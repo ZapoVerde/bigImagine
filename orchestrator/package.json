@@ -1,0 +1,34 @@
+{
+  "name": "@bigbrain/orchestrator",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    "./tool-registry": "./dist/orchestrator/toolRegistry.js",
+    "./plugin-loader": "./dist/orchestrator/pluginLoader.js",
+    "./llm": "./dist/io/llm/index.js",
+    "./llm-types": "./dist/io/llm/types.js",
+    "./llm-stub": "./dist/io/llm/stub.js",
+    "./embeddings": "./dist/io/embeddings/index.js",
+    "./embeddings-stub": "./dist/io/embeddings/stub.js",
+    "./postgres": "./dist/io/postgres.js",
+    "./field-cipher": "./dist/io/fieldCipher.js",
+    "./notion": "./dist/io/notion.js",
+    "./logger": "./dist/io/logger.js",
+    "./http-retry": "./dist/io/httpRetry.js",
+    "./pgvector": "./dist/util/pgvector.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "verify": "npm run build && node scripts/verify-logger.mjs && node scripts/verify-loop.mjs && node scripts/verify-llm-adapters.mjs && node scripts/verify-field-cipher.mjs && node scripts/verify-http-retry.mjs && node scripts/verify-server.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  },
+  "dependencies": {
+    "@types/pg": "^8.20.0",
+    "pg": "^8.22.0"
+  }
+}

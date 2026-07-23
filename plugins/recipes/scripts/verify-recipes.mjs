@@ -1,0 +1,470 @@
+// Proves all six tools end to end through info/registerTools (the real loader contract), using a
+// stateful fake Postgres pool (recipes_meals/meal_plan_entries/lists/list_items/notion_sync_map),
+// a fake LLM provider for the forced-schema extraction path, and a stubbed global fetch for the
+// URL-import path — including a real-shaped schema.org/Recipe JSON-LD fixture (mirroring what was
+// verified live against an actual recipetineats.com page) so the deterministic parse path is
+// proven against realistic markup, not just a hand-simplified shape.
+
+import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
+import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
+import { info, registerTools } from '../dist/index.js';
+
+function assert(cond, message) {
+  if (!cond) {
+    console.error(`FAIL: ${message}`);
+    process.exitCode = 1;
+  } else {
+    console.log(`ok: ${message}`);
+  }
+}
+
+function createFakePool() {
+  const recipesMeals = [];
+  const mealPlanEntries = [];
+  const lists = [];
+  const listItems = [];
+  const syncMap = [];
+  let recipeCounter = 0;
+  let planEntryCounter = 0;
+  let listCounter = 0;
+  let itemCounter = 0;
+
+  return {
+    recipesMeals,
+    mealPlanEntries,
+    lists,
+    listItems,
+    syncMap,
+    async connect() {
+      return {
+        async query(sql, params = []) {
+          if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+          if (sql.includes('set_config')) return { rows: [] };
+
+          if (sql.startsWith('insert into recipes_meals')) {
+            const [userId, mealName, ingredients, instructions, tags, prepTime, cookTime, servings, sourceUrl] = params;
+            const recipe_id = `recipe-${++recipeCounter}`;
+            recipesMeals.push({
+              recipe_id,
+              user_id: userId,
+              meal_name: mealName,
+              ingredients: JSON.parse(ingredients),
+              instructions: JSON.parse(instructions),
+              tags,
+              prep_time: prepTime,
+              cook_time: cookTime,
+              servings,
+              source_url: sourceUrl,
+            });
+            return { rows: [{ recipe_id }] };
+          }
+
+          if (sql.includes('unnest(tags)')) {
+            const [userId, tag] = params;
+            const rows = recipesMeals
+              .filter((r) => r.user_id === userId && r.tags.some((t) => t.toLowerCase() === tag.toLowerCase()))
+              .sort((a, b) => a.meal_name.localeCompare(b.meal_name));
+            return { rows };
+          }
+          if (sql.startsWith('select recipe_id, meal_name, tags, prep_time, cook_time, servings from recipes_meals')) {
+            const [userId] = params;
+            return { rows: recipesMeals.filter((r) => r.user_id === userId).sort((a, b) => a.meal_name.localeCompare(b.meal_name)) };
+          }
+
+          if (sql.includes('ingredients, instructions, tags')) {
+            const [userId, likePattern, exact] = params;
+            const needle = likePattern.replace(/%/g, '').toLowerCase();
+            const match = recipesMeals
+              .filter((r) => r.user_id === userId && r.meal_name.toLowerCase().includes(needle))
+              .sort((a, b) => (a.meal_name.toLowerCase() === exact.toLowerCase() ? -1 : 1))[0];
+            return { rows: match ? [match] : [] };
+          }
+
+          if (sql.startsWith('select recipe_id, meal_name from recipes_meals')) {
+            const [userId, likePattern, exact] = params;
+            const needle = likePattern.replace(/%/g, '').toLowerCase();
+            const match = recipesMeals
+              .filter((r) => r.user_id === userId && r.meal_name.toLowerCase().includes(needle))
+              .sort((a, b) => (a.meal_name.toLowerCase() === exact.toLowerCase() ? -1 : 1))[0];
+            return { rows: match ? [{ recipe_id: match.recipe_id, meal_name: match.meal_name }] : [] };
+          }
+
+          if (sql.includes('select plan_entry_id from meal_plan_entries')) {
+            const [userId, plannedDate, mealLabel] = params;
+            const match = mealPlanEntries.find(
+              (e) => e.user_id === userId && e.planned_date === plannedDate && (e.meal_label ?? null) === (mealLabel ?? null),
+            );
+            return { rows: match ? [{ plan_entry_id: match.plan_entry_id }] : [] };
+          }
+          if (sql.startsWith('update meal_plan_entries')) {
+            const [planEntryId, recipeId] = params;
+            const entry = mealPlanEntries.find((e) => e.plan_entry_id === planEntryId);
+            if (entry) entry.recipe_id = recipeId;
+            return { rows: [] };
+          }
+          if (sql.startsWith('insert into meal_plan_entries')) {
+            const [userId, recipeId, plannedDate, mealLabel] = params;
+            mealPlanEntries.push({
+              plan_entry_id: `plan-${++planEntryCounter}`,
+              user_id: userId,
+              recipe_id: recipeId,
+              planned_date: plannedDate,
+              meal_label: mealLabel ?? null,
+            });
+            return { rows: [] };
+          }
+
+          if (sql.includes('mpe.planned_date, mpe.meal_label')) {
+            const [userId, start, end] = params;
+            const rows = mealPlanEntries
+              .filter((e) => e.user_id === userId && e.planned_date >= start && e.planned_date <= end)
+              .map((e) => {
+                const recipe = recipesMeals.find((r) => r.recipe_id === e.recipe_id);
+                return { planned_date: e.planned_date, meal_label: e.meal_label, meal_name: recipe.meal_name, recipe_id: recipe.recipe_id };
+              })
+              .sort((a, b) => a.planned_date.localeCompare(b.planned_date));
+            return { rows };
+          }
+
+          if (sql.startsWith('select rm.ingredients')) {
+            const [userId, start, end] = params;
+            const rows = mealPlanEntries
+              .filter((e) => e.user_id === userId && e.planned_date >= start && e.planned_date <= end)
+              .map((e) => ({ ingredients: recipesMeals.find((r) => r.recipe_id === e.recipe_id).ingredients }));
+            return { rows };
+          }
+
+          if (sql.startsWith('select list_id from lists')) {
+            const [userId, name] = params;
+            const match = lists.find((l) => l.user_id === userId && l.name.toLowerCase() === name.toLowerCase());
+            return { rows: match ? [{ list_id: match.list_id }] : [] };
+          }
+          if (sql.startsWith('insert into lists')) {
+            const [userId, name] = params;
+            const list_id = `list-${++listCounter}`;
+            lists.push({ list_id, user_id: userId, name });
+            return { rows: [{ list_id }] };
+          }
+          if (sql.startsWith('select item_name from list_items')) {
+            const [listId] = params;
+            return { rows: listItems.filter((i) => i.list_id === listId && i.status === 'pending').map((i) => ({ item_name: i.item_name })) };
+          }
+          if (sql.startsWith('insert into list_items')) {
+            const [listId, userId, itemName] = params;
+            const item_id = `item-${++itemCounter}`;
+            listItems.push({ item_id, list_id: listId, user_id: userId, item_name: itemName, status: 'pending' });
+            return { rows: [{ item_id }] };
+          }
+          if (sql.startsWith('insert into notion_sync_map')) {
+            const [userId, sourceTable, sourceRowId, notionDatabaseId, notionPageId] = params;
+            syncMap.push({ user_id: userId, source_table: sourceTable, source_row_id: sourceRowId, notion_database_id: notionDatabaseId, notion_page_id: notionPageId });
+            return { rows: [] };
+          }
+
+          throw new Error(`fake pool got an unexpected query: ${sql}`);
+        },
+        release() {},
+      };
+    },
+  };
+}
+
+function createFakeLlm(responder) {
+  const calls = [];
+  return {
+    name: 'fake',
+    calls,
+    async complete(messages, _tools, options) {
+      calls.push({ messages, options });
+      return { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'call-1', name: options.forceTool, arguments: responder(messages) }] };
+    },
+  };
+}
+
+function createFakeNotion(ownerUserId = userId) {
+  const calls = [];
+  let pageCounter = 0;
+  return {
+    calls,
+    listsDataSourceId: 'fake-data-source-id',
+    ownerUserId,
+    async upsertListItemPage(args) {
+      calls.push(args);
+      return { pageId: `notion-page-${++pageCounter}` };
+    },
+  };
+}
+
+const RECIPE_JSON_LD_HTML = `<html><head>
+<script type="application/ld+json">${JSON.stringify({
+  '@context': 'https://schema.org',
+  '@graph': [
+    { '@type': 'Article', headline: 'irrelevant' },
+    {
+      '@type': 'Recipe',
+      name: 'Test Tacos',
+      recipeIngredient: ['2 cups flour', '1 onion, diced', '1 tsp salt'],
+      recipeInstructions: [
+        { '@type': 'HowToSection', name: 'Filling:', itemListElement: [{ '@type': 'HowToStep', text: 'Cook the onion.' }] },
+      ],
+      recipeYield: ['4'],
+      prepTime: 'PT10M',
+      cookTime: 'PT20M',
+      recipeCategory: ['Mains'],
+      recipeCuisine: ['Mexican'],
+      keywords: 'tacos, dinner',
+    },
+  ],
+})}</script>
+</head><body>whatever</body></html>`;
+
+const NO_MARKUP_HTML = `<html><body><h1>Grandma's Soup</h1><p>2 cups broth</p><p>Boil it for 10 minutes.</p></body></html>`;
+
+assert(info.id === 'recipes' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is present and matches the id format pluginLoader.ts requires');
+
+const userId = '11111111-1111-1111-1111-111111111111';
+
+// --- import_recipe: raw_text goes straight to the LLM extraction path ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => ({
+    mealName: 'Grandma Soup',
+    ingredients: ['2 cups broth', 'noodles'],
+    instructions: ['Boil the broth.', 'Add noodles.'],
+    tags: ['Soup'],
+    prepTime: '5 min',
+    cookTime: '15 min',
+  }));
+  const notion = createFakeNotion();
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion });
+  assert(tools.length === 6, 'registerTools returns exactly six tools');
+  const registry = createToolRegistry(tools);
+  for (const name of ['import_recipe', 'get_recipes', 'get_recipe', 'add_meal_plan_entry', 'get_meal_plan', 'generate_shopping_list_from_meal_plan']) {
+    assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
+  }
+
+  const result = await db.withUserScope(userId, (session) =>
+    registry.get('import_recipe').handler({ raw_text: 'broth, noodles, boil it' }, { userId, db: session }),
+  );
+  assert(llm.calls.length === 1, 'raw_text import called the LLM extraction path');
+  assert(result.mealName === 'Grandma Soup', 'the LLM-extracted recipe was inserted');
+  assert(pool.recipesMeals[0].ingredients.length === 2, 'ingredients were stored as a parsed array');
+  assert(pool.recipesMeals[0].source_url === null, 'no source_url is recorded for a raw_text import');
+}
+
+// --- import_recipe: url with real-shaped schema.org/Recipe JSON-LD takes the deterministic path ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => {
+    throw new Error('LLM should not be called when JSON-LD parsing succeeds');
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(RECIPE_JSON_LD_HTML, { status: 200 });
+  try {
+    const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+    const registry = createToolRegistry(tools);
+    const result = await db.withUserScope(userId, (session) =>
+      registry.get('import_recipe').handler({ url: 'https://example.com/tacos' }, { userId, db: session }),
+    );
+    assert(result.mealName === 'Test Tacos', 'the schema.org Recipe node was parsed deterministically');
+    const stored = pool.recipesMeals[0];
+    assert(stored.ingredients.length === 3, 'ingredients were taken verbatim as flat strings, not decomposed');
+    assert(stored.instructions[0].section === 'Filling:' && stored.instructions[0].steps[0] === 'Cook the onion.', 'HowToSection grouping was preserved');
+    assert(stored.tags.includes('Mains') && stored.tags.includes('Mexican') && stored.tags.includes('tacos'), 'category/cuisine/keywords were folded into tags');
+    assert(stored.prep_time === '10 min' && stored.cook_time === '20 min', 'ISO 8601 durations were humanized');
+    assert(stored.source_url === 'https://example.com/tacos', 'the source URL is recorded');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- import_recipe: url with no JSON-LD falls back to the LLM path over the page's stripped text ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm((messages) => {
+    const sourceText = messages[1].content;
+    if (!sourceText.includes("Grandma's Soup")) throw new Error('expected stripped page text to reach the LLM');
+    return { mealName: "Grandma's Soup", ingredients: ['2 cups broth'], instructions: ['Boil it.'], tags: [] };
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(NO_MARKUP_HTML, { status: 200 });
+  try {
+    const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+    const registry = createToolRegistry(tools);
+    const result = await db.withUserScope(userId, (session) =>
+      registry.get('import_recipe').handler({ url: 'https://example.com/soup' }, { userId, db: session }),
+    );
+    assert(llm.calls.length === 1, 'a page with no JSON-LD falls back to the LLM path');
+    assert(result.mealName === "Grandma's Soup", 'the LLM-fallback recipe was inserted');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- import_recipe: args validation rejects neither-or-both ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => ({ mealName: 'x', ingredients: ['x'], instructions: [], tags: [] }));
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+  for (const badArgs of [{}, { url: 'https://a', raw_text: 'b' }]) {
+    try {
+      await db.withUserScope(userId, (session) => registry.get('import_recipe').handler(badArgs, { userId, db: session }));
+      assert(false, `import_recipe rejects ${JSON.stringify(badArgs)}`);
+    } catch {
+      assert(true, `import_recipe rejects ${JSON.stringify(badArgs)}`);
+    }
+  }
+}
+
+// --- get_recipes / get_recipe, and the meal-plan + shopping-list flow, sharing one populated pool ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => ({ mealName: 'unused', ingredients: ['x'], instructions: [], tags: [] }));
+  const notion = createFakeNotion();
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion });
+  const registry = createToolRegistry(tools);
+  const withUser = (fn) => db.withUserScope(userId, (session) => fn({ userId, db: session }));
+  const call = (name, args) => withUser((ctx) => registry.get(name).handler(args, ctx));
+
+  const insertRecipe = (mealName, ingredients, tags = []) =>
+    pool.recipesMeals.push({
+      recipe_id: `seed-${mealName}`,
+      user_id: userId,
+      meal_name: mealName,
+      ingredients,
+      instructions: [],
+      tags,
+      prep_time: null,
+      cook_time: null,
+      servings: null,
+      source_url: null,
+    });
+
+  insertRecipe('Chicken Parmigiana', ['chicken breast', 'flour', 'onion'], ['Italian', 'Mains']);
+  insertRecipe('Pancakes', ['flour', 'eggs', 'milk'], ['Breakfast']);
+
+  // --- get_recipes ---
+  const all = await call('get_recipes', {});
+  assert(all.length === 2, 'get_recipes lists every recipe for the user');
+  const italianOnly = await call('get_recipes', { tag: 'italian' });
+  assert(italianOnly.length === 1 && italianOnly[0].mealName === 'Chicken Parmigiana', 'get_recipes filters case-insensitively by tag');
+
+  // --- get_recipe ---
+  const found = await call('get_recipe', { meal_name: 'pancakes' });
+  assert(found.found === true && found.ingredients.length === 3, 'get_recipe finds a recipe case-insensitively with full detail');
+  const notFound = await call('get_recipe', { meal_name: 'nonexistent dish' });
+  assert(notFound.found === false, 'get_recipe returns found:false rather than throwing for no match');
+
+  // --- add_meal_plan_entry: unknown recipe ---
+  const unknownPlan = await call('add_meal_plan_entry', { meal_name: 'nonexistent dish', planned_date: '2026-12-25' });
+  assert(unknownPlan.planned === false, 'planning a nonexistent recipe fails softly');
+
+  // --- add_meal_plan_entry: the Christmas scenario — breakfast + lunch planned, no dinner ---
+  await call('add_meal_plan_entry', { meal_name: 'Pancakes', planned_date: '2026-12-25', meal_label: 'Breakfast' });
+  await call('add_meal_plan_entry', { meal_name: 'Chicken Parmigiana', planned_date: '2026-12-25', meal_label: 'Lunch' });
+  assert(pool.mealPlanEntries.filter((e) => e.planned_date === '2026-12-25').length === 2, 'two differently-labeled entries coexist on the same date');
+
+  // --- add_meal_plan_entry: default dinner (no label), then replanning replaces it ---
+  const firstPlan = await call('add_meal_plan_entry', { meal_name: 'Pancakes', planned_date: '2026-12-20' });
+  assert(firstPlan.replaced === false && firstPlan.mealLabel === null, 'a plain plan entry defaults to no label (implied dinner)');
+  const replacedPlan = await call('add_meal_plan_entry', { meal_name: 'Chicken Parmigiana', planned_date: '2026-12-20' });
+  assert(replacedPlan.replaced === true, 'replanning the same date/label replaces rather than duplicates');
+  assert(pool.mealPlanEntries.filter((e) => e.planned_date === '2026-12-20' && e.meal_label === null).length === 1, 'only one entry exists for that date/label after replanning');
+
+  // --- get_meal_plan ---
+  const range = await call('get_meal_plan', { start_date: '2026-12-25', end_date: '2026-12-25' });
+  assert(range.length === 2, 'get_meal_plan returns both Christmas entries for that date');
+  assert(range.some((e) => e.mealLabel === 'Breakfast') && range.some((e) => e.mealLabel === 'Lunch'), 'both labels are present');
+  const noArgsRange = await call('get_meal_plan', {});
+  assert(Array.isArray(noArgsRange), 'get_meal_plan with no args uses its default date range without throwing');
+
+  // --- generate_shopping_list_from_meal_plan: aggregates + dedupes across both Christmas meals ---
+  const shoppingList = await call('generate_shopping_list_from_meal_plan', { start_date: '2026-12-25', end_date: '2026-12-25' });
+  assert(shoppingList.mealsConsidered === 2, 'both Christmas meals were considered');
+  assert(shoppingList.itemsAdded.length === new Set(shoppingList.itemsAdded.map((i) => i.toLowerCase())).size, 'no duplicate ingredient names within the added list');
+  assert(shoppingList.itemsAdded.some((i) => i.toLowerCase() === 'flour'), 'flour (shared by both meals) was added exactly once, not twice');
+  assert(pool.lists.some((l) => l.name === 'Grocery List'), 'the default "Grocery List" was created');
+  assert(notion.calls.length === shoppingList.itemsAdded.length, 'every newly-added item was pushed to Notion');
+  assert(pool.syncMap.length === shoppingList.itemsAdded.length, 'a notion_sync_map row exists for every newly-added item');
+
+  // --- running it again for an overlapping range skips already-pending items ---
+  const secondRun = await call('generate_shopping_list_from_meal_plan', { start_date: '2026-12-25', end_date: '2026-12-25' });
+  assert(secondRun.itemsAdded.length === 0, 'a second run over the same range adds nothing new');
+  assert(secondRun.itemsSkipped.length > 0, 'ingredients already pending on the list are reported as skipped');
+}
+
+// --- generate_shopping_list_from_meal_plan: notion undefined is a clean no-op ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => ({ mealName: 'unused', ingredients: ['x'], instructions: [], tags: [] }));
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+  pool.recipesMeals.push({
+    recipe_id: 'seed-only',
+    user_id: userId,
+    meal_name: 'Only Dish',
+    ingredients: ['salt'],
+    instructions: [],
+    tags: [],
+    prep_time: null,
+    cook_time: null,
+    servings: null,
+    source_url: null,
+  });
+  await db.withUserScope(userId, (session) =>
+    registry.get('add_meal_plan_entry').handler({ meal_name: 'Only Dish', planned_date: '2026-08-01' }, { userId, db: session }),
+  );
+  const result = await db.withUserScope(userId, (session) =>
+    registry.get('generate_shopping_list_from_meal_plan').handler({ start_date: '2026-08-01', end_date: '2026-08-01' }, { userId, db: session }),
+  );
+  assert(result.itemsAdded.length === 1, 'shopping list generation still works with Notion unconfigured');
+  assert(pool.syncMap.length === 0, 'no sync bookkeeping happens when notion is undefined');
+}
+
+// --- generate_shopping_list_from_meal_plan: a non-owner user's items stay Postgres-only, even
+// though Notion IS configured — this gateway syncs one workspace to one owning user only ---
+{
+  const nonOwnerUserId = '55555555-5555-5555-5555-555555555555'; // deliberately not notion.ownerUserId
+  const notion = createFakeNotion(userId); // ownerUserId is the main test user, not nonOwnerUserId
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => ({ mealName: 'unused', ingredients: ['x'], instructions: [], tags: [] }));
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion });
+  const registry = createToolRegistry(tools);
+  pool.recipesMeals.push({
+    recipe_id: 'seed-nonowner',
+    user_id: nonOwnerUserId,
+    meal_name: 'Non-Owner Dish',
+    ingredients: ['pepper'],
+    instructions: [],
+    tags: [],
+    prep_time: null,
+    cook_time: null,
+    servings: null,
+    source_url: null,
+  });
+  await db.withUserScope(nonOwnerUserId, (session) =>
+    registry.get('add_meal_plan_entry').handler({ meal_name: 'Non-Owner Dish', planned_date: '2026-08-01' }, { userId: nonOwnerUserId, db: session }),
+  );
+  const result = await db.withUserScope(nonOwnerUserId, (session) =>
+    registry
+      .get('generate_shopping_list_from_meal_plan')
+      .handler({ start_date: '2026-08-01', end_date: '2026-08-01' }, { userId: nonOwnerUserId, db: session }),
+  );
+  assert(result.itemsAdded.length === 1, "a non-owner user's shopping list generation still works in Postgres");
+  assert(notion.calls.length === 0, "a non-owner user's items never reach the Notion API, even with Notion configured");
+  assert(pool.syncMap.length === 0, 'no notion_sync_map row is created for a non-owner user');
+}
+
+if (process.exitCode) {
+  console.error('\nrecipes verification FAILED');
+  process.exit(1);
+}
+console.log('\nrecipes verification passed');

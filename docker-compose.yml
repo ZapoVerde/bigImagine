@@ -1,0 +1,66 @@
+# bigBrain stack — Dockge-managed, alongside the other stacks under /opt/stacks.
+# Services land in build order:
+#   Phase 1 — postgres
+#   Phase 4 — orchestrator (this file)
+#   Phase 4 (external) — open-webui reaches orchestrator over traefik-net by container name;
+#     see stacks/open-webui for that stack's own compose file
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: bigbrain-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${BIGBRAIN_PG_SUPERUSER:-bigbrain_admin}
+      POSTGRES_PASSWORD: ${BIGBRAIN_PG_SUPERUSER_PASSWORD:?set in .env}
+      POSTGRES_DB: bigbrain
+      BIGBRAIN_APP_PASSWORD: ${BIGBRAIN_APP_PASSWORD:?set in .env}
+    volumes:
+      - bigbrain-pgdata:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+      - ./db/checks:/checks:ro
+    # No published port: only reachable from other bigBrain containers on the compose-local
+    # network. Nothing outside this stack needs direct DB access (principle #7 — clients talk
+    # to the orchestrator's API, never the database), and Phase 5 keeps inbound closed anyway.
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bigbrain-orchestrator
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      BIGBRAIN_PG_HOST: postgres
+      BIGBRAIN_PG_PORT: ${BIGBRAIN_PG_PORT:-5432}
+      BIGBRAIN_PG_DATABASE: ${BIGBRAIN_PG_DATABASE:-bigbrain}
+      BIGBRAIN_PG_APP_USER: bigbrain_app
+      BIGBRAIN_APP_PASSWORD: ${BIGBRAIN_APP_PASSWORD:?set in .env}
+      BIGBRAIN_LLM_PROFILES: ${BIGBRAIN_LLM_PROFILES:?set in .env}
+      BIGBRAIN_LLM_ACTIVE_PROFILE: ${BIGBRAIN_LLM_ACTIVE_PROFILE:?set in .env}
+      BIGBRAIN_EMBEDDINGS_PROVIDER: ${BIGBRAIN_EMBEDDINGS_PROVIDER:?set in .env}
+      BIGBRAIN_EMBEDDINGS_MODEL: ${BIGBRAIN_EMBEDDINGS_MODEL:?set in .env}
+      BIGBRAIN_EMBEDDINGS_API_KEY: ${BIGBRAIN_EMBEDDINGS_API_KEY:?set in .env}
+      BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION: ${BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION:?set in .env}
+      BIGBRAIN_API_KEYS: ${BIGBRAIN_API_KEYS:?set in .env}
+      BIGBRAIN_FIELD_ENCRYPTION_KEY: ${BIGBRAIN_FIELD_ENCRYPTION_KEY:?set in .env}
+      BIGBRAIN_NOTION_TOKEN: ${BIGBRAIN_NOTION_TOKEN:-}
+      BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID: ${BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID:-}
+      BIGBRAIN_NOTION_OWNER_USER_ID: ${BIGBRAIN_NOTION_OWNER_USER_ID:-}
+      BIGBRAIN_ORCHESTRATOR_PORT: 8787
+    volumes:
+      - ./orchestrator/logs:/app/orchestrator/logs
+    networks:
+      - default
+      - traefik-net
+    # No published port and no Traefik router/labels: reachable only from other containers on
+    # traefik-net (e.g. open-webui, a separate compose project on the same external network) —
+    # never from outside. Phase 5 formalizes the perimeter; this is already closed by default.
+
+volumes:
+  bigbrain-pgdata:
+
+networks:
+  traefik-net:
+    external: true

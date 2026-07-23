@@ -1,0 +1,105 @@
+/**
+ * @file orchestrator/src/orchestrator/loop.ts
+ * @stamp 2026-07-21
+ * @architectural-role Orchestrator — the minimal agentic loop (docs/spec.md §4, steps 2-8;
+ * write-time hint and read-time render tick deliberately not implemented yet, per the build
+ * order — both are additive to this path)
+ * @description
+ * Sequences calls to the LLM and to tool handlers. Owns no state and does no direct IO of its
+ * own — every side effect goes through the LlmProvider or PostgresClient it's given. The only
+ * decision this file makes is mechanical (which tool name the LLM asked for, how many rounds to
+ * allow); it never interprets what a message or tool result *means* — that's the LLM's job
+ * alone, per bb_principles.md §2.
+ *
+ * Each tool call gets its own withUserScope transaction — simplest correct thing for a single
+ * request scoped to one user_id throughout (bb_principles.md §4); nothing here batches multiple
+ * tool calls into one transaction, since nothing yet needs that.
+ *
+ * @api-declaration
+ * runTurn(options: RunTurnOptions) — drives one user message through to a final chat reply,
+ *   executing any tool calls the LLM requests along the way; throws if maxToolRounds is
+ *   exceeded rather than returning a partial/guessed answer
+ *
+ * @contract
+ *   assertions:
+ *     purity:          impure (drives LLM + DB IO wrappers)
+ *     state_ownership: []
+ *     external_io:     []
+ */
+
+import { randomUUID } from 'node:crypto';
+import { log, runWithRequestId } from '../io/logger.js';
+import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
+import type { PostgresClient } from '../io/postgres.js';
+import type { ToolRegistry } from './toolRegistry.js';
+
+export interface RunTurnOptions {
+  userId: string;
+  /** The full conversation so far, ending in the latest user turn. A caller fronting a
+   *  stateless HTTP API (one that resends the whole history each request, e.g. an
+   *  OpenAI-shaped chat endpoint) passes it straight through; systemPrompt is a convenience
+   *  for callers that don't already have one in messages (e.g. verification scripts). */
+  messages: LlmMessage[];
+  systemPrompt?: string;
+  /** Per-request model override (e.g. from a chat client's own model picker) — passed straight
+   *  through to every llm.complete() call this turn makes. Unset means the provider's own
+   *  configured default. Nested calls a tool makes on its own (e.g. classifyNote's forced-schema
+   *  call) are untouched by this — they're a separate llm.complete() invocation entirely, not
+   *  routed through runTurn. */
+  model?: string;
+  llm: LlmProvider;
+  db: PostgresClient;
+  tools: ToolRegistry;
+  maxToolRounds?: number;
+}
+
+export async function runTurn(opts: RunTurnOptions): Promise<string> {
+  const requestId = randomUUID();
+  return runWithRequestId(requestId, () => runTurnInner(opts));
+}
+
+async function runTurnInner(opts: RunTurnOptions): Promise<string> {
+  const { userId, systemPrompt, model, llm, db, tools, maxToolRounds = 5 } = opts;
+
+  const messages: LlmMessage[] = [];
+  if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  messages.push(...opts.messages);
+
+  log.info(`runTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
+
+  for (let round = 0; round < maxToolRounds; round++) {
+    const turn = await llm.complete(messages, tools.definitions(), { model });
+    messages.push({
+      ...turn.message,
+      toolCalls: turn.toolCalls.length > 0 ? turn.toolCalls : undefined,
+    });
+
+    if (turn.toolCalls.length === 0) {
+      log.info(`runTurn done`, { userId, rounds: round + 1 });
+      return turn.message.content;
+    }
+
+    for (const call of turn.toolCalls) {
+      log.info(`tool call: ${call.name}`, { userId, toolCallId: call.id });
+      const tool = tools.get(call.name);
+
+      const resultPayload = await db.withUserScope(userId, async (session) => {
+        if (!tool) return { error: `unknown tool: ${call.name}` };
+        try {
+          return await tool.handler(call.arguments, { userId, db: session });
+        } catch (err) {
+          log.error(`tool ${call.name} threw`, err);
+          return { error: err instanceof Error ? err.message : String(err) };
+        }
+      });
+
+      messages.push({
+        role: 'tool',
+        toolCallId: call.id,
+        content: JSON.stringify(resultPayload),
+      });
+    }
+  }
+
+  throw new Error(`runTurn exceeded maxToolRounds (${maxToolRounds}) without a final reply`);
+}

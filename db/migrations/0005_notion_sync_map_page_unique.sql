@@ -1,0 +1,11 @@
+-- Applied by hand, same as 0003/0004:
+--   psql -U bigbrain_admin -d bigbrain -f /docker-entrypoint-initdb.d/0005_notion_sync_map_page_unique.sql
+--
+-- Caught live: a race between outbound sync (create the Notion page, THEN insert
+-- notion_sync_map — two separate steps, a real window between them) and the inbound
+-- reconciliation poll (plugins/lists/src/notionReconcile.ts) running in that exact window,
+-- seeing the brand-new page as "unmapped," and adopting it a second time as a new item. A
+-- Notion page_id can only ever legitimately correspond to one thing in bigBrain, regardless of
+-- which source_table synced it, so this constraint makes the duplicate impossible at the database
+-- level rather than relying on application-level timing to avoid it.
+alter table notion_sync_map add constraint notion_sync_map_notion_page_id_key unique (notion_page_id);

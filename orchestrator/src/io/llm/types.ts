@@ -1,0 +1,79 @@
+/**
+ * @file orchestrator/src/io/llm/types.ts
+ * @stamp 2026-07-21
+ * @architectural-role Pure Function module — shared types only, no behavior
+ * @description
+ * The interface every LLM provider adapter implements. bb_principles.md §6 (The Reasoning
+ * Layer is Replaceable): this is the seam — orchestrator/loop.ts is written against
+ * LlmProvider, never against a named vendor's request/response shape. Swapping providers means
+ * writing a new adapter behind this interface, not touching the loop.
+ *
+ * @api-declaration
+ * LlmMessage, ToolDefinition, ToolCall, LlmTurn, LlmProvider — see inline docs
+ *
+ * @contract
+ *   assertions:
+ *     purity:          pure (types only)
+ *     state_ownership: []
+ *     external_io:     []
+ */
+
+export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export interface LlmMessage {
+  role: LlmRole;
+  content: string;
+  /** Set only when role === 'tool': echoes the ToolCall.id this message answers. */
+  toolCallId?: string;
+  /** Set only on an assistant message that requested tool calls. Required for a follow-up
+   *  complete() call to be well-formed: a real provider rejects a 'tool' message whose
+   *  toolCallId doesn't trace back to a toolCalls entry on a preceding assistant message —
+   *  this is what makes that possible when history is replayed. */
+  toolCalls?: ToolCall[];
+}
+
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  /** JSON Schema for the tool's arguments. */
+  parameters: Record<string, unknown>;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface LlmTurn {
+  /** The assistant's reply. content is '' when the turn is purely tool call(s). */
+  message: LlmMessage;
+  toolCalls: ToolCall[];
+}
+
+export interface LlmCompleteOptions {
+  /** Force the named tool to be called instead of leaving it to the model's discretion — the
+   *  "forced-schema call" pattern docs/spec.md §6.1/§6.3 use for extraction, not open-ended
+   *  agentic tool use. `tools` must contain exactly this one definition when set. */
+  forceTool?: string;
+  /** Override the profile's own model for this call only — how a live model picker (Open
+   *  WebUI's connection dropdown, backed by GET /v1/models) actually takes effect per request.
+   *  Falls back to the profile's configured model when unset, which is what non-chat callers
+   *  (e.g. the forced-schema classification call) get, since there's no picker in that path. */
+  model?: string;
+}
+
+export interface LlmProvider {
+  readonly name: string;
+  complete(
+    messages: LlmMessage[],
+    tools: ToolDefinition[],
+    options?: LlmCompleteOptions,
+  ): Promise<LlmTurn>;
+  /** Optional capability: the live model catalog behind a dynamic model picker (server/httpServer.ts's
+   *  GET /v1/models). Not every provider has one worth exposing this way — undefined means "fall
+   *  back to a single static entry," not "provider is broken." Keeping this on LlmProvider rather
+   *  than passing baseUrl/apiKey out to httpServer.ts separately is what keeps them private to
+   *  each adapter's own closure. */
+  listModels?(): Promise<{ id: string }[]>;
+}
