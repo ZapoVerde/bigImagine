@@ -8,7 +8,8 @@
  * the LLM/embeddings/cipher providers — they only need ctx.db/ctx.userId, supplied per-call.
  * add_list_item and complete_list_item do use deps.notion (best-effort outbound Notion sync,
  * notionSync.ts) — deps.notion is undefined when Notion isn't configured, and both tools work
- * fully without it either way.
+ * fully without it either way. add_list_item also uses deps.llm, best-effort, to classify a new
+ * item into its list's section_order when one is defined (classifySection.ts).
  *
  * registerTools is also where the inbound half starts: if deps.notion is set, it starts a
  * background poll loop (notionReconcile.ts) using deps.db directly — not through any tool call.
@@ -19,7 +20,8 @@
  *
  * @api-declaration
  * info — plugin identity
- * registerTools(deps) — returns [create_list, add_list_item, complete_list_item, get_list_items]
+ * registerTools(deps) — returns [create_list, add_list_item, complete_list_item, get_list_items,
+ *   set_list_section_order]
  *
  * @contract
  *   assertions:
@@ -35,6 +37,7 @@ import { createCreateListTool } from './createListTool.js';
 import { createAddListItemTool } from './addListItemTool.js';
 import { createCompleteListItemTool } from './completeListItemTool.js';
 import { createGetListItemsTool } from './getListItemsTool.js';
+import { createSetListSectionOrderTool } from './setListSectionOrderTool.js';
 import { startNotionReconcileLoop } from './notionReconcile.js';
 
 const NOTION_POLL_INTERVAL_MS = 30_000; // imperceptible delay at household scale; see notionReconcile.ts
@@ -52,8 +55,9 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
 
   return [
     createCreateListTool(),
-    createAddListItemTool(deps.notion),
+    createAddListItemTool(deps.llm, deps.notion),
     createCompleteListItemTool(deps.notion),
     createGetListItemsTool(),
+    createSetListSectionOrderTool(),
   ];
 }

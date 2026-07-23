@@ -134,6 +134,11 @@ function createFakePool() {
             return { rows };
           }
 
+          if (sql.includes('select section_order from lists where list_id')) {
+            const [listId] = params;
+            const list = lists.find((l) => l.list_id === listId);
+            return { rows: list ? [{ section_order: list.section_order ?? [] }] : [] };
+          }
           if (sql.startsWith('select list_id from lists')) {
             const [userId, name] = params;
             const match = lists.find((l) => l.user_id === userId && l.name.toLowerCase() === name.toLowerCase());
@@ -142,7 +147,7 @@ function createFakePool() {
           if (sql.startsWith('insert into lists')) {
             const [userId, name] = params;
             const list_id = `list-${++listCounter}`;
-            lists.push({ list_id, user_id: userId, name });
+            lists.push({ list_id, user_id: userId, name, section_order: [] });
             return { rows: [{ list_id }] };
           }
           if (sql.startsWith('select item_name from list_items')) {
@@ -150,9 +155,9 @@ function createFakePool() {
             return { rows: listItems.filter((i) => i.list_id === listId && i.status === 'pending').map((i) => ({ item_name: i.item_name })) };
           }
           if (sql.startsWith('insert into list_items')) {
-            const [listId, userId, itemName] = params;
+            const [listId, userId, itemName, section] = params;
             const item_id = `item-${++itemCounter}`;
-            listItems.push({ item_id, list_id: listId, user_id: userId, item_name: itemName, status: 'pending' });
+            listItems.push({ item_id, list_id: listId, user_id: userId, item_name: itemName, section: section ?? null, status: 'pending' });
             return { rows: [{ item_id }] };
           }
           if (sql.startsWith('insert into notion_sync_map')) {
@@ -461,6 +466,49 @@ const userId = '11111111-1111-1111-1111-111111111111';
   assert(result.itemsAdded.length === 1, "a non-owner user's shopping list generation still works in Postgres");
   assert(notion.calls.length === 0, "a non-owner user's items never reach the Notion API, even with Notion configured");
   assert(pool.syncMap.length === 0, 'no notion_sync_map row is created for a non-owner user');
+}
+
+// --- generate_shopping_list_from_meal_plan: classifies each new item into its target list's
+// section_order, same as plugins/lists' add_list_item does for manually-added items ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const sectionLlm = createFakeLlm((messages) => {
+    const itemName = messages[1].content.toLowerCase();
+    return { section: itemName.includes('flour') ? 'baking' : itemName.includes('onion') ? 'veggies' : 'other' };
+  });
+  const tools = await registerTools({ llm: sectionLlm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+
+  pool.recipesMeals.push({
+    recipe_id: 'seed-sectioned',
+    user_id: userId,
+    meal_name: 'Sectioned Dish',
+    ingredients: ['flour', 'onion'],
+    instructions: [],
+    tags: [],
+    prep_time: null,
+    cook_time: null,
+    servings: null,
+    source_url: null,
+  });
+  // Pre-define the target list's section order, same as plugins/lists' set_list_section_order —
+  // duplicated here since this fake pool doesn't share state with that plugin's own tests.
+  pool.lists.push({ list_id: 'sectioned-list', user_id: userId, name: 'Grocery List', section_order: ['veggies', 'baking'] });
+
+  await db.withUserScope(userId, (session) =>
+    registry.get('add_meal_plan_entry').handler({ meal_name: 'Sectioned Dish', planned_date: '2026-08-02' }, { userId, db: session }),
+  );
+  const result = await db.withUserScope(userId, (session) =>
+    registry
+      .get('generate_shopping_list_from_meal_plan')
+      .handler({ start_date: '2026-08-02', end_date: '2026-08-02' }, { userId, db: session }),
+  );
+
+  assert(result.itemsAdded.length === 2, 'both ingredients were added to the pre-existing sectioned list');
+  assert(sectionLlm.calls.length === 2, 'each new ingredient triggered exactly one section classification call');
+  assert(pool.listItems.find((i) => i.item_name === 'flour').section === 'baking', 'flour was classified into the baking section');
+  assert(pool.listItems.find((i) => i.item_name === 'onion').section === 'veggies', 'onion was classified into the veggies section');
 }
 
 if (process.exitCode) {

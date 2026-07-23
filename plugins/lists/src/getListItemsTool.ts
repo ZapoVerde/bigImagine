@@ -8,6 +8,13 @@
  * items. Read-only, deterministic — no LLM reasoning involved in fetching, same as
  * get_shopping_patterns.
  *
+ * Sorted by each item's own list's section_order (set_list_section_order.ts) when that list has
+ * one defined — e.g. a grocery list sorted into the order you actually walk the store, not
+ * creation order. Done in JS, not SQL: results can span multiple lists at once (list_name is
+ * optional), each with its own independent section_order, which is awkward to express as a single
+ * SQL ORDER BY but trivial as a per-row array index lookup here. A list with no section_order (or
+ * an item with no classified section) falls back to created_at, unchanged from before this existed.
+ *
  * @api-declaration
  * createGetListItemsTool() — returns the get_list_items RegisteredTool
  *
@@ -23,10 +30,18 @@ import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 interface ItemRow {
   item_id: string;
   list_name: string;
+  section_order: string[];
+  section: string | null;
   item_name: string;
   status: string;
   created_at: string;
   completed_at: string | null;
+}
+
+function sectionRank(row: ItemRow): number {
+  if (!row.section) return Infinity;
+  const index = row.section_order.indexOf(row.section);
+  return index === -1 ? Infinity : index;
 }
 
 function isGetListItemsArgs(value: unknown): value is { list_name?: string; include_done?: boolean } {
@@ -55,7 +70,7 @@ export function createGetListItemsTool(): RegisteredTool {
       const includeDone = args.include_done ?? false;
 
       const rows = await ctx.db.query<ItemRow>(
-        `select li.item_id, l.name as list_name, li.item_name, li.status, li.created_at, li.completed_at
+        `select li.item_id, l.name as list_name, l.section_order, li.section, li.item_name, li.status, li.created_at, li.completed_at
          from list_items li
          join lists l on l.list_id = li.list_id
          where li.user_id = $1
@@ -65,9 +80,16 @@ export function createGetListItemsTool(): RegisteredTool {
         [ctx.userId, args.list_name ?? null, includeDone],
       );
 
+      rows.sort((a, b) => {
+        if (a.list_name !== b.list_name) return a.list_name.localeCompare(b.list_name);
+        const rankDiff = sectionRank(a) - sectionRank(b);
+        return rankDiff !== 0 ? rankDiff : a.created_at.localeCompare(b.created_at);
+      });
+
       return rows.map((r) => ({
         itemId: r.item_id,
         listName: r.list_name,
+        section: r.section,
         itemName: r.item_name,
         status: r.status,
         createdAt: r.created_at,

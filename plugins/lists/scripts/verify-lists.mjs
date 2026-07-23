@@ -38,6 +38,17 @@ function createFakePool() {
             return { rows: [] };
           }
 
+          if (sql.includes('select section_order from lists where list_id')) {
+            const [listId] = params;
+            const list = lists.find((l) => l.list_id === listId);
+            return { rows: list ? [{ section_order: list.section_order }] : [] };
+          }
+          if (sql.includes('update lists set section_order')) {
+            const [listId, sectionOrder] = params;
+            const list = lists.find((l) => l.list_id === listId);
+            if (list) list.section_order = sectionOrder;
+            return { rows: [] };
+          }
           if (sql.includes('select list_id from lists where')) {
             const [userId, name] = params;
             const match = lists.find((l) => l.user_id === userId && l.name.toLowerCase() === name.toLowerCase());
@@ -47,17 +58,18 @@ function createFakePool() {
           if (sql.includes('insert into lists')) {
             const [userId, name, tags] = params;
             const list_id = `list-${++listCounter}`;
-            lists.push({ list_id, user_id: userId, name, tags });
+            lists.push({ list_id, user_id: userId, name, tags, section_order: [] });
             return { rows: [{ list_id }] };
           }
           if (sql.includes('insert into list_items')) {
-            const [listId, userId, itemName] = params;
+            const [listId, userId, itemName, section] = params;
             const item_id = `item-${++itemCounter}`;
             items.push({
               item_id,
               list_id: listId,
               user_id: userId,
               item_name: itemName,
+              section: section ?? null,
               status: 'pending',
               created_at: `2026-07-23T00:00:${String(itemCounter).padStart(2, '0')}Z`,
               completed_at: null,
@@ -96,6 +108,8 @@ function createFakePool() {
                 return {
                   item_id: it.item_id,
                   list_name: list.name,
+                  section_order: list.section_order,
+                  section: it.section,
                   item_name: it.item_name,
                   status: it.status,
                   created_at: it.created_at,
@@ -159,10 +173,10 @@ assert(
 
 const notion = createFakeNotionClient();
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion });
-assert(pluginTools.length === 4, 'registerTools returns exactly four tools');
+assert(pluginTools.length === 5, 'registerTools returns exactly five tools');
 
 const registry = createToolRegistry(pluginTools);
-for (const name of ['create_list', 'add_list_item', 'complete_list_item', 'get_list_items']) {
+for (const name of ['create_list', 'add_list_item', 'complete_list_item', 'get_list_items', 'set_list_section_order']) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -285,6 +299,77 @@ try {
   assert(result.itemId !== undefined, "add_list_item still succeeds for a non-owner user (Postgres write is unaffected)");
   assert(nonOwnerNotion.calls.length === 0, "a non-owner user's add_list_item never calls the Notion API at all");
   assert(nonOwnerPool.syncMap.length === 0, 'no notion_sync_map row is created for a non-owner user');
+}
+
+function createFakeLlm(sectionFor) {
+  const calls = [];
+  return {
+    calls,
+    async complete(messages, _tools, options) {
+      calls.push(messages[1].content);
+      const itemName = messages[1].content;
+      const section = sectionFor(itemName);
+      if (section === undefined) throw new Error(`no fake section configured for "${itemName}"`);
+      return { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c1', name: options.forceTool, arguments: { section } }] };
+    },
+  };
+}
+
+// --- set_list_section_order + section-aware sorting in get_list_items ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const userId = '66666666-6666-6666-6666-666666666666';
+  const llm = createFakeLlm((item) => (item.toLowerCase().includes('milk') ? 'dairy' : item.toLowerCase().includes('lettuce') ? 'veggies' : undefined));
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+  const withUser = (fn) => db.withUserScope(userId, (session) => fn({ userId, db: session }));
+
+  const setOrder = await withUser((ctx) =>
+    registry.get('set_list_section_order').handler({ list_name: 'Grocery List', sections: ['veggies', 'meats', 'dairy'] }, ctx),
+  );
+  assert(setOrder.sectionCount === 3, 'set_list_section_order reports the number of sections it set');
+  assert(pool.lists[0].section_order.join(',') === 'veggies,meats,dairy', 'the list row carries the given section_order verbatim, in order');
+
+  // added out of section order (dairy before veggies) — get_list_items must still return them
+  // sorted by section position, not creation order
+  await withUser((ctx) => registry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'milk' }, ctx));
+  await withUser((ctx) => registry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'lettuce' }, ctx));
+
+  assert(llm.calls.length === 2, 'each item added to a list with a section_order triggers exactly one classification call');
+  assert(pool.items.find((i) => i.item_name === 'milk').section === 'dairy', 'milk was classified into the dairy section');
+  assert(pool.items.find((i) => i.item_name === 'lettuce').section === 'veggies', 'lettuce was classified into the veggies section');
+
+  const items = await withUser((ctx) => registry.get('get_list_items').handler({ list_name: 'Grocery List' }, ctx));
+  assert(
+    items.map((i) => i.itemName).join(',') === 'lettuce,milk',
+    'get_list_items returns items in section_order order (veggies before dairy), not creation order',
+  );
+
+  // a list with no section_order never calls the LLM at all
+  const throwingLlm = createFakeLlm(() => {
+    throw new Error('llm should not be called for a list with no section_order');
+  });
+  const noOrderTools = await registerTools({ llm: throwingLlm, embeddings: null, cipher: null, notion: undefined });
+  const noOrderRegistry = createToolRegistry(noOrderTools);
+  const noOrderResult = await withUser((ctx) =>
+    noOrderRegistry.get('add_list_item').handler({ list_name: 'Books to Read', item_name: 'a novel' }, ctx),
+  );
+  assert(noOrderResult.itemId !== undefined, 'adding to a list with no section_order still succeeds');
+  assert(pool.items.find((i) => i.item_name === 'a novel').section === null, 'the item is left unsectioned when its list has no section_order');
+
+  // a classification failure never blocks the item from being added
+  const failingLlm = createFakeLlm(() => undefined); // always throws inside createFakeLlm
+  const failTools = await registerTools({ llm: failingLlm, embeddings: null, cipher: null, notion: undefined });
+  const failRegistry = createToolRegistry(failTools);
+  const failResult = await withUser((ctx) =>
+    failRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'mystery item' }, ctx),
+  );
+  assert(failResult.itemId !== undefined, 'add_list_item still succeeds even when section classification throws');
+  assert(
+    pool.items.find((i) => i.item_name === 'mystery item').section === null,
+    'an item is left unsectioned (not crashed) when classification fails',
+  );
 }
 
 if (process.exitCode) {

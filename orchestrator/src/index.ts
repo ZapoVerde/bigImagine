@@ -60,8 +60,11 @@ async function main(): Promise<void> {
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));
   const port = Number(process.env.BIGBRAIN_ORCHESTRATOR_PORT ?? 8787);
+  // Where other containers on traefik-net (e.g. Open WebUI) actually reach this service — see
+  // docker-compose.yml's container_name. Only used to fill in the OpenAPI spec's `servers` entry.
+  const publicBaseUrl = process.env.BIGBRAIN_ORCHESTRATOR_BASE_URL ?? 'http://bigbrain-orchestrator:8787';
 
-  startHttpServer({ llm, db, tools, apiKeys, modelName: 'bigbrain', port });
+  startHttpServer({ llm, db, tools, apiKeys, modelName: 'bigbrain', port, publicBaseUrl });
 }
 
 main().catch((err) => {

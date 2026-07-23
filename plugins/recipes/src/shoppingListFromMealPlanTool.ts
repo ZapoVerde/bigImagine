@@ -24,21 +24,31 @@
  * stay Postgres-only, isolated by RLS same as everything else that user writes — this gateway is
  * one Notion workspace synced to one owning user, not one per household member.
  *
+ * If the target list has a section_order (plugins/lists/src/setListSectionOrderTool.ts), each
+ * newly-added ingredient is classified into one of those sections (classifySection.ts, duplicated
+ * from plugins/lists — see that file's docstring) before insert, so a whole week's
+ * meal-plan-generated shopping list sorts into the same store-walk order as manually-added items
+ * on the same list. Best-effort, same as the Notion sync below it: a classification failure is
+ * logged but never blocks the item from being added, unsectioned.
+ *
  * @api-declaration
- * createGenerateShoppingListFromMealPlanTool(notion) — returns the
+ * createGenerateShoppingListFromMealPlanTool(llm, notion) — returns the
  *   generate_shopping_list_from_meal_plan RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session, best-effort Notion API IO)
+ *     purity:          impure (Postgres IO via the injected session, best-effort LLM and Notion
+ *                      API IO)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given), Notion API (via NotionClient)]
+ *     external_io:     [Postgres (via the DbSession it's given), LLM, Notion API (via NotionClient)]
  */
 
 import { log } from '@bigbrain/orchestrator/logger';
+import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { DbSession } from '@bigbrain/orchestrator/postgres';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
+import { classifySection } from './classifySection.js';
 
 // Must match plugins/lists' notionSync.ts SOURCE_TABLE — see the file docstring above.
 const SOURCE_TABLE = 'list_items';
@@ -104,7 +114,10 @@ async function syncItemToNotion(
   }
 }
 
-export function createGenerateShoppingListFromMealPlanTool(notion: NotionClient | undefined): RegisteredTool {
+export function createGenerateShoppingListFromMealPlanTool(
+  llm: LlmProvider,
+  notion: NotionClient | undefined,
+): RegisteredTool {
   return {
     definition: {
       name: 'generate_shopping_list_from_meal_plan',
@@ -153,6 +166,9 @@ export function createGenerateShoppingListFromMealPlanTool(notion: NotionClient 
 
       const listId = await findOrCreateList(ctx.db, ctx.userId, listName);
 
+      const listRow = await ctx.db.query<{ section_order: string[] }>(`select section_order from lists where list_id = $1`, [listId]);
+      const sectionOrder = listRow[0]?.section_order ?? [];
+
       const existingPending = await ctx.db.query<{ item_name: string }>(
         `select item_name from list_items where list_id = $1 and status = 'pending'`,
         [listId],
@@ -168,9 +184,18 @@ export function createGenerateShoppingListFromMealPlanTool(notion: NotionClient 
           continue;
         }
 
+        let section: string | null = null;
+        if (sectionOrder.length > 0) {
+          try {
+            section = await classifySection(llm, sectionOrder, itemName);
+          } catch (err) {
+            log.error(`section classification failed for "${itemName}" on list ${listId} (item still added, unsectioned)`, err);
+          }
+        }
+
         const inserted = await ctx.db.query<{ item_id: string }>(
-          `insert into list_items (list_id, user_id, item_name) values ($1, $2, $3) returning item_id`,
-          [listId, ctx.userId, itemName],
+          `insert into list_items (list_id, user_id, item_name, section) values ($1, $2, $3, $4) returning item_id`,
+          [listId, ctx.userId, itemName, section],
         );
         await syncItemToNotion(ctx.db, notion, ctx.userId, inserted[0]!.item_id, itemName, listName);
         itemsAdded.push(itemName);

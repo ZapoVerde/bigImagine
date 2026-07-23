@@ -8,18 +8,27 @@
  * case. user_id is denormalized onto list_items (not just reachable via a join to lists) so RLS
  * applies directly to this table too, per bb_principles.md §4.
  *
+ * If the target list has a section_order (set_list_section_order.ts), the new item is classified
+ * into one of those sections (classifySection.ts) before insert, so get_list_items can sort it
+ * into store-walk order. Best-effort: a lists with no section_order skips classification entirely
+ * (no LLM call for the common case), and a classification failure is logged but never blocks the
+ * item actually being added — same best-effort spirit as the Notion sync below it.
+ *
  * @api-declaration
- * createAddListItemTool() — returns the add_list_item RegisteredTool
+ * createAddListItemTool(llm, notion) — returns the add_list_item RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session)
+ *     purity:          impure (Postgres IO via the injected session, best-effort LLM call)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given)]
+ *     external_io:     [Postgres (via the DbSession it's given), LLM]
  */
 
+import { log } from '@bigbrain/orchestrator/logger';
+import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
+import { classifySection } from './classifySection.js';
 import { findOrCreateList } from './listLookup.js';
 import { syncListItemToNotion } from './notionSync.js';
 
@@ -35,7 +44,7 @@ function isAddListItemArgs(value: unknown): value is { list_name: string; item_n
   );
 }
 
-export function createAddListItemTool(notion: NotionClient | undefined): RegisteredTool {
+export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | undefined): RegisteredTool {
   return {
     definition: {
       name: 'add_list_item',
@@ -58,9 +67,20 @@ export function createAddListItemTool(notion: NotionClient | undefined): Registe
 
       const { listId, created } = await findOrCreateList(ctx.db, ctx.userId, args.list_name);
 
+      let section: string | null = null;
+      const listRow = await ctx.db.query<{ section_order: string[] }>(`select section_order from lists where list_id = $1`, [listId]);
+      const sectionOrder = listRow[0]?.section_order ?? [];
+      if (sectionOrder.length > 0) {
+        try {
+          section = await classifySection(llm, sectionOrder, args.item_name);
+        } catch (err) {
+          log.error(`section classification failed for "${args.item_name}" on list ${listId} (item still added, unsectioned)`, err);
+        }
+      }
+
       const rows = await ctx.db.query<{ item_id: string }>(
-        `insert into list_items (list_id, user_id, item_name) values ($1, $2, $3) returning item_id`,
-        [listId, ctx.userId, args.item_name],
+        `insert into list_items (list_id, user_id, item_name, section) values ($1, $2, $3, $4) returning item_id`,
+        [listId, ctx.userId, args.item_name, section],
       );
       const itemId = rows[0]!.item_id;
 
