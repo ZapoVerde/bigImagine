@@ -15,9 +15,34 @@ import { createStubLlmProvider } from '../dist/io/llm/stub.js';
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createFieldCipher } from '../dist/io/fieldCipher.js';
+import { CREDENTIAL_NAMES } from '../dist/io/providerCredentials.js';
 import { randomBytes } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
+
+// A hand-rolled fake satisfying ProviderCredentialStore's shape directly — this suite is testing
+// the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not providerCredentials.ts's own
+// DB logic, which verify-provider-credentials.mjs already covers against a fake pool.
+function createFakeCredentialStore() {
+  const values = new Map();
+  return {
+    setCalls: [],
+    async list() {
+      return CREDENTIAL_NAMES.map((name) => ({
+        name,
+        configured: values.has(name),
+        updatedAt: values.has(name) ? '2026-01-01T00:00:00.000Z' : null,
+      }));
+    },
+    async resolve(name) {
+      return values.get(name);
+    },
+    async set(name, value) {
+      values.set(name, value);
+      this.setCalls.push({ name, value });
+    },
+  };
+}
 
 function assert(cond, message) {
   if (!cond) {
@@ -108,8 +133,20 @@ const pool = createFakePool();
 const db = createPostgresClient(pool);
 const tools = createToolRegistry([echoTool]);
 const apiKeys = createApiKeyStore('good-key:11111111-1111-1111-1111-111111111111');
+const credentials = createFakeCredentialStore();
+const restartCalls = [];
 
-const server = startHttpServer({ llm, db, tools, apiKeys, modelName: 'bigbrain', port: 0 });
+const server = startHttpServer({
+  llm,
+  db,
+  tools,
+  apiKeys,
+  adminApiKey: 'the-admin-key',
+  credentials,
+  modelName: 'bigbrain',
+  port: 0,
+  triggerRestart: () => restartCalls.push(Date.now()),
+});
 await new Promise((resolve) => server.once('listening', resolve));
 const port = server.address().port;
 const base = `http://127.0.0.1:${port}`;
@@ -168,6 +205,59 @@ assert(streamRes.headers.get('content-type')?.includes('text/event-stream'), 'st
 assert(streamText.includes('"content":"final answer"'), 'the SSE payload carries the final reply');
 assert(streamText.trim().endsWith('data: [DONE]'), 'the SSE stream ends with the [DONE] terminator');
 
+// --- Landing page ---
+const landingRes = await fetch(`${base}/`);
+const landingBody = await landingRes.text();
+assert(landingRes.status === 200, 'GET / serves the landing page unauthenticated');
+assert(landingBody.includes('<html') && landingBody.includes('/v1/admin'), 'the landing page links to Settings');
+
+// --- Admin credentials routes ---
+const adminPageRes = await fetch(`${base}/v1/admin`);
+assert(adminPageRes.status === 200, 'GET /v1/admin serves the static page unauthenticated');
+assert((await adminPageRes.text()).includes('<html'), 'GET /v1/admin returns HTML');
+
+const listNoAuthRes = await fetch(`${base}/v1/admin/credentials`);
+assert(listNoAuthRes.status === 401, 'GET /v1/admin/credentials with no auth header returns 401');
+
+const listWrongKeyRes = await fetch(`${base}/v1/admin/credentials`, {
+  headers: { authorization: 'Bearer not-the-admin-key' },
+});
+assert(listWrongKeyRes.status === 401, 'GET /v1/admin/credentials with the wrong key returns 401');
+
+const listOkRes = await fetch(`${base}/v1/admin/credentials`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const listOkBody = await listOkRes.json();
+assert(listOkRes.status === 200, 'GET /v1/admin/credentials with the correct admin key returns 200');
+assert(
+  listOkBody.credentials.length === 4 && listOkBody.credentials.every((c) => c.configured === false),
+  'GET /v1/admin/credentials returns all four names, none configured yet',
+);
+
+const setNoAuthRes = await fetch(`${base}/v1/admin/credentials`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'deepseek_api_key', value: 'sk-new' }),
+});
+assert(setNoAuthRes.status === 401, 'POST /v1/admin/credentials with no auth header returns 401');
+assert(credentials.setCalls.length === 0, 'the unauthenticated POST never reached the credential store');
+
+const setOkRes = await fetch(`${base}/v1/admin/credentials`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'deepseek_api_key', value: 'sk-new' }),
+});
+const setOkBody = await setOkRes.json();
+assert(setOkRes.status === 202, 'an authenticated POST /v1/admin/credentials returns 202');
+assert(setOkBody.status === 'restarting', 'the response body signals a restart is coming');
+assert(
+  credentials.setCalls.length === 1 && credentials.setCalls[0].name === 'deepseek_api_key' && credentials.setCalls[0].value === 'sk-new',
+  'the credential store actually recorded the write',
+);
+
+await new Promise((resolve) => setTimeout(resolve, 250));
+assert(restartCalls.length === 1, 'triggerRestart fired exactly once after the response flushed, instead of the real process.exit');
+
 server.close();
 
 // --- Part 4: dynamic model catalog + per-request model override ---
@@ -190,6 +280,8 @@ server.close();
     db: db2,
     tools: createToolRegistry([]),
     apiKeys: apiKeys2,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
     modelName: 'bigbrain',
     port: 0,
   });

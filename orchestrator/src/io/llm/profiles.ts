@@ -13,6 +13,9 @@
  * @api-declaration
  * LlmProfile, parseLlmProfiles(raw: string) — throws with a specific, actionable message on
  *   any malformed profile rather than silently dropping or guessing at it
+ * withOverriddenApiKeys(raw, overrides) — splices a DB-sourced apiKey (io/providerCredentials.ts)
+ *   into the otherwise-static profiles JSON before parseLlmProfiles ever sees it, so this module
+ *   and createLlmProvider need no other changes to support that
  *
  * @contract
  *   assertions:
@@ -73,4 +76,22 @@ export function parseLlmProfiles(raw: string): Record<string, LlmProfile> {
     profiles[name] = validateProfile(name, value);
   }
   return profiles;
+}
+
+/**
+ * Pure: re-serializes `raw`'s parsed JSON with `apiKey` replaced on whichever named profiles
+ * appear in both `raw` and `overrides` (an `undefined` override leaves that profile's existing
+ * apiKey untouched, it does not delete the field). kind/baseUrl/model, and any profile not named
+ * in overrides, pass through unchanged. Does not itself validate the result — the caller still
+ * runs it through parseLlmProfiles/validateProfile same as any other BIGBRAIN_LLM_PROFILES value.
+ */
+export function withOverriddenApiKeys(raw: string, overrides: Partial<Record<string, string>>): string {
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  for (const [name, apiKey] of Object.entries(overrides)) {
+    if (apiKey === undefined) continue;
+    const profile = parsed[name];
+    if (typeof profile !== 'object' || profile === null) continue;
+    parsed[name] = { ...(profile as Record<string, unknown>), apiKey };
+  }
+  return JSON.stringify(parsed);
 }

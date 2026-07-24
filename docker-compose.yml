@@ -44,19 +44,39 @@ services:
       BIGBRAIN_EMBEDDINGS_API_KEY: ${BIGBRAIN_EMBEDDINGS_API_KEY:?set in .env}
       BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION: ${BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION:?set in .env}
       BIGBRAIN_API_KEYS: ${BIGBRAIN_API_KEYS:?set in .env}
+      BIGBRAIN_ADMIN_API_KEY: ${BIGBRAIN_ADMIN_API_KEY:?set in .env}
       BIGBRAIN_FIELD_ENCRYPTION_KEY: ${BIGBRAIN_FIELD_ENCRYPTION_KEY:?set in .env}
       BIGBRAIN_NOTION_TOKEN: ${BIGBRAIN_NOTION_TOKEN:-}
       BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID: ${BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID:-}
       BIGBRAIN_NOTION_OWNER_USER_ID: ${BIGBRAIN_NOTION_OWNER_USER_ID:-}
       BIGBRAIN_ORCHESTRATOR_PORT: 8787
+    ports:
+      # Loopback-only fallback for GET /v1/admin (adminPage.ts) via
+      # `ssh -L 8787:localhost:8787 <user>@<host>` then http://localhost:8787/v1/admin — kept
+      # alongside the public route below, same dual-path precedent as open-webui's own LAN-direct
+      # port 3000 next to its Traefik route.
+      - "127.0.0.1:8787:8787"
     volumes:
       - ./orchestrator/logs:/app/orchestrator/logs
     networks:
       - default
       - traefik-net
-    # No published port and no Traefik router/labels: reachable only from other containers on
-    # traefik-net (e.g. open-webui, a separate compose project on the same external network) —
-    # never from outside. Phase 5 formalizes the perimeter; this is already closed by default.
+    # Public route for bigbrain.your-domain.example (settings/admin now, a data-verification/visualization
+    # surface for household members later) — see docs/spec.md §7's Correction for the tradeoff
+    # this reverses. Google-login enforcement happens at Cloudflare Access on this hostname, not
+    # here; Traefik/this container only ever see a request Access already approved. Every route
+    # underneath still requires its own bearer token exactly as before (BIGBRAIN_ADMIN_API_KEY for
+    # /v1/admin/*, BIGBRAIN_API_KEYS for chat/tools) — Access adds a household-identity gate in
+    # front of that, it doesn't replace it. Open WebUI's own traffic still reaches this container
+    # over traefik-net by container name, entirely separate from this hostname.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.bigbrain.rule=Host(`bigbrain.your-domain.example`)"
+      - "traefik.http.services.bigbrain.loadbalancer.server.port=8787"
+      # Disambiguates which of this container's two networks Traefik should route through — it's
+      # also on `default` (for Postgres), unlike open-webui/vaultwarden which only ever join
+      # traefik-net.
+      - "traefik.docker.network=traefik-net"
 
 volumes:
   bigbrain-pgdata:

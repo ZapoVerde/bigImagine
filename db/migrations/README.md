@@ -17,3 +17,9 @@ Already applied by hand, not run automatically (see the file for the exact comma
   models don't support 1536) and adds `unstructured_notes.category` /
   `unstructured_notes.summary_short`, which the original migration omitted despite the ingestion
   pipeline (`docs/spec.md` §6.1) producing both.
+- `0008_provider_credentials.sql` — adds `provider_credentials`, the encrypted DB-backed home for
+  the four provider API keys previously only in static env vars (`deepseek_api_key`,
+  `openrouter_api_key`, `voyage_api_key`, `notion_token`). Household-wide system config, not
+  per-user data — deliberately exempt from RLS the same way `users` is. Rotated via the admin-only
+  `POST /v1/admin/credentials` route (`orchestrator/src/server/adminServer.ts`) instead of a code
+  rebuild.

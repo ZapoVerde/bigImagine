@@ -1,15 +1,21 @@
 /**
  * @file orchestrator/src/io/postgres.ts
- * @stamp 2026-07-21
+ * @stamp 2026-07-24
  * @architectural-role IO Wrapper — Postgres access, scoped per request
  * @description
- * The only module allowed to open a database connection. Every query runs inside
+ * The only module allowed to open a database connection. Every user-facing query runs inside
  * withUserScope(userId, fn): a transaction that sets app.current_user_id via set_config(...,
  * true) before fn runs, so the RLS policies from db/migrations/0002_schema.sql (which read
  * app_current_user_id()) enforce themselves against whatever this module was told the request's
  * user is — never against anything a query or its caller claims about itself
  * (bb_principles.md §4). set_config's value is passed as a bound parameter, not interpolated,
  * so a hostile userId can't inject SQL through the scoping call itself.
+ *
+ * withSystemScope(fn) is the same transaction/rollback shape minus the set_config call, for
+ * tables with no per-user meaning at all — currently only provider_credentials
+ * (db/migrations/0008_provider_credentials.sql), which is exempt from RLS the same way `users`
+ * itself is. Never use this for a user_id-scoped table; it does not set app.current_user_id, so
+ * RLS policies that read it would silently see no scope at all rather than the caller's identity.
  *
  * Callers only ever see DbSession (query-only) inside the callback — never the pool or a raw
  * client — so nothing downstream can open a second, differently-scoped connection mid-request.
@@ -19,6 +25,7 @@
  *   object; production code passes a real pg.Pool, tests pass a fake satisfying the same shape
  * PostgresClient.withUserScope(userId, fn) — runs fn(session) inside a scoped transaction,
  *   committing on success and rolling back if fn throws
+ * PostgresClient.withSystemScope(fn) — same, for tables with no user_id at all
  *
  * @contract
  *   assertions:
@@ -35,6 +42,7 @@ export interface DbSession {
 
 export interface PostgresClient {
   withUserScope<T>(userId: string, fn: (session: DbSession) => Promise<T>): Promise<T>;
+  withSystemScope<T>(fn: (session: DbSession) => Promise<T>): Promise<T>;
 }
 
 export interface PoolClient {
@@ -46,33 +54,51 @@ export interface Pool {
   connect(): Promise<PoolClient>;
 }
 
+async function inTransaction<T>(
+  pool: Pool,
+  scopeLabel: string,
+  setupScope: (client: PoolClient) => Promise<void>,
+  fn: (session: DbSession) => Promise<T>,
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await setupScope(client);
+
+    const session: DbSession = {
+      query: async <R>(sql: string, params?: unknown[]) => {
+        const result = await client.query(sql, params);
+        return result.rows as R[];
+      },
+    };
+
+    const value = await fn(session);
+    await client.query('COMMIT');
+    return value;
+  } catch (err) {
+    await client.query('ROLLBACK').catch((rollbackErr) => {
+      log.error('rollback failed after an earlier error', rollbackErr);
+    });
+    log.error(`${scopeLabel} failed`, err);
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export function createPostgresClient(pool: Pool): PostgresClient {
   return {
-    async withUserScope<T>(userId: string, fn: (session: DbSession) => Promise<T>): Promise<T> {
-      const client = await pool.connect();
-      try {
-        await client.query('BEGIN');
-        await client.query("select set_config('app.current_user_id', $1, true)", [userId]);
+    withUserScope<T>(userId: string, fn: (session: DbSession) => Promise<T>): Promise<T> {
+      return inTransaction(
+        pool,
+        `withUserScope(${userId})`,
+        (client) => client.query("select set_config('app.current_user_id', $1, true)", [userId]).then(() => undefined),
+        fn,
+      );
+    },
 
-        const session: DbSession = {
-          query: async <R>(sql: string, params?: unknown[]) => {
-            const result = await client.query(sql, params);
-            return result.rows as R[];
-          },
-        };
-
-        const value = await fn(session);
-        await client.query('COMMIT');
-        return value;
-      } catch (err) {
-        await client.query('ROLLBACK').catch((rollbackErr) => {
-          log.error('rollback failed after an earlier error', rollbackErr);
-        });
-        log.error(`withUserScope failed for user ${userId}`, err);
-        throw err;
-      } finally {
-        client.release();
-      }
+    withSystemScope<T>(fn: (session: DbSession) => Promise<T>): Promise<T> {
+      return inTransaction(pool, 'withSystemScope', async () => undefined, fn);
     },
   };
 }
