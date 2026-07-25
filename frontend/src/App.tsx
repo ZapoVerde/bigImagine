@@ -5,6 +5,7 @@ import TabStrip from './components/TabStrip';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
+import CalendarView from './views/CalendarView';
 import ChatHistoryView from './views/ChatHistoryView';
 import ChatView from './views/ChatView';
 import ListsView from './views/ListsView';
@@ -94,6 +95,7 @@ export default function App() {
           {tab.type === 'recipes' && <RecipesView apiKey={apiKey} />}
           {tab.type === 'mealplan' && <MealPlanView apiKey={apiKey} />}
           {tab.type === 'notes' && <NotesView apiKey={apiKey} />}
+          {tab.type === 'calendar' && <CalendarView apiKey={apiKey} />}
           {tab.type === 'settings' && <SettingsView />}
         </div>
       ))}

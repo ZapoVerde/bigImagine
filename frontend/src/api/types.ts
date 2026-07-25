@@ -94,6 +94,24 @@ export interface GenerateShoppingListResult {
   mealsConsidered: number;
 }
 
+// plugins/calendar/src/getCalendarScheduleTool.ts / createCalendarEventTool.ts
+export type CalendarSource = 'cozi' | 'outlook' | 'native';
+
+export interface CalendarEvent {
+  eventId: string;
+  source: CalendarSource;
+  colorCode: string;
+  isReadOnly: boolean;
+  label: string;
+  title: string;
+  description: string | null;
+  location: string | null;
+  startTime: string;
+  endTime: string;
+  allDay: boolean;
+  assignedMembers: string[];
+}
+
 // orchestrator/src/server/openai.ts buildChatCompletion()
 export interface ChatCompletionResponse {
   id: string;

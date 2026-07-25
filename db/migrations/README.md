@@ -47,3 +47,12 @@ Already applied by hand, not run automatically (see the file for the exact comma
   standard `user_scoped` RLS. Same dual-surface shape as `notes` — picking one only copies its
   content into a chat's own `chat_sessions.params.system`; it is not a live reference, so editing
   or deleting a preset later never changes a chat that already used it.
+- `0013_calendar.sql` — adds `calendar_events`: household calendar rows for the Calendar tab
+  (`plugins/calendar`), standard `user_scoped` RLS. `source` (`'cozi' | 'outlook' | 'native'`) is
+  `text` + a `CHECK` vocabulary, same closed-vocabulary choice as `provider_credentials.name` /
+  `orchestrator_settings.key`, not a native Postgres enum. Cozi/Outlook rows come from
+  `plugins/calendar/src/icsSync.ts`'s background poll (`BIGBRAIN_COZI_ICS_URL`/
+  `BIGBRAIN_OUTLOOK_ICS_URL`, attributed to `BIGBRAIN_CALENDAR_OWNER_USER_ID`); native rows come
+  from the `create_calendar_event` tool. No `color_code`/`is_read_only` columns — both are pure
+  functions of `source` (`plugins/calendar/src/sourceMeta.ts`), computed at read time rather than
+  stored. Google Calendar's 2-way OAuth sync is deferred to a later phase (`docs/spec.md` §6.7).

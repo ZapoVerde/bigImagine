@@ -13,6 +13,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'recipes', label: 'Recipes' },
   { type: 'mealplan', label: 'Meal Plans' },
   { type: 'notes', label: 'Notes' },
+  { type: 'calendar', label: 'Calendar' },
   { type: 'settings', label: 'Settings' },
   { type: 'history', label: 'History' },
 ];
