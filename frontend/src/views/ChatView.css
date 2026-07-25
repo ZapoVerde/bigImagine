@@ -258,6 +258,38 @@
   color: var(--color-text-muted);
 }
 
+.chat-empty-landing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.2rem;
+}
+
+.view-switch-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.pills-label {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.view-switch-pills button {
+  padding: 0.4rem 0.9rem;
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-md);
+}
+
+.view-switch-pills button:hover {
+  border-color: var(--color-text-faint);
+}
+
 /* react-markdown renders real block elements now (remark-breaks turns single newlines into <br>,
    so pre-wrap on the bubble itself is no longer needed/wanted) — just trim the default browser
    margins so paragraphs/lists don't add more vertical gap than a plain chat bubble should have. */

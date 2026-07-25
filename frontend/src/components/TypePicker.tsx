@@ -17,9 +17,10 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'settings', label: 'Settings' },
 ];
 
-// What a blank tab (opened via the tab strip's (+) button) shows until the user picks what it's
-// for. Purely user-driven — no auto-selection, no intent detection. Once picked, a tab never
-// changes type again.
+// What a legacy 'blank' tab shows until the user picks what it's for. The tab strip's (+) button
+// no longer creates these (new tabs drop straight into chat — see useTabs' openBlank), but a tab
+// left in this state from before that change still needs somewhere to land. Purely user-driven —
+// no auto-selection, no intent detection. Once picked, a tab never changes type again.
 export default function TypePicker({ onPick }: TypePickerProps) {
   return (
     <div className="type-picker">

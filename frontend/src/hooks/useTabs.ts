@@ -22,8 +22,8 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   settings: 'Settings',
 };
 
-function newBlankTab(): TabInstance {
-  return { id: crypto.randomUUID(), type: 'blank', title: 'New tab' };
+function newChatTab(): TabInstance {
+  return { id: crypto.randomUUID(), type: 'chat', title: 'New chat' };
 }
 
 interface TabsState {
@@ -44,16 +44,22 @@ function loadInitial(): TabsState {
       }
     }
   } catch {
-    // malformed/missing storage — fall through to a fresh blank tab
+    // malformed/missing storage — fall through to a fresh chat tab
   }
-  const blank = newBlankTab();
-  return { tabs: [blank], activeTabId: blank.id };
+  const tab = newChatTab();
+  return { tabs: [tab], activeTabId: tab.id };
+}
+
+// A tab still open on its landing state — a legacy 'blank' tab (pre-chat-first-default, kept so
+// tabs persisted before this change keep working), or a 'chat' tab nobody has typed into yet
+// (no chatId). Either is fair game for summon()/openChat() to claim in place; anything else is
+// real content and, per the tab-strip design, never changes type again once created.
+function isClaimable(tab: TabInstance | undefined): boolean {
+  return tab?.type === 'blank' || (tab?.type === 'chat' && !tab.chatId);
 }
 
 // Owns the browser-style tab strip: which tabs are open, in what order, and which is active.
-// Persisted to localStorage so a reload doesn't scatter open conversations. Tabs are single-
-// purpose and never change type after creation (see the design decisions in the tab-strip plan) —
-// summon()/openChat() below only ever convert a still-*blank* tab, or open a brand new one.
+// Persisted to localStorage so a reload doesn't scatter open conversations.
 export function useTabs() {
   const [state, setState] = useState<TabsState>(loadInitial);
 
@@ -65,21 +71,23 @@ export function useTabs() {
     setState((s) => (s.tabs.some((t) => t.id === id) ? { ...s, activeTabId: id } : s));
   }
 
+  // Chat-first default (principle 5): a new tab drops straight into an empty chat, no picker in
+  // the way. Specialist views are still one click away via summon() below.
   function openBlank() {
-    const tab = newBlankTab();
+    const tab = newChatTab();
     setState((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
   }
 
   /** Singleton view types: focuses the existing tab if one's already open, else claims the active
-   *  blank tab (from the (+) picker) in place, else opens a brand new one. */
+   *  landing tab (blank, or an empty chat draft) in place, else opens a brand new one. */
   function summon(type: SummonableType) {
     setState((s) => {
       const existing = s.tabs.find((t) => t.type === type);
       if (existing) return { ...s, activeTabId: existing.id };
       const active = s.tabs.find((t) => t.id === s.activeTabId);
       const title = SUMMON_LABELS[type];
-      if (active?.type === 'blank') {
-        return { tabs: s.tabs.map((t) => (t.id === active.id ? { ...t, type, title } : t)), activeTabId: active.id };
+      if (isClaimable(active)) {
+        return { tabs: s.tabs.map((t) => (t.id === active!.id ? { ...t, type, title } : t)), activeTabId: active!.id };
       }
       const tab: TabInstance = { id: crypto.randomUUID(), type, title };
       return { tabs: [...s.tabs, tab], activeTabId: tab.id };
@@ -96,10 +104,10 @@ export function useTabs() {
       }
       const active = s.tabs.find((t) => t.id === s.activeTabId);
       const label = title ?? 'New chat';
-      if (active?.type === 'blank') {
+      if (isClaimable(active)) {
         return {
-          tabs: s.tabs.map((t) => (t.id === active.id ? { ...t, type: 'chat', chatId, title: label } : t)),
-          activeTabId: active.id,
+          tabs: s.tabs.map((t) => (t.id === active!.id ? { ...t, type: 'chat', chatId, title: label } : t)),
+          activeTabId: active!.id,
         };
       }
       const tab: TabInstance = { id: crypto.randomUUID(), type: 'chat', chatId, title: label };

@@ -19,7 +19,21 @@ import {
 import { formatPricePerMillion } from '../api/pricing';
 import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
+import TodayAgenda from '../components/TodayAgenda';
+import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
+
+// Lists/Recipes/etc. are the "come here to do a task" specialist views; Settings isn't one of
+// those, but TypePicker (superseded by the chat-first default below) was its only entry point
+// anywhere in the app, so it stays in this row rather than becoming unreachable.
+const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string }[] = [
+  { type: 'lists', label: 'Lists' },
+  { type: 'recipes', label: 'Recipes' },
+  { type: 'mealplan', label: 'Meal Plans' },
+  { type: 'notes', label: 'Notes' },
+  { type: 'calendar', label: 'Calendar' },
+  { type: 'settings', label: 'Settings' },
+];
 
 interface ChatViewProps {
   apiKey: string | null;
@@ -33,6 +47,10 @@ interface ChatViewProps {
   /** Fires whenever this chat's title changes (e.g. the server's first-message auto-title) so the
    *  owning tab's label stays in sync. */
   onTitleChange?: (title: string) => void;
+  /** Opt-in escape hatch out of the chat-first default (principle 5): converts this still-empty
+   *  draft tab into a specialist view. Only offered before anything's been sent — see the
+   *  chat-empty-landing branch below. */
+  onSwitchView?: (type: SummonableType) => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -52,7 +70,7 @@ function toWireMessages(messages: DisplayMessage[]): ChatMessage[] {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
@@ -286,7 +304,22 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
         </div>
 
         <div className="chat-history" ref={historyRef}>
-          {messages.length === 0 && <div className="empty-state">Ask bigBrain something.</div>}
+          {messages.length === 0 && chatId && <div className="empty-state">Ask bigBrain something.</div>}
+          {messages.length === 0 && !chatId && (
+            <div className="chat-empty-landing">
+              <TodayAgenda apiKey={apiKey} />
+              {onSwitchView && (
+                <div className="view-switch-pills">
+                  <span className="pills-label">Or open a specialist view:</span>
+                  {VIEW_SWITCH_OPTIONS.map((opt) => (
+                    <button key={opt.type} type="button" onClick={() => onSwitchView(opt.type)}>
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           {messages.map((m, i) => {
             const isLastAssistant = m.role === 'assistant' && !messages.slice(i + 1).some((x) => x.role === 'assistant');
             return (
@@ -346,6 +379,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
             }}
             placeholder="Message bigBrain…"
             rows={2}
+            autoFocus
           />
           <button type="submit" disabled={sending || !draft.trim()}>
             Send
