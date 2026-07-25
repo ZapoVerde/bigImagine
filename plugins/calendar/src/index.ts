@@ -5,7 +5,9 @@
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as lists/recipes/notes): an `info`
  * object, an async `registerTools`, and an optional `startBackgroundJobs`. Neither tool needs
- * deps.llm/embeddings/cipher/notion — only ctx.db/ctx.userId, supplied per-call.
+ * deps.llm/embeddings/cipher/notion. get_calendar_schedule closes over deps.settings to resolve
+ * household_timezone live on every call (getCalendarScheduleTool.ts) — everything else is
+ * ctx.db/ctx.userId, supplied per-call.
  *
  * ICS feed URLs are secrets (docs/bb_principles.md §12: a capability URL grants access on its
  * own, same as an API key) — resolved via deps.credentials ('cozi_ics_url'/'outlook_ics_url',
@@ -52,8 +54,8 @@ export const info = {
   description: 'Household calendar: read-only Cozi/Outlook feeds aggregated with native bigBrain events.',
 };
 
-export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]> {
-  return [createGetCalendarScheduleTool(), createCreateCalendarEventTool()];
+export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]> {
+  return [createGetCalendarScheduleTool(deps.settings), createCreateCalendarEventTool()];
 }
 
 export async function startBackgroundJobs(deps: PluginDeps): Promise<void> {

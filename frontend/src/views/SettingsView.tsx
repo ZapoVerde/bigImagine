@@ -31,6 +31,30 @@ function listTimezoneOptions(): string[] {
   }
 }
 
+// The browser always knows its own zone — surfacing it directly answers "which one am I on"
+// without the user having to guess from a list of IANA names.
+function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return '';
+  }
+}
+
+// GMT+X / GMT-X:XX next to each zone name, since most people know their offset from UTC long
+// before they know their IANA zone name.
+function formatUtcOffset(tz: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'shortOffset' }).formatToParts(
+      new Date(),
+    );
+    const offset = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
+    return offset.replace('GMT', 'UTC');
+  } catch {
+    return '';
+  }
+}
+
 // Ported from the old standalone adminPage.ts — same two endpoints, same behavior (restart-on-
 // save, poll /healthz until the orchestrator comes back). The admin key is deliberately kept in
 // component state only, never localStorage: unlike the household API key gating the rest of this
@@ -68,6 +92,7 @@ export default function SettingsView() {
   const [selectedTimezone, setSelectedTimezone] = useState('');
   const [timezoneStatus, setTimezoneStatus] = useState('');
   const timezoneOptions = listTimezoneOptions();
+  const deviceTimezone = browserTimezone();
 
   const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
   const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
@@ -394,12 +419,18 @@ export default function SettingsView() {
 
       <fieldset>
         <legend>Timezone</legend>
+        {deviceTimezone && (
+          <div className="status">
+            Your device is currently on <strong>{deviceTimezone}</strong> ({formatUtcOffset(deviceTimezone)})
+          </div>
+        )}
         {timezoneOptions.length > 0 ? (
           <select value={selectedTimezone} onChange={(e) => setSelectedTimezone(e.target.value)}>
             {[...new Set([selectedTimezone, ...timezoneOptions])].filter(Boolean).map((tz) => (
               <option key={tz} value={tz}>
-                {tz}
+                {tz} ({formatUtcOffset(tz)})
                 {tz === timezone ? ' (current)' : ''}
+                {tz === deviceTimezone ? ' (your device)' : ''}
               </option>
             ))}
           </select>

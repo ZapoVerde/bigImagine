@@ -48,6 +48,17 @@ export async function whoami(): Promise<string | null> {
   return body.userId;
 }
 
+/** GET /v1/timezone — the household_timezone setting, same household-key auth as callTool/chat
+ *  (not the admin-gated /v1/admin/timezone). Not a secret (bb_principles.md §12); lets the
+ *  frontend compute "today" the same way the server does for the LLM's own date context, instead
+ *  of guessing from the browser's local clock or UTC. */
+export async function getTimezone(apiKey: string | null): Promise<string> {
+  const res = await fetch('/v1/timezone', { headers: authHeaders(apiKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { timezone: string };
+  return body.timezone;
+}
+
 /** Invokes one registered tool by name — POST /v1/tools/:name, same auth and RLS scoping as chat.
  *  apiKey is null under Cloudflare Access SSO (see whoami()) — the Authorization header is simply
  *  omitted in that case. Response shapes aren't discoverable from the server (openapi.json always

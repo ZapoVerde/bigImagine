@@ -152,10 +152,17 @@ END:VCALENDAR
   };
 }
 
+// get_calendar_schedule reads household_timezone live on every call (getCalendarScheduleTool.ts,
+// same value util/dateContext.ts uses for the LLM) — undefined here just exercises the DEFAULT_TIMEZONE
+// ('UTC') fallback, fine for tests that always pass explicit start_date/end_date anyway.
+function createFakeSettingsStore(overrides = {}) {
+  return { async get(key) { return overrides[key]; } };
+}
+
 async function main() {
   // --- registerTools contract ---
   assert(info.id === 'calendar', 'plugin info.id is "calendar"');
-  const tools = await registerTools({});
+  const tools = await registerTools({ settings: createFakeSettingsStore() });
   const names = tools.map((t) => t.definition.name).sort();
   assert(JSON.stringify(names) === JSON.stringify(['create_calendar_event', 'get_calendar_schedule']), 'registerTools returns exactly the two calendar tools');
 
@@ -207,6 +214,18 @@ async function main() {
 
   const allSources = await withUser((ctx) => getTool.handler({ start_date: '2026-01-01', end_date: '2026-12-31' }, ctx));
   assert(allSources.length === pool.events.length, 'omitting sources returns events from every source');
+
+  // --- "today" is resolved through household_timezone, not the server's own (UTC) clock — a
+  // server-local "today" would silently drop events that are already today for a household west
+  // of UTC, which is the bug this default exists to avoid. ---
+  {
+    const tzCalls = [];
+    const spySettings = { async get(key) { tzCalls.push(key); return 'Australia/Perth'; } };
+    const tzTools = await registerTools({ settings: spySettings });
+    const tzGetTool = tzTools.find((t) => t.definition.name === 'get_calendar_schedule');
+    await withUser((ctx) => tzGetTool.handler({}, ctx));
+    assert(tzCalls.includes('household_timezone'), 'get_calendar_schedule resolves "today" through household_timezone on every call, not the server clock');
+  }
 
   // --- sourceMeta / applyPrivacyMask as pure functions ---
   assert(sourceMeta('cozi').colorCode === '#8B5CF6' && sourceMeta('cozi').isReadOnly === true, 'sourceMeta("cozi") is purple and read-only');

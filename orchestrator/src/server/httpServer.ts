@@ -779,6 +779,19 @@ async function handleWhoAmI(req: IncomingMessage, res: ServerResponse, deps: Htt
   sendJson(res, 200, { userId });
 }
 
+// household_timezone isn't a secret (bb_principles.md §12) and every household member already
+// receives it indirectly on every chat turn via formatCurrentDateContext's system message — this
+// just gives the frontend itself (CalendarView/TodayAgenda, computing "today" client-side) the
+// same value directly, gated the same way as /v1/chats rather than requiring the admin key.
+async function handleHouseholdTimezoneGet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  sendJson(res, 200, { timezone: await getHouseholdTimezone(deps.settings) });
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -807,6 +820,10 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url === '/v1/models') {
     await handleModels(res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/timezone') {
+    await handleHouseholdTimezoneGet(req, res, deps);
     return;
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
