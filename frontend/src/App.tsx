@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
 import './App.css';
 import { whoami } from './api/client';
+import Sidebar from './components/sidebar/Sidebar';
 import TabStrip from './components/TabStrip';
+import TodayAgenda from './components/TodayAgenda';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
 import CalendarView from './views/CalendarView';
-import ChatHistoryView from './views/ChatHistoryView';
 import ChatView from './views/ChatView';
 import ListsView from './views/ListsView';
 import MealPlanView from './views/MealPlanView';
@@ -29,6 +30,17 @@ type AuthState =
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ mode: 'checking' });
   const { tabs, activeTabId, openBlank, summon, openChat, updateTab, close, focus } = useTabs();
+
+  // Sidebar/view picker state for the singleton lists/notes/recipes tabs — lifted here because
+  // the sidebar's browser and the tab's detail view are siblings, not parent/child. Each "X
+  // changed" callback bumps the matching refresh key so the sidebar's browser (which owns its own
+  // fetch) knows to re-fetch after a mutation the detail view made.
+  const [selectedListName, setSelectedListName] = useState<string | null>(null);
+  const [listsRefreshKey, setListsRefreshKey] = useState(0);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  const [notesRefreshKey, setNotesRefreshKey] = useState(0);
+  const [selectedRecipeName, setSelectedRecipeName] = useState<string | null>(null);
+  const [recipesRefreshKey, setRecipesRefreshKey] = useState(0);
 
   useEffect(() => {
     // Probe first: a Cloudflare Access identity (io/accessIdentity.ts) needs no key at all — only
@@ -59,46 +71,86 @@ export default function App() {
   }
 
   const apiKey = auth.mode === 'key' ? auth.apiKey : null;
+  const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
     <div className="app">
-      <TabStrip
-        tabs={tabs}
-        activeId={activeTabId}
-        onSelect={focus}
-        onClose={close}
-        onNew={openBlank}
-        onChangeKey={
-          auth.mode === 'key'
-            ? () => {
-                localStorage.removeItem(API_KEY_STORAGE_KEY);
-                setAuth({ mode: 'locked' });
-              }
-            : undefined
-        }
+      <Sidebar
+        apiKey={apiKey}
+        activeType={activeTab?.type}
+        onOpenChat={openChat}
+        selectedListName={selectedListName}
+        onSelectList={setSelectedListName}
+        listsRefreshKey={listsRefreshKey}
+        selectedNoteId={selectedNoteId}
+        onSelectNote={setSelectedNoteId}
+        onDeselectNote={() => setSelectedNoteId(null)}
+        notesRefreshKey={notesRefreshKey}
+        selectedRecipeName={selectedRecipeName}
+        onSelectRecipe={setSelectedRecipeName}
+        recipesRefreshKey={recipesRefreshKey}
       />
-      {tabs.map((tab) => (
-        <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
-          {tab.type === 'blank' && (
-            <TypePicker onPick={(type) => (type === 'chat' ? openChat() : summon(type))} />
-          )}
-          {tab.type === 'chat' && (
-            <ChatView
-              apiKey={apiKey}
-              chatId={tab.chatId}
-              onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
-              onTitleChange={(title) => updateTab(tab.id, { title })}
-            />
-          )}
-          {tab.type === 'history' && <ChatHistoryView apiKey={apiKey} onOpenChat={openChat} />}
-          {tab.type === 'lists' && <ListsView apiKey={apiKey} />}
-          {tab.type === 'recipes' && <RecipesView apiKey={apiKey} />}
-          {tab.type === 'mealplan' && <MealPlanView apiKey={apiKey} />}
-          {tab.type === 'notes' && <NotesView apiKey={apiKey} />}
-          {tab.type === 'calendar' && <CalendarView apiKey={apiKey} />}
-          {tab.type === 'settings' && <SettingsView />}
-        </div>
-      ))}
+      <div className="app-main">
+        <TabStrip
+          tabs={tabs}
+          activeId={activeTabId}
+          onSelect={focus}
+          onClose={close}
+          onNew={openBlank}
+          onChangeKey={
+            auth.mode === 'key'
+              ? () => {
+                  localStorage.removeItem(API_KEY_STORAGE_KEY);
+                  setAuth({ mode: 'locked' });
+                }
+              : undefined
+          }
+        />
+        {tabs.map((tab) => (
+          <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
+            {tab.type === 'blank' && (
+              <div className="blank-tab">
+                <TodayAgenda apiKey={apiKey} />
+                <TypePicker onPick={(type) => (type === 'chat' ? openChat() : summon(type))} />
+              </div>
+            )}
+            {tab.type === 'chat' && (
+              <ChatView
+                apiKey={apiKey}
+                chatId={tab.chatId}
+                onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
+                onTitleChange={(title) => updateTab(tab.id, { title })}
+              />
+            )}
+            {tab.type === 'lists' && (
+              <ListsView
+                apiKey={apiKey}
+                selectedListName={selectedListName}
+                onSelectList={setSelectedListName}
+                onChanged={() => setListsRefreshKey((k) => k + 1)}
+              />
+            )}
+            {tab.type === 'recipes' && (
+              <RecipesView
+                apiKey={apiKey}
+                selectedRecipeName={selectedRecipeName}
+                onSelectRecipe={setSelectedRecipeName}
+                onChanged={() => setRecipesRefreshKey((k) => k + 1)}
+              />
+            )}
+            {tab.type === 'mealplan' && <MealPlanView apiKey={apiKey} />}
+            {tab.type === 'notes' && (
+              <NotesView
+                apiKey={apiKey}
+                selectedNoteId={selectedNoteId}
+                onChanged={() => setNotesRefreshKey((k) => k + 1)}
+              />
+            )}
+            {tab.type === 'calendar' && <CalendarView apiKey={apiKey} />}
+            {tab.type === 'settings' && <SettingsView />}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

@@ -4,13 +4,6 @@
   margin: 0 auto;
 }
 
-.tag-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  margin-bottom: 1rem;
-}
-
 .pill {
   font-size: 0.8rem;
   padding: 0.3rem 0.7rem;
@@ -27,44 +20,10 @@
   border-color: #222;
 }
 
-.recipe-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-  gap: 1rem;
-}
-
-.recipe-card {
-  text-align: left;
-  padding: 1rem;
-  border: 1px solid #ddd;
-  border-radius: 0.5rem;
-  background: #fff;
-  cursor: pointer;
-}
-
-.recipe-card:hover {
-  border-color: #999;
-}
-
-.recipe-card h3 {
-  margin: 0 0 0.3rem;
-  font-size: 1rem;
-}
-
 .recipe-meta {
   font-size: 0.8rem;
   color: #888;
   margin: 0;
-}
-
-.back-link {
-  background: none;
-  border: none;
-  cursor: pointer;
-  color: #555;
-  padding: 0;
-  margin-bottom: 1rem;
-  font-size: 0.9rem;
 }
 
 .recipe-detail h2 {

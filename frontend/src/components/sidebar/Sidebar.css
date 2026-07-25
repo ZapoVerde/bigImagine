@@ -1,0 +1,159 @@
+.sidebar {
+  width: 16rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #ddd;
+  overflow: hidden;
+}
+
+.sidebar.collapsed {
+  width: 2.6rem;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.7rem;
+  flex-shrink: 0;
+  border-bottom: 1px solid #eee;
+}
+
+.sidebar.collapsed .sidebar-header {
+  justify-content: center;
+}
+
+.sidebar-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #888;
+}
+
+.sidebar-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.sidebar-toggle:hover {
+  color: #111;
+}
+
+.sidebar-content {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-browser {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0.6rem;
+}
+
+.sidebar-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.sidebar-search {
+  flex: 1;
+  min-width: 0;
+  padding: 0.4rem 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+}
+
+.sidebar-add-btn {
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  color: #555;
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.sidebar-tag-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.5rem;
+}
+
+.sidebar-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.sidebar-group {
+  margin-bottom: 0.3rem;
+}
+
+.sidebar-group-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  color: #888;
+  padding: 0.5rem 0.4rem 0.2rem;
+}
+
+.sidebar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.5rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.sidebar-row:hover {
+  background: #eee;
+}
+
+.sidebar-row.active {
+  background: #e4e4e4;
+  font-weight: 600;
+}
+
+.sidebar-row-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-row-delete {
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0 0.2rem;
+  visibility: hidden;
+}
+
+.sidebar-row:hover .sidebar-row-delete,
+.sidebar-group-name:hover .sidebar-row-delete {
+  visibility: visible;
+}
+
+.sidebar-row-delete:hover {
+  color: #b00;
+}
+
+.empty-state.small {
+  padding: 1rem 0.5rem;
+  font-size: 0.85rem;
+}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export type TabType = 'blank' | 'chat' | 'lists' | 'recipes' | 'mealplan' | 'notes' | 'calendar' | 'settings' | 'history';
+export type TabType = 'blank' | 'chat' | 'lists' | 'recipes' | 'mealplan' | 'notes' | 'calendar' | 'settings';
 export type SummonableType = Exclude<TabType, 'blank' | 'chat'>;
 
 export interface TabInstance {
@@ -20,7 +20,6 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   notes: 'Notes',
   calendar: 'Calendar',
   settings: 'Settings',
-  history: 'History',
 };
 
 function newBlankTab(): TabInstance {

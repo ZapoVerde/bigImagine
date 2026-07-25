@@ -20,8 +20,16 @@ body {
 
 .app {
   display: flex;
+  flex-direction: row;
+  height: 100%;
+}
+
+.app-main {
+  display: flex;
   flex-direction: column;
   height: 100%;
+  flex: 1;
+  min-width: 0;
 }
 
 .tab-bar {
@@ -121,6 +129,21 @@ body {
 .view-container {
   flex: 1;
   overflow: auto;
+}
+
+.blank-tab {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.blank-tab .today-agenda {
+  flex-shrink: 0;
+  margin: 1.5rem auto 0;
+}
+
+.blank-tab .type-picker {
+  flex: 1;
 }
 
 .view-container.hidden {

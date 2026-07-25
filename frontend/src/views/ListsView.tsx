@@ -5,21 +5,25 @@ import './ListsView.css';
 
 interface ListsViewProps {
   apiKey: string | null;
+  /** Which list to show — picked in the sidebar's ListsBrowser. Null = nothing picked yet. */
+  selectedListName: string | null;
+  /** Focuses a list — called after adding an item, so a brand-new list is shown immediately. */
+  onSelectList: (name: string) => void;
+  /** Tells the sidebar to re-derive its list-name picker after a mutation might have added one. */
+  onChanged: () => void;
 }
 
-function groupBySectionThenList(items: ListItem[]): Map<string, Map<string, ListItem[]>> {
-  const byList = new Map<string, Map<string, ListItem[]>>();
+function groupBySection(items: ListItem[]): Map<string, ListItem[]> {
+  const bySection = new Map<string, ListItem[]>();
   for (const item of items) {
-    if (!byList.has(item.listName)) byList.set(item.listName, new Map());
-    const bySection = byList.get(item.listName)!;
     const section = item.section ?? '';
     if (!bySection.has(section)) bySection.set(section, []);
     bySection.get(section)!.push(item);
   }
-  return byList;
+  return bySection;
 }
 
-export default function ListsView({ apiKey }: ListsViewProps) {
+export default function ListsView({ apiKey, selectedListName, onSelectList, onChanged }: ListsViewProps) {
   const [items, setItems] = useState<ListItem[]>([]);
   const [includeDone, setIncludeDone] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -46,14 +50,18 @@ export default function ListsView({ apiKey }: ListsViewProps) {
   }, [includeDone]);
 
   async function addItem() {
-    if (!newListName.trim() || !newItemName.trim()) return;
+    const listName = (newListName || selectedListName || '').trim();
+    if (!listName || !newItemName.trim()) return;
     try {
       await callTool<AddListItemResult>(
         'add_list_item',
-        { list_name: newListName.trim(), item_name: newItemName.trim() },
+        { list_name: listName, item_name: newItemName.trim() },
         apiKey,
       );
       setNewItemName('');
+      setNewListName('');
+      onSelectList(listName);
+      onChanged();
       await reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to add item');
@@ -73,8 +81,9 @@ export default function ListsView({ apiKey }: ListsViewProps) {
     }
   }
 
-  const grouped = groupBySectionThenList(items);
-  const knownListNames = [...grouped.keys()];
+  const knownListNames = [...new Set(items.map((i) => i.listName))].sort();
+  const selectedItems = selectedListName ? items.filter((i) => i.listName === selectedListName) : [];
+  const bySection = groupBySection(selectedItems);
 
   return (
     <div className="lists-view">
@@ -88,11 +97,16 @@ export default function ListsView({ apiKey }: ListsViewProps) {
       </div>
 
       {loading && items.length === 0 && <div className="empty-state">Loading…</div>}
-      {!loading && items.length === 0 && <div className="empty-state">No list items yet.</div>}
+      {!loading && !selectedListName && (
+        <div className="empty-state">Pick a list from the sidebar, or add an item below to start one.</div>
+      )}
+      {!loading && selectedListName && selectedItems.length === 0 && (
+        <div className="empty-state">Nothing in "{selectedListName}" yet.</div>
+      )}
 
-      {[...grouped.entries()].map(([listName, bySection]) => (
-        <section key={listName} className="list-group">
-          <h2>{listName}</h2>
+      {selectedListName && (
+        <section className="list-group">
+          <h2>{selectedListName}</h2>
           {[...bySection.entries()].map(([section, sectionItems]) => (
             <div key={section} className="list-section">
               {section && <h3>{section}</h3>}
@@ -114,7 +128,7 @@ export default function ListsView({ apiKey }: ListsViewProps) {
             </div>
           ))}
         </section>
-      ))}
+      )}
 
       <form
         className="add-item-form"
@@ -127,7 +141,7 @@ export default function ListsView({ apiKey }: ListsViewProps) {
           list="known-lists"
           value={newListName}
           onChange={(e) => setNewListName(e.target.value)}
-          placeholder="List name"
+          placeholder={selectedListName ?? 'List name'}
         />
         <datalist id="known-lists">
           {knownListNames.map((name) => (

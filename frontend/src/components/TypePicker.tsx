@@ -15,7 +15,6 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'notes', label: 'Notes' },
   { type: 'calendar', label: 'Calendar' },
   { type: 'settings', label: 'Settings' },
-  { type: 'history', label: 'History' },
 ];
 
 // What a blank tab (opened via the tab strip's (+) button) shows until the user picks what it's

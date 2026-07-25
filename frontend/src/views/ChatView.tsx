@@ -68,7 +68,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
   const [showSettings, setShowSettings] = useState(false);
   const [allToolNames, setAllToolNames] = useState<string[]>([]);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
-  // folders is a chat-history concern now (see ChatHistoryView).
+  // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
 
   const historyRef = useRef<HTMLDivElement | null>(null);

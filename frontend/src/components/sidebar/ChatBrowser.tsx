@@ -1,17 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { ApiError, createFolder, deleteChat, deleteFolder, listChats, listFolders } from '../api/client';
-import type { ChatSummary, Folder } from '../api/types';
-import './ChatHistoryView.css';
+import { ApiError, createFolder, deleteChat, deleteFolder, listChats, listFolders } from '../../api/client';
+import type { ChatSummary, Folder } from '../../api/types';
 
-interface ChatHistoryViewProps {
+interface ChatBrowserProps {
   apiKey: string | null;
   /** Opens (or focuses, if already open in another tab) a chat — wired to useTabs' openChat. */
   onOpenChat: (chatId: string, title?: string) => void;
 }
 
-// The bigBrain-wide "browse and reopen a past chat" surface — everything ChatView's own sidebar
-// used to do before chats became one-per-tab. Summoned via the (+) picker like any other tab type.
-export default function ChatHistoryView({ apiKey, onOpenChat }: ChatHistoryViewProps) {
+// The sidebar's chat browser: folders + past chat sessions, click to open/focus a chat tab.
+export default function ChatBrowser({ apiKey, onOpenChat }: ChatBrowserProps) {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [search, setSearch] = useState('');
@@ -80,10 +78,10 @@ export default function ChatHistoryView({ apiKey, onOpenChat }: ChatHistoryViewP
 
   function renderChatRow(chat: ChatSummary) {
     return (
-      <div key={chat.chatId} className="history-row" onClick={() => onOpenChat(chat.chatId, chat.title)}>
-        <span className="history-row-title">{chat.title}</span>
+      <div key={chat.chatId} className="sidebar-row" onClick={() => onOpenChat(chat.chatId, chat.title)}>
+        <span className="sidebar-row-title">{chat.title}</span>
         <button
-          className="history-row-delete"
+          className="sidebar-row-delete"
           title="Delete chat"
           onClick={(e) => {
             e.stopPropagation();
@@ -97,26 +95,26 @@ export default function ChatHistoryView({ apiKey, onOpenChat }: ChatHistoryViewP
   }
 
   return (
-    <div className="chat-history-view">
+    <div className="sidebar-browser">
       {error && <div className="error-banner">{error}</div>}
-      <div className="history-actions">
+      <div className="sidebar-actions">
         <input
-          className="history-search"
+          className="sidebar-search"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search chats…"
         />
-        <button className="new-folder-btn" title="New folder" onClick={addFolder}>
+        <button className="sidebar-add-btn" title="New folder" onClick={addFolder}>
           + Folder
         </button>
       </div>
-      <div className="history-list">
+      <div className="sidebar-list">
         {folders.map((folder) => (
-          <div key={folder.folderId} className="folder-group">
-            <div className="folder-name">
+          <div key={folder.folderId} className="sidebar-group">
+            <div className="sidebar-group-name">
               <span>{folder.name}</span>
               <button
-                className="history-row-delete"
+                className="sidebar-row-delete"
                 title="Delete folder (chats are kept)"
                 onClick={() => removeFolder(folder.folderId)}
               >
@@ -127,7 +125,7 @@ export default function ChatHistoryView({ apiKey, onOpenChat }: ChatHistoryViewP
           </div>
         ))}
         {(chatsByFolder.get(null) ?? []).map(renderChatRow)}
-        {chats.length === 0 && <div className="empty-state">No chats yet.</div>}
+        {chats.length === 0 && <div className="empty-state small">No chats yet.</div>}
       </div>
     </div>
   );
