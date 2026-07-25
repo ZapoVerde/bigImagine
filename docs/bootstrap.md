@@ -36,7 +36,8 @@ Two separate directory trees, **not symlinked**:
   Edit and verify (`npm run verify`) here.
 - **`/config/workspace/stacks/bigbrain/`** — the *deployed* copy. Not a git repo. This is what
   Dockge/`docker compose` actually builds the running containers from. Holds the real `.env`
-  (secrets, gitignored, never in `bigBrain/`) and is where migrations get hand-applied.
+  (secrets, gitignored, never in `bigBrain/` — see **Secrets** below) and is where migrations get
+  hand-applied.
 
 **Nothing syncs automatically.** The workflow after any change in `bigBrain/`:
 ```
@@ -50,6 +51,20 @@ docker exec -i bigbrain-postgres psql -U bigbrain_admin -d bigbrain < db/migrati
 ```
 If you edit only `stacks/bigbrain/` directly, that change is invisible to git and will be silently
 lost/overwritten by the next sync from `bigBrain/`. Always edit `bigBrain/`, verify, then sync.
+
+**Secrets**: the canonical copy of every secret in `.env` is `stacks/bigbrain/secrets.enc.env` —
+`sops`-encrypted with `age`, safe to read, back up, or even commit (it's ciphertext; individual
+values are unreadable without the private key). `.env` itself is a disposable, regeneratable
+artifact decrypted from it before each deploy, not the source of truth anymore:
+```
+sops --input-type dotenv --output-type dotenv --decrypt secrets.enc.env > .env
+docker compose up -d --build orchestrator
+```
+The `age` private key that decrypts it is **not** on this host (deliberately — an encrypted file
+next to its own key on the same disk protects against nothing). Whoever holds that key runs the
+decrypt step; there's no way to redeploy without it. To change a secret: decrypt, edit `.env`,
+re-encrypt with `sops --input-type dotenv --output-type dotenv --encrypt --age <public-key>
+.env > secrets.enc.env`, then delete the plaintext `.env` if it shouldn't linger.
 
 **Live testing**: two real API keys exist — `jeremy` (real account) and `bb-test` (dedicated test
 account). Use `bb-test` for anything experimental; only `jeremy`'s writes reach the real Notion
@@ -67,7 +82,14 @@ network.
 
 Live and deployed: data layer, orchestrator, document ingestion, shopping analytics, generic lists
 + Notion sync, recipes & meal planning, an OpenAPI tool-server surface
-(`/v1/tools/openapi.json`), grocery-list section ordering. Parked: GitHub Ingestion Gateway and
-the governance doc-sync (blocked on it). Drafted but not yet actioned: Open WebUI suggested-prompts
-content, and registering the OpenAPI tool server inside Open WebUI's own admin panel (needs a
-human in the browser).
+(`/v1/tools/openapi.json`), grocery-list section ordering, a native frontend (`frontend/`, spec.md
+§5 Correction 7) with chat history/folders, freeform notes, prompt presets, and household-wide
+orchestrator settings (active LLM profile/model, timezone) — see spec.md §3's `provider_credentials`
+/ `folders`+`chat_sessions`+`chat_messages` / `orchestrator_settings` / `notes` / `prompt_presets`
+additions. Most of this (frontend/, plugins/notes, plugins/prompt-presets, chat sessions, access
+identity, date context, migrations 0009-0012) is deployed but **not yet committed** to this repo —
+check `git status` before assuming the working tree matches HEAD. Parked: GitHub Ingestion Gateway,
+the governance doc-sync (blocked on it), and Gmail parsing (spec.md §6.3). Drafted but not yet
+actioned: Open WebUI suggested-prompts content, registering the OpenAPI tool server inside Open
+WebUI's own admin panel (needs a human in the browser), and the household calendar (spec.md §6.7,
+phase 1 not yet scaffolded).
