@@ -5,12 +5,14 @@
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as notes/lists/recipes/document-
  * ingestion): an `info` object and an async `registerTools`. Needs deps.llm/deps.embeddings for
- * save_document/ingest_url's summarize+embed step (classifyDocument.ts) — everything else
- * (gitRepo.ts's local repos, ctx.db) is either plugin-local or supplied per-call, same as notes.
+ * save_document/ingest_url's summarize+embed step (classifyDocument.ts) and search_documents'
+ * query embedding — everything else (gitRepo.ts's local repos, ctx.db) is either plugin-local or
+ * supplied per-call, same as notes.
  *
  * @api-declaration
  * info — plugin identity
- * registerTools(deps) — returns [save_document, get_document, list_documents, ingest_url]
+ * registerTools(deps) — returns [save_document, get_document, list_documents, ingest_url,
+ *   search_documents]
  *
  * @contract
  *   assertions:
@@ -25,11 +27,12 @@ import { createGetDocumentTool } from './getDocumentTool.js';
 import { createIngestUrlTool } from './ingestUrlTool.js';
 import { createListDocumentsTool } from './listDocumentsTool.js';
 import { createSaveDocumentTool } from './saveDocumentTool.js';
+import { createSearchDocumentsTool } from './searchDocumentsTool.js';
 
 export const info = {
   id: 'documents',
   name: 'Documents',
-  description: 'Markdown documents backed by a local per-user git repository: save, read, list, and clip web pages.',
+  description: 'Markdown documents backed by a local per-user git repository: save, read, list, search, and clip web pages.',
 };
 
 export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]> {
@@ -38,5 +41,6 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createGetDocumentTool(),
     createListDocumentsTool(),
     createIngestUrlTool(deps.llm, deps.embeddings),
+    createSearchDocumentsTool(deps.embeddings),
   ];
 }

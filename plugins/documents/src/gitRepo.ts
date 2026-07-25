@@ -116,10 +116,14 @@ export async function writeDocumentFile(
       await git(userId, ['commit', '-m', commitMessage, '--', filePath]);
     } catch (err) {
       // A re-save with byte-identical content leaves nothing staged — not a real failure, just
-      // report the existing HEAD instead of throwing on a no-op save.
-      const stderr = (err as { stderr?: string })?.stderr ?? '';
+      // report the existing HEAD instead of throwing on a no-op save. git reports this on stdout,
+      // not stderr (confirmed against this repo's actual node/git — promisify(execFile)'s rejection
+      // carries both).
+      const output = [(err as { stdout?: string })?.stdout, (err as { stderr?: string })?.stderr]
+        .filter(Boolean)
+        .join('\n');
       const message = err instanceof Error ? err.message : String(err);
-      if (!stderr.includes('nothing to commit') && !message.includes('nothing to commit')) throw err;
+      if (!output.includes('nothing to commit') && !message.includes('nothing to commit')) throw err;
       log.info(`gitRepo: ${filePath} for user ${userId} unchanged, no new commit`);
     }
     const sha = await git(userId, ['rev-parse', 'HEAD']);
