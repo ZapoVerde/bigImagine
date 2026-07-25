@@ -18,12 +18,13 @@
     "./google-calendar": "./dist/io/googleCalendar.js",
     "./logger": "./dist/io/logger.js",
     "./http-retry": "./dist/io/httpRetry.js",
+    "./fetch-untrusted": "./dist/io/fetchUntrusted.js",
     "./pgvector": "./dist/util/pgvector.js"
   },
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "verify": "npm run build && node scripts/verify-logger.mjs && node scripts/verify-loop.mjs && node scripts/verify-llm-adapters.mjs && node scripts/verify-field-cipher.mjs && node scripts/verify-http-retry.mjs && node scripts/verify-provider-credentials.mjs && node scripts/verify-access-identity.mjs && node scripts/verify-chat-sessions.mjs && node scripts/verify-date-context.mjs && node scripts/verify-server.mjs && node scripts/verify-openapi-tools.mjs"
+    "verify": "npm run build && node scripts/verify-logger.mjs && node scripts/verify-loop.mjs && node scripts/verify-llm-adapters.mjs && node scripts/verify-field-cipher.mjs && node scripts/verify-http-retry.mjs && node scripts/verify-ssrf-guard.mjs && node scripts/verify-fetch-untrusted.mjs && node scripts/verify-provider-credentials.mjs && node scripts/verify-access-identity.mjs && node scripts/verify-chat-sessions.mjs && node scripts/verify-date-context.mjs && node scripts/verify-server.mjs && node scripts/verify-openapi-tools.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2"

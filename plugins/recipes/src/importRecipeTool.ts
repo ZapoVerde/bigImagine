@@ -13,6 +13,11 @@
  * site's response differs based on this (a bare Node fetch is a plausible bot-block target even
  * for public pages), so this isn't defensive-for-no-reason.
  *
+ * `url` is the one fetch target in the platform that's LLM/chat-supplied rather than
+ * admin-configured, so it goes through fetchUntrustedUrl (orchestrator/src/io/fetchUntrusted.ts)
+ * rather than the plain fetchWithRetry other IO wrappers use — a prompt-injected page could
+ * otherwise steer this tool at an internal address on the same Docker network.
+ *
  * @api-declaration
  * createImportRecipeTool(llm) — returns the import_recipe RegisteredTool
  *
@@ -23,7 +28,7 @@
  *     external_io:     [whatever URL is passed, LLM, Postgres (via the DbSession it's given)]
  */
 
-import { fetchWithRetry } from '@bigbrain/orchestrator/http-retry';
+import { fetchUntrustedUrl } from '@bigbrain/orchestrator/fetch-untrusted';
 import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { htmlToText } from './htmlToText.js';
@@ -53,7 +58,7 @@ async function resolveRecipe(llm: LlmProvider, args: ImportRecipeArgs): Promise<
     return extractRecipeWithLlm(llm, args.raw_text);
   }
 
-  const response = await fetchWithRetry(args.url!, { headers: { 'User-Agent': FETCH_USER_AGENT } });
+  const response = await fetchUntrustedUrl(args.url!, { headers: { 'User-Agent': FETCH_USER_AGENT } });
   if (!response.ok) {
     throw new Error(`import_recipe: fetching ${args.url} returned HTTP ${response.status}`);
   }
