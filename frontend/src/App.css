@@ -33,6 +33,11 @@ button:disabled {
   cursor: default;
 }
 
+button:focus-visible {
+  outline: 2px solid var(--color-tertiary);
+  outline-offset: 1px;
+}
+
 input,
 textarea,
 select {
@@ -41,6 +46,14 @@ select {
   background: var(--color-bg-canvas);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: var(--color-tertiary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-tertiary) 30%, transparent);
 }
 
 html,
@@ -75,6 +88,7 @@ body {
   display: flex;
   align-items: center;
   height: var(--topbar-height);
+  background: var(--color-bg-surface);
   border-bottom: 1px solid var(--color-border);
   padding: 0 1rem;
   flex-shrink: 0;
@@ -154,7 +168,7 @@ body {
 }
 
 .tab-bar button.tab-new:hover {
-  color: var(--color-text-primary);
+  color: var(--color-secondary);
   background: var(--color-hover-surface);
 }
 

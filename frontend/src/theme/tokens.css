@@ -19,10 +19,21 @@
   --color-text-faint: #999999;
 
   /* --- Brand / interactive --- */
+  /* Three deliberate hues, one job each — not decoration: indigo marks confirm/submit/active
+     (the send button, active tab, active sidebar row); amber marks "create something new" (every
+     +Folder/+Item/+Event/new-tab button); teal marks focus (the one state that must be visible
+     the same way everywhere, keyboard or mouse). */
   --color-accent: #4f46e5;
   --color-accent-hover: #4338ca;
   --color-accent-contrast: #ffffff;
   --color-accent-subtle: #eef0fd;
+
+  --color-secondary: #d97706;
+  --color-secondary-hover: #b45309;
+  --color-secondary-contrast: #ffffff;
+
+  --color-tertiary: #0d9488;
+  --color-tertiary-contrast: #ffffff;
 
   /* --- Semantic --- */
   --color-success: #0a7a0a;
@@ -90,6 +101,13 @@ body.dark {
   --color-accent-hover: #9aa3fa;
   --color-accent-contrast: #18191d;
   --color-accent-subtle: #2a2b45;
+
+  --color-secondary: #fbbf24;
+  --color-secondary-hover: #fcd34d;
+  --color-secondary-contrast: #18191d;
+
+  --color-tertiary: #2dd4bf;
+  --color-tertiary-contrast: #18191d;
 
   /* --- Semantic --- */
   --color-success: #4ade80;

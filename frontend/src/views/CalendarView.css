@@ -78,4 +78,12 @@
 
 .add-event-form button {
   padding: 0.4rem 1rem;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  border-color: var(--color-secondary);
+}
+
+.add-event-form button:hover {
+  background: var(--color-secondary-hover);
+  border-color: var(--color-secondary-hover);
 }

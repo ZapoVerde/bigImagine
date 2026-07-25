@@ -80,8 +80,8 @@
 .sidebar-add-btn {
   padding: 0.4rem 0.6rem;
   cursor: pointer;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
+  color: var(--color-secondary);
+  border: 1px solid var(--color-secondary);
   border-radius: var(--radius-sm);
   background: var(--color-bg-canvas);
   font-size: var(--font-size-sm);
@@ -89,7 +89,8 @@
 }
 
 .sidebar-add-btn:hover {
-  background: var(--color-hover-surface);
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
 }
 
 .sidebar-tag-pills {
