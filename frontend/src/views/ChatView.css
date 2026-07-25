@@ -31,26 +31,49 @@
   white-space: nowrap;
 }
 
-.settings-btn {
-  background: none;
-  border: none;
-  font-size: 1.2rem;
-  cursor: pointer;
-  color: #666;
+/* --- Settings rail (right-hand side, collapsible like the left sidebar) --- */
+
+.chat-settings-rail {
+  width: 20rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #eee;
+  overflow: hidden;
 }
 
-.settings-btn:hover {
+.chat-settings-rail.collapsed {
+  width: 2.6rem;
+}
+
+.chat-settings-rail-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.6rem 0.7rem;
+  flex-shrink: 0;
+}
+
+.chat-settings-rail.collapsed .chat-settings-rail-header {
+  justify-content: center;
+}
+
+.chat-settings-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  font-size: 0.9rem;
+  padding: 0.2rem 0.4rem;
+}
+
+.chat-settings-toggle:hover {
   color: #111;
 }
 
-/* --- Settings pane (right-hand side) --- */
-
-.chat-settings-pane {
-  width: 20rem;
-  flex-shrink: 0;
-  border-left: 1px solid #eee;
-  background: #fafafa;
+.chat-settings-rail-content {
+  flex: 1;
   overflow-y: auto;
+  background: #fafafa;
 }
 
 .chat-settings {

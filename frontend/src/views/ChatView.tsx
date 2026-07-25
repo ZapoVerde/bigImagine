@@ -64,8 +64,17 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
   const [editDraft, setEditDraft] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
-  // Settings pane state
-  const [showSettings, setShowSettings] = useState(false);
+  // Settings rail state — collapsed by default, but (unlike the old gear-icon toggle) available
+  // even before a chat exists, so a system prompt/model/tools can be set up before the first
+  // message. pendingSettings holds a save made before activeChat exists; send() applies it right
+  // after the lazy createChat() so the very first message already sees it.
+  const [settingsCollapsed, setSettingsCollapsed] = useState(true);
+  const [pendingSettings, setPendingSettings] = useState<{
+    params?: ChatParams;
+    tool_names?: string[] | null;
+    folder_id?: string | null;
+    title?: string;
+  } | null>(null);
   const [allToolNames, setAllToolNames] = useState<string[]>([]);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
@@ -85,7 +94,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
     if (!chatId) {
       setActiveChat(null);
       setMessages([]);
-      setShowSettings(false);
+      setSettingsCollapsed(true);
       setError(null);
       setEditingId(null);
       return;
@@ -137,6 +146,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
       let session = activeChat;
       if (!session) {
         session = await createChat(apiKey);
+        if (pendingSettings) {
+          session = await updateChat(session.chatId, pendingSettings, apiKey);
+          setPendingSettings(null);
+        }
         setActiveChat(session);
       }
       await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId);
@@ -236,7 +249,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
     folder_id?: string | null;
     title?: string;
   }) {
-    if (!activeChat) return;
+    if (!activeChat) {
+      // No chat exists yet — stash the draft, send() applies it right after createChat().
+      setPendingSettings(patch);
+      return;
+    }
     try {
       const updated = await updateChat(activeChat.chatId, patch, apiKey);
       setActiveChat(updated);
@@ -252,11 +269,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
 
         <div className="chat-header">
           <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
-          {activeChat && (
-            <button className="settings-btn" title="Chat settings" onClick={() => setShowSettings(!showSettings)}>
-              &#9881;
-            </button>
-          )}
         </div>
 
         <div className="chat-history" ref={historyRef}>
@@ -327,18 +339,29 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
         </form>
       </div>
 
-      {showSettings && activeChat && (
-        <aside className="chat-settings-pane">
-          <ChatSettings apiKey={apiKey} session={activeChat} folders={folders} allToolNames={allToolNames} onSave={saveSettings} />
-        </aside>
-      )}
+      <div className={`chat-settings-rail${settingsCollapsed ? ' collapsed' : ''}`}>
+        <div className="chat-settings-rail-header">
+          <button
+            className="chat-settings-toggle"
+            title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+            onClick={() => setSettingsCollapsed((c) => !c)}
+          >
+            {settingsCollapsed ? '«' : '»'}
+          </button>
+        </div>
+        {!settingsCollapsed && (
+          <div className="chat-settings-rail-content">
+            <ChatSettings apiKey={apiKey} session={activeChat} folders={folders} allToolNames={allToolNames} onSave={saveSettings} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 interface ChatSettingsProps {
   apiKey: string | null;
-  session: ChatSessionRow;
+  session: ChatSessionRow | null;
   folders: Folder[];
   allToolNames: string[];
   onSave: (patch: {
@@ -349,16 +372,19 @@ interface ChatSettingsProps {
   }) => Promise<void>;
 }
 
+// session is null until the chat's first message is sent (it's created lazily) — every field
+// below just falls back to an empty/default draft in that case. Saving while null hands the
+// draft patch back up to ChatView, which applies it right after the chat is actually created.
 function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSettingsProps) {
-  const [title, setTitle] = useState(session.title);
-  const [system, setSystem] = useState(session.params.system ?? '');
-  const [temperature, setTemperature] = useState(session.params.temperature?.toString() ?? '');
-  const [maxTokens, setMaxTokens] = useState(session.params.max_tokens?.toString() ?? '');
-  const [model, setModel] = useState(session.params.model ?? '');
-  const [folderId, setFolderId] = useState(session.folderId ?? '');
+  const [title, setTitle] = useState(session?.title ?? 'New chat');
+  const [system, setSystem] = useState(session?.params.system ?? '');
+  const [temperature, setTemperature] = useState(session?.params.temperature?.toString() ?? '');
+  const [maxTokens, setMaxTokens] = useState(session?.params.max_tokens?.toString() ?? '');
+  const [model, setModel] = useState(session?.params.model ?? '');
+  const [folderId, setFolderId] = useState(session?.folderId ?? '');
   // null toolNames = all tools allowed
   const [selectedTools, setSelectedTools] = useState<Set<string>>(
-    new Set(session.toolNames ?? allToolNames),
+    new Set(session?.toolNames ?? allToolNames),
   );
   const [saved, setSaved] = useState(false);
 
@@ -433,7 +459,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     if (model.trim()) params.model = model.trim();
     const allSelected = allToolNames.length > 0 && allToolNames.every((t) => selectedTools.has(t));
     await onSave({
-      title: title.trim() || session.title,
+      title: title.trim() || session?.title || 'New chat',
       params,
       tool_names: allSelected ? null : [...selectedTools],
       folder_id: folderId || null,
