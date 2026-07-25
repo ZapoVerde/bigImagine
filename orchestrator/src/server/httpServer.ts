@@ -115,20 +115,27 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
+  buildGoogleAuthUrl,
+  completeGoogleCalendarOauth,
+  consumeGoogleOauthState,
   getActiveProfileSetting,
   getCalendarSettings,
+  getGoogleCalendarSettings,
   getHouseholdTimezone,
   getNotionSettings,
   listCredentials,
   listModelsForProfile,
+  mintGoogleOauthState,
   parseSetActiveProfileBody,
   parseSetCalendarSettingsBody,
   parseSetCredentialBody,
+  parseSetGoogleCalendarSettingsBody,
   parseSetNotionSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
   setCalendarSettings,
   setCredential,
+  setGoogleCalendarSettings,
   setHouseholdTimezone,
   setNotionSettings,
 } from './adminServer.js';
@@ -592,6 +599,86 @@ async function handleNotionSettingsSet(req: IncomingMessage, res: ServerResponse
   });
 }
 
+async function handleGoogleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getGoogleCalendarSettings(deps.settings));
+}
+
+async function handleGoogleCalendarSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetGoogleCalendarSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected { client_id?: non-empty string, owner_user_id?: non-empty string, calendar_id?: non-empty string }, at least one',
+    });
+    return;
+  }
+
+  await setGoogleCalendarSettings(deps.settings, parsed);
+
+  const payload = JSON.stringify({ status: 'restarting' });
+  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+  res.end(payload, () => {
+    const restart = deps.triggerRestart ?? (() => process.exit(0));
+    setTimeout(restart, 100);
+  });
+}
+
+function googleCalendarRedirectUri(deps: HttpServerDeps): string {
+  return `${deps.publicBaseUrl ?? `http://localhost:${deps.port}`}/v1/admin/google-calendar/callback`;
+}
+
+async function handleGoogleCalendarAuthUrl(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const { clientId } = await getGoogleCalendarSettings(deps.settings);
+  if (!clientId) {
+    sendJson(res, 400, { error: 'google_calendar_client_id is not configured yet — set it in Settings first' });
+    return;
+  }
+  const state = mintGoogleOauthState();
+  sendJson(res, 200, { url: buildGoogleAuthUrl(clientId, googleCalendarRedirectUri(deps), state) });
+}
+
+// Deliberately not gated by isAdminAuthorized, unlike every other /v1/admin/* route — see the
+// preamble and the call site in handleRequest for why this is still safe.
+async function handleGoogleCalendarCallback(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const url = new URL(req.url ?? '', 'http://placeholder');
+  const code = url.searchParams.get('code') ?? undefined;
+  const state = url.searchParams.get('state') ?? undefined;
+
+  if (!consumeGoogleOauthState(state)) {
+    sendJson(res, 400, { error: 'missing or expired oauth state — restart the connection flow from Settings' });
+    return;
+  }
+  if (!code) {
+    res.writeHead(302, { location: '/?google_calendar=denied' });
+    res.end();
+    return;
+  }
+
+  try {
+    await completeGoogleCalendarOauth(deps.credentials, deps.settings, code, googleCalendarRedirectUri(deps));
+  } catch (err) {
+    log.error('Google Calendar OAuth exchange failed', err);
+    res.writeHead(302, { location: '/?google_calendar=error' });
+    res.end();
+    return;
+  }
+
+  res.writeHead(302, { location: '/?google_calendar=connected' });
+  // The refresh token was just written to provider_credentials — same restart-on-save shape as
+  // any other credential rotation (index.ts only ever reads it at boot).
+  res.end(() => {
+    const restart = deps.triggerRestart ?? (() => process.exit(0));
+    setTimeout(restart, 100);
+  });
+}
+
 async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   if (deps.llm.listModels) {
     try {
@@ -943,6 +1030,39 @@ async function handleRequest(
       return;
     }
     await handleNotionSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/google-calendar-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleGoogleCalendarSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/google-calendar-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleGoogleCalendarSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/google-calendar/auth-url') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleGoogleCalendarAuthUrl(res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/admin/google-calendar/callback')) {
+    // Deliberately not gated by isAdminAuthorized (docs/spec.md §6.7): Google's redirect is a
+    // plain browser GET with no way to attach a bearer token or Access header of its own. Instead
+    // it's protected by the single-use `state` nonce minted only for an already-admin-authorized
+    // auth-url request above — this route can only ever complete a flow this server itself
+    // started, it can't accept an arbitrary inbound payload the way a real webhook would.
+    await handleGoogleCalendarCallback(req, res, deps);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

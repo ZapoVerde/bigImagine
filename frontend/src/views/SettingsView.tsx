@@ -3,6 +3,8 @@ import {
   ApiError,
   adminGetActiveProfile,
   adminGetCalendarSettings,
+  adminGetGoogleCalendarAuthUrl,
+  adminGetGoogleCalendarSettings,
   adminGetNotionSettings,
   adminGetTimezone,
   adminListCredentials,
@@ -10,11 +12,12 @@ import {
   adminSetActiveProfile,
   adminSetCalendarSettings,
   adminSetCredential,
+  adminSetGoogleCalendarSettings,
   adminSetNotionSettings,
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type { CalendarSettings, CredentialSummary, NotionSettings, ProfileModelsResult } from '../api/types';
+import type { CalendarSettings, CredentialSummary, GoogleCalendarSettings, NotionSettings, ProfileModelsResult } from '../api/types';
 import './SettingsView.css';
 
 type ModelOption = ProfileModelsResult['models'][number];
@@ -108,6 +111,16 @@ export default function SettingsView() {
   const [notionStatus, setNotionStatus] = useState('');
   const notionPollRef = useRef<number | null>(null);
 
+  const [googleClientId, setGoogleClientId] = useState('');
+  const [selectedGoogleClientId, setSelectedGoogleClientId] = useState('');
+  const [googleOwnerUserId, setGoogleOwnerUserId] = useState('');
+  const [selectedGoogleOwnerUserId, setSelectedGoogleOwnerUserId] = useState('');
+  const [googleCalendarId, setGoogleCalendarId] = useState('');
+  const [selectedGoogleCalendarId, setSelectedGoogleCalendarId] = useState('');
+  const [googleStatus, setGoogleStatus] = useState('');
+  const [googleConnecting, setGoogleConnecting] = useState(false);
+  const googlePollRef = useRef<number | null>(null);
+
   function applyCalendarSettings(settings: CalendarSettings) {
     setCalendarOwnerUserId(settings.ownerUserId ?? '');
     setSelectedCalendarOwnerUserId(settings.ownerUserId ?? '');
@@ -122,15 +135,41 @@ export default function SettingsView() {
     setSelectedNotionDataSourceId(settings.listsDataSourceId ?? '');
   }
 
+  function applyGoogleCalendarSettings(settings: GoogleCalendarSettings) {
+    setGoogleClientId(settings.clientId ?? '');
+    setSelectedGoogleClientId(settings.clientId ?? '');
+    setGoogleOwnerUserId(settings.ownerUserId ?? '');
+    setSelectedGoogleOwnerUserId(settings.ownerUserId ?? '');
+    setGoogleCalendarId(settings.calendarId);
+    setSelectedGoogleCalendarId(settings.calendarId);
+  }
+
+  // The OAuth callback (server/adminServer.ts) redirects the browser back here with a status
+  // query param rather than an in-page response, since the whole point of that redirect is that
+  // this page wasn't the one making the request — Google was. Read it once on mount, then strip
+  // it so a reload doesn't keep re-showing a stale status.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get('google_calendar');
+    if (!status) return;
+    if (status === 'connected') setGoogleStatus('Connected — the orchestrator restarted to pick up the new refresh token.');
+    else if (status === 'denied') setGoogleStatus('Connection cancelled — consent was not granted.');
+    else setGoogleStatus('Connection failed — check the orchestrator logs.');
+    params.delete('google_calendar');
+    const query = params.toString();
+    window.history.replaceState({}, '', query ? `?${query}` : window.location.pathname);
+  }, []);
+
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz, calendarSettings, notionSettings] = await Promise.all([
+        const [creds, connection, tz, calendarSettings, notionSettings, googleCalendarSettings] = await Promise.all([
           adminListCredentials(null),
           adminGetActiveProfile(null),
           adminGetTimezone(null),
           adminGetCalendarSettings(null),
           adminGetNotionSettings(null),
+          adminGetGoogleCalendarSettings(null),
         ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
@@ -143,6 +182,7 @@ export default function SettingsView() {
         setSelectedTimezone(tz);
         applyCalendarSettings(calendarSettings);
         applyNotionSettings(notionSettings);
+        applyGoogleCalendarSettings(googleCalendarSettings);
         setUnlocked(true);
       } catch {
         // Not covered by Access (or Access isn't configured here) — fall back to the key form.
@@ -155,12 +195,13 @@ export default function SettingsView() {
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz, calendarSettings, notionSettings] = await Promise.all([
+      const [creds, connection, tz, calendarSettings, notionSettings, googleCalendarSettings] = await Promise.all([
         adminListCredentials(adminKey),
         adminGetActiveProfile(adminKey),
         adminGetTimezone(adminKey),
         adminGetCalendarSettings(adminKey),
         adminGetNotionSettings(adminKey),
+        adminGetGoogleCalendarSettings(adminKey),
       ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -173,6 +214,7 @@ export default function SettingsView() {
       setSelectedTimezone(tz);
       applyCalendarSettings(calendarSettings);
       applyNotionSettings(notionSettings);
+      applyGoogleCalendarSettings(googleCalendarSettings);
       setUnlocked(true);
     } catch (err) {
       setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
@@ -314,6 +356,62 @@ export default function SettingsView() {
         // still restarting, keep polling
       }
     }, 2000);
+  }
+
+  async function saveGoogleCalendarSettings() {
+    if (
+      selectedGoogleClientId === googleClientId &&
+      selectedGoogleOwnerUserId === googleOwnerUserId &&
+      selectedGoogleCalendarId === googleCalendarId
+    ) {
+      return;
+    }
+    setGoogleStatus('');
+    try {
+      await adminSetGoogleCalendarSettings(
+        {
+          client_id: selectedGoogleClientId || undefined,
+          owner_user_id: selectedGoogleOwnerUserId || undefined,
+          calendar_id: selectedGoogleCalendarId || undefined,
+        },
+        adminKey,
+      );
+    } catch (err) {
+      setGoogleStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setGoogleStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
+
+    googlePollRef.current = window.setInterval(async () => {
+      try {
+        const res = await fetch('/healthz');
+        if (res.ok) {
+          if (googlePollRef.current) clearInterval(googlePollRef.current);
+          setGoogleClientId(selectedGoogleClientId);
+          setGoogleOwnerUserId(selectedGoogleOwnerUserId);
+          setGoogleCalendarId(selectedGoogleCalendarId);
+          setGoogleStatus('Back up — reload to confirm.');
+        }
+      } catch {
+        // still restarting, keep polling
+      }
+    }, 2000);
+  }
+
+  // Opens Google's consent screen in a new tab rather than navigating this one away — the callback
+  // route redirects *that* tab back to / with a status param (read by the effect above); this tab
+  // just needs the admin to come back and reload once it's done.
+  async function connectGoogleCalendar() {
+    setGoogleStatus('');
+    setGoogleConnecting(true);
+    try {
+      const url = await adminGetGoogleCalendarAuthUrl(adminKey);
+      window.open(url, '_blank', 'noopener');
+    } catch (err) {
+      setGoogleStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to start the connection flow');
+    } finally {
+      setGoogleConnecting(false);
+    }
   }
 
   async function save() {
@@ -510,6 +608,60 @@ export default function SettingsView() {
           Save &amp; Restart
         </button>
         <div className="status">{notionStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Google Calendar</legend>
+        <label>
+          OAuth client id
+          <br />
+          <input
+            value={selectedGoogleClientId}
+            onChange={(e) => setSelectedGoogleClientId(e.target.value)}
+            placeholder="from the Google Cloud OAuth client you created"
+          />
+        </label>
+        <br />
+        <label>
+          Owning user id
+          <br />
+          <input
+            value={selectedGoogleOwnerUserId}
+            onChange={(e) => setSelectedGoogleOwnerUserId(e.target.value)}
+            placeholder="the bigBrain user Google Calendar events sync to/from"
+          />
+        </label>
+        <br />
+        <label>
+          Calendar id
+          <br />
+          <input
+            value={selectedGoogleCalendarId}
+            onChange={(e) => setSelectedGoogleCalendarId(e.target.value)}
+            placeholder="primary"
+          />
+        </label>
+        <br />
+        <button
+          onClick={saveGoogleCalendarSettings}
+          disabled={
+            selectedGoogleClientId === googleClientId &&
+            selectedGoogleOwnerUserId === googleOwnerUserId &&
+            selectedGoogleCalendarId === googleCalendarId
+          }
+        >
+          Save &amp; Restart
+        </button>{' '}
+        <button onClick={connectGoogleCalendar} disabled={googleConnecting || !googleClientId}>
+          Connect Google Calendar
+        </button>
+        {!googleClientId && <div className="status">Set and save an OAuth client id first, then connect.</div>}
+        <div className="status">{googleStatus}</div>
+        <div className="status">
+          The client secret and refresh token are set via the credentials table below
+          (google_calendar_client_secret is entered manually from your Google Cloud OAuth client;
+          google_calendar_refresh_token is written automatically by the Connect button above).
+        </div>
       </fieldset>
 
       <table>

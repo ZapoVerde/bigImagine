@@ -35,7 +35,7 @@ import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 type OrchestratorSettingsStore = PluginDeps['settings'];
 import { sourceMeta, type CalendarSource } from './sourceMeta.js';
 
-const VALID_SOURCES: CalendarSource[] = ['cozi', 'outlook', 'native'];
+const VALID_SOURCES: CalendarSource[] = ['cozi', 'outlook', 'google', 'native'];
 const DEFAULT_TIMEZONE = 'UTC'; // same safe default as adminServer.ts's getHouseholdTimezone
 
 interface GetCalendarScheduleArgs {

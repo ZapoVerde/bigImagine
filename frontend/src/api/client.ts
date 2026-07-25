@@ -9,6 +9,7 @@ import type {
   ChatSummary,
   CredentialSummary,
   Folder,
+  GoogleCalendarSettings,
   NotionSettings,
   ProfileModelsResult,
 } from './types';
@@ -291,4 +292,32 @@ export async function adminSetNotionSettings(
     body: JSON.stringify(patch),
   });
   if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+export async function adminGetGoogleCalendarSettings(adminKey: string | null): Promise<GoogleCalendarSettings> {
+  const res = await fetch('/v1/admin/google-calendar-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<GoogleCalendarSettings>;
+}
+
+export async function adminSetGoogleCalendarSettings(
+  patch: { client_id?: string; owner_user_id?: string; calendar_id?: string },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch('/v1/admin/google-calendar-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+// Returns Google's consent URL to open in a new tab — the Settings tab never handles the OAuth
+// code/state itself, that's server/adminServer.ts's callback route (redirects the browser back to
+// / with a ?google_calendar= status query param this page can read once on load).
+export async function adminGetGoogleCalendarAuthUrl(adminKey: string | null): Promise<string> {
+  const res = await fetch('/v1/admin/google-calendar/auth-url', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { url: string };
+  return body.url;
 }

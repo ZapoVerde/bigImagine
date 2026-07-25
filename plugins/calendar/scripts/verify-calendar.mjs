@@ -1,15 +1,22 @@
 // Proves the calendar plugin end to end through info/registerTools (the real loader contract),
-// using a stateful fake Postgres pool (calendar_events only — this plugin touches no other
-// table) and a stubbed global fetch for the ICS-sync path. Covers: create_calendar_event via the
-// tool, get_calendar_schedule's overlap filter and sourceMeta enrichment, icsSync's RRULE
-// expansion and upsert-dedup (a second sync of the same feed never duplicates rows), and
-// applyPrivacyMask's masking/no-masking behavior directly.
+// using a stateful fake Postgres pool (calendar_events + calendar_google_sync_map — the only two
+// tables this plugin touches) and a stubbed global fetch for the ICS-sync path. Covers:
+// create/update/delete_calendar_event via the tools, get_calendar_schedule's overlap filter and
+// sourceMeta enrichment, icsSync's RRULE expansion and upsert-dedup (a second sync of the same
+// feed never duplicates rows), applyPrivacyMask's masking/no-masking behavior directly, and
+// bidirectional Google Calendar sync (googleSync.ts's inbound poll reconciliation, and the
+// outbound push from the create/update/delete tools via a fake GoogleCalendarClient — no real
+// network call, same reasoning icsSync's stubbed fetch already uses for Cozi/Outlook).
 
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
 import { info, registerTools, startBackgroundJobs } from '../dist/index.js';
 import { syncFeedOnce } from '../dist/icsSync.js';
+import { syncGoogleOnce } from '../dist/googleSync.js';
 import { applyPrivacyMask } from '../dist/parseWorkEvent.js';
 import { sourceMeta } from '../dist/sourceMeta.js';
+import { createCreateCalendarEventTool } from '../dist/createCalendarEventTool.js';
+import { createUpdateCalendarEventTool } from '../dist/updateCalendarEventTool.js';
+import { createDeleteCalendarEventTool } from '../dist/deleteCalendarEventTool.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -24,36 +31,44 @@ const USER_ID = '11111111-1111-1111-1111-111111111111';
 
 function createFakePool() {
   const events = [];
+  const syncMap = [];
   let counter = 0;
 
   return {
     events,
+    syncMap,
     async connect() {
-      let staged;
+      let stagedEvents;
+      let stagedSyncMap;
       return {
         async query(sql, params = []) {
           if (sql === 'BEGIN') {
-            staged = [...events];
+            stagedEvents = [...events];
+            stagedSyncMap = [...syncMap];
             return { rows: [] };
           }
           if (sql === 'COMMIT') {
             events.length = 0;
-            events.push(...staged);
+            events.push(...stagedEvents);
+            syncMap.length = 0;
+            syncMap.push(...stagedSyncMap);
             return { rows: [] };
           }
           if (sql === 'ROLLBACK') {
-            staged = undefined;
+            stagedEvents = undefined;
+            stagedSyncMap = undefined;
             return { rows: [] };
           }
           if (sql.includes('set_config')) return { rows: [] };
 
+          // --- icsSync.ts: upsert on (source, external_id) ---
           if (sql.startsWith('insert into calendar_events') && sql.includes('on conflict')) {
             const [userId, source, externalId, title, description, location, startTime, endTime, allDay] = params;
-            const existing = staged.find((e) => e.source === source && e.external_id === externalId);
+            const existing = stagedEvents.find((e) => e.source === source && e.external_id === externalId);
             if (existing) {
               Object.assign(existing, { title, description, location, start_time: startTime, end_time: endTime, all_day: allDay });
             } else {
-              staged.push({
+              stagedEvents.push({
                 event_id: `event-${++counter}`,
                 user_id: userId,
                 source,
@@ -70,10 +85,11 @@ function createFakePool() {
             return { rows: [] };
           }
 
-          if (sql.startsWith('insert into calendar_events') && sql.includes('returning event_id')) {
+          // --- createCalendarEventTool.ts: always source='native' ---
+          if (sql.includes("values ($1, 'native', gen_random_uuid()")) {
             const [userId, title, description, startTime, endTime, assignedMembers] = params;
             const event_id = `event-${++counter}`;
-            staged.push({
+            stagedEvents.push({
               event_id,
               user_id: userId,
               source: 'native',
@@ -85,8 +101,128 @@ function createFakePool() {
               end_time: endTime,
               all_day: false,
               assigned_members: assignedMembers,
+              updated_at: new Date().toISOString(),
             });
             return { rows: [{ event_id }] };
+          }
+
+          // --- googleSync.ts: insert a new google-originated event ---
+          if (sql.includes("values ($1, 'google', $2")) {
+            const [userId, externalId, title, description, location, startTime, endTime, allDay] = params;
+            const event_id = `event-${++counter}`;
+            stagedEvents.push({
+              event_id,
+              user_id: userId,
+              source: 'google',
+              external_id: externalId,
+              title,
+              description,
+              location,
+              start_time: startTime,
+              end_time: endTime,
+              all_day: allDay,
+              assigned_members: [],
+              updated_at: new Date().toISOString(),
+            });
+            return { rows: [{ event_id }] };
+          }
+
+          // --- googleSync.ts: apply an inbound update from Google ---
+          if (sql.includes('all_day = $7, updated_at = now()')) {
+            const [eventId, title, description, location, startTime, endTime, allDay] = params;
+            const existing = stagedEvents.find((e) => e.event_id === eventId);
+            if (existing) {
+              Object.assign(existing, {
+                title,
+                description,
+                location,
+                start_time: startTime,
+                end_time: endTime,
+                all_day: allDay,
+                updated_at: new Date().toISOString(),
+              });
+            }
+            return { rows: [] };
+          }
+
+          // --- updateCalendarEventTool.ts: look up the existing row before editing ---
+          if (sql.includes('select source, title, description, location, start_time, end_time, all_day')) {
+            const [eventId, userId] = params;
+            const existing = stagedEvents.find((e) => e.event_id === eventId && e.user_id === userId);
+            return { rows: existing ? [existing] : [] };
+          }
+
+          // --- updateCalendarEventTool.ts: apply the actual edit ---
+          if (sql.includes('assigned_members = coalesce($7, assigned_members)')) {
+            const [eventId, userId, title, description, startTime, endTime, assignedMembers] = params;
+            const existing = stagedEvents.find((e) => e.event_id === eventId && e.user_id === userId);
+            if (existing) {
+              Object.assign(existing, {
+                title,
+                description,
+                start_time: startTime,
+                end_time: endTime,
+                assigned_members: assignedMembers ?? existing.assigned_members,
+                updated_at: new Date().toISOString(),
+              });
+            }
+            return { rows: [] };
+          }
+
+          // --- deleteCalendarEventTool.ts ---
+          if (sql.includes('and user_id = $2 returning event_id')) {
+            const [eventId, userId] = params;
+            const index = stagedEvents.findIndex((e) => e.event_id === eventId && e.user_id === userId);
+            if (index === -1) return { rows: [] };
+            const [removed] = stagedEvents.splice(index, 1);
+            for (let i = stagedSyncMap.length - 1; i >= 0; i--) {
+              if (stagedSyncMap[i].event_id === removed.event_id) stagedSyncMap.splice(i, 1); // cascade
+            }
+            return { rows: [{ event_id: removed.event_id }] };
+          }
+
+          // --- googleSync.ts: cancel-delete (no user_id param — the poll is already scoped by withUserScope) ---
+          if (sql === 'delete from calendar_events where event_id = $1') {
+            const [eventId] = params;
+            const index = stagedEvents.findIndex((e) => e.event_id === eventId);
+            if (index !== -1) stagedEvents.splice(index, 1);
+            for (let i = stagedSyncMap.length - 1; i >= 0; i--) {
+              if (stagedSyncMap[i].event_id === eventId) stagedSyncMap.splice(i, 1); // cascade
+            }
+            return { rows: [] };
+          }
+
+          // --- googleSync.ts: lookup by google_event_id, joined to calendar_events ---
+          if (sql.includes('from calendar_google_sync_map gsm')) {
+            const [googleEventId] = params;
+            const mapped = stagedSyncMap.find((m) => m.google_event_id === googleEventId);
+            if (!mapped) return { rows: [] };
+            const event = stagedEvents.find((e) => e.event_id === mapped.event_id);
+            return { rows: event ? [{ event_id: event.event_id, updated_at: event.updated_at }] : [] };
+          }
+
+          // --- googleOutboundSync.ts: lookupGoogleEventId ---
+          if (sql === 'select google_event_id from calendar_google_sync_map where event_id = $1') {
+            const [eventId] = params;
+            const mapped = stagedSyncMap.find((m) => m.event_id === eventId);
+            return { rows: mapped ? [{ google_event_id: mapped.google_event_id }] : [] };
+          }
+
+          // --- mint a calendar_google_sync_map row (on conflict (google_event_id) do nothing) ---
+          if (sql.includes('insert into calendar_google_sync_map (event_id, google_event_id')) {
+            const [eventId, googleEventId, googleUpdatedAt] = params;
+            if (stagedSyncMap.some((m) => m.google_event_id === googleEventId)) return { rows: [] }; // conflict, do nothing
+            const sync_id = `sync-${++counter}`;
+            stagedSyncMap.push({ sync_id, event_id: eventId, google_event_id: googleEventId, google_updated_at: googleUpdatedAt });
+            return { rows: [{ sync_id }] };
+          }
+
+          // --- bookkeeping update to an existing sync-map row (both googleSync.ts and googleOutboundSync.ts) ---
+          if (sql.includes('update calendar_google_sync_map set google_updated_at')) {
+            const [eventId, googleUpdatedAt] = params;
+            const mapped = stagedSyncMap.find((m) => m.event_id === eventId);
+            if (mapped) mapped.google_updated_at = googleUpdatedAt;
+            return { rows: [] };
           }
 
           if (sql.startsWith('select event_id, source, title')) {
@@ -94,7 +230,7 @@ function createFakePool() {
             const rangeEnd = new Date(`${endDate}T00:00:00.000Z`);
             rangeEnd.setUTCDate(rangeEnd.getUTCDate() + 1);
             const rangeStart = new Date(`${startDate}T00:00:00.000Z`);
-            const matches = staged
+            const matches = stagedEvents
               .filter(
                 (e) =>
                   e.user_id === userId &&
@@ -156,30 +292,177 @@ END:VCALENDAR
 // same value util/dateContext.ts uses for the LLM) — undefined here just exercises the DEFAULT_TIMEZONE
 // ('UTC') fallback, fine for tests that always pass explicit start_date/end_date anyway.
 function createFakeSettingsStore(overrides = {}) {
-  return { async get(key) { return overrides[key]; } };
+  const store = { ...overrides };
+  return {
+    async get(key) {
+      return store[key];
+    },
+    async set(key, value) {
+      store[key] = value;
+    },
+  };
+}
+
+// Neither ICS nor Google Calendar configured — the common case for tests not specifically
+// exercising either sync path (registerTools' resolveGoogleCalendarClient still calls this, so
+// every registerTools() call site needs a working fake, not just the ones testing Google directly).
+function createFakeCredentialsStore(overrides = {}) {
+  return {
+    async resolve(name, envFallback) {
+      return overrides[name];
+    },
+  };
+}
+
+// A fake GoogleCalendarClient covering only what create/update/delete_calendar_event's outbound
+// push calls (insertEvent/updateEvent/deleteEvent) — no real network, same reasoning icsSync's
+// stubbed fetch already uses for Cozi/Outlook. Records every call for assertions.
+function createFakeGoogleOutboundClient() {
+  let counter = 0;
+  return {
+    calendarId: 'primary',
+    inserted: [],
+    updated: [],
+    deleted: [],
+    async insertEvent(input) {
+      const googleEventId = `g-out-${++counter}`;
+      const updatedAt = new Date().toISOString();
+      this.inserted.push({ googleEventId, input });
+      return { googleEventId, updatedAt };
+    },
+    async updateEvent(googleEventId, input) {
+      const updatedAt = new Date().toISOString();
+      this.updated.push({ googleEventId, input });
+      return { updatedAt };
+    },
+    async deleteEvent(googleEventId) {
+      this.deleted.push(googleEventId);
+    },
+  };
 }
 
 async function main() {
   // --- registerTools contract ---
   assert(info.id === 'calendar', 'plugin info.id is "calendar"');
-  const tools = await registerTools({ settings: createFakeSettingsStore() });
+  const noGoogleDeps = { settings: createFakeSettingsStore(), credentials: createFakeCredentialsStore() };
+  const tools = await registerTools(noGoogleDeps);
   const names = tools.map((t) => t.definition.name).sort();
-  assert(JSON.stringify(names) === JSON.stringify(['create_calendar_event', 'get_calendar_schedule']), 'registerTools returns exactly the two calendar tools');
+  assert(
+    JSON.stringify(names) === JSON.stringify(['create_calendar_event', 'delete_calendar_event', 'get_calendar_schedule', 'update_calendar_event']),
+    'registerTools returns exactly the four calendar tools',
+  );
 
   const createTool = tools.find((t) => t.definition.name === 'create_calendar_event');
+  const updateTool = tools.find((t) => t.definition.name === 'update_calendar_event');
+  const deleteTool = tools.find((t) => t.definition.name === 'delete_calendar_event');
   const getTool = tools.find((t) => t.definition.name === 'get_calendar_schedule');
 
   const pool = createFakePool();
   const db = createPostgresClient(pool);
   const withUser = (fn) => db.withUserScope(USER_ID, (session) => fn({ userId: USER_ID, db: session }));
 
-  // --- create_calendar_event ---
+  // --- create_calendar_event, no Google connection configured: works, no sync-map row minted ---
   const created = await withUser((ctx) =>
     createTool.handler({ title: 'Pack for trip', start_time: '2026-08-01T10:00:00.000Z', end_time: '2026-08-01T11:00:00.000Z' }, ctx),
   );
   assert(created.source === 'native', 'create_calendar_event sets source=native');
   assert(created.isReadOnly === false, 'a native event reports isReadOnly=false via sourceMeta');
   assert(pool.events.length === 1 && pool.events[0].title === 'Pack for trip', 'native event actually persisted');
+  assert(pool.syncMap.length === 0, 'no Google connection configured — no sync-map row is minted');
+
+  // --- update_calendar_event / delete_calendar_event, still no Google connection ---
+  const updated = await withUser((ctx) => updateTool.handler({ event_id: created.eventId, title: 'Pack for the trip' }, ctx));
+  assert(updated.title === 'Pack for the trip', 'update_calendar_event changes the given field');
+  assert(pool.events[0].title === 'Pack for the trip', 'update_calendar_event actually persisted the change');
+  assert(pool.events[0].start_time === '2026-08-01T10:00:00.000Z', 'update_calendar_event leaves an omitted field unchanged');
+
+  const deleted = await withUser((ctx) => deleteTool.handler({ event_id: created.eventId }, ctx));
+  assert(deleted.deleted === true, 'delete_calendar_event reports success');
+  assert(pool.events.length === 0, 'delete_calendar_event actually removed the row');
+
+  // --- outbound push to Google: create/update/delete, via a fake GoogleCalendarClient ---
+  {
+    const googleClient = createFakeGoogleOutboundClient();
+    const outCreateTool = createCreateCalendarEventTool(googleClient);
+    const outUpdateTool = createUpdateCalendarEventTool(googleClient);
+    const outDeleteTool = createDeleteCalendarEventTool(googleClient);
+
+    const outCreated = await withUser((ctx) =>
+      outCreateTool.handler({ title: 'Dentist', start_time: '2026-09-01T09:00:00.000Z', end_time: '2026-09-01T10:00:00.000Z' }, ctx),
+    );
+    assert(googleClient.inserted.length === 1 && googleClient.inserted[0].input.title === 'Dentist', 'create pushes the new event to Google');
+    assert(
+      pool.syncMap.length === 1 && pool.syncMap[0].event_id === outCreated.eventId && pool.syncMap[0].google_event_id === googleClient.inserted[0].googleEventId,
+      'create mints a calendar_google_sync_map row linking the local event to the Google event',
+    );
+
+    await withUser((ctx) => outUpdateTool.handler({ event_id: outCreated.eventId, title: 'Dentist (rescheduled)' }, ctx));
+    assert(
+      googleClient.updated.length === 1 && googleClient.updated[0].googleEventId === googleClient.inserted[0].googleEventId,
+      'update pushes the edit to the already-mapped Google event',
+    );
+    assert(googleClient.updated[0].input.title === 'Dentist (rescheduled)', 'the pushed update carries the new title');
+
+    await withUser((ctx) => outDeleteTool.handler({ event_id: outCreated.eventId }, ctx));
+    assert(
+      googleClient.deleted.length === 1 && googleClient.deleted[0] === googleClient.inserted[0].googleEventId,
+      'delete pushes the deletion to Google using the id looked up before the local row (and its sync-map row) was removed',
+    );
+    assert(pool.syncMap.length === 0, 'deleting the local row cascades away its sync-map row');
+  }
+
+  // --- update/delete on an event never mirrored to Google: no-op push, no crash ---
+  {
+    const googleClient = createFakeGoogleOutboundClient();
+    const plainCreateTool = createCreateCalendarEventTool(undefined); // created with no Google connection at all
+    const bare = await withUser((ctx) =>
+      plainCreateTool.handler({ title: 'Unmirrored', start_time: '2026-09-02T09:00:00.000Z', end_time: '2026-09-02T10:00:00.000Z' }, ctx),
+    );
+    const outUpdateTool = createUpdateCalendarEventTool(googleClient);
+    const outDeleteTool = createDeleteCalendarEventTool(googleClient);
+    await withUser((ctx) => outUpdateTool.handler({ event_id: bare.eventId, title: 'Still unmirrored' }, ctx));
+    await withUser((ctx) => outDeleteTool.handler({ event_id: bare.eventId }, ctx));
+    assert(googleClient.updated.length === 0 && googleClient.deleted.length === 0, 'a never-mirrored event pushes nothing to Google on update/delete');
+  }
+
+  // --- inbound Google sync (googleSync.ts): insert / update-applied / update-skipped / cancel-delete ---
+  {
+    const settings = createFakeSettingsStore();
+    const googleUpdatedAt = new Date().toISOString();
+
+    // New Google-originated event, never seen before.
+    let listResult = { events: [{ googleEventId: 'g-in-1', status: 'confirmed', title: 'Soccer practice', description: null, location: null, startTime: '2026-09-03T15:00:00.000Z', endTime: '2026-09-03T16:00:00.000Z', allDay: false, updatedAt: googleUpdatedAt }], nextSyncToken: 'token-1' };
+    let fakeClient = { calendarId: 'primary', async listEvents() { return listResult; } };
+    await syncGoogleOnce(db, fakeClient, USER_ID, settings);
+    const inserted = pool.events.find((e) => e.external_id === 'g-in-1');
+    assert(inserted && inserted.source === 'google' && inserted.title === 'Soccer practice', 'an unmapped, non-cancelled Google event is adopted as a new source=google row');
+    assert(pool.syncMap.some((m) => m.google_event_id === 'g-in-1' && m.event_id === inserted.event_id), 'adopting it mints a sync-map row');
+    assert((await settings.get('google_calendar_sync_token')) === 'token-1', 'syncGoogleOnce persists the returned nextSyncToken');
+
+    // Google reports a newer update for the same event — must be applied.
+    const newerUpdatedAt = new Date(Date.now() + 60_000).toISOString();
+    listResult = { events: [{ googleEventId: 'g-in-1', status: 'confirmed', title: 'Soccer practice (moved)', description: null, location: null, startTime: '2026-09-03T16:00:00.000Z', endTime: '2026-09-03T17:00:00.000Z', allDay: false, updatedAt: newerUpdatedAt }], nextSyncToken: 'token-2' };
+    await syncGoogleOnce(db, fakeClient, USER_ID, settings);
+    assert(pool.events.find((e) => e.event_id === inserted.event_id).title === 'Soccer practice (moved)', 'a Google update newer than the local row is applied');
+
+    // Google reports a version *older* than the local row (e.g. a stale poll) — must be ignored.
+    pool.events.find((e) => e.event_id === inserted.event_id).updated_at = new Date(Date.now() + 120_000).toISOString(); // simulate a newer local edit
+    const staleUpdatedAt = new Date(Date.now() - 120_000).toISOString();
+    listResult = { events: [{ googleEventId: 'g-in-1', status: 'confirmed', title: 'Should not apply', description: null, location: null, startTime: '2026-09-03T16:00:00.000Z', endTime: '2026-09-03T17:00:00.000Z', allDay: false, updatedAt: staleUpdatedAt }], nextSyncToken: 'token-3' };
+    await syncGoogleOnce(db, fakeClient, USER_ID, settings);
+    assert(pool.events.find((e) => e.event_id === inserted.event_id).title === 'Soccer practice (moved)', 'a Google update older than the local row is left alone (last-write-wins)');
+
+    // Cancellation of a mapped event deletes the local row.
+    listResult = { events: [{ googleEventId: 'g-in-1', status: 'cancelled', title: 'Soccer practice (moved)', description: null, location: null, startTime: '2026-09-03T16:00:00.000Z', endTime: '2026-09-03T17:00:00.000Z', allDay: false, updatedAt: new Date().toISOString() }], nextSyncToken: 'token-4' };
+    await syncGoogleOnce(db, fakeClient, USER_ID, settings);
+    assert(!pool.events.some((e) => e.external_id === 'g-in-1'), 'a cancelled, mapped Google event deletes the local row');
+    assert(!pool.syncMap.some((m) => m.google_event_id === 'g-in-1'), 'deleting it cascades away its sync-map row');
+
+    // Cancellation of an event we never knew about is a no-op, not an error.
+    listResult = { events: [{ googleEventId: 'g-in-never-seen', status: 'cancelled', title: 'x', description: null, location: null, startTime: '2026-09-03T16:00:00.000Z', endTime: '2026-09-03T17:00:00.000Z', allDay: false, updatedAt: new Date().toISOString() }], nextSyncToken: 'token-5' };
+    await syncGoogleOnce(db, fakeClient, USER_ID, settings);
+    assert(!pool.events.some((e) => e.external_id === 'g-in-never-seen'), 'cancelling an unmapped event stays a no-op');
+  }
 
   // --- icsSync: fetch + parse + upsert, including RRULE expansion ---
   const fixture = buildFixtureIcs();
@@ -206,6 +489,11 @@ async function main() {
   }
 
   // --- get_calendar_schedule: overlap filter + sourceMeta enrichment ---
+  const nativeLeft = pool.events.filter((e) => e.source === 'native');
+  assert(nativeLeft.length === 0, 'sanity: no native rows survived the create/update/delete cycles above');
+  await withUser((ctx) =>
+    createTool.handler({ title: 'Pack for trip', start_time: '2026-08-01T10:00:00.000Z', end_time: '2026-08-01T11:00:00.000Z' }, ctx),
+  );
   const schedule = await withUser((ctx) =>
     getTool.handler({ start_date: '2026-01-01', end_date: '2026-12-31', sources: ['native'] }, ctx),
   );
@@ -221,7 +509,7 @@ async function main() {
   {
     const tzCalls = [];
     const spySettings = { async get(key) { tzCalls.push(key); return 'Australia/Perth'; } };
-    const tzTools = await registerTools({ settings: spySettings });
+    const tzTools = await registerTools({ settings: spySettings, credentials: createFakeCredentialsStore() });
     const tzGetTool = tzTools.find((t) => t.definition.name === 'get_calendar_schedule');
     await withUser((ctx) => tzGetTool.handler({}, ctx));
     assert(tzCalls.includes('household_timezone'), 'get_calendar_schedule resolves "today" through household_timezone on every call, not the server clock');
@@ -229,6 +517,7 @@ async function main() {
 
   // --- sourceMeta / applyPrivacyMask as pure functions ---
   assert(sourceMeta('cozi').colorCode === '#8B5CF6' && sourceMeta('cozi').isReadOnly === true, 'sourceMeta("cozi") is purple and read-only');
+  assert(sourceMeta('google').colorCode === '#EA4335' && sourceMeta('google').isReadOnly === false, 'sourceMeta("google") is Google-red and editable under OAuth sync');
   const rawEvent = { externalId: 'x', title: 'Real title', description: 'Real desc', location: 'Real place', startTime: 'a', endTime: 'b', allDay: false };
   assert(applyPrivacyMask(rawEvent, false) === rawEvent, 'applyPrivacyMask is a no-op (same reference) when shouldMask=false');
   assert(applyPrivacyMask(rawEvent, true).title === 'Work Commitment', 'applyPrivacyMask replaces title when shouldMask=true');
@@ -239,14 +528,14 @@ async function main() {
     const fakeCredentials = {
       async resolve(name, envFallback) {
         resolveCalls.push({ name, envFallback });
-        return undefined; // neither feed "configured" — proves no poll timer gets started off unresolved secrets
+        return undefined; // neither ICS feed nor Google configured — proves no poll timer gets started off unresolved secrets
       },
     };
     const settingsGetCalls = [];
     const fakeSettings = {
       async get(key) {
         settingsGetCalls.push(key);
-        return undefined; // nothing in the DB yet — falls back to the env var set below
+        return undefined; // nothing in the DB yet — falls back to the env var set below for calendar_owner_user_id
       },
     };
     const originalOwner = process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
@@ -264,6 +553,14 @@ async function main() {
     assert(
       resolveCalls.some((c) => c.name === 'cozi_ics_url') && resolveCalls.some((c) => c.name === 'outlook_ics_url'),
       'startBackgroundJobs resolves both ICS feed URLs through deps.credentials, not process.env directly',
+    );
+    assert(
+      settingsGetCalls.includes('google_calendar_owner_user_id'),
+      'startBackgroundJobs separately checks google_calendar_owner_user_id — the ICS and Google connections are independently gated',
+    );
+    assert(
+      !resolveCalls.some((c) => c.name === 'google_calendar_client_secret'),
+      'no google_calendar_owner_user_id configured — Google Calendar client resolution is short-circuited before touching credentials at all',
     );
   }
 }

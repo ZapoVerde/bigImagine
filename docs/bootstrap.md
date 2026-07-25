@@ -85,13 +85,20 @@ Live and deployed: data layer, orchestrator, document ingestion, shopping analyt
 (`/v1/tools/openapi.json`), grocery-list section ordering, a native frontend (`frontend/`, spec.md
 §5 Correction 7) with chat history/folders, freeform notes, prompt presets, household-wide
 orchestrator settings (active LLM profile/model, timezone), a household calendar (spec.md §6.7,
-Cozi/Outlook ICS + native events), web search (spec.md §6.8, `plugins/web`, Brave Search API), and
+Cozi/Outlook read-only ICS + native events, live; bidirectional Google Calendar OAuth sync built
+but not yet deployed or committed — see below), web search (spec.md §6.8, `plugins/web`, Brave
+Search API), and
 weather (spec.md §6.9, `plugins/weather`, Open-Meteo, no API key) — see spec.md §3's
 `provider_credentials` / `folders`+`chat_sessions`+`chat_messages` /
 `orchestrator_settings` / `notes` / `prompt_presets` additions. Most of this (frontend/,
 plugins/notes, plugins/prompt-presets, chat sessions, access identity, date context, migrations
 0009-0012) is deployed but **not yet committed** to this repo — check `git status` before assuming
-the working tree matches HEAD. Parked: GitHub Ingestion Gateway, the governance doc-sync (blocked
-on it), and Gmail parsing (spec.md §6.3). Drafted but not yet actioned: Open WebUI
+the working tree matches HEAD. The bidirectional Google Calendar OAuth sync (spec.md §6.7,
+migrations 0017-0018, `orchestrator/src/io/googleCalendar.ts`, `plugins/calendar/src/{googleSync,
+googleOutboundSync}.ts`) is a step further behind still — built in `bigBrain/` but neither synced
+to `stacks/bigbrain/` nor migration-applied, so it isn't running anywhere yet; requires a Google
+Cloud OAuth client (see spec.md §6.7) before it can be connected even once deployed. Parked: GitHub
+Ingestion Gateway, the governance doc-sync (blocked on it), and Gmail parsing (spec.md §6.3).
+Drafted but not yet actioned: Open WebUI
 suggested-prompts content, registering the OpenAPI tool server inside Open WebUI's own admin panel
 (needs a human in the browser).

@@ -15,6 +15,7 @@
     "./postgres": "./dist/io/postgres.js",
     "./field-cipher": "./dist/io/fieldCipher.js",
     "./notion": "./dist/io/notion.js",
+    "./google-calendar": "./dist/io/googleCalendar.js",
     "./logger": "./dist/io/logger.js",
     "./http-retry": "./dist/io/httpRetry.js",
     "./pgvector": "./dist/util/pgvector.js"

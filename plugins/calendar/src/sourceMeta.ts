@@ -8,6 +8,11 @@
  * that needs a badge color or an editability check (getCalendarScheduleTool.ts,
  * frontend/src/views/CalendarView.tsx) calls this instead of re-deriving it.
  *
+ * 'google' is isReadOnly: false, unlike cozi/outlook — under the bidirectional OAuth sync
+ * (docs/spec.md §6.7, plugins/calendar/src/googleSync.ts), a Google-originated event is a normal
+ * calendar_events row editable/deletable through update_calendar_event/delete_calendar_event like
+ * any other, not a passive read-only mirror.
+ *
  * @api-declaration
  * sourceMeta(source) — { colorCode, isReadOnly, label } for a given calendar_events.source
  *
@@ -18,7 +23,7 @@
  *     external_io:     []
  */
 
-export type CalendarSource = 'cozi' | 'outlook' | 'native';
+export type CalendarSource = 'cozi' | 'outlook' | 'google' | 'native';
 
 export interface CalendarSourceMeta {
   colorCode: string;
@@ -29,6 +34,7 @@ export interface CalendarSourceMeta {
 const SOURCE_META: Record<CalendarSource, CalendarSourceMeta> = {
   cozi: { colorCode: '#8B5CF6', isReadOnly: true, label: 'Cozi (Family)' },
   outlook: { colorCode: '#0284C7', isReadOnly: true, label: 'Outlook (Work)' },
+  google: { colorCode: '#EA4335', isReadOnly: false, label: 'Google Calendar' },
   native: { colorCode: '#10B981', isReadOnly: false, label: 'bigBrain' },
 };
 

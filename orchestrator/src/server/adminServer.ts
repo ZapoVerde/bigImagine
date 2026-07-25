@@ -72,6 +72,30 @@
  * setNotionSettings(store, body) — upserts whichever of notion_owner_user_id/
  *   notion_lists_data_source_id was given
  *
+ * Also backs Google Calendar's OAuth connection flow (docs/spec.md §6.7): same restart-on-save
+ * settings shape for GET/POST /v1/admin/google-calendar-settings (client id/owner user id/
+ * calendar id — client secret and refresh token stay in provider_credentials, §12). The
+ * connection itself is a two-step redirect dance the Settings tab drives:
+ * mintGoogleOauthState()/buildGoogleAuthUrl() build the consent URL httpServer.ts's auth-url
+ * route hands back for the browser to open; Google redirects back to the callback route with a
+ * code and that same state, which consumeGoogleOauthState() single-use-verifies before
+ * completeGoogleCalendarOauth() exchanges the code and writes the resulting refresh token. The
+ * state nonce store is intentionally in-memory here (module-level, mirrors io/notion.ts's own
+ * closured throttle state) — it only needs to survive the few minutes between minting and
+ * consumption, not a process restart.
+ *
+ * mintGoogleOauthState() — mints and stores a single-use nonce, TTL-bounded, opportunistically
+ *   sweeping expired entries on each call
+ * consumeGoogleOauthState(nonce) — true iff the nonce exists and hasn't expired; always deletes it
+ *   (single-use regardless of outcome)
+ * buildGoogleAuthUrl(clientId, redirectUri, state) — Google's OAuth consent URL, offline access +
+ *   forced re-consent so a refresh token is issued even on a second connection attempt
+ * getGoogleCalendarSettings(store) / parseSetGoogleCalendarSettingsBody(raw) /
+ *   setGoogleCalendarSettings(store, body) — same shape as the Calendar/Notion settings trio above
+ * completeGoogleCalendarOauth(credentials, settings, code, redirectUri) — resolves client
+ *   id/secret, exchanges the code, and writes the refresh token; throws if Google didn't return
+ *   one (already-granted access — the caller should tell the admin to revoke and reconnect)
+ *
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
@@ -82,10 +106,12 @@
  *     external_io:     [Postgres (via the stores it's given); the configured LLM provider APIs]
  */
 
+import { randomUUID } from 'node:crypto';
 import type { CredentialName, CredentialSummary, ProviderCredentialStore } from '../io/providerCredentials.js';
 import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
+import { exchangeAuthCode } from '../io/googleCalendar.js';
 
 export interface SetCredentialBody {
   name: CredentialName;
@@ -264,4 +290,103 @@ export function parseSetNotionSettingsBody(raw: unknown): SetNotionSettingsBody 
 export async function setNotionSettings(store: OrchestratorSettingsStore, body: SetNotionSettingsBody): Promise<void> {
   if (body.ownerUserId !== undefined) await store.set('notion_owner_user_id', body.ownerUserId);
   if (body.listsDataSourceId !== undefined) await store.set('notion_lists_data_source_id', body.listsDataSourceId);
+}
+
+// --- Google Calendar OAuth (docs/bb_principles.md §12-13, docs/spec.md §6.7) ---
+
+const OAUTH_STATE_TTL_MS = 10 * 60_000; // long enough for a human to complete Google's consent screen
+const pendingOauthStates = new Map<string, number>(); // nonce -> expiresAt
+
+export function mintGoogleOauthState(): string {
+  const now = Date.now();
+  for (const [nonce, expiresAt] of pendingOauthStates) {
+    if (expiresAt < now) pendingOauthStates.delete(nonce); // opportunistic sweep, not a timer — this process rarely mints more than one at a time
+  }
+  const nonce = randomUUID();
+  pendingOauthStates.set(nonce, now + OAUTH_STATE_TTL_MS);
+  return nonce;
+}
+
+export function consumeGoogleOauthState(nonce: string | undefined): boolean {
+  if (!nonce) return false;
+  const expiresAt = pendingOauthStates.get(nonce);
+  pendingOauthStates.delete(nonce); // single-use regardless of outcome — a replayed callback must never succeed twice
+  return expiresAt !== undefined && expiresAt > Date.now();
+}
+
+const GOOGLE_OAUTH_SCOPE = 'https://www.googleapis.com/auth/calendar.events';
+
+export function buildGoogleAuthUrl(clientId: string, redirectUri: string, state: string): string {
+  const params = new URLSearchParams({
+    client_id: clientId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: GOOGLE_OAUTH_SCOPE,
+    access_type: 'offline',
+    prompt: 'consent', // forces a refresh_token even if this Google account already granted access once before
+    state,
+  });
+  return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+}
+
+export interface GoogleCalendarSettings {
+  clientId: string | null;
+  ownerUserId: string | null;
+  calendarId: string;
+}
+
+const DEFAULT_GOOGLE_CALENDAR_ID = 'primary';
+
+export async function getGoogleCalendarSettings(store: OrchestratorSettingsStore): Promise<GoogleCalendarSettings> {
+  const clientId = (await store.get('google_calendar_client_id')) ?? null;
+  const ownerUserId = (await store.get('google_calendar_owner_user_id')) ?? null;
+  const calendarId = (await store.get('google_calendar_id')) ?? DEFAULT_GOOGLE_CALENDAR_ID;
+  return { clientId, ownerUserId, calendarId };
+}
+
+export interface SetGoogleCalendarSettingsBody {
+  clientId?: string;
+  ownerUserId?: string;
+  calendarId?: string;
+}
+
+export function parseSetGoogleCalendarSettingsBody(raw: unknown): SetGoogleCalendarSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { client_id, owner_user_id, calendar_id } = raw as Record<string, unknown>;
+  if (client_id === undefined && owner_user_id === undefined && calendar_id === undefined) return undefined;
+  if (client_id !== undefined && (typeof client_id !== 'string' || client_id.length === 0)) return undefined;
+  if (owner_user_id !== undefined && (typeof owner_user_id !== 'string' || owner_user_id.length === 0)) return undefined;
+  if (calendar_id !== undefined && (typeof calendar_id !== 'string' || calendar_id.length === 0)) return undefined;
+  return {
+    clientId: typeof client_id === 'string' ? client_id : undefined,
+    ownerUserId: typeof owner_user_id === 'string' ? owner_user_id : undefined,
+    calendarId: typeof calendar_id === 'string' ? calendar_id : undefined,
+  };
+}
+
+export async function setGoogleCalendarSettings(store: OrchestratorSettingsStore, body: SetGoogleCalendarSettingsBody): Promise<void> {
+  if (body.clientId !== undefined) await store.set('google_calendar_client_id', body.clientId);
+  if (body.ownerUserId !== undefined) await store.set('google_calendar_owner_user_id', body.ownerUserId);
+  if (body.calendarId !== undefined) await store.set('google_calendar_id', body.calendarId);
+}
+
+export async function completeGoogleCalendarOauth(
+  credentials: ProviderCredentialStore,
+  settings: OrchestratorSettingsStore,
+  code: string,
+  redirectUri: string,
+): Promise<void> {
+  const clientId = await settings.get('google_calendar_client_id');
+  const clientSecret = await credentials.resolve('google_calendar_client_secret', undefined);
+  if (!clientId || !clientSecret) {
+    throw new Error('google_calendar_client_id and google_calendar_client_secret must both be configured before connecting');
+  }
+
+  const tokens = await exchangeAuthCode(code, redirectUri, clientId, clientSecret);
+  if (!tokens.refreshToken) {
+    throw new Error(
+      'Google did not return a refresh token — this account likely already has an active grant for this app; revoke it at https://myaccount.google.com/permissions and reconnect',
+    );
+  }
+  await credentials.set('google_calendar_refresh_token', tokens.refreshToken);
 }

@@ -95,7 +95,7 @@ export interface GenerateShoppingListResult {
 }
 
 // plugins/calendar/src/getCalendarScheduleTool.ts / createCalendarEventTool.ts
-export type CalendarSource = 'cozi' | 'outlook' | 'native';
+export type CalendarSource = 'cozi' | 'outlook' | 'google' | 'native';
 
 export interface CalendarEvent {
   eventId: string;
@@ -122,6 +122,13 @@ export interface CalendarSettings {
 export interface NotionSettings {
   ownerUserId: string | null;
   listsDataSourceId: string | null;
+}
+
+// orchestrator/src/server/adminServer.ts getGoogleCalendarSettings()
+export interface GoogleCalendarSettings {
+  clientId: string | null;
+  ownerUserId: string | null;
+  calendarId: string;
 }
 
 // orchestrator/src/server/openai.ts buildChatCompletion()

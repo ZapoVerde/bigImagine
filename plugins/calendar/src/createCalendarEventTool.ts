@@ -4,27 +4,35 @@
  * @architectural-role IO Wrapper — creates a native (bigBrain-owned) calendar event
  * @description
  * Always source = 'native': the only calendar_events rows this tool ever writes are ones bigBrain
- * itself owns, never a Cozi/Outlook row (those are exclusively icsSync.ts's to write). external_id
- * has no feed to key against for a native event, so a fresh random id is minted per insert —
- * unique-per-source-and-external_id (db/migrations/0013_calendar.sql) still holds, it just never
- * collides with anything since nothing else ever produces a 'native' external_id.
+ * itself owns, never a Cozi/Outlook/Google row (those are exclusively icsSync.ts's/googleSync.ts's
+ * to write). external_id has no feed to key against for a native event, so a fresh random id is
+ * minted per insert — unique-per-source-and-external_id (db/migrations/0013_calendar.sql) still
+ * holds, it just never collides with anything since nothing else ever produces a 'native'
+ * external_id.
  *
- * Update/delete on native events are deliberately not included yet — docs/spec.md §6.7 defers
- * them until real use shows they're needed, same bias toward shipping the minimum this project
- * applies everywhere else (e.g. the lists/inventory decision).
+ * When a Google Calendar connection is configured (googleClient given, undefined otherwise), the
+ * new event is also best-effort pushed to Google right after the local insert succeeds
+ * (googleOutboundSync.ts's pushCreateToGoogle — same "never fail the tool call if the external
+ * write fails" rule Notion sync already established) — a native event created in bigBrain now
+ * shows up in the household's real Google Calendar, and becomes editable/deletable from either
+ * side (docs/spec.md §6.7).
  *
  * @api-declaration
- * createCreateCalendarEventTool() — returns the create_calendar_event RegisteredTool
+ * createCreateCalendarEventTool(googleClient) — returns the create_calendar_event RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session)
+ *     purity:          impure (Postgres IO via the injected session; network IO via googleClient
+ *                      when configured)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given)]
+ *     external_io:     [Postgres (via the DbSession it's given), the Google Calendar API when
+ *                      googleClient is configured]
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
+import type { GoogleCalendarClient } from '@bigbrain/orchestrator/google-calendar';
 import { sourceMeta } from './sourceMeta.js';
+import { pushCreateToGoogle } from './googleOutboundSync.js';
 
 interface CreateCalendarEventArgs {
   title: string;
@@ -46,7 +54,7 @@ function isCreateCalendarEventArgs(value: unknown): value is CreateCalendarEvent
   return true;
 }
 
-export function createCreateCalendarEventTool(): RegisteredTool {
+export function createCreateCalendarEventTool(googleClient: GoogleCalendarClient | undefined): RegisteredTool {
   return {
     definition: {
       name: 'create_calendar_event',
@@ -87,9 +95,19 @@ export function createCreateCalendarEventTool(): RegisteredTool {
          returning event_id`,
         [ctx.userId, args.title, args.description ?? null, startTime.toISOString(), endTime.toISOString(), args.assigned_members ?? []],
       );
+      const eventId = rows[0]!.event_id;
+
+      await pushCreateToGoogle(ctx.db, googleClient, eventId, {
+        title: args.title,
+        description: args.description ?? null,
+        location: null,
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString(),
+        allDay: false,
+      });
 
       return {
-        eventId: rows[0]!.event_id,
+        eventId,
         source: 'native' as const,
         ...sourceMeta('native'),
         title: args.title,
