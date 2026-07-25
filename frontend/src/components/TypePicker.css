@@ -9,9 +9,9 @@
 }
 
 .type-picker h2 {
-  font-size: 1rem;
-  font-weight: 500;
-  color: #666;
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-muted);
   margin: 0;
 }
 
@@ -25,14 +25,10 @@
 
 .type-picker-btn {
   padding: 0.7rem 1.3rem;
-  font-size: 0.95rem;
-  cursor: pointer;
-  border: 1px solid #ccc;
-  border-radius: 0.5rem;
-  background: #fff;
+  font-size: var(--font-size-md);
+  border-radius: var(--radius-md);
 }
 
 .type-picker-btn:hover {
-  background: #f0f0f0;
-  border-color: #999;
+  border-color: var(--color-text-faint);
 }

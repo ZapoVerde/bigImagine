@@ -11,9 +11,9 @@
 }
 
 .note-title-input {
-  font-size: 1.1rem;
-  font-weight: 600;
-  padding: 0.4rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  padding: 0.4rem 0.6rem;
 }
 
 .note-content-input {
@@ -30,10 +30,9 @@
 
 .note-editor-actions button {
   padding: 0.4rem 0.9rem;
-  cursor: pointer;
 }
 
 .saved-note {
-  font-size: 0.85rem;
-  color: #0a7a0a;
+  font-size: var(--font-size-sm);
+  color: var(--color-success);
 }

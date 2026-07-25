@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import './theme/tokens.css';
 import './App.css';
 import { whoami } from './api/client';
 import Sidebar from './components/sidebar/Sidebar';
@@ -7,6 +8,7 @@ import TodayAgenda from './components/TodayAgenda';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
+import { useTheme } from './hooks/useTheme';
 import CalendarView from './views/CalendarView';
 import ChatView from './views/ChatView';
 import ListsView from './views/ListsView';
@@ -30,6 +32,7 @@ type AuthState =
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ mode: 'checking' });
   const { tabs, activeTabId, openBlank, summon, openChat, updateTab, close, focus } = useTabs();
+  const { theme, toggle: toggleTheme } = useTheme();
 
   // Sidebar/view picker state for the singleton lists/notes/recipes tabs — lifted here because
   // the sidebar's browser and the tab's detail view are siblings, not parent/child. Each "X
@@ -97,6 +100,8 @@ export default function App() {
           onSelect={focus}
           onClose={close}
           onNew={openBlank}
+          theme={theme}
+          onToggleTheme={toggleTheme}
           onChangeKey={
             auth.mode === 'key'
               ? () => {

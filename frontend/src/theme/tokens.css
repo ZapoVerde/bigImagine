@@ -1,0 +1,108 @@
+/* Design tokens — the single source of truth for color/radius/layout values across every view.
+   Add a new value here, not a hardcoded hex/rem in a view's own CSS file. Pattern borrowed from
+   whoseturnnow's global.css: :root for light, body.dark for the dark override. */
+
+:root {
+  /* --- Surfaces --- */
+  --color-bg-canvas: #ffffff;
+  --color-bg-surface: #fafafa;
+  --color-bg-panel: #f0f0f0;
+
+  /* --- Borders --- */
+  --color-border: #dddddd;
+  --color-border-subtle: #eeeeee;
+
+  /* --- Text --- */
+  --color-text-primary: #1a1a1a;
+  --color-text-secondary: #555555;
+  --color-text-muted: #888888;
+  --color-text-faint: #999999;
+
+  /* --- Brand / interactive --- */
+  --color-accent: #4f46e5;
+  --color-accent-hover: #4338ca;
+  --color-accent-contrast: #ffffff;
+  --color-accent-subtle: #eef0fd;
+
+  /* --- Semantic --- */
+  --color-success: #0a7a0a;
+  --color-danger: #b00000;
+  --color-danger-bg: #fdecea;
+
+  /* --- Interaction states --- */
+  --color-hover-surface: #eeeeee;
+  --color-active-surface: #e4e4e4;
+
+  /* --- Chat bubbles (own contrast pair, not surface tokens above) --- */
+  --color-bubble-user-bg: #222222;
+  --color-bubble-user-text: #ffffff;
+  --color-bubble-assistant-bg: #f0f0f0;
+  --color-bubble-assistant-text: #111111;
+
+  /* --- Radius scale ("curves") --- */
+  --radius-sm: 0.35rem;
+  --radius-md: 0.6rem;
+  --radius-lg: 0.9rem;
+  --radius-pill: 999px;
+
+  /* --- Layout --- */
+  --topbar-height: 3rem;
+
+  /* --- Typography --- */
+  --font-family: system-ui, sans-serif;
+
+  /* Scale: 2xs/xs/sm are for captions, meta text, uppercase section labels. md/base are the
+     default UI/body sizes. lg/xl are titles — lg for a view's own section headings (day/list
+     group dividers), xl for the title of a specific open record (a recipe, a note). */
+  --font-size-2xs: 0.7rem;
+  --font-size-xs: 0.8rem;
+  --font-size-sm: 0.85rem;
+  --font-size-md: 0.95rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.1rem;
+  --font-size-xl: 1.3rem;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  --label-letter-spacing: 0.04em;
+}
+
+body.dark {
+  /* --- Surfaces --- */
+  --color-bg-canvas: #18191d;
+  --color-bg-surface: #1f2024;
+  --color-bg-panel: #26272c;
+
+  /* --- Borders --- */
+  --color-border: #34353b;
+  --color-border-subtle: #2a2b30;
+
+  /* --- Text --- */
+  --color-text-primary: #f2f2f2;
+  --color-text-secondary: #b8b8be;
+  --color-text-muted: #8b8b92;
+  --color-text-faint: #77777e;
+
+  /* --- Brand / interactive --- */
+  --color-accent: #818cf8;
+  --color-accent-hover: #9aa3fa;
+  --color-accent-contrast: #18191d;
+  --color-accent-subtle: #2a2b45;
+
+  /* --- Semantic --- */
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --color-danger-bg: #3a2020;
+
+  /* --- Interaction states --- */
+  --color-hover-surface: #2c2d33;
+  --color-active-surface: #35363d;
+
+  /* --- Chat bubbles --- */
+  --color-bubble-user-bg: #4f46e5;
+  --color-bubble-user-text: #ffffff;
+  --color-bubble-assistant-bg: #26272c;
+  --color-bubble-assistant-text: #f2f2f2;
+}

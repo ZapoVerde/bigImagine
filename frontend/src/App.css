@@ -2,8 +2,45 @@
   color-scheme: light;
 }
 
+body.dark {
+  color-scheme: dark;
+}
+
 * {
   box-sizing: border-box;
+}
+
+/* Base look for every button/input/textarea/select in the app — curved corners and token-driven
+   colors by default, so a view only needs to override what's actually special about it (an
+   icon-only borderless button, an accent-colored primary action), not redeclare a border and
+   radius every time it adds a form control. */
+button {
+  font-family: inherit;
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+}
+
+button:hover {
+  background: var(--color-hover-surface);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  color: var(--color-text-primary);
+  background: var(--color-bg-canvas);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
 }
 
 html,
@@ -14,8 +51,10 @@ body,
 }
 
 body {
-  font-family: system-ui, sans-serif;
-  color: #1a1a1a;
+  font-family: var(--font-family);
+  font-size: var(--font-size-base);
+  color: var(--color-text-primary);
+  background: var(--color-bg-canvas);
 }
 
 .app {
@@ -35,13 +74,15 @@ body {
 .tab-bar {
   display: flex;
   align-items: center;
-  border-bottom: 1px solid #ddd;
+  height: var(--topbar-height);
+  border-bottom: 1px solid var(--color-border);
   padding: 0 1rem;
   flex-shrink: 0;
 }
 
 .tab-bar h1 {
-  font-size: 1.1rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
   margin: 0 1.2rem 0 0;
   white-space: nowrap;
 }
@@ -58,25 +99,27 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-size: 0.95rem;
+  font-size: var(--font-size-md);
   background: none;
   border: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   border-bottom: 2px solid transparent;
   padding: 0.7rem 0.6rem;
   cursor: pointer;
-  color: #555;
+  color: var(--color-text-secondary);
   white-space: nowrap;
   flex-shrink: 0;
   max-width: 12rem;
 }
 
 .tab-bar button.tab:hover {
-  color: #111;
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
 }
 
 .tab-bar button.tab.active {
-  color: #111;
-  border-bottom-color: #333;
+  color: var(--color-text-primary);
+  border-bottom-color: var(--color-accent);
   font-weight: 600;
 }
 
@@ -87,43 +130,63 @@ body {
 }
 
 .tab-bar .tab-close {
-  color: #999;
-  font-size: 0.9rem;
+  color: var(--color-text-faint);
+  font-size: var(--font-size-sm);
   line-height: 1;
-  border-radius: 0.2rem;
+  border-radius: var(--radius-sm);
   padding: 0.05rem 0.25rem;
 }
 
 .tab-bar .tab-close:hover {
-  color: #b00;
-  background: #eee;
+  color: var(--color-danger);
+  background: var(--color-hover-surface);
 }
 
 .tab-bar button.tab-new {
-  font-size: 1.1rem;
+  font-size: var(--font-size-lg);
   background: none;
   border: none;
+  border-radius: var(--radius-sm);
   padding: 0.7rem 0.8rem;
   cursor: pointer;
-  color: #666;
+  color: var(--color-text-muted);
   flex-shrink: 0;
 }
 
 .tab-bar button.tab-new:hover {
-  color: #111;
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+.tab-bar .theme-toggle {
+  font-size: var(--font-size-base);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.55rem;
+  cursor: pointer;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+  margin-left: 0.4rem;
+}
+
+.tab-bar .theme-toggle:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
 }
 
 .tab-bar .change-key {
-  font-size: 0.8rem;
+  font-size: var(--font-size-xs);
   background: none;
   border: none;
-  color: #999;
+  color: var(--color-text-faint);
   cursor: pointer;
   white-space: nowrap;
+  margin-left: 0.6rem;
 }
 
 .tab-bar .change-key:hover {
-  color: #555;
+  color: var(--color-text-secondary);
 }
 
 .view-container {
@@ -151,14 +214,14 @@ body {
 }
 
 .error-banner {
-  background: #fdecea;
-  color: #b00;
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
   padding: 0.6rem 1rem;
   font-size: 0.9rem;
 }
 
 .empty-state {
-  color: #888;
+  color: var(--color-text-muted);
   padding: 2rem;
   text-align: center;
 }
@@ -176,9 +239,13 @@ body {
 
 .unlock-gate input {
   font-size: 1rem;
-  padding: 0.4rem;
+  padding: 0.4rem 0.6rem;
   margin: 0.4rem 0;
   width: 16rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
 }
 
 .unlock-gate button {
@@ -186,4 +253,13 @@ body {
   padding: 0.4rem 1rem;
   margin-top: 0.6rem;
   cursor: pointer;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.unlock-gate button:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
 }

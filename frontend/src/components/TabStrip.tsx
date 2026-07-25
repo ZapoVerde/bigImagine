@@ -6,11 +6,22 @@ interface TabStripProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
   /** Omitted entirely under Cloudflare Access SSO — there's no key to change. */
   onChangeKey?: () => void;
 }
 
-export default function TabStrip({ tabs, activeId, onSelect, onClose, onNew, onChangeKey }: TabStripProps) {
+export default function TabStrip({
+  tabs,
+  activeId,
+  onSelect,
+  onClose,
+  onNew,
+  theme,
+  onToggleTheme,
+  onChangeKey,
+}: TabStripProps) {
   return (
     <header className="tab-bar">
       <h1>bigBrain</h1>
@@ -38,6 +49,13 @@ export default function TabStrip({ tabs, activeId, onSelect, onClose, onNew, onC
           +
         </button>
       </nav>
+      <button
+        className="theme-toggle"
+        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        onClick={onToggleTheme}
+      >
+        {theme === 'dark' ? '☀' : '☾'}
+      </button>
       {onChangeKey && (
         <button className="change-key" onClick={onChangeKey}>
           change key

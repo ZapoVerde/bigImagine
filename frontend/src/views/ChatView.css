@@ -17,7 +17,7 @@
   align-items: center;
   gap: 0.6rem;
   padding: 0.6rem 1rem;
-  border-bottom: 1px solid #eee;
+  border-bottom: 1px solid var(--color-border-subtle);
 }
 
 .chat-header .chat-title {
@@ -25,7 +25,8 @@
 }
 
 .chat-title {
-  font-weight: 600;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -38,7 +39,7 @@
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid #eee;
+  border-left: 1px solid var(--color-border-subtle);
   overflow: hidden;
 }
 
@@ -60,20 +61,19 @@
 .chat-settings-toggle {
   background: none;
   border: none;
-  cursor: pointer;
-  color: #888;
-  font-size: 0.9rem;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
   padding: 0.2rem 0.4rem;
 }
 
 .chat-settings-toggle:hover {
-  color: #111;
+  color: var(--color-text-primary);
 }
 
 .chat-settings-rail-content {
   flex: 1;
   overflow-y: auto;
-  background: #fafafa;
+  background: var(--color-bg-surface);
 }
 
 .chat-settings {
@@ -84,8 +84,8 @@
 }
 
 .preset-list {
-  border: 1px solid #ddd;
-  border-radius: 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   padding: 0.5rem 0.8rem;
   display: flex;
   flex-direction: column;
@@ -93,8 +93,8 @@
 }
 
 .preset-list legend {
-  font-size: 0.8rem;
-  color: #777;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
   padding: 0 0.3rem;
 }
 
@@ -103,13 +103,13 @@
   align-items: center;
   justify-content: space-between;
   padding: 0.3rem 0.3rem;
-  border-radius: 0.3rem;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   gap: 0.4rem;
 }
 
 .preset-row:hover {
-  background: #eee;
+  background: var(--color-hover-surface);
 }
 
 .preset-row-name {
@@ -117,15 +117,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
 }
 
 .preset-row-delete {
   background: none;
   border: none;
-  color: #aaa;
-  cursor: pointer;
-  font-size: 1rem;
+  color: var(--color-text-faint);
+  font-size: var(--font-size-base);
   padding: 0 0.2rem;
   visibility: hidden;
 }
@@ -135,32 +134,32 @@
 }
 
 .preset-row-delete:hover {
-  color: #b00;
+  color: var(--color-danger);
 }
 
 .save-preset-btn {
   align-self: flex-start;
   background: none;
   border: none;
-  color: #555;
-  cursor: pointer;
-  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
   padding: 0.3rem;
 }
 
 .save-preset-btn:hover {
-  color: #111;
+  color: var(--color-text-primary);
+  background: none;
   text-decoration: underline;
 }
 
 .model-connection-note {
-  font-size: 0.75rem;
-  color: #888;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
 }
 
 .empty-state.small {
   padding: 0.4rem 0.3rem;
-  font-size: 0.8rem;
+  font-size: var(--font-size-xs);
   text-align: left;
 }
 
@@ -168,8 +167,8 @@
   display: flex;
   flex-direction: column;
   gap: 0.2rem;
-  font-size: 0.85rem;
-  color: #555;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
 }
 
 .chat-settings input,
@@ -191,14 +190,14 @@
 }
 
 .tool-checklist {
-  border: 1px solid #ddd;
-  border-radius: 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   padding: 0.5rem 0.8rem;
 }
 
 .tool-checklist legend {
-  font-size: 0.8rem;
-  color: #777;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
   padding: 0 0.3rem;
 }
 
@@ -207,7 +206,7 @@
   align-items: center;
   gap: 0.4rem !important;
   padding: 0.15rem 0;
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
 }
 
 .settings-actions {
@@ -218,12 +217,11 @@
 
 .settings-actions button {
   padding: 0.4rem 0.9rem;
-  cursor: pointer;
 }
 
 .saved-note {
-  font-size: 0.85rem;
-  color: #0a7a0a;
+  font-size: var(--font-size-sm);
+  color: var(--color-success);
 }
 
 /* --- Conversation --- */
@@ -240,24 +238,24 @@
 .chat-bubble {
   max-width: 34rem;
   padding: 0.6rem 0.9rem;
-  border-radius: 0.8rem;
+  border-radius: var(--radius-lg);
   line-height: 1.4;
 }
 
 .chat-bubble.user {
   align-self: flex-end;
-  background: #222;
-  color: #fff;
+  background: var(--color-bubble-user-bg);
+  color: var(--color-bubble-user-text);
 }
 
 .chat-bubble.assistant {
   align-self: flex-start;
-  background: #f0f0f0;
-  color: #111;
+  background: var(--color-bubble-assistant-bg);
+  color: var(--color-bubble-assistant-text);
 }
 
 .chat-bubble.pending {
-  color: #888;
+  color: var(--color-text-muted);
 }
 
 /* react-markdown renders real block elements now (remark-breaks turns single newlines into <br>,
@@ -274,7 +272,7 @@
 .markdown-content pre {
   background: rgba(0, 0, 0, 0.06);
   padding: 0.6rem;
-  border-radius: 0.4rem;
+  border-radius: var(--radius-sm);
   overflow-x: auto;
 }
 
@@ -295,7 +293,7 @@
 .markdown-content :not(pre) > code {
   background: rgba(0, 0, 0, 0.06);
   padding: 0.1rem 0.3rem;
-  border-radius: 0.3rem;
+  border-radius: var(--radius-sm);
 }
 
 .chat-bubble.user .markdown-content :not(pre) > code {
@@ -330,13 +328,13 @@
   background: none;
   border: none;
   padding: 0;
-  font-size: 0.78rem;
-  cursor: pointer;
+  font-size: var(--font-size-xs);
   color: inherit;
   opacity: 0.65;
 }
 
 .message-actions button:hover {
+  background: none;
   opacity: 1;
   text-decoration: underline;
 }
@@ -352,7 +350,6 @@
   font: inherit;
   padding: 0.4rem;
   resize: vertical;
-  color: #111;
 }
 
 .message-edit-actions {
@@ -362,14 +359,13 @@
 
 .message-edit-actions button {
   padding: 0.3rem 0.7rem;
-  cursor: pointer;
 }
 
 .chat-input {
   display: flex;
   gap: 0.5rem;
   padding: 0.8rem 1rem;
-  border-top: 1px solid #ddd;
+  border-top: 1px solid var(--color-border);
 }
 
 .chat-input textarea {
@@ -380,11 +376,13 @@
 }
 
 .chat-input button {
-  padding: 0 1.2rem;
-  cursor: pointer;
+  padding: 0.5rem 1.2rem;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  border-color: var(--color-accent);
 }
 
-.chat-input button:disabled {
-  opacity: 0.5;
-  cursor: default;
+.chat-input button:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
 }

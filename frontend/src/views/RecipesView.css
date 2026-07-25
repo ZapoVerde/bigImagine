@@ -5,28 +5,30 @@
 }
 
 .pill {
-  font-size: 0.8rem;
+  font-size: var(--font-size-xs);
   padding: 0.3rem 0.7rem;
-  border-radius: 1rem;
-  border: 1px solid #ccc;
-  background: #fff;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-canvas);
   cursor: pointer;
-  color: #555;
+  color: var(--color-text-secondary);
 }
 
 .pill.active {
-  background: #222;
-  color: #fff;
-  border-color: #222;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  border-color: var(--color-accent);
 }
 
 .recipe-meta {
-  font-size: 0.8rem;
-  color: #888;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
   margin: 0;
 }
 
 .recipe-detail h2 {
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-semibold);
   margin-bottom: 0.2rem;
 }
 
@@ -39,21 +41,20 @@
 .import-form {
   position: sticky;
   bottom: 0;
-  background: #fff;
+  background: var(--color-bg-canvas);
   display: flex;
   gap: 0.5rem;
   padding: 0.8rem 0;
-  border-top: 1px solid #ddd;
+  border-top: 1px solid var(--color-border);
   margin-top: 1.5rem;
 }
 
 .import-form input {
   flex: 1;
-  padding: 0.4rem;
+  padding: 0.4rem 0.6rem;
   font: inherit;
 }
 
 .import-form button {
-  padding: 0 1rem;
-  cursor: pointer;
+  padding: 0.4rem 1rem;
 }

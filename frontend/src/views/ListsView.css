@@ -6,20 +6,22 @@
 
 .lists-toolbar {
   margin-bottom: 1rem;
-  font-size: 0.9rem;
-  color: #555;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
 }
 
 .list-group h2 {
-  font-size: 1.1rem;
-  border-bottom: 1px solid #ddd;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  border-bottom: 1px solid var(--color-border);
   padding-bottom: 0.3rem;
 }
 
 .list-section h3 {
-  font-size: 0.85rem;
+  font-size: var(--font-size-sm);
+  letter-spacing: var(--label-letter-spacing);
   text-transform: uppercase;
-  color: #888;
+  color: var(--color-text-muted);
   margin: 0.8rem 0 0.2rem;
 }
 
@@ -35,7 +37,7 @@
 
 .list-section li.done label {
   text-decoration: line-through;
-  color: #999;
+  color: var(--color-text-faint);
 }
 
 .list-section label {
@@ -48,21 +50,20 @@
 .add-item-form {
   position: sticky;
   bottom: 0;
-  background: #fff;
+  background: var(--color-bg-canvas);
   display: flex;
   gap: 0.5rem;
   padding: 0.8rem 0;
-  border-top: 1px solid #ddd;
+  border-top: 1px solid var(--color-border);
   margin-top: 1.5rem;
 }
 
 .add-item-form input {
   flex: 1;
-  padding: 0.4rem;
+  padding: 0.4rem 0.6rem;
   font: inherit;
 }
 
 .add-item-form button {
-  padding: 0 1rem;
-  cursor: pointer;
+  padding: 0.4rem 1rem;
 }
