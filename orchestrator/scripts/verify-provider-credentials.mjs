@@ -65,7 +65,7 @@ const store = createProviderCredentialStore(db, cipher);
 // --- list() before any writes ---
 {
   const summaries = await store.list();
-  assert(summaries.length === CREDENTIAL_NAMES.length, 'list() returns all four fixed credential names');
+  assert(summaries.length === CREDENTIAL_NAMES.length, 'list() returns every fixed credential name');
   assert(summaries.every((s) => s.configured === false), 'every credential starts as not configured');
 }
 

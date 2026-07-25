@@ -114,7 +114,7 @@ async function main(): Promise<void> {
 
   // Default matches the Docker image layout: /app/orchestrator/dist/index.js -> /app/plugins.
   const pluginsDir = process.env.BIGBRAIN_PLUGINS_DIR ?? new URL('../../plugins', import.meta.url).pathname;
-  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, notion, db });
+  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, notion, db, credentials });
   const tools = createToolRegistry(pluginTools);
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));

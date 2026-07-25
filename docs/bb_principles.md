@@ -110,4 +110,12 @@ This is not a license to log indiscriminately — a log flooded with noise is as
 
 ---
 
+## 12. A Secret Is Write-Only; Everything Else Stays Visible
+
+A value is a secret exactly when possessing it grants access on its own — an API key, a bearer token, a capability URL that lets anyone holding it read private data. Secrets are encrypted at rest and never round-trip back out through any admin surface once set: an operator can enter or rotate one, and see that it's configured and when it last changed, but never retrieve the value itself again. There is exactly one shape for this — a closed, named vocabulary in the encrypted credential store — and a new secret means adding a name to that vocabulary, not inventing a parallel mechanism.
+
+A value that only configures behavior — an identifier, a flag, a selected profile — is not a secret, even when it lives right next to one in the same feature. It stays visible, in the open settings store or plain config, because hiding it protects nothing and costs real usability: an operator needs to see which user a shared feed is attributed to, confirm a toggle's state, or read back an active connection. Secrecy is decided per value, never inherited from the feature it belongs to.
+
+---
+
 *Further principles will be added as they emerge from real friction, not anticipated in advance.*

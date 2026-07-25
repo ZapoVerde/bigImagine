@@ -56,3 +56,8 @@ Already applied by hand, not run automatically (see the file for the exact comma
   from the `create_calendar_event` tool. No `color_code`/`is_read_only` columns — both are pure
   functions of `source` (`plugins/calendar/src/sourceMeta.ts`), computed at read time rather than
   stored. Google Calendar's 2-way OAuth sync is deferred to a later phase (`docs/spec.md` §6.7).
+- `0014_calendar_ics_credentials.sql` — widens `provider_credentials.name`'s `CHECK` vocabulary
+  with `cozi_ics_url`/`outlook_ics_url`. A feed URL is a capability secret exactly like an API key
+  (`docs/bb_principles.md` §12) — same encrypted, write-only, Settings-tab-editable shape as the
+  other four credentials, not a plain env var. `BIGBRAIN_CALENDAR_OWNER_USER_ID` and
+  `BIGBRAIN_MASK_WORK_CALENDAR` stay plain env deliberately: neither grants access on its own.

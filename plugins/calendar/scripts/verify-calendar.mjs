@@ -6,7 +6,7 @@
 // applyPrivacyMask's masking/no-masking behavior directly.
 
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
-import { info, registerTools } from '../dist/index.js';
+import { info, registerTools, startBackgroundJobs } from '../dist/index.js';
 import { syncFeedOnce } from '../dist/icsSync.js';
 import { applyPrivacyMask } from '../dist/parseWorkEvent.js';
 import { sourceMeta } from '../dist/sourceMeta.js';
@@ -213,6 +213,29 @@ async function main() {
   const rawEvent = { externalId: 'x', title: 'Real title', description: 'Real desc', location: 'Real place', startTime: 'a', endTime: 'b', allDay: false };
   assert(applyPrivacyMask(rawEvent, false) === rawEvent, 'applyPrivacyMask is a no-op (same reference) when shouldMask=false');
   assert(applyPrivacyMask(rawEvent, true).title === 'Work Commitment', 'applyPrivacyMask replaces title when shouldMask=true');
+
+  // --- startBackgroundJobs resolves feed URLs via the credential store, not raw env (bb_principles.md §12) ---
+  {
+    const resolveCalls = [];
+    const fakeCredentials = {
+      async resolve(name, envFallback) {
+        resolveCalls.push({ name, envFallback });
+        return undefined; // neither feed "configured" — proves no poll timer gets started off unresolved secrets
+      },
+    };
+    const originalOwner = process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
+    process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID = USER_ID;
+    try {
+      await startBackgroundJobs({ db, credentials: fakeCredentials });
+    } finally {
+      if (originalOwner === undefined) delete process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
+      else process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID = originalOwner;
+    }
+    assert(
+      resolveCalls.some((c) => c.name === 'cozi_ics_url') && resolveCalls.some((c) => c.name === 'outlook_ics_url'),
+      'startBackgroundJobs resolves both ICS feed URLs through deps.credentials, not process.env directly',
+    );
+  }
 }
 
 main().catch((err) => {

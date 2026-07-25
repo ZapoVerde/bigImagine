@@ -13,8 +13,9 @@
  * distinction in that per-household-member map (nor should there be one bolted on for this).
  *
  * Never returns a plaintext or ciphertext credential value — listCredentials only ever reports
- * whether each of the four fixed names is configured and when it was last touched. The admin
- * page (adminPage.ts) is built around that: credentials can be set/rotated, never viewed back.
+ * whether each fixed name (CREDENTIAL_NAMES) is configured and when it was last touched. Write-
+ * only by construction (docs/bb_principles.md §12): the Settings tab is built around that —
+ * credentials can be set/rotated, never viewed back.
  *
  * Also backs the Settings tab's connection picker (GET/POST /v1/admin/settings, and
  * GET /v1/admin/settings/models for the model dropdown within whichever connection is
@@ -36,7 +37,7 @@
  *
  * @api-declaration
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
- * listCredentials(store) — CredentialSummary[] for all four fixed names
+ * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
  * setCredential(store, name, value) — encrypts + upserts the one named credential
  * getActiveProfileSetting(store, profiles, envActiveProfile) — DB value if set, else the
  *   boot-time env fallback, for both the active profile and its model, alongside every

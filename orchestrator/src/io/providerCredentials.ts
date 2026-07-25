@@ -1,12 +1,20 @@
 /**
  * @file orchestrator/src/io/providerCredentials.ts
- * @stamp 2026-07-24
- * @architectural-role IO Wrapper — encrypted, DB-backed provider API key storage
+ * @stamp 2026-07-25
+ * @architectural-role IO Wrapper — encrypted, DB-backed secret storage
  * @description
- * Backs the four credentials named below (db/migrations/0008_provider_credentials.sql) with
- * createFieldCipher (io/fieldCipher.ts) — reused as-is, no crypto reimplemented here. resolve()
- * is this codebase's first decrypt-on-read call site; fieldCipher.ts's own preamble notes none
- * existed yet, only the encrypt-on-write idiom in ingestNoteTool.ts.
+ * Backs the credentials named below (db/migrations/0008_provider_credentials.sql,
+ * 0014_calendar_ics_credentials.sql) with createFieldCipher (io/fieldCipher.ts) — reused as-is, no
+ * crypto reimplemented here. resolve() is this codebase's first decrypt-on-read call site;
+ * fieldCipher.ts's own preamble notes none existed yet, only the encrypt-on-write idiom in
+ * ingestNoteTool.ts.
+ *
+ * The one shape every secret in this codebase uses (docs/bb_principles.md §12): a closed, named
+ * vocabulary, encrypted at rest, never returned in plaintext or ciphertext once set — a new secret
+ * is a new name added to CREDENTIAL_NAMES plus a migration widening the CHECK constraint, not a
+ * new parallel mechanism. Non-secret config that merely selects or configures behavior (a user id,
+ * a feature flag) never belongs in this vocabulary — see BIGBRAIN_NOTION_OWNER_USER_ID and
+ * BIGBRAIN_CALENDAR_OWNER_USER_ID, both deliberately plain env instead.
  *
  * resolve()'s env-fallback-and-seed behavior is what lets this ship against an existing,
  * non-empty deployment without a manual DB write on cutover day: if no row exists yet, it uses
@@ -39,7 +47,14 @@
 import type { FieldCipher } from './fieldCipher.js';
 import type { PostgresClient } from './postgres.js';
 
-export const CREDENTIAL_NAMES = ['deepseek_api_key', 'openrouter_api_key', 'voyage_api_key', 'notion_token'] as const;
+export const CREDENTIAL_NAMES = [
+  'deepseek_api_key',
+  'openrouter_api_key',
+  'voyage_api_key',
+  'notion_token',
+  'cozi_ics_url',
+  'outlook_ics_url',
+] as const;
 export type CredentialName = (typeof CREDENTIAL_NAMES)[number];
 
 export const UNMANAGED_SENTINEL = 'unused-managed-in-db';
@@ -69,10 +84,11 @@ export function createProviderCredentialStore(db: PostgresClient, cipher: FieldC
 
   return {
     async list(): Promise<CredentialSummary[]> {
+      const placeholders = CREDENTIAL_NAMES.map((_, i) => `($${i + 1})`).join(', ');
       const rows = await db.withSystemScope((session) =>
         session.query<{ name: CredentialName; updated_at: string | null }>(
           `select v.name as name, pc.updated_at as updated_at
-           from (values ($1), ($2), ($3), ($4)) as v(name)
+           from (values ${placeholders}) as v(name)
            left join provider_credentials pc using (name)
            order by v.name`,
           [...CREDENTIAL_NAMES],

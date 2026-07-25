@@ -7,23 +7,31 @@
  * object, an async `registerTools`, and an optional `startBackgroundJobs`. Neither tool needs
  * deps.llm/embeddings/cipher/notion — only ctx.db/ctx.userId, supplied per-call.
  *
- * ICS feed config (Cozi/Outlook URLs, the owning user, the work-calendar masking flag) is read
- * directly from process.env here rather than threaded through PluginDeps — it's calendar-specific
- * config no other plugin needs, unlike the cross-cutting clients (llm/notion/etc.) index.ts
- * constructs centrally. Best-effort like Notion sync: any feed with no URL configured is simply
- * skipped, and the whole poll loop never starts if neither feed nor an owner user id is set.
+ * ICS feed URLs are secrets (docs/bb_principles.md §12: a capability URL grants access on its
+ * own, same as an API key) — resolved via deps.credentials ('cozi_ics_url'/'outlook_ics_url',
+ * db/migrations/0014_calendar_ics_credentials.sql), same encrypted write-only store index.ts uses
+ * for the LLM/Notion keys, editable from the Settings tab rather than a .env round-trip.
+ * BIGBRAIN_COZI_ICS_URL/BIGBRAIN_OUTLOOK_ICS_URL env vars still exist purely as resolve()'s
+ * one-time seed-on-first-boot fallback (io/providerCredentials.ts), not the ongoing source of
+ * truth. The owning user id and the masking flag are NOT secrets — neither grants access on its
+ * own — so both stay plain process.env reads, same as BIGBRAIN_NOTION_OWNER_USER_ID.
+ *
+ * Best-effort like Notion sync: any feed that fails to resolve (unset, or explicitly unmanaged) is
+ * simply skipped, and the whole poll loop never starts if neither feed nor an owner user id
+ * resolves.
  *
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [get_calendar_schedule, create_calendar_event]
- * startBackgroundJobs(deps) — starts the ICS poll loop (icsSync.ts) if configured
+ * startBackgroundJobs(deps) — resolves ICS feed credentials, then starts the poll loop
+ *   (icsSync.ts) if at least one feed configured
  *
  * @contract
  *   assertions:
- *     purity:          impure (constructs tools that do IO; starts a background poll timer when
- *                      at least one ICS feed is configured)
+ *     purity:          impure (constructs tools that do IO; resolves credentials; starts a
+ *                      background poll timer when at least one ICS feed is configured)
  *     state_ownership: [the ICS sync poll timer, when started]
- *     external_io:     []
+ *     external_io:     [Postgres, via deps.credentials, before the poll timer itself starts]
  */
 
 import type { PluginDeps } from '@bigbrain/orchestrator/plugin-loader';
@@ -45,19 +53,24 @@ export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]
   return [createGetCalendarScheduleTool(), createCreateCalendarEventTool()];
 }
 
-export function startBackgroundJobs(deps: PluginDeps): void {
+export async function startBackgroundJobs(deps: PluginDeps): Promise<void> {
   const ownerUserId = process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
   if (!ownerUserId) {
     log.info('calendar: BIGBRAIN_CALENDAR_OWNER_USER_ID unset, ICS sync disabled (native events via create_calendar_event still work)');
     return;
   }
 
+  const [coziUrl, outlookUrl] = await Promise.all([
+    deps.credentials.resolve('cozi_ics_url', process.env.BIGBRAIN_COZI_ICS_URL),
+    deps.credentials.resolve('outlook_ics_url', process.env.BIGBRAIN_OUTLOOK_ICS_URL),
+  ]);
+
   const feeds: IcsFeedConfig[] = [];
-  if (process.env.BIGBRAIN_COZI_ICS_URL) feeds.push({ source: 'cozi', url: process.env.BIGBRAIN_COZI_ICS_URL });
-  if (process.env.BIGBRAIN_OUTLOOK_ICS_URL) feeds.push({ source: 'outlook', url: process.env.BIGBRAIN_OUTLOOK_ICS_URL });
+  if (coziUrl) feeds.push({ source: 'cozi', url: coziUrl });
+  if (outlookUrl) feeds.push({ source: 'outlook', url: outlookUrl });
 
   if (feeds.length === 0) {
-    log.info('calendar: no BIGBRAIN_COZI_ICS_URL/BIGBRAIN_OUTLOOK_ICS_URL configured, ICS sync disabled');
+    log.info('calendar: neither cozi_ics_url nor outlook_ics_url is configured (Settings tab or BIGBRAIN_*_ICS_URL seed), ICS sync disabled');
     return;
   }
 

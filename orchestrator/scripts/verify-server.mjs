@@ -261,6 +261,8 @@ const realTools = await loadPlugins(realPluginsDir, {
   embeddings: createStubEmbeddingProvider(8),
   cipher: testCipher,
   notion: undefined,
+  db: createPostgresClient(createFakePool()),
+  credentials: createFakeCredentialStore(),
 });
 assert(
   realTools.some((t) => t.definition.name === 'ingest_note'),
@@ -471,8 +473,8 @@ const listOkRes = await fetch(`${base}/v1/admin/credentials`, {
 const listOkBody = await listOkRes.json();
 assert(listOkRes.status === 200, 'GET /v1/admin/credentials with the correct admin key returns 200');
 assert(
-  listOkBody.credentials.length === 4 && listOkBody.credentials.every((c) => c.configured === false),
-  'GET /v1/admin/credentials returns all four names, none configured yet',
+  listOkBody.credentials.length === CREDENTIAL_NAMES.length && listOkBody.credentials.every((c) => c.configured === false),
+  'GET /v1/admin/credentials returns every credential name, none configured yet',
 );
 
 const setNoAuthRes = await fetch(`${base}/v1/admin/credentials`, {
