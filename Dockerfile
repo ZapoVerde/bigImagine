@@ -13,6 +13,8 @@ COPY plugins/recipes/package.json plugins/recipes/package.json
 COPY plugins/notes/package.json plugins/notes/package.json
 COPY plugins/prompt-presets/package.json plugins/prompt-presets/package.json
 COPY plugins/calendar/package.json plugins/calendar/package.json
+COPY plugins/web/package.json plugins/web/package.json
+COPY plugins/weather/package.json plugins/weather/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci
 
@@ -27,6 +29,8 @@ RUN npm run build --workspace=@bigbrain/orchestrator \
  && npm run build --workspace=@bigbrain/plugin-notes \
  && npm run build --workspace=@bigbrain/plugin-prompt-presets \
  && npm run build --workspace=@bigbrain/plugin-calendar \
+ && npm run build --workspace=@bigbrain/plugin-web \
+ && npm run build --workspace=@bigbrain/plugin-weather \
  && npm run build --workspace=@bigbrain/frontend
 
 ENV NODE_ENV=production

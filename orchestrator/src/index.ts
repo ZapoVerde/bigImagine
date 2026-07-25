@@ -24,6 +24,13 @@
  * providerCredentials.UNMANAGED_SENTINEL turns a since-deleted DB row into a boot-time failure
  * rather than a silent one (the two explicit checks below).
  *
+ * Also disables Node's default Happy Eyeballs (autoSelectFamily) dual-stack connection racing
+ * before anything else runs — this container has no working IPv6 route, and any outbound host
+ * that happens to publish an AAAA record (confirmed live against Open-Meteo's geocoding API)
+ * hangs until timeout instead of falling back to IPv4 promptly. Process-wide, not per-call,
+ * since every IO Wrapper's outbound fetch (LLM providers, Notion, plugins/web, plugins/weather,
+ * calendar ICS feeds) shares the same broken assumption.
+ *
  * @api-declaration
  * (entry point — no exports)
  *
@@ -34,6 +41,7 @@
  *     external_io:     [Postgres, inbound HTTP]
  */
 
+import { setDefaultAutoSelectFamily } from 'node:net';
 import { Pool } from 'pg';
 import { log } from './io/logger.js';
 import { createLlmProvider } from './io/llm/index.js';
@@ -58,6 +66,17 @@ function requireEnv(name: string): string {
 }
 
 async function main(): Promise<void> {
+  // This container has no functional IPv6 route (loopback only), but Node 20+ defaults to Happy
+  // Eyeballs (autoSelectFamily) for any hostname that resolves both an A and AAAA record —
+  // racing IPv4 against IPv6 rather than trying IPv4 first. Confirmed live: fetch() to
+  // geocoding-api.open-meteo.com (which has an AAAA record) hung until timeout, while the exact
+  // same origin over a raw IPv4 socket responded in ~200ms — this container's IPv6 attempt isn't
+  // failing fast enough for Happy Eyeballs' fallback to matter. Disabling it process-wide is safe
+  // here since nothing in this deployment has real IPv6 connectivity to lose, and it protects
+  // every future outbound call (any provider, any plugin) from the same failure mode, not just
+  // this one host.
+  setDefaultAutoSelectFamily(false);
+
   const pool = new Pool({
     host: requireEnv('BIGBRAIN_PG_HOST'),
     port: Number(process.env.BIGBRAIN_PG_PORT ?? 5432),

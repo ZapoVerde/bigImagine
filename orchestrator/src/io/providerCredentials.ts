@@ -54,6 +54,7 @@ export const CREDENTIAL_NAMES = [
   'notion_token',
   'cozi_ics_url',
   'outlook_ics_url',
+  'brave_api_key',
 ] as const;
 export type CredentialName = (typeof CREDENTIAL_NAMES)[number];
 
