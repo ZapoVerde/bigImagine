@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
 import type { AddListItemResult, CompleteListItemResult, ListItem } from '../api/types';
 import './ListsView.css';
@@ -30,6 +30,7 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
   const [error, setError] = useState<string | null>(null);
   const [newListName, setNewListName] = useState('');
   const [newItemName, setNewItemName] = useState('');
+  const itemInputRef = useRef<HTMLInputElement>(null);
 
   async function reload() {
     setLoading(true);
@@ -63,6 +64,7 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
       onSelectList(listName);
       onChanged();
       await reload();
+      itemInputRef.current?.focus();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to add item');
     }
@@ -137,18 +139,23 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
           addItem();
         }}
       >
+        {!selectedListName && (
+          <>
+            <input
+              list="known-lists"
+              value={newListName}
+              onChange={(e) => setNewListName(e.target.value)}
+              placeholder="List name"
+            />
+            <datalist id="known-lists">
+              {knownListNames.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+          </>
+        )}
         <input
-          list="known-lists"
-          value={newListName}
-          onChange={(e) => setNewListName(e.target.value)}
-          placeholder={selectedListName ?? 'List name'}
-        />
-        <datalist id="known-lists">
-          {knownListNames.map((name) => (
-            <option key={name} value={name} />
-          ))}
-        </datalist>
-        <input
+          ref={itemInputRef}
           value={newItemName}
           onChange={(e) => setNewItemName(e.target.value)}
           placeholder="Item name"
