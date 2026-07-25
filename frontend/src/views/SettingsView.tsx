@@ -2,15 +2,19 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   adminGetActiveProfile,
+  adminGetCalendarSettings,
+  adminGetNotionSettings,
   adminGetTimezone,
   adminListCredentials,
   adminListModelsForProfile,
   adminSetActiveProfile,
+  adminSetCalendarSettings,
   adminSetCredential,
+  adminSetNotionSettings,
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type { CredentialSummary, ProfileModelsResult } from '../api/types';
+import type { CalendarSettings, CredentialSummary, NotionSettings, ProfileModelsResult } from '../api/types';
 import './SettingsView.css';
 
 type ModelOption = ProfileModelsResult['models'][number];
@@ -65,13 +69,43 @@ export default function SettingsView() {
   const [timezoneStatus, setTimezoneStatus] = useState('');
   const timezoneOptions = listTimezoneOptions();
 
+  const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
+  const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
+  const [maskWorkCalendar, setMaskWorkCalendar] = useState(false);
+  const [selectedMaskWorkCalendar, setSelectedMaskWorkCalendar] = useState(false);
+  const [calendarStatus, setCalendarStatus] = useState('');
+  const calendarPollRef = useRef<number | null>(null);
+
+  const [notionOwnerUserId, setNotionOwnerUserId] = useState('');
+  const [selectedNotionOwnerUserId, setSelectedNotionOwnerUserId] = useState('');
+  const [notionDataSourceId, setNotionDataSourceId] = useState('');
+  const [selectedNotionDataSourceId, setSelectedNotionDataSourceId] = useState('');
+  const [notionStatus, setNotionStatus] = useState('');
+  const notionPollRef = useRef<number | null>(null);
+
+  function applyCalendarSettings(settings: CalendarSettings) {
+    setCalendarOwnerUserId(settings.ownerUserId ?? '');
+    setSelectedCalendarOwnerUserId(settings.ownerUserId ?? '');
+    setMaskWorkCalendar(settings.maskWorkCalendar);
+    setSelectedMaskWorkCalendar(settings.maskWorkCalendar);
+  }
+
+  function applyNotionSettings(settings: NotionSettings) {
+    setNotionOwnerUserId(settings.ownerUserId ?? '');
+    setSelectedNotionOwnerUserId(settings.ownerUserId ?? '');
+    setNotionDataSourceId(settings.listsDataSourceId ?? '');
+    setSelectedNotionDataSourceId(settings.listsDataSourceId ?? '');
+  }
+
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz] = await Promise.all([
+        const [creds, connection, tz, calendarSettings, notionSettings] = await Promise.all([
           adminListCredentials(null),
           adminGetActiveProfile(null),
           adminGetTimezone(null),
+          adminGetCalendarSettings(null),
+          adminGetNotionSettings(null),
         ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
@@ -82,6 +116,8 @@ export default function SettingsView() {
         setSelectedModel(connection.activeModel);
         setTimezone(tz);
         setSelectedTimezone(tz);
+        applyCalendarSettings(calendarSettings);
+        applyNotionSettings(notionSettings);
         setUnlocked(true);
       } catch {
         // Not covered by Access (or Access isn't configured here) — fall back to the key form.
@@ -94,10 +130,12 @@ export default function SettingsView() {
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz] = await Promise.all([
+      const [creds, connection, tz, calendarSettings, notionSettings] = await Promise.all([
         adminListCredentials(adminKey),
         adminGetActiveProfile(adminKey),
         adminGetTimezone(adminKey),
+        adminGetCalendarSettings(adminKey),
+        adminGetNotionSettings(adminKey),
       ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -108,6 +146,8 @@ export default function SettingsView() {
       setSelectedModel(connection.activeModel);
       setTimezone(tz);
       setSelectedTimezone(tz);
+      applyCalendarSettings(calendarSettings);
+      applyNotionSettings(notionSettings);
       setUnlocked(true);
     } catch (err) {
       setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
@@ -173,6 +213,77 @@ export default function SettingsView() {
           setActiveProfile(selectedProfile);
           setActiveModel(selectedModel);
           setConnectionStatus('Back up — reload to confirm.');
+        }
+      } catch {
+        // still restarting, keep polling
+      }
+    }, 2000);
+  }
+
+  // Boot-time settings (docs/bb_principles.md §13) — restart-on-save, same shape as saveConnection
+  // above, since each is only read once when the thing it configures is constructed.
+  async function saveCalendarSettings() {
+    if (
+      !selectedCalendarOwnerUserId ||
+      (selectedCalendarOwnerUserId === calendarOwnerUserId && selectedMaskWorkCalendar === maskWorkCalendar)
+    ) {
+      return;
+    }
+    setCalendarStatus('');
+    try {
+      await adminSetCalendarSettings(
+        { owner_user_id: selectedCalendarOwnerUserId, mask_work_calendar: selectedMaskWorkCalendar },
+        adminKey,
+      );
+    } catch (err) {
+      setCalendarStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setCalendarStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
+
+    calendarPollRef.current = window.setInterval(async () => {
+      try {
+        const res = await fetch('/healthz');
+        if (res.ok) {
+          if (calendarPollRef.current) clearInterval(calendarPollRef.current);
+          setCalendarOwnerUserId(selectedCalendarOwnerUserId);
+          setMaskWorkCalendar(selectedMaskWorkCalendar);
+          setCalendarStatus('Back up — reload to confirm.');
+        }
+      } catch {
+        // still restarting, keep polling
+      }
+    }, 2000);
+  }
+
+  async function saveNotionSettings() {
+    if (
+      !selectedNotionOwnerUserId ||
+      !selectedNotionDataSourceId ||
+      (selectedNotionOwnerUserId === notionOwnerUserId && selectedNotionDataSourceId === notionDataSourceId)
+    ) {
+      return;
+    }
+    setNotionStatus('');
+    try {
+      await adminSetNotionSettings(
+        { owner_user_id: selectedNotionOwnerUserId, lists_data_source_id: selectedNotionDataSourceId },
+        adminKey,
+      );
+    } catch (err) {
+      setNotionStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setNotionStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
+
+    notionPollRef.current = window.setInterval(async () => {
+      try {
+        const res = await fetch('/healthz');
+        if (res.ok) {
+          if (notionPollRef.current) clearInterval(notionPollRef.current);
+          setNotionOwnerUserId(selectedNotionOwnerUserId);
+          setNotionDataSourceId(selectedNotionDataSourceId);
+          setNotionStatus('Back up — reload to confirm.');
         }
       } catch {
         // still restarting, keep polling
@@ -300,6 +411,74 @@ export default function SettingsView() {
           Save
         </button>
         <div className="status">{timezoneStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Calendar</legend>
+        <label>
+          Owning user id
+          <br />
+          <input
+            value={selectedCalendarOwnerUserId}
+            onChange={(e) => setSelectedCalendarOwnerUserId(e.target.value)}
+            placeholder="the bigBrain user Cozi/Outlook feed rows are attributed to"
+          />
+        </label>
+        <br />
+        <label>
+          <input
+            type="checkbox"
+            checked={selectedMaskWorkCalendar}
+            onChange={(e) => setSelectedMaskWorkCalendar(e.target.checked)}
+          />
+          Mask Outlook event titles/descriptions/locations
+        </label>
+        <br />
+        <button
+          onClick={saveCalendarSettings}
+          disabled={
+            !selectedCalendarOwnerUserId ||
+            (selectedCalendarOwnerUserId === calendarOwnerUserId && selectedMaskWorkCalendar === maskWorkCalendar)
+          }
+        >
+          Save &amp; Restart
+        </button>
+        <div className="status">{calendarStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Notion Sync</legend>
+        <label>
+          Owning user id
+          <br />
+          <input
+            value={selectedNotionOwnerUserId}
+            onChange={(e) => setSelectedNotionOwnerUserId(e.target.value)}
+            placeholder="the bigBrain user items typed directly into Notion get attributed to"
+          />
+        </label>
+        <br />
+        <label>
+          Lists data source id
+          <br />
+          <input
+            value={selectedNotionDataSourceId}
+            onChange={(e) => setSelectedNotionDataSourceId(e.target.value)}
+            placeholder="the 'bigBrain Lists' database's data_source_id"
+          />
+        </label>
+        <br />
+        <button
+          onClick={saveNotionSettings}
+          disabled={
+            !selectedNotionOwnerUserId ||
+            !selectedNotionDataSourceId ||
+            (selectedNotionOwnerUserId === notionOwnerUserId && selectedNotionDataSourceId === notionDataSourceId)
+          }
+        >
+          Save &amp; Restart
+        </button>
+        <div className="status">{notionStatus}</div>
       </fieldset>
 
       <table>

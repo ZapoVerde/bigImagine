@@ -118,4 +118,12 @@ A value that only configures behavior — an identifier, a flag, a selected prof
 
 ---
 
+## 13. Runtime Config Lives in the Database; `.env` Is for Bootstrap Only
+
+Once the orchestrator can reach Postgres and authenticate a caller, no further configuration should require editing `.env` and redeploying. `.env` is reserved for what has to exist *before* either of those is true — the database connection itself, the encryption key protecting everything else at rest, the admin key that gates changing any of this. A value belongs there because the system cannot function without it before it's set, not because it happened to ship that way first.
+
+Everything else — which connection is active, a shared feed's owning user, a masking flag — is DB-backed and editable from the Settings tab, whether or not it's also a secret (§12 decides encrypted-and-write-only vs. plain-and-visible; this decides whether it lives in the database at all). A setting that still requires `.env` and a redeploy to change is either genuinely bootstrap-level, or unfinished — not a third category to design around.
+
+---
+
 *Further principles will be added as they emerge from real friction, not anticipated in advance.*

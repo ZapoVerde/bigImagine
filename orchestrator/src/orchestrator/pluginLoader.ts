@@ -29,9 +29,11 @@
  * deps.credentials is the same encrypted, write-only secret store index.ts uses to resolve its
  * own provider keys (docs/bb_principles.md §12) — any plugin with its own named secret (e.g.
  * calendar's cozi_ics_url/outlook_ics_url) resolves it the same way, rather than reading
- * process.env directly for anything capability-shaped. Non-secret plugin config (an owner user id,
- * a feature flag) still reads straight from process.env — deps.credentials is only for the closed
- * CREDENTIAL_NAMES vocabulary.
+ * process.env directly for anything capability-shaped. deps.settings is the plaintext counterpart
+ * (docs/bb_principles.md §13) for a plugin's own non-secret boot-time config (e.g. calendar's
+ * calendar_owner_user_id/mask_work_calendar) — DB value if set, its legacy BIGBRAIN_*-prefixed env
+ * var as the fallback otherwise. Only a plugin whose config genuinely has no reason to be
+ * DB/Settings-tab-editable reads process.env directly.
  *
  * @api-declaration
  * loadPlugins(pluginsDir, deps) — returns every RegisteredTool every successfully-loaded plugin
@@ -52,6 +54,7 @@ import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { FieldCipher } from '../io/fieldCipher.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import type { NotionClient } from '../io/notion.js';
+import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
 import type { RegisteredTool } from './toolRegistry.js';
@@ -63,6 +66,7 @@ export interface PluginDeps {
   notion: NotionClient | undefined;
   db: PostgresClient;
   credentials: ProviderCredentialStore;
+  settings: OrchestratorSettingsStore;
 }
 
 export interface PluginInfo {

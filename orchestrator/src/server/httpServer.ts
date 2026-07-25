@@ -81,6 +81,12 @@
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
  * into anything at boot, so a POST here just writes the value and responds 200 immediately.
  *
+ * Same admin gate, same restart-on-save shape as credentials/settings, for GET/POST
+ * /v1/admin/calendar-settings and GET/POST /v1/admin/notion-settings (docs/bb_principles.md
+ * §13 — non-secret runtime config belongs in the database, not .env). Each is read once at boot
+ * (plugins/calendar's ICS poll; io/notion.ts's client construction), so a live update with no
+ * restart would silently do nothing until the next one anyway — unlike timezone.
+ *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
  *
@@ -109,15 +115,21 @@ import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegis
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
   getActiveProfileSetting,
+  getCalendarSettings,
   getHouseholdTimezone,
+  getNotionSettings,
   listCredentials,
   listModelsForProfile,
   parseSetActiveProfileBody,
+  parseSetCalendarSettingsBody,
   parseSetCredentialBody,
+  parseSetNotionSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
+  setCalendarSettings,
   setCredential,
   setHouseholdTimezone,
+  setNotionSettings,
 } from './adminServer.js';
 import { buildOpenApiSpec, invokeTool } from './openApiToolServer.js';
 import {
@@ -512,6 +524,64 @@ async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps
   sendJson(res, 200, { timezone: value });
 }
 
+async function handleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getCalendarSettings(deps.settings));
+}
+
+async function handleCalendarSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetCalendarSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { owner_user_id?: non-empty string, mask_work_calendar?: boolean }, at least one' });
+    return;
+  }
+
+  await setCalendarSettings(deps.settings, parsed);
+
+  const payload = JSON.stringify({ status: 'restarting' });
+  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+  res.end(payload, () => {
+    const restart = deps.triggerRestart ?? (() => process.exit(0));
+    setTimeout(restart, 100);
+  });
+}
+
+async function handleNotionSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getNotionSettings(deps.settings));
+}
+
+async function handleNotionSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetNotionSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { owner_user_id?: non-empty string, lists_data_source_id?: non-empty string }, at least one' });
+    return;
+  }
+
+  await setNotionSettings(deps.settings, parsed);
+
+  const payload = JSON.stringify({ status: 'restarting' });
+  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+  res.end(payload, () => {
+    const restart = deps.triggerRestart ?? (() => process.exit(0));
+    setTimeout(restart, 100);
+  });
+}
+
 async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   if (deps.llm.listModels) {
     try {
@@ -814,6 +884,38 @@ async function handleRequest(
       return;
     }
     await handleTimezoneSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/calendar-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCalendarSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/calendar-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCalendarSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/notion-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleNotionSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/notion-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleNotionSettingsSet(req, res, deps);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

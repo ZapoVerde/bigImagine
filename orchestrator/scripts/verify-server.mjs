@@ -263,6 +263,7 @@ const realTools = await loadPlugins(realPluginsDir, {
   notion: undefined,
   db: createPostgresClient(createFakePool()),
   credentials: createFakeCredentialStore(),
+  settings: createFakeSettingsStore(),
 });
 assert(
   realTools.some((t) => t.definition.name === 'ingest_note'),
@@ -578,6 +579,71 @@ const settingsSetProfileOnlyRes = await fetch(`${base}/v1/admin/settings`, {
 });
 assert(settingsSetProfileOnlyRes.status === 202, 'switching profile alone (no model) still succeeds');
 assert(settings.setCalls.length === 3, 'omitting model means only the profile write happens, not a second settings.set call');
+
+// --- Admin calendar-settings route (docs/bb_principles.md §13) ---
+
+const calNoAuthRes = await fetch(`${base}/v1/admin/calendar-settings`);
+assert(calNoAuthRes.status === 401, 'GET /v1/admin/calendar-settings with no auth header returns 401');
+
+const calSetNoAuthRes = await fetch(`${base}/v1/admin/calendar-settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ owner_user_id: 'nope' }),
+});
+assert(calSetNoAuthRes.status === 401, 'POST /v1/admin/calendar-settings with no auth header returns 401');
+
+const calSetEmptyRes = await fetch(`${base}/v1/admin/calendar-settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({}),
+});
+assert(calSetEmptyRes.status === 400, 'POST /v1/admin/calendar-settings with neither field given returns 400');
+
+const calSetOkRes = await fetch(`${base}/v1/admin/calendar-settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ owner_user_id: '55555555-5555-5555-5555-555555555555', mask_work_calendar: true }),
+});
+const calSetOkBody = await calSetOkRes.json();
+assert(calSetOkRes.status === 202 && calSetOkBody.status === 'restarting', 'an authenticated POST /v1/admin/calendar-settings returns 202/restarting');
+assert(
+  settings.setCalls.some((c) => c.key === 'calendar_owner_user_id' && c.value === '55555555-5555-5555-5555-555555555555') &&
+    settings.setCalls.some((c) => c.key === 'mask_work_calendar' && c.value === 'true'),
+  'the settings store recorded both the owner and mask writes',
+);
+
+const calGetAfterSaveRes = await fetch(`${base}/v1/admin/calendar-settings`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const calGetAfterSaveBody = await calGetAfterSaveRes.json();
+assert(
+  calGetAfterSaveBody.ownerUserId === '55555555-5555-5555-5555-555555555555' && calGetAfterSaveBody.maskWorkCalendar === true,
+  'GET /v1/admin/calendar-settings reflects the newly saved values, even before the restart completes',
+);
+
+await new Promise((resolve) => setTimeout(resolve, 250));
+assert(restartCalls.length === 4, 'triggerRestart fired again after the calendar settings save flushed');
+
+// --- Admin notion-settings route (docs/bb_principles.md §13) ---
+
+const notionSettingsNoAuthRes = await fetch(`${base}/v1/admin/notion-settings`);
+assert(notionSettingsNoAuthRes.status === 401, 'GET /v1/admin/notion-settings with no auth header returns 401');
+
+const notionSetOkRes = await fetch(`${base}/v1/admin/notion-settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ owner_user_id: '66666666-6666-6666-6666-666666666666', lists_data_source_id: 'ds-123' }),
+});
+const notionSetOkBody = await notionSetOkRes.json();
+assert(notionSetOkRes.status === 202 && notionSetOkBody.status === 'restarting', 'an authenticated POST /v1/admin/notion-settings returns 202/restarting');
+assert(
+  settings.setCalls.some((c) => c.key === 'notion_owner_user_id' && c.value === '66666666-6666-6666-6666-666666666666') &&
+    settings.setCalls.some((c) => c.key === 'notion_lists_data_source_id' && c.value === 'ds-123'),
+  'the settings store recorded both the owner and data-source writes',
+);
+
+await new Promise((resolve) => setTimeout(resolve, 250));
+assert(restartCalls.length === 5, 'triggerRestart fired again after the notion settings save flushed');
 
 // --- Admin settings/models route (the model dropdown within a chosen connection) ---
 

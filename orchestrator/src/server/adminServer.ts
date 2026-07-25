@@ -35,6 +35,15 @@
  * parseSetTimezoneBody validates the given name is one Intl actually recognizes, rejecting a typo
  * before it's stored rather than failing later inside dateContext.ts.
  *
+ * Also backs two more boot-time settings groups (docs/bb_principles.md §13 — non-secret runtime
+ * config belongs in the database, not .env), same restart-on-save shape as the connection picker
+ * rather than timezone's live-update one, since each is only read once when the thing it
+ * configures is constructed: GET/POST /v1/admin/calendar-settings (calendar_owner_user_id,
+ * mask_work_calendar — plugins/calendar) and GET/POST /v1/admin/notion-settings
+ * (notion_owner_user_id, notion_lists_data_source_id — io/notion.ts). Each getter falls back to
+ * its legacy BIGBRAIN_*-prefixed env var when the DB has no value yet, so an existing deployment
+ * keeps working unchanged until someone actually visits Settings.
+ *
  * @api-declaration
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
  * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
@@ -52,13 +61,23 @@
  * parseSetTimezoneBody(raw) — validates {value} is a real IANA zone name Intl recognizes;
  *   undefined on any malformed shape or unrecognized name
  * setHouseholdTimezone(store, value) — upserts household_timezone
+ * getCalendarSettings(store) — { ownerUserId, maskWorkCalendar }, DB value or env fallback
+ * parseSetCalendarSettingsBody(raw) — validates {owner_user_id?, mask_work_calendar?}, at least
+ *   one present; undefined on any malformed shape
+ * setCalendarSettings(store, body) — upserts whichever of calendar_owner_user_id/
+ *   mask_work_calendar was given
+ * getNotionSettings(store) — { ownerUserId, listsDataSourceId }, DB value or env fallback
+ * parseSetNotionSettingsBody(raw) — validates {owner_user_id?, lists_data_source_id?}, at least
+ *   one present; undefined on any malformed shape
+ * setNotionSettings(store, body) — upserts whichever of notion_owner_user_id/
+ *   notion_lists_data_source_id was given
  *
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
- *                      isValidTimeZone are pure; the rest are impure (Postgres IO via the
- *                      injected store, or a network call to the named provider for
- *                      listModelsForProfile)
+ *                      isValidTimeZone/parseSetCalendarSettingsBody/parseSetNotionSettingsBody
+ *                      are pure; the rest are impure (Postgres IO via the injected store, or a
+ *                      network call to the named provider for listModelsForProfile)
  *     state_ownership: []
  *     external_io:     [Postgres (via the stores it's given); the configured LLM provider APIs]
  */
@@ -166,4 +185,83 @@ export function parseSetTimezoneBody(raw: unknown): string | undefined {
 
 export function setHouseholdTimezone(store: OrchestratorSettingsStore, value: string): Promise<void> {
   return store.set('household_timezone', value);
+}
+
+// --- Calendar settings (docs/bb_principles.md §13) ---
+// Boot-time, restart-on-save, same shape as the connection picker above — unlike timezone, these
+// are only ever read once (plugins/calendar/src/index.ts's startBackgroundJobs), so a live update
+// with no restart would silently do nothing until the next boot anyway.
+
+export interface CalendarSettings {
+  ownerUserId: string | null;
+  maskWorkCalendar: boolean;
+}
+
+export async function getCalendarSettings(store: OrchestratorSettingsStore): Promise<CalendarSettings> {
+  const ownerUserId = (await store.get('calendar_owner_user_id')) ?? process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID ?? null;
+  const maskRaw = (await store.get('mask_work_calendar')) ?? process.env.BIGBRAIN_MASK_WORK_CALENDAR;
+  return { ownerUserId, maskWorkCalendar: maskRaw === 'true' };
+}
+
+export interface SetCalendarSettingsBody {
+  ownerUserId?: string;
+  maskWorkCalendar?: boolean;
+}
+
+export function parseSetCalendarSettingsBody(raw: unknown): SetCalendarSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { owner_user_id, mask_work_calendar } = raw as Record<string, unknown>;
+  if (owner_user_id === undefined && mask_work_calendar === undefined) return undefined;
+  if (owner_user_id !== undefined && (typeof owner_user_id !== 'string' || owner_user_id.length === 0)) return undefined;
+  if (mask_work_calendar !== undefined && typeof mask_work_calendar !== 'boolean') return undefined;
+  return {
+    ownerUserId: typeof owner_user_id === 'string' ? owner_user_id : undefined,
+    maskWorkCalendar: typeof mask_work_calendar === 'boolean' ? mask_work_calendar : undefined,
+  };
+}
+
+export async function setCalendarSettings(store: OrchestratorSettingsStore, body: SetCalendarSettingsBody): Promise<void> {
+  if (body.ownerUserId !== undefined) await store.set('calendar_owner_user_id', body.ownerUserId);
+  if (body.maskWorkCalendar !== undefined) await store.set('mask_work_calendar', String(body.maskWorkCalendar));
+}
+
+// --- Notion settings (docs/bb_principles.md §13) ---
+// Same boot-time restart-on-save shape — read once when io/notion.ts's client is constructed
+// (index.ts). BIGBRAIN_NOTION_TOKEN stays entirely separate, in provider_credentials (§12): it's
+// the one secret in this trio, these two are identifiers.
+
+export interface NotionSettings {
+  ownerUserId: string | null;
+  listsDataSourceId: string | null;
+}
+
+export async function getNotionSettings(store: OrchestratorSettingsStore): Promise<NotionSettings> {
+  const ownerUserId = (await store.get('notion_owner_user_id')) ?? process.env.BIGBRAIN_NOTION_OWNER_USER_ID ?? null;
+  const listsDataSourceId =
+    (await store.get('notion_lists_data_source_id')) ?? process.env.BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID ?? null;
+  return { ownerUserId, listsDataSourceId };
+}
+
+export interface SetNotionSettingsBody {
+  ownerUserId?: string;
+  listsDataSourceId?: string;
+}
+
+export function parseSetNotionSettingsBody(raw: unknown): SetNotionSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { owner_user_id, lists_data_source_id } = raw as Record<string, unknown>;
+  if (owner_user_id === undefined && lists_data_source_id === undefined) return undefined;
+  if (owner_user_id !== undefined && (typeof owner_user_id !== 'string' || owner_user_id.length === 0)) return undefined;
+  if (lists_data_source_id !== undefined && (typeof lists_data_source_id !== 'string' || lists_data_source_id.length === 0)) {
+    return undefined;
+  }
+  return {
+    ownerUserId: typeof owner_user_id === 'string' ? owner_user_id : undefined,
+    listsDataSourceId: typeof lists_data_source_id === 'string' ? lists_data_source_id : undefined,
+  };
+}
+
+export async function setNotionSettings(store: OrchestratorSettingsStore, body: SetNotionSettingsBody): Promise<void> {
+  if (body.ownerUserId !== undefined) await store.set('notion_owner_user_id', body.ownerUserId);
+  if (body.listsDataSourceId !== undefined) await store.set('notion_lists_data_source_id', body.listsDataSourceId);
 }

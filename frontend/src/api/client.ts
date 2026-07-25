@@ -1,5 +1,6 @@
 import type {
   ActiveProfileSetting,
+  CalendarSettings,
   ChatCompletionResponse,
   ChatDetail,
   ChatMessage,
@@ -8,6 +9,7 @@ import type {
   ChatSummary,
   CredentialSummary,
   Folder,
+  NotionSettings,
   ProfileModelsResult,
 } from './types';
 
@@ -239,4 +241,43 @@ export async function adminSetTimezone(timezone: string, adminKey: string | null
     body: JSON.stringify({ value: timezone }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** docs/bb_principles.md §13: non-secret runtime config, DB-backed and Settings-tab-editable
+ *  rather than .env-only. Both calendar and Notion settings are read once at boot, so a save
+ *  restarts the orchestrator (202/restarting), same UX as the connection picker. */
+export async function adminGetCalendarSettings(adminKey: string | null): Promise<CalendarSettings> {
+  const res = await fetch('/v1/admin/calendar-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<CalendarSettings>;
+}
+
+export async function adminSetCalendarSettings(
+  patch: { owner_user_id?: string; mask_work_calendar?: boolean },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch('/v1/admin/calendar-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+export async function adminGetNotionSettings(adminKey: string | null): Promise<NotionSettings> {
+  const res = await fetch('/v1/admin/notion-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<NotionSettings>;
+}
+
+export async function adminSetNotionSettings(
+  patch: { owner_user_id?: string; lists_data_source_id?: string },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch('/v1/admin/notion-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
 }

@@ -14,7 +14,10 @@
  * BIGBRAIN_COZI_ICS_URL/BIGBRAIN_OUTLOOK_ICS_URL env vars still exist purely as resolve()'s
  * one-time seed-on-first-boot fallback (io/providerCredentials.ts), not the ongoing source of
  * truth. The owning user id and the masking flag are NOT secrets — neither grants access on its
- * own — so both stay plain process.env reads, same as BIGBRAIN_NOTION_OWNER_USER_ID.
+ * own — but per docs/bb_principles.md §13 they're still DB-backed (orchestrator_settings via
+ * deps.settings, db/migrations/0015_settings_owner_ids.sql), Settings-tab-editable, plaintext, not
+ * .env-only: only the legacy BIGBRAIN_CALENDAR_OWNER_USER_ID/BIGBRAIN_MASK_WORK_CALENDAR env vars
+ * remain, as the fallback when the DB has no value yet.
  *
  * Best-effort like Notion sync: any feed that fails to resolve (unset, or explicitly unmanaged) is
  * simply skipped, and the whole poll loop never starts if neither feed nor an owner user id
@@ -54,15 +57,16 @@ export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]
 }
 
 export async function startBackgroundJobs(deps: PluginDeps): Promise<void> {
-  const ownerUserId = process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
+  const ownerUserId = (await deps.settings.get('calendar_owner_user_id')) ?? process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
   if (!ownerUserId) {
-    log.info('calendar: BIGBRAIN_CALENDAR_OWNER_USER_ID unset, ICS sync disabled (native events via create_calendar_event still work)');
+    log.info('calendar: no owning user configured (Settings tab or BIGBRAIN_CALENDAR_OWNER_USER_ID), ICS sync disabled (native events via create_calendar_event still work)');
     return;
   }
 
-  const [coziUrl, outlookUrl] = await Promise.all([
+  const [coziUrl, outlookUrl, maskSetting] = await Promise.all([
     deps.credentials.resolve('cozi_ics_url', process.env.BIGBRAIN_COZI_ICS_URL),
     deps.credentials.resolve('outlook_ics_url', process.env.BIGBRAIN_OUTLOOK_ICS_URL),
+    deps.settings.get('mask_work_calendar'),
   ]);
 
   const feeds: IcsFeedConfig[] = [];
@@ -74,9 +78,6 @@ export async function startBackgroundJobs(deps: PluginDeps): Promise<void> {
     return;
   }
 
-  startIcsSyncLoop(
-    deps.db,
-    { ownerUserId, feeds, maskWorkCalendar: process.env.BIGBRAIN_MASK_WORK_CALENDAR === 'true' },
-    ICS_POLL_INTERVAL_MS,
-  );
+  const maskWorkCalendar = (maskSetting ?? process.env.BIGBRAIN_MASK_WORK_CALENDAR) === 'true';
+  startIcsSyncLoop(deps.db, { ownerUserId, feeds, maskWorkCalendar }, ICS_POLL_INTERVAL_MS);
 }

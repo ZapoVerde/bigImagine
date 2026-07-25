@@ -61,3 +61,13 @@ Already applied by hand, not run automatically (see the file for the exact comma
   (`docs/bb_principles.md` §12) — same encrypted, write-only, Settings-tab-editable shape as the
   other four credentials, not a plain env var. `BIGBRAIN_CALENDAR_OWNER_USER_ID` and
   `BIGBRAIN_MASK_WORK_CALENDAR` stay plain env deliberately: neither grants access on its own.
+- `0015_settings_owner_ids.sql` — widens `orchestrator_settings.key`'s `CHECK` vocabulary with
+  `calendar_owner_user_id`/`mask_work_calendar` and `notion_owner_user_id`/
+  `notion_lists_data_source_id`. None of the four is a secret (`docs/bb_principles.md` §12 — an
+  owning user id is a selector, the mask flag is a toggle), but all four were still `.env`-only
+  before this, which §13 treats as unfinished, not a legitimate third category: once the
+  orchestrator can reach Postgres, non-secret runtime config belongs in the database and the
+  Settings tab, not a redeploy. Same restart-on-save shape as `active_llm_profile` (each is read
+  once, at boot, by whatever it configures — `plugins/calendar`'s ICS poll, `io/notion.ts`'s client
+  construction), with the legacy `BIGBRAIN_*`-prefixed env var as the fallback until a value is set
+  via `GET`/`POST /v1/admin/calendar-settings` or `/v1/admin/notion-settings`.

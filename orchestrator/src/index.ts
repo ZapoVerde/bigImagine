@@ -11,14 +11,18 @@
  * surface is everything under io/ and orchestrator/ that this file assembles.
  *
  * The Postgres pool is constructed before the LLM/embeddings/Notion clients now (previously the
- * reverse), because their credentials may come from provider_credentials
- * (io/providerCredentials.ts) rather than directly from env — deepseek/openrouter's apiKey,
- * BIGBRAIN_EMBEDDINGS_API_KEY, and BIGBRAIN_NOTION_TOKEN are rotated far more often than the rest
- * of this config, and doing so now only requires a value change + restart (restart: unless-stopped
- * in docker-compose.yml), not a rebuild — see orchestrator/src/server/adminServer.ts. The legacy
- * env vars remain the fallback used to seed provider_credentials on first boot after this
- * shipped; once an operator replaces them with providerCredentials.UNMANAGED_SENTINEL, the two
- * explicit checks below make a since-deleted DB row a boot-time failure, not a silent one.
+ * reverse), because their config may come from the database rather than directly from env —
+ * secrets from provider_credentials (io/providerCredentials.ts: deepseek/openrouter's apiKey,
+ * BIGBRAIN_EMBEDDINGS_API_KEY, BIGBRAIN_NOTION_TOKEN), non-secret identifiers from
+ * orchestrator_settings (io/orchestratorSettings.ts: Notion's owner user id / data source id —
+ * docs/bb_principles.md §§12-13 draw that line). Both are rotated far more often than the rest of
+ * this config, and doing so now only requires a value change + restart (restart: unless-stopped in
+ * docker-compose.yml), not a rebuild — see orchestrator/src/server/adminServer.ts. The legacy env
+ * vars remain the fallback used until an operator sets the DB-backed value via the Settings tab;
+ * for the two encrypted credentials specifically, once that value is set the store also seeds
+ * itself from the env fallback on first read, and replacing that env var with
+ * providerCredentials.UNMANAGED_SENTINEL turns a since-deleted DB row into a boot-time failure
+ * rather than a silent one (the two explicit checks below).
  *
  * @api-declaration
  * (entry point — no exports)
@@ -110,11 +114,22 @@ async function main(): Promise<void> {
     BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
   });
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
-  const notion = createNotionClient({ ...process.env, BIGBRAIN_NOTION_TOKEN: notionToken ?? '' });
+  // Owner user id / data source id are non-secret (docs/bb_principles.md §12) so they're DB-backed
+  // via orchestrator_settings, not provider_credentials — same restart-on-save shape as the
+  // connection picker, with the legacy env var as fallback until someone visits Settings (§13).
+  const notionOwnerUserId = (await settings.get('notion_owner_user_id')) ?? process.env.BIGBRAIN_NOTION_OWNER_USER_ID;
+  const notionListsDataSourceId =
+    (await settings.get('notion_lists_data_source_id')) ?? process.env.BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID;
+  const notion = createNotionClient({
+    ...process.env,
+    BIGBRAIN_NOTION_TOKEN: notionToken ?? '',
+    BIGBRAIN_NOTION_OWNER_USER_ID: notionOwnerUserId ?? '',
+    BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID: notionListsDataSourceId ?? '',
+  });
 
   // Default matches the Docker image layout: /app/orchestrator/dist/index.js -> /app/plugins.
   const pluginsDir = process.env.BIGBRAIN_PLUGINS_DIR ?? new URL('../../plugins', import.meta.url).pathname;
-  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, notion, db, credentials });
+  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, notion, db, credentials, settings });
   const tools = createToolRegistry(pluginTools);
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));

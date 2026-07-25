@@ -214,7 +214,7 @@ async function main() {
   assert(applyPrivacyMask(rawEvent, false) === rawEvent, 'applyPrivacyMask is a no-op (same reference) when shouldMask=false');
   assert(applyPrivacyMask(rawEvent, true).title === 'Work Commitment', 'applyPrivacyMask replaces title when shouldMask=true');
 
-  // --- startBackgroundJobs resolves feed URLs via the credential store, not raw env (bb_principles.md §12) ---
+  // --- startBackgroundJobs resolves settings via deps.settings/deps.credentials, not raw env (bb_principles.md §§12-13) ---
   {
     const resolveCalls = [];
     const fakeCredentials = {
@@ -223,14 +223,25 @@ async function main() {
         return undefined; // neither feed "configured" — proves no poll timer gets started off unresolved secrets
       },
     };
+    const settingsGetCalls = [];
+    const fakeSettings = {
+      async get(key) {
+        settingsGetCalls.push(key);
+        return undefined; // nothing in the DB yet — falls back to the env var set below
+      },
+    };
     const originalOwner = process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
     process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID = USER_ID;
     try {
-      await startBackgroundJobs({ db, credentials: fakeCredentials });
+      await startBackgroundJobs({ db, credentials: fakeCredentials, settings: fakeSettings });
     } finally {
       if (originalOwner === undefined) delete process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID;
       else process.env.BIGBRAIN_CALENDAR_OWNER_USER_ID = originalOwner;
     }
+    assert(
+      settingsGetCalls.includes('calendar_owner_user_id'),
+      'startBackgroundJobs resolves the owning user through deps.settings before falling back to env',
+    );
     assert(
       resolveCalls.some((c) => c.name === 'cozi_ics_url') && resolveCalls.some((c) => c.name === 'outlook_ics_url'),
       'startBackgroundJobs resolves both ICS feed URLs through deps.credentials, not process.env directly',

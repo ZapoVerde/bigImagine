@@ -112,6 +112,18 @@ export interface CalendarEvent {
   assignedMembers: string[];
 }
 
+// orchestrator/src/server/adminServer.ts getCalendarSettings()
+export interface CalendarSettings {
+  ownerUserId: string | null;
+  maskWorkCalendar: boolean;
+}
+
+// orchestrator/src/server/adminServer.ts getNotionSettings()
+export interface NotionSettings {
+  ownerUserId: string | null;
+  listsDataSourceId: string | null;
+}
+
 // orchestrator/src/server/openai.ts buildChatCompletion()
 export interface ChatCompletionResponse {
   id: string;

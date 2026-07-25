@@ -15,6 +15,13 @@
  * into anything at boot — unlike active_llm_profile/active_llm_model, changing it takes effect
  * immediately, no restart needed, since it's just interpolated into a system message per request.
  *
+ * calendar_owner_user_id/mask_work_calendar (plugins/calendar) and notion_owner_user_id/
+ * notion_lists_data_source_id (io/notion.ts) are boot-time, same restart-on-save shape as
+ * active_llm_profile — each is read once when the client/background job it configures is
+ * constructed, with its legacy BIGBRAIN_*-prefixed env var as the fallback when unset in the DB
+ * (docs/bb_principles.md §13). Neither is a secret (§12) — get() hands the plaintext back for the
+ * same reason household_timezone does.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -30,7 +37,15 @@
 
 import type { PostgresClient } from './postgres.js';
 
-export const SETTING_NAMES = ['active_llm_profile', 'active_llm_model', 'household_timezone'] as const;
+export const SETTING_NAMES = [
+  'active_llm_profile',
+  'active_llm_model',
+  'household_timezone',
+  'calendar_owner_user_id',
+  'mask_work_calendar',
+  'notion_owner_user_id',
+  'notion_lists_data_source_id',
+] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 
 export interface OrchestratorSettingsStore {
