@@ -33,12 +33,15 @@
 import { Pool } from 'pg';
 import { log } from './io/logger.js';
 import { createLlmProvider } from './io/llm/index.js';
-import { parseLlmProfiles, withOverriddenApiKeys } from './io/llm/profiles.js';
+import { parseLlmProfiles, withOverriddenApiKeys, withOverriddenModel } from './io/llm/profiles.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createFieldCipher } from './io/fieldCipher.js';
 import { createNotionClient } from './io/notion.js';
+import { createAccessIdentityResolver } from './io/accessIdentity.js';
+import { createChatSessionStore } from './io/chatSessions.js';
 import { createPostgresClient } from './io/postgres.js';
 import { createProviderCredentialStore } from './io/providerCredentials.js';
+import { createOrchestratorSettingsStore } from './io/orchestratorSettings.js';
 import { createToolRegistry } from './orchestrator/toolRegistry.js';
 import { loadPlugins } from './orchestrator/pluginLoader.js';
 import { createApiKeyStore } from './server/apiKeyStore.js';
@@ -62,6 +65,7 @@ async function main(): Promise<void> {
 
   const cipher = createFieldCipher();
   const credentials = createProviderCredentialStore(db, cipher);
+  const settings = createOrchestratorSettingsStore(db);
 
   const rawProfilesJson = requireEnv('BIGBRAIN_LLM_PROFILES');
   const legacyProfiles = parseLlmProfiles(rawProfilesJson);
@@ -84,9 +88,26 @@ async function main(): Promise<void> {
     throw new Error('openrouter_api_key has no provider_credentials row and no usable env fallback');
   }
 
+  // Settings tab's connection picker (POST /v1/admin/settings) overrides which profile — and
+  // which model within it — is active, without a rebuild; same restart-on-save shape as
+  // credential rotation. Both fall back to the profile's own static config so an untouched
+  // deployment behaves exactly as before.
+  const activeProfile = (await settings.get('active_llm_profile')) ?? requireEnv('BIGBRAIN_LLM_ACTIVE_PROFILE');
+  const activeModel = await settings.get('active_llm_model');
+  const profilesJsonWithApiKeys = withOverriddenApiKeys(rawProfilesJson, {
+    deepseek: deepseekKey,
+    openrouter: openrouterKey,
+  });
+  // The unparsed, apiKey-resolved profiles map — passed to httpServer.ts so the Settings tab's
+  // model dropdown (GET /v1/admin/settings/models) can list any configured profile's catalog,
+  // even one that isn't currently active. Deliberately built from the pre-model-override JSON:
+  // a not-yet-active profile's "default model" should be its own static config, not whatever
+  // model happens to be overridden onto a *different* (the currently active) profile.
+  const llmProfiles = parseLlmProfiles(profilesJsonWithApiKeys);
   const llm = createLlmProvider({
     ...process.env,
-    BIGBRAIN_LLM_PROFILES: withOverriddenApiKeys(rawProfilesJson, { deepseek: deepseekKey, openrouter: openrouterKey }),
+    BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithApiKeys, activeProfile, activeModel),
+    BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
   });
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
   const notion = createNotionClient({ ...process.env, BIGBRAIN_NOTION_TOKEN: notionToken ?? '' });
@@ -97,13 +118,31 @@ async function main(): Promise<void> {
   const tools = createToolRegistry(pluginTools);
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));
+  const chats = createChatSessionStore(db);
+  // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
+  // io/accessIdentity.ts.
+  const accessIdentity = createAccessIdentityResolver(process.env);
   const adminApiKey = requireEnv('BIGBRAIN_ADMIN_API_KEY');
   const port = Number(process.env.BIGBRAIN_ORCHESTRATOR_PORT ?? 8787);
   // Where other containers on traefik-net (e.g. Open WebUI) actually reach this service — see
   // docker-compose.yml's container_name. Only used to fill in the OpenAPI spec's `servers` entry.
   const publicBaseUrl = process.env.BIGBRAIN_ORCHESTRATOR_BASE_URL ?? 'http://bigbrain-orchestrator:8787';
 
-  startHttpServer({ llm, db, tools, apiKeys, adminApiKey, credentials, modelName: 'bigbrain', port, publicBaseUrl });
+  startHttpServer({
+    llm,
+    db,
+    tools,
+    apiKeys,
+    accessIdentity,
+    chats,
+    adminApiKey,
+    credentials,
+    settings,
+    llmProfiles,
+    modelName: 'bigbrain',
+    port,
+    publicBaseUrl,
+  });
 }
 
 main().catch((err) => {

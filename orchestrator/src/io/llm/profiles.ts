@@ -16,6 +16,8 @@
  * withOverriddenApiKeys(raw, overrides) — splices a DB-sourced apiKey (io/providerCredentials.ts)
  *   into the otherwise-static profiles JSON before parseLlmProfiles ever sees it, so this module
  *   and createLlmProvider need no other changes to support that
+ * withOverriddenModel(raw, profileName, model) — splices a DB-sourced model override
+ *   (io/orchestratorSettings.ts's active_llm_model) onto one named profile, same idea
  *
  * @contract
  *   assertions:
@@ -93,5 +95,21 @@ export function withOverriddenApiKeys(raw: string, overrides: Partial<Record<str
     if (typeof profile !== 'object' || profile === null) continue;
     parsed[name] = { ...(profile as Record<string, unknown>), apiKey };
   }
+  return JSON.stringify(parsed);
+}
+
+/**
+ * Pure: re-serializes `raw`'s parsed JSON with `model` replaced on the one named `profileName`,
+ * when `model` is set — the Settings tab's model picker (GET/POST /v1/admin/settings) overriding
+ * which model within the active connection is used, the same shape as withOverriddenApiKeys but
+ * for a single profile/field instead of many. An unset model, an unknown profileName, or a
+ * malformed profile entry all leave `raw` untouched.
+ */
+export function withOverriddenModel(raw: string, profileName: string, model: string | undefined): string {
+  if (!model) return raw;
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  const profile = parsed[profileName];
+  if (typeof profile !== 'object' || profile === null) return raw;
+  parsed[profileName] = { ...(profile as Record<string, unknown>), model };
   return JSON.stringify(parsed);
 }

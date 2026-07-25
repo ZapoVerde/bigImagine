@@ -20,6 +20,28 @@ import { randomBytes } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
 
+// handleAdminSettingsGet falls back to this when the fake settings store has no row yet — set
+// deterministically rather than relying on whatever happens to be in the test process's env.
+process.env.BIGBRAIN_LLM_ACTIVE_PROFILE = 'deepseek';
+
+// Real LlmProfile shapes (not fakes) — handleAdminSettingsModels builds a real adapter
+// (createLlmProviderForProfile) around whichever one it's asked about, so these need real-shaped
+// baseUrls for the mocked-fetch model-catalog test further down to intercept.
+const llmProfiles = {
+  deepseek: {
+    kind: 'openai-compatible',
+    model: 'deepseek-v4-flash',
+    apiKey: 'sk-test-deepseek',
+    baseUrl: 'https://example.invalid/deepseek',
+  },
+  openrouter: {
+    kind: 'openai-compatible',
+    model: 'google/gemini-3.5-flash-lite',
+    apiKey: 'sk-test-openrouter',
+    baseUrl: 'https://example.invalid/openrouter',
+  },
+};
+
 // A hand-rolled fake satisfying ProviderCredentialStore's shape directly — this suite is testing
 // the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not providerCredentials.ts's own
 // DB logic, which verify-provider-credentials.mjs already covers against a fake pool.
@@ -40,6 +62,160 @@ function createFakeCredentialStore() {
     async set(name, value) {
       values.set(name, value);
       this.setCalls.push({ name, value });
+    },
+  };
+}
+
+// A hand-rolled fake satisfying OrchestratorSettingsStore's shape directly — this suite is testing
+// the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not orchestratorSettings.ts's own
+// DB logic.
+function createFakeSettingsStore() {
+  const values = new Map();
+  return {
+    setCalls: [],
+    async get(key) {
+      return values.get(key);
+    },
+    async set(key, value) {
+      values.set(key, value);
+      this.setCalls.push({ key, value });
+    },
+  };
+}
+
+// A hand-rolled fake satisfying AccessIdentityResolver's shape directly — this suite is testing
+// httpServer.ts's own auth-path wiring (Access-header-first, Bearer-key fallback), not
+// accessIdentity.ts's real JWT/JWKS verification, which verify-access-identity.mjs already covers
+// against a real local JWKS endpoint and real signatures.
+function createFakeAccessIdentityResolver() {
+  const calls = [];
+  return {
+    calls,
+    async userIdForAccessJwt(jwt) {
+      calls.push(jwt);
+      return jwt === 'valid-access-jwt' ? '33333333-3333-3333-3333-333333333333' : undefined;
+    },
+  };
+}
+
+// A hand-rolled fake satisfying ChatSessionStore's shape directly — this suite is testing
+// httpServer.ts's own route wiring and the chat_id persistence hook, not chatSessions.ts's real
+// SQL, which verify-chat-sessions.mjs already covers against a fake pool.
+function createFakeChatSessionStore() {
+  const sessions = new Map();
+  const messagesByChat = new Map();
+  const folders = new Map();
+  let counter = 0;
+  const newId = (prefix) => `${prefix}-${++counter}`;
+
+  return {
+    sessions,
+    async listChats(userId, opts = {}) {
+      let rows = [...sessions.values()].filter((s) => s.userId === userId);
+      if (opts.search) {
+        const q = opts.search.toLowerCase();
+        rows = rows.filter(
+          (s) =>
+            s.title.toLowerCase().includes(q) ||
+            (messagesByChat.get(s.chatId) ?? []).some((m) => m.content.toLowerCase().includes(q)),
+        );
+      }
+      if (opts.folderId) rows = rows.filter((s) => s.folderId === opts.folderId);
+      return rows
+        .map((s) => ({ chatId: s.chatId, title: s.title, folderId: s.folderId, updatedAt: s.updatedAt }))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    },
+    async createChat(userId, init = {}) {
+      const chatId = newId('chat');
+      const row = {
+        chatId,
+        userId,
+        title: init.title ?? 'New chat',
+        folderId: init.folderId ?? null,
+        params: {},
+        toolNames: null,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      sessions.set(chatId, row);
+      messagesByChat.set(chatId, []);
+      return row;
+    },
+    async getChat(userId, chatId) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      return { session: row, messages: messagesByChat.get(chatId) ?? [] };
+    },
+    async updateChat(userId, chatId, patch) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      if (patch.title !== undefined) row.title = patch.title;
+      if (patch.folderId !== undefined) row.folderId = patch.folderId;
+      if (patch.params !== undefined) row.params = patch.params;
+      if (patch.toolNames !== undefined) row.toolNames = patch.toolNames;
+      row.updatedAt = new Date().toISOString();
+      return row;
+    },
+    async deleteChat(userId, chatId) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return false;
+      sessions.delete(chatId);
+      messagesByChat.delete(chatId);
+      return true;
+    },
+    async appendMessages(userId, chatId, messages) {
+      const arr = messagesByChat.get(chatId) ?? [];
+      // A monotonic counter, not wall-clock time — two messages appended in the same call (or
+      // the same millisecond) must still sort deterministically, the exact real-Postgres bug
+      // clock_timestamp() fixed in chatSessions.ts itself (see appendMessages there).
+      for (const m of messages) arr.push({ messageId: newId('msg'), role: m.role, content: m.content, createdAt: ++counter });
+      messagesByChat.set(chatId, arr);
+      const row = sessions.get(chatId);
+      if (row) row.updatedAt = new Date().toISOString();
+    },
+    async deleteMessage(userId, chatId, messageId) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return false;
+      const arr = messagesByChat.get(chatId) ?? [];
+      const idx = arr.findIndex((m) => m.messageId === messageId);
+      if (idx === -1) return false;
+      arr.splice(idx, 1);
+      return true;
+    },
+    async truncateMessagesFrom(userId, chatId, messageId) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return false;
+      const arr = messagesByChat.get(chatId) ?? [];
+      const target = arr.find((m) => m.messageId === messageId);
+      if (!target) return false;
+      messagesByChat.set(
+        chatId,
+        arr.filter((m) => m.createdAt < target.createdAt),
+      );
+      return true;
+    },
+    async listFolders(userId) {
+      return [...folders.values()].filter((f) => f.userId === userId);
+    },
+    async createFolder(userId, init) {
+      const folderId = newId('folder');
+      const row = { folderId, userId, name: init.name, parentId: init.parentId ?? null };
+      folders.set(folderId, row);
+      return row;
+    },
+    async updateFolder(userId, folderId, patch) {
+      const row = folders.get(folderId);
+      if (!row || row.userId !== userId) return undefined;
+      if (patch.name !== undefined) row.name = patch.name;
+      if (patch.parentId !== undefined) row.parentId = patch.parentId;
+      return row;
+    },
+    async deleteFolder(userId, folderId) {
+      const row = folders.get(folderId);
+      if (!row || row.userId !== userId) return false;
+      folders.delete(folderId);
+      for (const s of sessions.values()) if (s.folderId === folderId) s.folderId = null;
+      return true;
     },
   };
 }
@@ -117,12 +293,18 @@ assert(
 }
 
 // --- Part 3: the HTTP server, end to end, including auth ---
-// Two full rounds scripted per request below (one non-streaming, one streaming), sharing this
-// one long-lived stub instance the same way a real server shares one LlmProvider across requests.
+// One full round (tool call + final answer) scripted per request that reaches runTurn below —
+// two for the original non-streaming/streaming pair, two more for the Cloudflare-Access-auth
+// requests added alongside them — sharing this one long-lived stub instance the same way a real
+// server shares one LlmProvider across requests.
 const llm = createStubLlmProvider([
   { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c1', name: 'echo', arguments: { x: 1 } }] },
   { message: { role: 'assistant', content: 'final answer' }, toolCalls: [] },
   { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c2', name: 'echo', arguments: { x: 2 } }] },
+  { message: { role: 'assistant', content: 'final answer' }, toolCalls: [] },
+  { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c3', name: 'echo', arguments: { x: 3 } }] },
+  { message: { role: 'assistant', content: 'final answer' }, toolCalls: [] },
+  { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c4', name: 'echo', arguments: { x: 4 } }] },
   { message: { role: 'assistant', content: 'final answer' }, toolCalls: [] },
 ]);
 const echoTool = {
@@ -134,6 +316,9 @@ const db = createPostgresClient(pool);
 const tools = createToolRegistry([echoTool]);
 const apiKeys = createApiKeyStore('good-key:11111111-1111-1111-1111-111111111111');
 const credentials = createFakeCredentialStore();
+const settings = createFakeSettingsStore();
+const accessIdentity = createFakeAccessIdentityResolver();
+const chats = createFakeChatSessionStore();
 const restartCalls = [];
 
 const server = startHttpServer({
@@ -141,8 +326,12 @@ const server = startHttpServer({
   db,
   tools,
   apiKeys,
+  accessIdentity,
+  chats,
   adminApiKey: 'the-admin-key',
   credentials,
+  settings,
+  llmProfiles,
   modelName: 'bigbrain',
   port: 0,
   triggerRestart: () => restartCalls.push(Date.now()),
@@ -171,6 +360,43 @@ const wrongKeyRes = await fetch(`${base}/v1/chat/completions`, {
   body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }),
 });
 assert(wrongKeyRes.status === 401, 'POST /v1/chat/completions with an unrecognized key returns 401');
+
+// --- Cloudflare Access identity takes priority over, and can substitute for, a Bearer key ---
+const accessNoKeyRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', 'cf-access-jwt-assertion': 'valid-access-jwt' },
+  body: JSON.stringify({ messages: [{ role: 'user', content: 'please echo' }] }),
+});
+assert(accessNoKeyRes.status === 200, 'a valid Cf-Access-Jwt-Assertion header authenticates with no Bearer key at all');
+assert(accessIdentity.calls.includes('valid-access-jwt'), 'the Access header was actually passed to the resolver');
+
+const accessInvalidFallsThroughRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: {
+    'content-type': 'application/json',
+    'cf-access-jwt-assertion': 'not-a-real-jwt',
+    authorization: 'Bearer good-key',
+  },
+  body: JSON.stringify({ messages: [{ role: 'user', content: 'please echo' }] }),
+});
+assert(
+  accessInvalidFallsThroughRes.status === 200,
+  'an unresolvable Access header falls through to the Bearer key instead of hard-failing',
+);
+
+const whoamiNoAuthRes = await fetch(`${base}/v1/whoami`);
+assert(whoamiNoAuthRes.status === 401, 'GET /v1/whoami with no auth at all returns 401');
+
+const whoamiKeyRes = await fetch(`${base}/v1/whoami`, { headers: { authorization: 'Bearer good-key' } });
+const whoamiKeyBody = await whoamiKeyRes.json();
+assert(whoamiKeyRes.status === 200 && whoamiKeyBody.userId === '11111111-1111-1111-1111-111111111111', 'GET /v1/whoami resolves via a Bearer key');
+
+const whoamiAccessRes = await fetch(`${base}/v1/whoami`, { headers: { 'cf-access-jwt-assertion': 'valid-access-jwt' } });
+const whoamiAccessBody = await whoamiAccessRes.json();
+assert(
+  whoamiAccessRes.status === 200 && whoamiAccessBody.userId === '33333333-3333-3333-3333-333333333333',
+  'GET /v1/whoami resolves via a Cloudflare Access identity with no key at all',
+);
 
 const badBodyRes = await fetch(`${base}/v1/chat/completions`, {
   method: 'POST',
@@ -205,16 +431,31 @@ assert(streamRes.headers.get('content-type')?.includes('text/event-stream'), 'st
 assert(streamText.includes('"content":"final answer"'), 'the SSE payload carries the final reply');
 assert(streamText.trim().endsWith('data: [DONE]'), 'the SSE stream ends with the [DONE] terminator');
 
-// --- Landing page ---
-const landingRes = await fetch(`${base}/`);
-const landingBody = await landingRes.text();
-assert(landingRes.status === 200, 'GET / serves the landing page unauthenticated');
-assert(landingBody.includes('<html') && landingBody.includes('/v1/admin'), 'the landing page links to Settings');
+// --- Frontend SPA static serving (frontend/dist, built by `npm run build --workspace=@bigbrain/frontend`) ---
+const rootRes = await fetch(`${base}/`);
+const rootBody = await rootRes.text();
+assert(rootRes.status === 200, 'GET / serves the built frontend SPA unauthenticated');
+assert(rootRes.headers.get('content-type')?.includes('text/html'), 'GET / returns text/html');
+assert(rootBody.includes('<div id="root">'), 'GET / serves the SPA shell (index.html)');
+
+// index.html references its real, content-hashed built assets — fetch whatever it actually
+// references rather than hardcoding a filename that changes every build.
+const assetPaths = [...new Set(rootBody.match(/\/assets\/[^"']+/g) ?? [])];
+assert(assetPaths.length > 0, 'the built index.html references at least one /assets/ file');
+for (const assetPath of assetPaths) {
+  const assetRes = await fetch(`${base}${assetPath}`);
+  const expectedType = assetPath.endsWith('.css') ? 'text/css' : 'application/javascript';
+  assert(assetRes.status === 200, `GET ${assetPath} returns 200`);
+  assert(assetRes.headers.get('content-type')?.includes(expectedType), `GET ${assetPath} has content-type ${expectedType}`);
+}
+
+const missingAssetRes = await fetch(`${base}/assets/does-not-exist.js`);
+assert(missingAssetRes.status === 404, 'GET /assets/<missing file> returns 404');
+
+const traversalRes = await fetch(`${base}/assets/..%2f..%2fpackage.json`);
+assert(traversalRes.status === 404, 'GET /assets/<path traversal attempt> is rejected, not served');
 
 // --- Admin credentials routes ---
-const adminPageRes = await fetch(`${base}/v1/admin`);
-assert(adminPageRes.status === 200, 'GET /v1/admin serves the static page unauthenticated');
-assert((await adminPageRes.text()).includes('<html'), 'GET /v1/admin returns HTML');
 
 const listNoAuthRes = await fetch(`${base}/v1/admin/credentials`);
 assert(listNoAuthRes.status === 401, 'GET /v1/admin/credentials with no auth header returns 401');
@@ -258,6 +499,239 @@ assert(
 await new Promise((resolve) => setTimeout(resolve, 250));
 assert(restartCalls.length === 1, 'triggerRestart fired exactly once after the response flushed, instead of the real process.exit');
 
+// --- Admin settings routes (connection picker) ---
+
+const settingsNoAuthRes = await fetch(`${base}/v1/admin/settings`);
+assert(settingsNoAuthRes.status === 401, 'GET /v1/admin/settings with no auth header returns 401');
+
+const settingsGetRes = await fetch(`${base}/v1/admin/settings`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const settingsGetBody = await settingsGetRes.json();
+assert(settingsGetRes.status === 200, 'GET /v1/admin/settings with the correct admin key returns 200');
+assert(
+  settingsGetBody.activeProfile === 'deepseek' &&
+    settingsGetBody.activeModel === 'deepseek-v4-flash' &&
+    JSON.stringify(settingsGetBody.profileNames) === JSON.stringify(['deepseek', 'openrouter']),
+  'GET /v1/admin/settings falls back to the env active profile and its static model before anything has been saved, and lists every known profile',
+);
+
+const settingsSetNoAuthRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ value: 'openrouter' }),
+});
+assert(settingsSetNoAuthRes.status === 401, 'POST /v1/admin/settings with no auth header returns 401');
+assert(settings.setCalls.length === 0, 'the unauthenticated POST never reached the settings store');
+
+const settingsSetBadNameRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'not-a-real-profile' }),
+});
+assert(settingsSetBadNameRes.status === 400, 'POST /v1/admin/settings rejects a profile name that is not a known profile');
+
+const settingsSetBadModelRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', model: '' }),
+});
+assert(settingsSetBadModelRes.status === 400, 'POST /v1/admin/settings rejects an empty-string model');
+
+const settingsSetOkRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4' }),
+});
+const settingsSetOkBody = await settingsSetOkRes.json();
+assert(settingsSetOkRes.status === 202, 'an authenticated POST /v1/admin/settings with a known profile and model returns 202');
+assert(settingsSetOkBody.status === 'restarting', 'the response body signals a restart is coming');
+assert(
+  settings.setCalls.length === 2 &&
+    settings.setCalls[0].key === 'active_llm_profile' &&
+    settings.setCalls[0].value === 'openrouter' &&
+    settings.setCalls[1].key === 'active_llm_model' &&
+    settings.setCalls[1].value === 'anthropic/claude-4',
+  'the settings store recorded both the profile and model writes, in that order',
+);
+
+await new Promise((resolve) => setTimeout(resolve, 250));
+assert(restartCalls.length === 2, 'triggerRestart fired again after the settings save flushed');
+
+const settingsGetAfterSaveRes = await fetch(`${base}/v1/admin/settings`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const settingsGetAfterSaveBody = await settingsGetAfterSaveRes.json();
+assert(
+  settingsGetAfterSaveBody.activeProfile === 'openrouter' && settingsGetAfterSaveBody.activeModel === 'anthropic/claude-4',
+  'GET /v1/admin/settings reflects the newly saved active profile AND model, even before the restart completes',
+);
+
+// A profile switch with no model in the body leaves the previously saved model override alone —
+// setActiveProfile only touches active_llm_model when one is actually given.
+const settingsSetProfileOnlyRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'deepseek' }),
+});
+assert(settingsSetProfileOnlyRes.status === 202, 'switching profile alone (no model) still succeeds');
+assert(settings.setCalls.length === 3, 'omitting model means only the profile write happens, not a second settings.set call');
+
+// --- Admin settings/models route (the model dropdown within a chosen connection) ---
+
+const modelsNoAuthRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`);
+assert(modelsNoAuthRes.status === 401, 'GET /v1/admin/settings/models with no auth header returns 401');
+
+const modelsUnknownProfileRes = await fetch(`${base}/v1/admin/settings/models?profile=not-a-real-profile`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(modelsUnknownProfileRes.status === 404, 'GET /v1/admin/settings/models for an unknown profile returns 404');
+
+// This mock has to coexist with the test's own outer fetch() calls to the local test server —
+// both go through the same globalThis.fetch in this single process — so it only fakes the one
+// URL it cares about and delegates everything else (including the loopback call below) to the
+// real fetch.
+const originalFetch = globalThis.fetch;
+const calledUrls = [];
+globalThis.fetch = async (url, init) => {
+  if (url !== 'https://example.invalid/openrouter/models') return originalFetch(url, init);
+  calledUrls.push(url);
+  return {
+    ok: true,
+    json: async () => ({
+      data: [
+        { id: 'google/gemini-3.5-flash-lite', pricing: { prompt: '0.0000001', completion: '0.0000004' } },
+        { id: 'anthropic/claude-4' },
+      ],
+    }),
+    text: async () => '',
+  };
+};
+try {
+  const modelsOkRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`, {
+    headers: { authorization: 'Bearer the-admin-key' },
+  });
+  const modelsOkBody = await modelsOkRes.json();
+  assert(
+    calledUrls.length === 1,
+    "the models route queried the requested profile's own baseUrl (openrouter), not the currently active one (deepseek)",
+  );
+  assert(modelsOkRes.status === 200, 'GET /v1/admin/settings/models for a known profile returns 200');
+  assert(
+    modelsOkBody.models.length === 2 && modelsOkBody.models.some((m) => m.id === 'anthropic/claude-4'),
+    'the response carries the live model catalog fetched from that connection',
+  );
+  assert(
+    modelsOkBody.defaultModel === 'google/gemini-3.5-flash-lite',
+    "defaultModel is the profile's own static config model, not any override",
+  );
+  const priced = modelsOkBody.models.find((m) => m.id === 'google/gemini-3.5-flash-lite');
+  assert(
+    priced?.pricing?.prompt === '0.0000001' && priced?.pricing?.completion === '0.0000004',
+    "a model with a pricing field (OpenRouter's own extension) carries it through to the response",
+  );
+  const unpriced = modelsOkBody.models.find((m) => m.id === 'anthropic/claude-4');
+  assert(unpriced?.pricing === undefined, 'a model with no pricing field (e.g. DeepSeek-shaped entries) is left without one, not a fabricated default');
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
+const modelsAccessRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`, {
+  headers: { 'cf-access-jwt-assertion': 'not-a-real-jwt' },
+});
+assert(
+  modelsAccessRes.status === 401,
+  'GET /v1/admin/settings/models is gated by the same isAdminAuthorized check (an unresolvable Access header still 401s)',
+);
+
+// A valid Cloudflare Access identity authorizes admin routes with no admin key at all — the
+// gate is Access itself now, not a second manually-typed secret (see isAdminAuthorized).
+const accessAdminRes = await fetch(`${base}/v1/admin/settings`, {
+  headers: { 'cf-access-jwt-assertion': 'valid-access-jwt' },
+});
+assert(accessAdminRes.status === 200, 'GET /v1/admin/settings with a valid Access identity and no admin key returns 200');
+
+const accessAdminWrongJwtRes = await fetch(`${base}/v1/admin/settings`, {
+  headers: { 'cf-access-jwt-assertion': 'not-a-real-jwt' },
+});
+assert(
+  accessAdminWrongJwtRes.status === 401,
+  'GET /v1/admin/settings with an unresolvable Access header and no admin key still returns 401',
+);
+
+// --- Chat/folder CRUD routes ---
+for (const [method, path] of [
+  ['GET', '/v1/chats'],
+  ['POST', '/v1/chats'],
+  ['GET', '/v1/chats/whatever'],
+  ['POST', '/v1/chats/whatever'],
+  ['DELETE', '/v1/chats/whatever'],
+  ['GET', '/v1/folders'],
+  ['POST', '/v1/folders'],
+]) {
+  const res = await fetch(`${base}${path}`, { method });
+  assert(res.status === 401, `${method} ${path} with no auth returns 401`);
+}
+
+const auth = { authorization: 'Bearer good-key' };
+const createChatRes = await fetch(`${base}/v1/chats`, {
+  method: 'POST',
+  headers: { ...auth, 'content-type': 'application/json' },
+  body: JSON.stringify({ title: 'Weekend trip' }),
+});
+const createdChat = await createChatRes.json();
+assert(createChatRes.status === 201 && createdChat.title === 'Weekend trip', 'POST /v1/chats creates a session with the given title');
+
+const listChatsRes = await fetch(`${base}/v1/chats`, { headers: auth });
+const listChatsBody = await listChatsRes.json();
+assert(
+  listChatsRes.status === 200 && listChatsBody.chats.some((c) => c.chatId === createdChat.chatId),
+  'GET /v1/chats lists the newly created chat',
+);
+
+const getChatRes = await fetch(`${base}/v1/chats/${createdChat.chatId}`, { headers: auth });
+const getChatBody = await getChatRes.json();
+assert(
+  getChatRes.status === 200 && getChatBody.session.chatId === createdChat.chatId && Array.isArray(getChatBody.messages),
+  'GET /v1/chats/:id returns the session and its (empty) message list',
+);
+
+const updateChatRes = await fetch(`${base}/v1/chats/${createdChat.chatId}`, {
+  method: 'POST',
+  headers: { ...auth, 'content-type': 'application/json' },
+  body: JSON.stringify({ params: { system: 'Be terse.' }, tool_names: [] }),
+});
+const updateChatBody = await updateChatRes.json();
+assert(
+  updateChatRes.status === 200 && updateChatBody.params.system === 'Be terse.' && Array.isArray(updateChatBody.toolNames),
+  'POST /v1/chats/:id updates params and tool_names',
+);
+
+const missingChatRes = await fetch(`${base}/v1/chats/does-not-exist`, { headers: auth });
+assert(missingChatRes.status === 404, 'GET /v1/chats/:id for an unknown id returns 404');
+
+const createFolderRes = await fetch(`${base}/v1/folders`, {
+  method: 'POST',
+  headers: { ...auth, 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'Travel' }),
+});
+const createdFolder = await createFolderRes.json();
+assert(createFolderRes.status === 201 && createdFolder.name === 'Travel', 'POST /v1/folders creates a folder');
+
+const listFoldersRes = await fetch(`${base}/v1/folders`, { headers: auth });
+const listFoldersBody = await listFoldersRes.json();
+assert(
+  listFoldersRes.status === 200 && listFoldersBody.folders.some((f) => f.folderId === createdFolder.folderId),
+  'GET /v1/folders lists the newly created folder',
+);
+
+const deleteChatRes = await fetch(`${base}/v1/chats/${createdChat.chatId}`, { method: 'DELETE', headers: auth });
+const deleteChatBody = await deleteChatRes.json();
+assert(deleteChatRes.status === 200 && deleteChatBody.deleted === true, 'DELETE /v1/chats/:id deletes the chat');
+
+const getDeletedChatRes = await fetch(`${base}/v1/chats/${createdChat.chatId}`, { headers: auth });
+assert(getDeletedChatRes.status === 404, 'a deleted chat 404s afterward');
+
 server.close();
 
 // --- Part 4: dynamic model catalog + per-request model override ---
@@ -280,8 +754,12 @@ server.close();
     db: db2,
     tools: createToolRegistry([]),
     apiKeys: apiKeys2,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: createFakeChatSessionStore(),
     adminApiKey: 'unused-in-this-part',
     credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmProfiles,
     modelName: 'bigbrain',
     port: 0,
   });
@@ -326,6 +804,268 @@ server.close();
   );
 
   server2.close();
+}
+
+// --- Part 5: chat_id ties a turn to a persisted session — its params/tools apply, exchange is stored ---
+{
+  const capturedCalls = [];
+  const capturingLlm = {
+    name: 'capturing',
+    async complete(messages, toolDefs) {
+      capturedCalls.push({ messages, toolDefs });
+      return { message: { role: 'assistant', content: 'terse reply' }, toolCalls: [] };
+    },
+  };
+  const db3 = createPostgresClient(createFakePool());
+  const apiKeys3 = createApiKeyStore('good-key-3:33333333-3333-3333-3333-333333333333');
+  const chats3 = createFakeChatSessionStore();
+  const tools3 = createToolRegistry([echoTool]);
+  const server3 = startHttpServer({
+    llm: capturingLlm,
+    db: db3,
+    tools: tools3,
+    apiKeys: apiKeys3,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chats3,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmProfiles,
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server3.once('listening', resolve));
+  const base3 = `http://127.0.0.1:${server3.address().port}`;
+  const userId3 = '33333333-3333-3333-3333-333333333333';
+
+  const chat = await chats3.createChat(userId3, {});
+  await chats3.updateChat(userId3, chat.chatId, {
+    params: { system: 'Be terse.', temperature: 0.3 },
+    toolNames: [], // no tools allowed in this chat
+  });
+
+  const missingChatIdRes = await fetch(`${base3}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer good-key-3' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello there' }], chat_id: 'no-such-chat' }),
+  });
+  assert(missingChatIdRes.status === 404, 'chat_id pointing at an unknown/inaccessible chat returns 404');
+
+  const chatRes = await fetch(`${base3}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer good-key-3' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello there' }], chat_id: chat.chatId }),
+  });
+  assert(chatRes.status === 200, 'a request with a valid chat_id succeeds');
+
+  const call = capturedCalls[0];
+  assert(
+    call.messages[0].role === 'system' &&
+      call.messages[0].content.startsWith('Today is') &&
+      call.messages[0].content.endsWith('Be terse.'),
+    "a current-date line is prepended ahead of the chat's own system prompt param, joined by a blank line",
+  );
+  assert(call.toolDefs.length === 0, "the chat's empty tool_names allow-list actually restricts what the model is offered (echo_tool exists but isn't sent)");
+
+  const detail = await chats3.getChat(userId3, chat.chatId);
+  assert(detail.messages.length === 2, 'both the user message and the reply were persisted');
+  assert(
+    detail.messages[0].role === 'user' && detail.messages[0].content === 'hello there' && detail.messages[1].content === 'terse reply',
+    'persisted messages have the right role/content and order',
+  );
+  assert(detail.session.title === 'hello there', "an untitled chat's first exchange auto-titles it from the user's message");
+
+  const withoutChatIdRes = await fetch(`${base3}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer good-key-3' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'no session here' }] }),
+  });
+  assert(withoutChatIdRes.status === 200, 'a request with no chat_id still works (Open WebUI-style stateless traffic)');
+  const detailAfter = await chats3.getChat(userId3, chat.chatId);
+  assert(detailAfter.messages.length === 2, 'a stateless request (no chat_id) does not touch any persisted session');
+
+  const statelessCall = capturedCalls[1];
+  assert(
+    statelessCall.messages[0].role === 'system' && statelessCall.messages[0].content.startsWith('Today is'),
+    'the date-context line is prepended even for a request with no chat_id and no custom system prompt at all',
+  );
+
+  // --- Message delete/truncate routes, and edit/rerun's dedup logic ---
+  const auth3 = { authorization: 'Bearer good-key-3' };
+  const chat2 = await chats3.createChat(userId3, {});
+  await chats3.appendMessages(userId3, chat2.chatId, [
+    { role: 'user', content: 'first question' },
+    { role: 'assistant', content: 'first answer' },
+  ]);
+  const seeded = await chats3.getChat(userId3, chat2.chatId);
+  const [seededUser, seededAssistant] = seeded.messages;
+
+  const deleteMsgNoAuthRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${seededAssistant.messageId}`, {
+    method: 'DELETE',
+  });
+  assert(deleteMsgNoAuthRes.status === 401, 'DELETE /v1/chats/:id/messages/:messageId with no auth returns 401');
+
+  const deleteMsgUnknownRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/no-such-id`, {
+    method: 'DELETE',
+    headers: auth3,
+  });
+  assert(deleteMsgUnknownRes.status === 404, 'DELETE for an unknown message id returns 404');
+
+  const deleteMsgOkRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${seededAssistant.messageId}`, {
+    method: 'DELETE',
+    headers: auth3,
+  });
+  const deleteMsgOkBody = await deleteMsgOkRes.json();
+  assert(
+    deleteMsgOkRes.status === 200 && deleteMsgOkBody.deleted === true,
+    'DELETE /v1/chats/:id/messages/:messageId removes the message and returns 200',
+  );
+  const afterDeleteMsg = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterDeleteMsg.messages.length === 1 && afterDeleteMsg.messages[0].messageId === seededUser.messageId,
+    'exactly the targeted message is gone, the rest of the chat is untouched',
+  );
+
+  // Re-seed a second exchange to prove truncate removes everything chronologically after the
+  // target, not just the target itself.
+  await chats3.appendMessages(userId3, chat2.chatId, [{ role: 'assistant', content: 'first answer again' }]);
+  await chats3.appendMessages(userId3, chat2.chatId, [
+    { role: 'user', content: 'second question' },
+    { role: 'assistant', content: 'second answer' },
+  ]);
+  const seeded2 = await chats3.getChat(userId3, chat2.chatId);
+  const [u1, a1, u2] = seeded2.messages;
+
+  const truncateNoAuthRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${u2.messageId}/truncate`, { method: 'POST' });
+  assert(truncateNoAuthRes.status === 401, 'POST .../truncate with no auth returns 401');
+
+  const truncateUnknownRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/no-such-id/truncate`, {
+    method: 'POST',
+    headers: auth3,
+  });
+  assert(truncateUnknownRes.status === 404, 'POST .../truncate for an unknown message id returns 404');
+
+  const truncateOkRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${u2.messageId}/truncate`, {
+    method: 'POST',
+    headers: auth3,
+  });
+  const truncateOkBody = await truncateOkRes.json();
+  assert(
+    truncateOkRes.status === 200 && truncateOkBody.truncated === true,
+    'POST .../truncate removes the message and everything after it, returns 200',
+  );
+  const afterTruncate = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterTruncate.messages.length === 2 &&
+      afterTruncate.messages[0].messageId === u1.messageId &&
+      afterTruncate.messages[1].messageId === a1.messageId,
+    'truncating from the second question removes it and its answer, leaving only the first exchange',
+  );
+
+  // "rerun": truncate the last assistant reply, then resend the identical (now-shorter) history —
+  // must NOT duplicate the user message that's already persisted.
+  const rerunTruncateRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${a1.messageId}/truncate`, {
+    method: 'POST',
+    headers: auth3,
+  });
+  assert(rerunTruncateRes.status === 200, 'truncating the assistant reply to rerun it succeeds');
+  const rerunHistory = await chats3.getChat(userId3, chat2.chatId);
+  assert(rerunHistory.messages.length === 1, 'only the user message remains after truncating the reply being rerun');
+
+  const rerunRes = await fetch(`${base3}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'first question' }], chat_id: chat2.chatId }),
+  });
+  assert(rerunRes.status === 200, 'the rerun-style resend succeeds');
+  const afterRerun = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterRerun.messages.length === 2 && afterRerun.messages[0].content === 'first question' && afterRerun.messages[1].role === 'assistant',
+    'a rerun resend (same message count as already persisted) appends only the new assistant reply, not a duplicate user message',
+  );
+
+  // "edit": truncate from the message being edited, then resend with new content plus one more
+  // message than what's now persisted — a genuinely new turn, so both rows insert.
+  const editTruncateRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterRerun.messages[0].messageId}/truncate`, {
+    method: 'POST',
+    headers: auth3,
+  });
+  assert(editTruncateRes.status === 200, 'truncating from the message being edited succeeds');
+  const editHistory = await chats3.getChat(userId3, chat2.chatId);
+  assert(editHistory.messages.length === 0, 'truncating from the very first message empties the chat');
+
+  const editRes = await fetch(`${base3}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'first question, edited' }], chat_id: chat2.chatId }),
+  });
+  assert(editRes.status === 200, 'the edit-style resend succeeds');
+  const afterEdit = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterEdit.messages.length === 2 && afterEdit.messages[0].content === 'first question, edited' && afterEdit.messages[1].role === 'assistant',
+    'an edit resend (one more message than already persisted) appends both the edited user message and the new reply',
+  );
+
+  server3.close();
+}
+
+// --- Admin timezone route (feeds handleChatCompletions's date-context line) ---
+{
+  const settings4 = createFakeSettingsStore();
+  const server4 = startHttpServer({
+    llm,
+    db: createPostgresClient(createFakePool()),
+    tools: createToolRegistry([]),
+    apiKeys: createApiKeyStore('good-key-4:44444444-4444-4444-4444-444444444444'),
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: createFakeChatSessionStore(),
+    adminApiKey: 'the-admin-key',
+    credentials: createFakeCredentialStore(),
+    settings: settings4,
+    llmProfiles,
+    modelName: 'bigbrain',
+    port: 0,
+    triggerRestart: () => {
+      throw new Error('timezone changes must never trigger a restart');
+    },
+  });
+  await new Promise((resolve) => server4.once('listening', resolve));
+  const base4 = `http://127.0.0.1:${server4.address().port}`;
+
+  const tzNoAuthRes = await fetch(`${base4}/v1/admin/timezone`);
+  assert(tzNoAuthRes.status === 401, 'GET /v1/admin/timezone with no auth header returns 401');
+
+  const tzDefaultRes = await fetch(`${base4}/v1/admin/timezone`, { headers: { authorization: 'Bearer the-admin-key' } });
+  const tzDefaultBody = await tzDefaultRes.json();
+  assert(
+    tzDefaultRes.status === 200 && tzDefaultBody.timezone === 'UTC',
+    'GET /v1/admin/timezone defaults to UTC before anything has been saved',
+  );
+
+  const tzBadRes = await fetch(`${base4}/v1/admin/timezone`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ value: 'Not/A_Real_Zone' }),
+  });
+  assert(tzBadRes.status === 400, 'POST /v1/admin/timezone rejects a name Intl does not recognize as a timezone');
+
+  const tzOkRes = await fetch(`${base4}/v1/admin/timezone`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ value: 'America/New_York' }),
+  });
+  const tzOkBody = await tzOkRes.json();
+  assert(
+    tzOkRes.status === 200 && tzOkBody.timezone === 'America/New_York',
+    'POST /v1/admin/timezone with a valid IANA name returns 200 immediately (not 202/restarting)',
+  );
+  assert(settings4.setCalls.some((c) => c.key === 'household_timezone' && c.value === 'America/New_York'), 'the settings store recorded the write');
+
+  const tzAfterSaveRes = await fetch(`${base4}/v1/admin/timezone`, { headers: { authorization: 'Bearer the-admin-key' } });
+  const tzAfterSaveBody = await tzAfterSaveRes.json();
+  assert(tzAfterSaveBody.timezone === 'America/New_York', 'GET /v1/admin/timezone reflects the newly saved value with no restart required');
+
+  server4.close();
 }
 
 if (process.exitCode) {

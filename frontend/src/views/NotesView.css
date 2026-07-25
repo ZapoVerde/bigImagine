@@ -1,0 +1,119 @@
+.notes-view {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1.2rem;
+}
+
+.notes-toolbar {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.notes-search {
+  flex: 1;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+.notes-toolbar button {
+  padding: 0.45rem 0.9rem;
+  cursor: pointer;
+}
+
+.notes-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.note-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 0.5rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  gap: 0.4rem;
+}
+
+.note-row:hover {
+  background: #eee;
+}
+
+.note-row-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.note-row-delete {
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0 0.3rem;
+  visibility: hidden;
+}
+
+.note-row:hover .note-row-delete {
+  visibility: visible;
+}
+
+.note-row-delete:hover {
+  color: #b00;
+}
+
+.back-link {
+  background: none;
+  border: none;
+  color: #666;
+  cursor: pointer;
+  padding: 0;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.back-link:hover {
+  color: #111;
+}
+
+.note-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.note-title-input {
+  font-size: 1.1rem;
+  font-weight: 600;
+  padding: 0.4rem;
+}
+
+.note-content-input {
+  font: inherit;
+  padding: 0.6rem;
+  resize: vertical;
+}
+
+.note-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.note-editor-actions button {
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+}
+
+.note-editor-actions button.danger {
+  color: #b00;
+}
+
+.saved-note {
+  font-size: 0.85rem;
+  color: #0a7a0a;
+}

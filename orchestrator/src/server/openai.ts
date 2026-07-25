@@ -29,6 +29,10 @@ export interface ChatCompletionRequestBody {
   model?: string;
   messages: IncomingChatMessage[];
   stream?: boolean;
+  /** bigBrain extension, not part of the OpenAI shape: ties this turn to a persisted chat
+   *  session (io/chatSessions.ts) — the session's params/tools apply and the exchange is stored.
+   *  Clients that don't send it (Open WebUI) get the original stateless behavior untouched. */
+  chat_id?: string;
 }
 
 function isIncomingChatMessage(value: unknown): value is IncomingChatMessage {
@@ -43,6 +47,7 @@ function isIncomingChatMessage(value: unknown): value is IncomingChatMessage {
 export function isChatCompletionRequestBody(value: unknown): value is ChatCompletionRequestBody {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
+  if (v.chat_id !== undefined && typeof v.chat_id !== 'string') return false;
   return Array.isArray(v.messages) && v.messages.every(isIncomingChatMessage);
 }
 

@@ -11,6 +11,9 @@
  * @api-declaration
  * createToolRegistry(tools: RegisteredTool[]) — .definitions() for the LLM's tool manifest,
  *   .get(name) to resolve a tool call to its handler
+ * filterToolRegistry(registry, allowed) — a view of an existing registry restricted to the named
+ *   tools (a chat session's tool allow-list, io/chatSessions.ts); wraps rather than reconstructs,
+ *   since RegisteredTool[] can't be enumerated back out of a ToolRegistry
  *
  * @contract
  *   assertions:
@@ -44,5 +47,13 @@ export function createToolRegistry(tools: RegisteredTool[]): ToolRegistry {
   return {
     definitions: () => tools.map((t) => t.definition),
     get: (name: string) => byName.get(name),
+  };
+}
+
+export function filterToolRegistry(registry: ToolRegistry, allowed: string[]): ToolRegistry {
+  const allowedNames = new Set(allowed);
+  return {
+    definitions: () => registry.definitions().filter((d) => allowedNames.has(d.name)),
+    get: (name: string) => (allowedNames.has(name) ? registry.get(name) : undefined),
   };
 }

@@ -61,6 +61,12 @@ export interface LlmCompleteOptions {
    *  Falls back to the profile's configured model when unset, which is what non-chat callers
    *  (e.g. the forced-schema classification call) get, since there's no picker in that path. */
   model?: string;
+  /** Per-call sampling overrides — how a chat session's own params (io/chatSessions.ts) take
+   *  effect. Omitted fields are simply not sent (temperature/topP), or fall back to the
+   *  provider's static config then 1024 (maxTokens) — the provider's own defaults apply. */
+  temperature?: number;
+  topP?: number;
+  maxTokens?: number;
 }
 
 export interface LlmProvider {
@@ -74,6 +80,13 @@ export interface LlmProvider {
    *  GET /v1/models). Not every provider has one worth exposing this way — undefined means "fall
    *  back to a single static entry," not "provider is broken." Keeping this on LlmProvider rather
    *  than passing baseUrl/apiKey out to httpServer.ts separately is what keeps them private to
-   *  each adapter's own closure. */
-  listModels?(): Promise<{ id: string }[]>;
+   *  each adapter's own closure.
+   *
+   *  pricing is per-token, in USD, as strings straight from the vendor (OpenRouter's /models is
+   *  the only source that actually has it; DeepSeek's doesn't, so it's simply absent there — not
+   *  every provider needs to invent a number). Only GET /v1/admin/settings/models (the Settings
+   *  tab's model picker) surfaces it; the public GET /v1/models Open WebUI uses only ever sends
+   *  bare ids (server/httpServer.ts's handleModels maps to `.id` before responding), so this
+   *  field never reaches that unauthenticated route. */
+  listModels?(): Promise<{ id: string; pricing?: { prompt: string; completion: string } }[]>;
 }

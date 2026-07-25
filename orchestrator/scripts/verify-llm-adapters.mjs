@@ -158,6 +158,81 @@ await withMockedFetch(
   },
 );
 
+// --- Sampling params (temperature/topP/maxTokens) — a chat session's own params, io/chatSessions.ts ---
+await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requests) => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  const db = createPostgresClient(createFakePool());
+  const tools = createToolRegistry([]);
+
+  await runTurn({
+    userId: 'u1',
+    messages: [{ role: 'user', content: 'hi' }],
+    sampling: { temperature: 0.2, topP: 0.9, maxTokens: 256 },
+    llm,
+    db,
+    tools,
+  });
+
+  const body = requests[0].body;
+  assert(body.temperature === 0.2, 'Anthropic: temperature is forwarded when set');
+  assert(body.top_p === 0.9, 'Anthropic: top_p is forwarded when set');
+  assert(body.max_tokens === 256, 'Anthropic: max_tokens override wins over the provider default');
+});
+
+await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requests) => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  const db = createPostgresClient(createFakePool());
+  const tools = createToolRegistry([]);
+
+  await runTurn({ userId: 'u1', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+
+  const body = requests[0].body;
+  assert(!('temperature' in body), 'Anthropic: temperature is omitted, not sent as null/undefined, when unset');
+  assert(!('top_p' in body), 'Anthropic: top_p is omitted when unset');
+  assert(body.max_tokens === 1024, 'Anthropic: max_tokens falls back to the 1024 default when unset');
+});
+
+await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+  });
+  const db = createPostgresClient(createFakePool());
+  const tools = createToolRegistry([]);
+
+  await runTurn({
+    userId: 'u1',
+    messages: [{ role: 'user', content: 'hi' }],
+    sampling: { temperature: 0.5, topP: 0.8, maxTokens: 128 },
+    llm,
+    db,
+    tools,
+  });
+
+  const body = requests[0].body;
+  assert(body.temperature === 0.5, 'OpenAI-compatible: temperature is forwarded when set');
+  assert(body.top_p === 0.8, 'OpenAI-compatible: top_p is forwarded when set');
+  assert(body.max_tokens === 128, 'OpenAI-compatible: max_tokens override wins over the provider default');
+});
+
+await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+  });
+  const db = createPostgresClient(createFakePool());
+  const tools = createToolRegistry([]);
+
+  await runTurn({ userId: 'u1', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+
+  const body = requests[0].body;
+  assert(!('temperature' in body), 'OpenAI-compatible: temperature is omitted when unset');
+  assert(!('top_p' in body), 'OpenAI-compatible: top_p is omitted when unset');
+  assert(body.max_tokens === 1024, 'OpenAI-compatible: max_tokens falls back to the 1024 default when unset');
+});
+
 if (process.exitCode) {
   console.error('\nLLM adapter verification FAILED');
   process.exit(1);

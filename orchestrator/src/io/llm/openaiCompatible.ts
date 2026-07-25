@@ -95,10 +95,15 @@ function fromOaiResponse(message: { content: string | null; tool_calls?: OaiTool
 /** GET {baseUrl}/models — the live catalog behind the "dynamic model picker": whatever a
  *  client's own model dropdown shows (Open WebUI included) comes from this, not a value baked
  *  into config. Standard on OpenAI-compatible APIs; OpenRouter's listing in particular needs no
- *  auth, but the key is sent anyway since some other providers do require it for this route. */
+ *  auth, but the key is sent anyway since some other providers do require it for this route.
+ *
+ *  `pricing` is OpenRouter's own extension to this otherwise-standard shape (confirmed live:
+ *  DeepSeek's /models entries carry only {id, object, owned_by}, no pricing field at all) — read
+ *  straight through when present, left undefined otherwise. Not validated beyond "is it an
+ *  object with string prompt/completion" since it's display-only, never computed on. */
 export async function listOpenAiCompatibleModels(
   config: Pick<OpenAiCompatibleConfig, 'baseUrl' | 'apiKey'>,
-): Promise<{ id: string }[]> {
+): Promise<{ id: string; pricing?: { prompt: string; completion: string } }[]> {
   const response = await fetchWithRetry(`${config.baseUrl}/models`, {
     headers: { authorization: `Bearer ${config.apiKey}` },
   });
@@ -106,8 +111,16 @@ export async function listOpenAiCompatibleModels(
     const body = await response.text();
     throw new Error(`OpenAI-compatible API error ${response.status} listing models: ${body}`);
   }
-  const payload = (await response.json()) as { data: { id: string }[] };
-  return payload.data.map((m) => ({ id: m.id }));
+  const payload = (await response.json()) as {
+    data: { id: string; pricing?: { prompt?: unknown; completion?: unknown } }[];
+  };
+  return payload.data.map((m) => {
+    const pricing =
+      typeof m.pricing?.prompt === 'string' && typeof m.pricing?.completion === 'string'
+        ? { prompt: m.pricing.prompt, completion: m.pricing.completion }
+        : undefined;
+    return pricing ? { id: m.id, pricing } : { id: m.id };
+  });
 }
 
 export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig): LlmProvider {
@@ -126,7 +139,9 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
         },
         body: JSON.stringify({
           model: options?.model ?? config.model,
-          max_tokens: config.maxTokens ?? 1024,
+          max_tokens: options?.maxTokens ?? config.maxTokens ?? 1024,
+          ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+          ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
           messages: toOaiMessages(messages),
           tools: tools.length > 0 ? toOaiTools(tools) : undefined,
           tool_choice: options?.forceTool

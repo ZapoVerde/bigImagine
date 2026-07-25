@@ -1,0 +1,69 @@
+.mealplan-view {
+  padding: 1rem 1.5rem 5rem;
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.mealplan-toolbar {
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.mealplan-toolbar button {
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+}
+
+.shopping-result {
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.day-group h2 {
+  font-size: 1rem;
+  border-bottom: 1px solid #ddd;
+  padding-bottom: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+
+.day-group ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+}
+
+.day-group li {
+  padding: 0.2rem 0;
+}
+
+.meal-label {
+  color: #888;
+  font-size: 0.85rem;
+}
+
+.add-entry-form {
+  position: sticky;
+  bottom: 0;
+  background: #fff;
+  display: flex;
+  gap: 0.5rem;
+  padding: 0.8rem 0;
+  border-top: 1px solid #ddd;
+  margin-top: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.add-entry-form input {
+  flex: 1;
+  min-width: 8rem;
+  padding: 0.4rem;
+  font: inherit;
+}
+
+.add-entry-form button {
+  padding: 0 1rem;
+  cursor: pointer;
+}

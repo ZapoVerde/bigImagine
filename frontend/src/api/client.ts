@@ -1,0 +1,242 @@
+import type {
+  ActiveProfileSetting,
+  ChatCompletionResponse,
+  ChatDetail,
+  ChatMessage,
+  ChatParams,
+  ChatSessionRow,
+  ChatSummary,
+  CredentialSummary,
+  Folder,
+  ProfileModelsResult,
+} from './types';
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function parseErrorBody(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: string };
+    return body.error ?? res.statusText;
+  } catch {
+    return res.statusText;
+  }
+}
+
+function authHeaders(apiKey: string | null): Record<string, string> {
+  return apiKey ? { authorization: `Bearer ${apiKey}` } : {};
+}
+
+/** Am I already authenticated with no key at all? True when a Cloudflare Access identity
+ *  (io/accessIdentity.ts) resolves this request server-side — Access attaches its header to every
+ *  request reaching the origin through bigbrain.your-domain.example regardless of what this page sends, so
+ *  no Authorization header is needed here for that path to succeed. Returns null on 401 (an
+ *  expected outcome, not an error) rather than throwing. */
+export async function whoami(): Promise<string | null> {
+  const res = await fetch('/v1/whoami');
+  if (res.status === 401) return null;
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { userId: string };
+  return body.userId;
+}
+
+/** Invokes one registered tool by name — POST /v1/tools/:name, same auth and RLS scoping as chat.
+ *  apiKey is null under Cloudflare Access SSO (see whoami()) — the Authorization header is simply
+ *  omitted in that case. Response shapes aren't discoverable from the server (openapi.json always
+ *  reports `{}`); callers supply the expected shape via the type parameter, backed by the
+ *  hand-written interfaces in ./types.ts. */
+export async function callTool<T>(name: string, args: unknown, apiKey: string | null): Promise<T> {
+  const res = await fetch(`/v1/tools/${encodeURIComponent(name)}`, {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify(args),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<T>;
+}
+
+/** POST /v1/chat/completions — non-streaming: runTurn resolves the full reply server-side before
+ *  anything is sent back, so there's no token stream worth consuming here. chatId ties the turn
+ *  to a persisted session (the server applies its params/tools and stores the exchange).
+ *
+ *  Deliberately omits `model` from the body: httpServer.ts's handleChatCompletions treats
+ *  body.model as a real per-request override (`options.model ?? config.model` in the LLM
+ *  adapters) — it exists for Open WebUI's own model dropdown, which sends a real model id from
+ *  GET /v1/models. This client used to hardcode the literal string "bigbrain" here, which was
+ *  harmless before that override plumbing existed but became a hard failure once it did — every
+ *  request told the real provider (DeepSeek/OpenRouter) to use a model literally named
+ *  "bigbrain", which doesn't exist, and it rejected every single message. Omitting it here falls
+ *  back to the chat session's own params.model if set, else the active connection's configured
+ *  default — never a fake label. */
+export async function chatCompletion(
+  messages: ChatMessage[],
+  apiKey: string | null,
+  chatId?: string,
+): Promise<ChatCompletionResponse> {
+  const res = await fetch('/v1/chat/completions', {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ messages, stream: false, ...(chatId ? { chat_id: chatId } : {}) }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ChatCompletionResponse>;
+}
+
+async function jsonRequest<T>(path: string, apiKey: string | null, init?: { method?: string; body?: unknown }): Promise<T> {
+  const res = await fetch(path, {
+    method: init?.method ?? 'GET',
+    headers: { ...authHeaders(apiKey), ...(init?.body !== undefined ? { 'content-type': 'application/json' } : {}) },
+    body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<T>;
+}
+
+export async function listChats(apiKey: string | null, search?: string): Promise<ChatSummary[]> {
+  const query = search ? `?search=${encodeURIComponent(search)}` : '';
+  const body = await jsonRequest<{ chats: ChatSummary[] }>(`/v1/chats${query}`, apiKey);
+  return body.chats;
+}
+
+export function createChat(apiKey: string | null, init?: { title?: string; folder_id?: string }): Promise<ChatSessionRow> {
+  return jsonRequest<ChatSessionRow>('/v1/chats', apiKey, { method: 'POST', body: init ?? {} });
+}
+
+export function getChat(chatId: string, apiKey: string | null): Promise<ChatDetail> {
+  return jsonRequest<ChatDetail>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey);
+}
+
+export function updateChat(
+  chatId: string,
+  patch: { title?: string; folder_id?: string | null; params?: ChatParams; tool_names?: string[] | null },
+  apiKey: string | null,
+): Promise<ChatSessionRow> {
+  return jsonRequest<ChatSessionRow>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey, { method: 'POST', body: patch });
+}
+
+export function deleteChat(chatId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
+  return jsonRequest<{ deleted: boolean }>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey, { method: 'DELETE' });
+}
+
+/** Removes exactly one message, wherever it falls in the conversation — the Chat tab's standalone
+ *  delete action. Everything else in the chat is untouched. */
+export function deleteMessage(chatId: string, messageId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
+  return jsonRequest<{ deleted: boolean }>(
+    `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}`,
+    apiKey,
+    { method: 'DELETE' },
+  );
+}
+
+/** Removes the given message and everything chronologically after it — the shared step behind
+ *  both "edit" (truncate the edited message, then resend with new content) and "rerun" (truncate
+ *  the reply being regenerated, then resend the now-shorter history unchanged). Caller is
+ *  responsible for the resend; this only clears room for it. */
+export function truncateMessagesFrom(
+  chatId: string,
+  messageId: string,
+  apiKey: string | null,
+): Promise<{ truncated: boolean }> {
+  return jsonRequest<{ truncated: boolean }>(
+    `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/truncate`,
+    apiKey,
+    { method: 'POST' },
+  );
+}
+
+export async function listFolders(apiKey: string | null): Promise<Folder[]> {
+  const body = await jsonRequest<{ folders: Folder[] }>('/v1/folders', apiKey);
+  return body.folders;
+}
+
+export function createFolder(name: string, apiKey: string | null): Promise<Folder> {
+  return jsonRequest<Folder>('/v1/folders', apiKey, { method: 'POST', body: { name } });
+}
+
+export function deleteFolder(folderId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
+  return jsonRequest<{ deleted: boolean }>(`/v1/folders/${encodeURIComponent(folderId)}`, apiKey, { method: 'DELETE' });
+}
+
+/** Registered tool names, from the OpenAPI spec's paths — the only place the server enumerates
+ *  its tools. Used by the per-chat tool checklist. */
+export async function listToolNames(apiKey: string | null): Promise<string[]> {
+  const body = await jsonRequest<{ paths: Record<string, unknown> }>('/v1/tools/openapi.json', apiKey);
+  return Object.keys(body.paths).map((p) => p.replace(/^\//, ''));
+}
+
+/** adminKey is null under Cloudflare Access SSO — httpServer.ts's isAdminAuthorized trusts any
+ *  Access identity that already cleared the hostname, same as the household routes, so no
+ *  manually-typed admin key is needed there. Only deployments without Access configured (or
+ *  non-browser callers) need to supply the static BIGBRAIN_ADMIN_API_KEY. */
+export async function adminListCredentials(adminKey: string | null): Promise<CredentialSummary[]> {
+  const res = await fetch('/v1/admin/credentials', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { credentials: CredentialSummary[] };
+  return body.credentials;
+}
+
+/** Resolves once the save is accepted (202) — the orchestrator restarts a moment later
+ *  (restart-on-save, see adminServer.ts) to pick up the new value at boot. */
+export async function adminSetCredential(name: string, value: string, adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/credentials', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ name, value }),
+  });
+  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** The connection picker's current state — which named BIGBRAIN_LLM_PROFILES entry is active,
+ *  and every selectable name. */
+export async function adminGetActiveProfile(adminKey: string | null): Promise<ActiveProfileSetting> {
+  const res = await fetch('/v1/admin/settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ActiveProfileSetting>;
+}
+
+/** Resolves once the save is accepted (202) — same restart-on-save shape as adminSetCredential. */
+export async function adminSetActiveProfile(profileName: string, model: string, adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ value: profileName, model }),
+  });
+  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** The model catalog for one named connection — even one that isn't currently active — so the
+ *  Settings tab can populate its model dropdown as soon as a profile is picked, before switching
+ *  to it. defaultModel is that profile's own static config model, a sensible pre-selection. */
+export async function adminListModelsForProfile(profileName: string, adminKey: string | null): Promise<ProfileModelsResult> {
+  const res = await fetch(`/v1/admin/settings/models?profile=${encodeURIComponent(profileName)}`, {
+    headers: authHeaders(adminKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ProfileModelsResult>;
+}
+
+/** The household's IANA timezone (defaults to "UTC" server-side until ever set) — used to tell
+ *  the LLM the actual current date/time on every chat turn (orchestrator's util/dateContext.ts).
+ *  Unlike the connection picker, changing this needs no restart. */
+export async function adminGetTimezone(adminKey: string | null): Promise<string> {
+  const res = await fetch('/v1/admin/timezone', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { timezone: string };
+  return body.timezone;
+}
+
+/** Resolves once saved — no restart, no polling; the very next chat turn reads it live. */
+export async function adminSetTimezone(timezone: string, adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/timezone', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ value: timezone }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}

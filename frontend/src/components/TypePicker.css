@@ -1,0 +1,38 @@
+.type-picker {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.type-picker h2 {
+  font-size: 1rem;
+  font-weight: 500;
+  color: #666;
+  margin: 0;
+}
+
+.type-picker-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.7rem;
+  max-width: 28rem;
+}
+
+.type-picker-btn {
+  padding: 0.7rem 1.3rem;
+  font-size: 0.95rem;
+  cursor: pointer;
+  border: 1px solid #ccc;
+  border-radius: 0.5rem;
+  background: #fff;
+}
+
+.type-picker-btn:hover {
+  background: #f0f0f0;
+  border-color: #999;
+}

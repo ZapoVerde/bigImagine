@@ -44,6 +44,9 @@ services:
       BIGBRAIN_EMBEDDINGS_API_KEY: ${BIGBRAIN_EMBEDDINGS_API_KEY:?set in .env}
       BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION: ${BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION:?set in .env}
       BIGBRAIN_API_KEYS: ${BIGBRAIN_API_KEYS:?set in .env}
+      BIGBRAIN_ACCESS_TEAM_DOMAIN: ${BIGBRAIN_ACCESS_TEAM_DOMAIN:-}
+      BIGBRAIN_ACCESS_AUD: ${BIGBRAIN_ACCESS_AUD:-}
+      BIGBRAIN_ACCESS_EMAILS: ${BIGBRAIN_ACCESS_EMAILS:-}
       BIGBRAIN_ADMIN_API_KEY: ${BIGBRAIN_ADMIN_API_KEY:?set in .env}
       BIGBRAIN_FIELD_ENCRYPTION_KEY: ${BIGBRAIN_FIELD_ENCRYPTION_KEY:?set in .env}
       BIGBRAIN_NOTION_TOKEN: ${BIGBRAIN_NOTION_TOKEN:-}
@@ -51,10 +54,10 @@ services:
       BIGBRAIN_NOTION_OWNER_USER_ID: ${BIGBRAIN_NOTION_OWNER_USER_ID:-}
       BIGBRAIN_ORCHESTRATOR_PORT: 8787
     ports:
-      # Loopback-only fallback for GET /v1/admin (adminPage.ts) via
-      # `ssh -L 8787:localhost:8787 <user>@<host>` then http://localhost:8787/v1/admin — kept
-      # alongside the public route below, same dual-path precedent as open-webui's own LAN-direct
-      # port 3000 next to its Traefik route.
+      # Loopback-only fallback for the frontend/Settings tab (frontend/, adminServer.ts) via
+      # `ssh -L 8787:localhost:8787 <user>@<host>` then http://localhost:8787/ — kept alongside the
+      # public route below, same dual-path precedent as open-webui's own LAN-direct port 3000 next
+      # to its Traefik route.
       - "127.0.0.1:8787:8787"
     volumes:
       - ./orchestrator/logs:/app/orchestrator/logs

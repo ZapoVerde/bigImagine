@@ -5,7 +5,8 @@
   "type": "module",
   "workspaces": [
     "orchestrator",
-    "plugins/*"
+    "plugins/*",
+    "frontend"
   ],
   "scripts": {
     "build": "npm run build --workspace=@bigbrain/orchestrator && npm run build --workspaces --if-present",

@@ -1,0 +1,18 @@
+{
+  "name": "@bigbrain/plugin-prompt-presets",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "verify": "npm run build && node scripts/verify-prompt-presets.mjs"
+  },
+  "dependencies": {
+    "@bigbrain/orchestrator": "*"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}

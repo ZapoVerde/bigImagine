@@ -13,6 +13,10 @@
  * @api-declaration
  * createLlmProvider(env: NodeJS.ProcessEnv) — reads BIGBRAIN_LLM_PROFILES (JSON) and
  *   BIGBRAIN_LLM_ACTIVE_PROFILE (which key in it to use)
+ * createLlmProviderForProfile(profile: LlmProfile) — the kind-dispatch on its own, factored out
+ *   so the Settings tab's model picker (server/httpServer.ts's GET /v1/admin/settings/models) can
+ *   build a throwaway provider for any configured profile — even one that isn't active — just to
+ *   call its listModels(), without duplicating the anthropic/openai-compatible branch here too
  *
  * @contract
  *   assertions:
@@ -23,11 +27,19 @@
 
 import { createAnthropicLlmProvider } from './anthropic.js';
 import { createOpenAiCompatibleLlmProvider } from './openaiCompatible.js';
-import { parseLlmProfiles } from './profiles.js';
+import { parseLlmProfiles, type LlmProfile } from './profiles.js';
 import type { LlmProvider } from './types.js';
 
 export type { LlmMessage, LlmProvider, LlmRole, LlmTurn, ToolCall, ToolDefinition } from './types.js';
 export type { LlmProfile } from './profiles.js';
+
+export function createLlmProviderForProfile(profile: LlmProfile): LlmProvider {
+  if (profile.kind === 'anthropic') {
+    return createAnthropicLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl });
+  }
+  // profile.kind === 'openai-compatible'; profiles.ts already guarantees baseUrl is set for this kind.
+  return createOpenAiCompatibleLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl! });
+}
 
 export function createLlmProvider(env: NodeJS.ProcessEnv = process.env): LlmProvider {
   const rawProfiles = env.BIGBRAIN_LLM_PROFILES;
@@ -47,9 +59,5 @@ export function createLlmProvider(env: NodeJS.ProcessEnv = process.env): LlmProv
     throw new Error(`BIGBRAIN_LLM_ACTIVE_PROFILE is "${activeName}", which isn't in BIGBRAIN_LLM_PROFILES — known profiles: ${known}`);
   }
 
-  if (profile.kind === 'anthropic') {
-    return createAnthropicLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl });
-  }
-  // profile.kind === 'openai-compatible'; profiles.ts already guarantees baseUrl is set for this kind.
-  return createOpenAiCompatibleLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl! });
+  return createLlmProviderForProfile(profile);
 }

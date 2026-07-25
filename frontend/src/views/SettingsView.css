@@ -1,0 +1,49 @@
+.settings-view {
+  max-width: 40rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.settings-view table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.settings-view td,
+.settings-view th {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #ccc;
+}
+
+.settings-view input,
+.settings-view select,
+.settings-view button {
+  font-size: 1rem;
+  padding: 0.4rem;
+  margin: 0.2rem 0;
+}
+
+.settings-view input[type='password'] {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.badge-yes {
+  color: #0a7a0a;
+}
+
+.badge-no {
+  color: #999;
+}
+
+.settings-view fieldset {
+  margin-top: 1.5rem;
+}
+
+.status {
+  margin-top: 0.6rem;
+  font-size: 0.9rem;
+  color: #555;
+}

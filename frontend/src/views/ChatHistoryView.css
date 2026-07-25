@@ -1,0 +1,86 @@
+.chat-history-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  max-width: 32rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.history-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.history-search {
+  flex: 1;
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+}
+
+.new-folder-btn {
+  padding: 0.45rem 0.7rem;
+  cursor: pointer;
+  color: #555;
+}
+
+.history-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.folder-group {
+  margin-bottom: 0.3rem;
+}
+
+.folder-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  color: #888;
+  padding: 0.5rem 0.4rem 0.2rem;
+}
+
+.history-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  gap: 0.4rem;
+}
+
+.history-row:hover {
+  background: #eee;
+}
+
+.history-row-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.95rem;
+}
+
+.history-row-delete {
+  background: none;
+  border: none;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0 0.2rem;
+  visibility: hidden;
+}
+
+.history-row:hover .history-row-delete,
+.folder-name:hover .history-row-delete {
+  visibility: visible;
+}
+
+.history-row-delete:hover {
+  color: #b00;
+}

@@ -47,6 +47,10 @@ export interface RunTurnOptions {
    *  call) are untouched by this — they're a separate llm.complete() invocation entirely, not
    *  routed through runTurn. */
   model?: string;
+  /** Per-request sampling overrides (a persisted chat session's own params — see
+   *  io/chatSessions.ts), forwarded to every llm.complete() call this turn makes. Unset fields
+   *  fall through to the provider's own defaults, same as model above. */
+  sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   llm: LlmProvider;
   db: PostgresClient;
   tools: ToolRegistry;
@@ -59,7 +63,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<string> {
 }
 
 async function runTurnInner(opts: RunTurnOptions): Promise<string> {
-  const { userId, systemPrompt, model, llm, db, tools, maxToolRounds = 5 } = opts;
+  const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 5 } = opts;
 
   const messages: LlmMessage[] = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
@@ -68,7 +72,7 @@ async function runTurnInner(opts: RunTurnOptions): Promise<string> {
   log.info(`runTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
 
   for (let round = 0; round < maxToolRounds; round++) {
-    const turn = await llm.complete(messages, tools.definitions(), { model });
+    const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
     messages.push({
       ...turn.message,
       toolCalls: turn.toolCalls.length > 0 ? turn.toolCalls : undefined,
