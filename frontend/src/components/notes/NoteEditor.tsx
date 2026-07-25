@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../../api/client';
-import type { NoteDetailResult } from '../../api/types';
+import type { NoteDetailResult, NoteState } from '../../api/types';
+
+function toDateInputValue(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : '';
+}
 
 interface NoteEditorProps {
   apiKey: string | null;
@@ -21,6 +25,8 @@ interface NoteEditorProps {
 export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: NoteEditorProps) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
+  const [state, setStateValue] = useState<NoteState>('active');
+  const [reminderAt, setReminderAt] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
@@ -39,6 +45,8 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
         setNotFound(false);
         setTitle(detail.title);
         setContent(detail.content);
+        setStateValue(detail.state);
+        setReminderAt(detail.reminderAt);
         setDirty(false);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load note'));
@@ -69,6 +77,30 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
     }
   }
 
+  // state/reminder changes apply immediately (not gated behind the Save button above) — they're
+  // metadata about the note, not edits to its content, same "explicit action, applied right away"
+  // shape complete_list_item/togglePin-style controls use elsewhere in this app.
+  async function setState(next: NoteState) {
+    setError(null);
+    try {
+      await callTool<NoteDetailResult>('update_note', { note_id: noteId, state: next }, apiKey);
+      setStateValue(next);
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update note');
+    }
+  }
+
+  async function setReminder(value: string) {
+    setError(null);
+    try {
+      await callTool<NoteDetailResult>('update_note', { note_id: noteId, reminder_at: value || null }, apiKey);
+      setReminderAt(value || null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update reminder');
+    }
+  }
+
   if (notFound) {
     return (
       <div className="note-editor">
@@ -80,6 +112,26 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
   return (
     <div className="note-editor">
       {error && <div className="error-banner">{error}</div>}
+      <div className="note-editor-meta">
+        <button
+          type="button"
+          className={state === 'pinned' ? 'active' : ''}
+          onClick={() => setState(state === 'pinned' ? 'active' : 'pinned')}
+        >
+          {state === 'pinned' ? '★ Pinned' : '☆ Pin'}
+        </button>
+        <button
+          type="button"
+          className={state === 'archived' ? 'active' : ''}
+          onClick={() => setState(state === 'archived' ? 'active' : 'archived')}
+        >
+          {state === 'archived' ? 'Unarchive' : 'Archive'}
+        </button>
+        <label className="note-reminder">
+          Remind me
+          <input type="date" value={toDateInputValue(reminderAt)} onChange={(e) => setReminder(e.target.value)} />
+        </label>
+      </div>
       <input
         className="note-title-input"
         value={title}

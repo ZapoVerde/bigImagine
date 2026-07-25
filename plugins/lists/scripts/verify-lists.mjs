@@ -62,7 +62,7 @@ function createFakePool() {
             return { rows: [{ list_id }] };
           }
           if (sql.includes('insert into list_items')) {
-            const [listId, userId, itemName, section] = params;
+            const [listId, userId, itemName, section, priority, dueAt] = params;
             const item_id = `item-${++itemCounter}`;
             items.push({
               item_id,
@@ -71,10 +71,22 @@ function createFakePool() {
               item_name: itemName,
               section: section ?? null,
               status: 'pending',
+              priority: priority ?? null,
+              due_at: dueAt ?? null,
               created_at: `2026-07-23T00:00:${String(itemCounter).padStart(2, '0')}Z`,
               completed_at: null,
             });
             return { rows: [{ item_id }] };
+          }
+          if (sql.startsWith('update list_items set')) {
+            const [itemId, userId] = params;
+            const item = items.find((it) => it.item_id === itemId && it.user_id === userId);
+            if (!item) return { rows: [] };
+            let paramIdx = 2;
+            if (sql.includes('item_name = $')) item.item_name = params[paramIdx++];
+            if (sql.includes('priority = $')) item.priority = params[paramIdx++];
+            if (sql.includes('due_at = $')) item.due_at = params[paramIdx++];
+            return { rows: [{ item_id: item.item_id, item_name: item.item_name, priority: item.priority, due_at: item.due_at }] };
           }
           if (sql.includes('update list_items')) {
             const [userId, itemName, listName] = params;
@@ -112,6 +124,8 @@ function createFakePool() {
                   section: it.section,
                   item_name: it.item_name,
                   status: it.status,
+                  priority: it.priority ?? null,
+                  due_at: it.due_at ?? null,
                   created_at: it.created_at,
                   completed_at: it.completed_at,
                 };
@@ -173,10 +187,10 @@ assert(
 
 const notion = createFakeNotionClient();
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion });
-assert(pluginTools.length === 5, 'registerTools returns exactly five tools');
+assert(pluginTools.length === 6, 'registerTools returns exactly six tools');
 
 const registry = createToolRegistry(pluginTools);
-for (const name of ['create_list', 'add_list_item', 'complete_list_item', 'get_list_items', 'set_list_section_order']) {
+for (const name of ['create_list', 'add_list_item', 'complete_list_item', 'get_list_items', 'update_list_item', 'set_list_section_order']) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -241,6 +255,27 @@ assert(all.length === 3, 'include_done: true returns all items including the com
 // --- list_name scopes to just that list ---
 const booksOnly = await withUser((ctx) => registry.get('get_list_items').handler({ list_name: 'Books to Read' }, ctx));
 assert(booksOnly.length === 0, 'a list with no items returns an empty array, not an error');
+
+// --- priority/due_at pass through add_list_item -> get_list_items, and update_list_item edits them later ---
+{
+  const addUrgent = await withUser((ctx) =>
+    registry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'urgent thing', priority: 'P1', due_at: '2026-08-01T00:00:00Z' }, ctx),
+  );
+  assert(addUrgent.priority === 'P1' && addUrgent.dueAt === '2026-08-01T00:00:00Z', 'add_list_item echoes back the priority/due_at it was given');
+
+  const items = await withUser((ctx) => registry.get('get_list_items').handler({ list_name: 'Grocery List' }, ctx));
+  const urgentItem = items.find((i) => i.itemName === 'urgent thing');
+  assert(urgentItem.priority === 'P1' && urgentItem.dueAt === '2026-08-01T00:00:00Z', 'get_list_items carries priority/due_at through');
+  const plainItem = items.find((i) => i.itemName === 'eggs');
+  assert(plainItem.priority === null && plainItem.dueAt === null, 'an item added without priority/due_at has both null');
+
+  const updated = await withUser((ctx) => registry.get('update_list_item').handler({ item_id: urgentItem.itemId, priority: 'P3' }, ctx));
+  assert(updated.found === true && updated.priority === 'P3', 'update_list_item changes priority when given');
+  assert(updated.dueAt === '2026-08-01T00:00:00Z', 'update_list_item leaves due_at untouched when only priority was supplied');
+
+  const missingUpdate = await withUser((ctx) => registry.get('update_list_item').handler({ item_id: 'no-such-item', priority: 'P1' }, ctx));
+  assert(missingUpdate.found === false, 'update_list_item on a nonexistent item returns found: false rather than throwing');
+}
 
 // --- empty-string args are rejected, not silently accepted ---
 try {

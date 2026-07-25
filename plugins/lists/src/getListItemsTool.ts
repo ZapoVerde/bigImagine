@@ -1,6 +1,6 @@
 /**
  * @file plugins/lists/src/getListItemsTool.ts
- * @stamp 2026-07-23
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — reads list items back
  * @description
  * Defaults to pending items only (the common "what do I still need to get" ask) across all of
@@ -14,6 +14,12 @@
  * optional), each with its own independent section_order, which is awkward to express as a single
  * SQL ORDER BY but trivial as a per-row array index lookup here. A list with no section_order (or
  * an item with no classified section) falls back to created_at, unchanged from before this existed.
+ *
+ * priority/due_at (db/migrations/0024_action_dates_priority.sql, docs/spec.md's action-dates
+ * addition) are passed through as plain columns here, unsorted by this tool — this stays
+ * section-order sorted for the "what do I still need to get" shopping-list case; a separate
+ * time-then-priority ranked view is a different tool's job (the Landing Deck's action queue), not
+ * this one's default.
  *
  * @api-declaration
  * createGetListItemsTool() — returns the get_list_items RegisteredTool
@@ -34,6 +40,8 @@ interface ItemRow {
   section: string | null;
   item_name: string;
   status: string;
+  priority: string | null;
+  due_at: string | null;
   created_at: string;
   completed_at: string | null;
 }
@@ -70,7 +78,7 @@ export function createGetListItemsTool(): RegisteredTool {
       const includeDone = args.include_done ?? false;
 
       const rows = await ctx.db.query<ItemRow>(
-        `select li.item_id, l.name as list_name, l.section_order, li.section, li.item_name, li.status, li.created_at, li.completed_at
+        `select li.item_id, l.name as list_name, l.section_order, li.section, li.item_name, li.status, li.priority, li.due_at, li.created_at, li.completed_at
          from list_items li
          join lists l on l.list_id = li.list_id
          where li.user_id = $1
@@ -92,6 +100,8 @@ export function createGetListItemsTool(): RegisteredTool {
         section: r.section,
         itemName: r.item_name,
         status: r.status,
+        priority: r.priority,
+        dueAt: r.due_at,
         createdAt: r.created_at,
         completedAt: r.completed_at,
       }));

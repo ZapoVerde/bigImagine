@@ -1,6 +1,6 @@
 /**
  * @file plugins/lists/src/addListItemTool.ts
- * @stamp 2026-07-23
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — adds an item to a (possibly new) list
  * @description
  * Goes through findOrCreateList so "add milk to my grocery list" works in one call even if the
@@ -13,6 +13,10 @@
  * into store-walk order. Best-effort: a lists with no section_order skips classification entirely
  * (no LLM call for the common case), and a classification failure is logged but never blocks the
  * item actually being added — same best-effort spirit as the Notion sync below it.
+ *
+ * priority/due_at (db/migrations/0024_action_dates_priority.sql) are both optional and set
+ * explicitly here, never inferred — bb_principles.md §3: once set, a priority isn't second-guessed
+ * by anything downstream. Either can also be set later via update_list_item.
  *
  * @api-declaration
  * createAddListItemTool(llm, notion) — returns the add_list_item RegisteredTool
@@ -32,16 +36,25 @@ import { classifySection } from './classifySection.js';
 import { findOrCreateList } from './listLookup.js';
 import { syncListItemToNotion } from './notionSync.js';
 
-function isAddListItemArgs(value: unknown): value is { list_name: string; item_name: string } {
+const VALID_PRIORITIES = ['P1', 'P2', 'P3'];
+
+function isAddListItemArgs(
+  value: unknown,
+): value is { list_name: string; item_name: string; priority?: string; due_at?: string } {
   const v = value as Record<string, unknown>;
-  return (
-    typeof value === 'object' &&
-    value !== null &&
-    typeof v.list_name === 'string' &&
-    v.list_name !== '' &&
-    typeof v.item_name === 'string' &&
-    v.item_name !== ''
-  );
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    typeof v.list_name !== 'string' ||
+    v.list_name === '' ||
+    typeof v.item_name !== 'string' ||
+    v.item_name === ''
+  ) {
+    return false;
+  }
+  if (v.priority !== undefined && !VALID_PRIORITIES.includes(v.priority as string)) return false;
+  if (v.due_at !== undefined && typeof v.due_at !== 'string') return false;
+  return true;
 }
 
 export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | undefined): RegisteredTool {
@@ -55,6 +68,8 @@ export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | u
         properties: {
           list_name: { type: 'string', description: 'The name of the list to add the item to.' },
           item_name: { type: 'string', description: 'The item to add.' },
+          priority: { type: 'string', enum: VALID_PRIORITIES, description: 'Optional: P1 (urgent) through P3 (whenever). Only set when the user explicitly asks for it.' },
+          due_at: { type: 'string', description: 'Optional: ISO timestamp this item is due by.' },
         },
         required: ['list_name', 'item_name'],
         additionalProperties: false,
@@ -62,7 +77,7 @@ export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | u
     },
     handler: async (args, ctx) => {
       if (!isAddListItemArgs(args)) {
-        throw new Error('add_list_item requires non-empty list_name and item_name: string arguments');
+        throw new Error('add_list_item requires non-empty list_name and item_name: string arguments; priority (if given) must be P1/P2/P3 and due_at (if given) a string');
       }
 
       const { listId, created } = await findOrCreateList(ctx.db, ctx.userId, args.list_name);
@@ -79,8 +94,8 @@ export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | u
       }
 
       const rows = await ctx.db.query<{ item_id: string }>(
-        `insert into list_items (list_id, user_id, item_name, section) values ($1, $2, $3, $4) returning item_id`,
-        [listId, ctx.userId, args.item_name, section],
+        `insert into list_items (list_id, user_id, item_name, section, priority, due_at) values ($1, $2, $3, $4, $5, $6) returning item_id`,
+        [listId, ctx.userId, args.item_name, section, args.priority ?? null, args.due_at ?? null],
       );
       const itemId = rows[0]!.item_id;
 
@@ -97,6 +112,8 @@ export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | u
         listId,
         listName: args.list_name,
         itemName: args.item_name,
+        priority: args.priority ?? null,
+        dueAt: args.due_at ?? null,
         listWasCreated: created,
       };
     },

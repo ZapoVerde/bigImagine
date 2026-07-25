@@ -32,7 +32,7 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into notes')) {
-            const [userId, title, content] = params;
+            const [userId, title, content, reminderAt] = params;
             assert(scopedUserId === userId, 'create_note is scoped to the requesting user');
             const note = {
               note_id: `note-${++counter}`,
@@ -40,15 +40,17 @@ function createFakePool() {
               title: title ?? 'Untitled note',
               content,
               tags: [],
+              state: 'active',
+              reminder_at: reminderAt ?? null,
               created_at: `2026-07-24T00:00:${String(counter).padStart(2, '0')}Z`,
               updated_at: `2026-07-24T00:00:${String(counter).padStart(2, '0')}Z`,
             };
             notes.push(note);
-            return { rows: [{ note_id: note.note_id, title: note.title, content: note.content }] };
+            return { rows: [{ note_id: note.note_id, title: note.title, content: note.content, reminder_at: note.reminder_at }] };
           }
 
-          if (sql.startsWith('select note_id, title, updated_at from notes')) {
-            const [userId, like] = params;
+          if (sql.startsWith('select note_id, title, state, updated_at from notes')) {
+            const [userId, like, state, excludeArchived] = params;
             assert(scopedUserId === userId, 'get_notes is scoped to the requesting user');
             const matches = notes
               .filter((n) => n.user_id === userId)
@@ -57,11 +59,13 @@ function createFakePool() {
                 const term = like.slice(1, -1).toLowerCase();
                 return n.title.toLowerCase().includes(term) || n.content.toLowerCase().includes(term);
               })
+              .filter((n) => (state ? n.state === state : true))
+              .filter((n) => (!state && excludeArchived ? n.state !== 'archived' : true))
               .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
-            return { rows: matches.map((n) => ({ note_id: n.note_id, title: n.title, updated_at: n.updated_at })) };
+            return { rows: matches.map((n) => ({ note_id: n.note_id, title: n.title, state: n.state, updated_at: n.updated_at })) };
           }
 
-          if (sql.startsWith('select note_id, title, content, tags, created_at, updated_at from notes')) {
+          if (sql.startsWith('select note_id, title, content, tags, state, reminder_at, created_at, updated_at from notes')) {
             const [noteId, userId] = params;
             assert(scopedUserId === userId, 'get_note is scoped to the requesting user');
             const note = notes.find((n) => n.note_id === noteId && n.user_id === userId);
@@ -73,13 +77,28 @@ function createFakePool() {
             assert(scopedUserId === userId, 'update_note is scoped to the requesting user');
             const note = notes.find((n) => n.note_id === noteId && n.user_id === userId);
             if (!note) return { rows: [] };
-            // sets order matches updateNoteTool.ts: title?, content?, tags? — walk whichever were included
+            // sets order matches updateNoteTool.ts: title?, content?, tags?, state?, reminder_at? —
+            // walk whichever were included
             let i = 0;
             if (sql.includes('title = $')) note.title = rest[i++];
             if (sql.includes('content = $')) note.content = rest[i++];
             if (sql.includes('tags = $')) note.tags = rest[i++];
+            if (sql.includes('state = $')) note.state = rest[i++];
+            if (sql.includes('reminder_at = $')) note.reminder_at = rest[i++];
             note.updated_at = `2026-07-24T01:00:${String(++counter).padStart(2, '0')}Z`;
-            return { rows: [{ note_id: note.note_id, title: note.title, content: note.content, tags: note.tags, updated_at: note.updated_at }] };
+            return {
+              rows: [
+                {
+                  note_id: note.note_id,
+                  title: note.title,
+                  content: note.content,
+                  tags: note.tags,
+                  state: note.state,
+                  reminder_at: note.reminder_at,
+                  updated_at: note.updated_at,
+                },
+              ],
+            };
           }
 
           if (sql.startsWith('delete from notes')) {
@@ -187,6 +206,47 @@ const deleteMissing = await db.withUserScope(userId, (session) =>
   deleteTool.handler({ note_id: 'does-not-exist' }, { userId, db: session }),
 );
 assert(deleteMissing.deleted === false, 'delete_note reports failure for a missing note rather than throwing');
+
+// --- state (pinned/archived) and reminder_at, in a fresh pool so this block's counts stay isolated ---
+{
+  const pool2 = createFakePool();
+  const db2 = createPostgresClient(pool2);
+  const uid = '55555555-5555-5555-5555-555555555555';
+  const withU = (fn) => db2.withUserScope(uid, (session) => fn({ userId: uid, db: session }));
+
+  const created = await withU((ctx) => createTool.handler({ content: 'Review the itinerary', reminder_at: '2026-08-01T09:00:00Z' }, ctx));
+  assert(created.reminderAt === '2026-08-01T09:00:00Z', 'create_note stores reminder_at when given');
+
+  const fetched = await withU((ctx) => getNoteTool.handler({ note_id: created.noteId }, ctx));
+  assert(fetched.state === 'active', 'a new note starts in state "active"');
+
+  const pinned = await withU((ctx) => updateTool.handler({ note_id: created.noteId, state: 'pinned' }, ctx));
+  assert(pinned.state === 'pinned', 'update_note can pin a note');
+
+  const otherNote = await withU((ctx) => createTool.handler({ content: 'Just a regular note' }, ctx));
+  assert(otherNote.reminderAt === null, 'reminder_at defaults to null when omitted at creation');
+
+  const pinnedOnly = await withU((ctx) => getNotesTool.handler({ state: 'pinned' }, ctx));
+  assert(pinnedOnly.length === 1 && pinnedOnly[0].noteId === created.noteId, 'get_notes({state: "pinned"}) returns only the pinned note — this backs the Landing Deck reference drawer');
+
+  const archived = await withU((ctx) => updateTool.handler({ note_id: otherNote.noteId, state: 'archived' }, ctx));
+  assert(archived.state === 'archived', 'update_note can archive a note');
+
+  const defaultBrowse = await withU((ctx) => getNotesTool.handler({}, ctx));
+  assert(
+    defaultBrowse.length === 1 && defaultBrowse[0].noteId === created.noteId,
+    'the default get_notes browse excludes the archived note but still includes the pinned one',
+  );
+
+  const archivedSearch = await withU((ctx) => getNotesTool.handler({ search: 'regular' }, ctx));
+  assert(archivedSearch.length === 1 && archivedSearch[0].noteId === otherNote.noteId, 'a search term still reaches an archived note — archiving hides browsing, not search');
+
+  const archivedExplicit = await withU((ctx) => getNotesTool.handler({ state: 'archived' }, ctx));
+  assert(archivedExplicit.length === 1 && archivedExplicit[0].noteId === otherNote.noteId, 'state: "archived" browses archived notes directly');
+
+  const clearedReminder = await withU((ctx) => updateTool.handler({ note_id: created.noteId, reminder_at: null }, ctx));
+  assert(clearedReminder.reminderAt === null, 'update_note with reminder_at: null clears a previously-set reminder');
+}
 
 if (process.exitCode) {
   console.error('\nnotes verification FAILED');

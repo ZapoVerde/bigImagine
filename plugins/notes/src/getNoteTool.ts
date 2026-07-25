@@ -26,6 +26,8 @@ interface NoteRow {
   title: string;
   content: string;
   tags: string[];
+  state: string;
+  reminder_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -57,7 +59,7 @@ export function createGetNoteTool(): RegisteredTool {
         throw new Error('get_note requires a note_id: string argument');
       }
       const [row] = await ctx.db.query<NoteRow>(
-        'select note_id, title, content, tags, created_at, updated_at from notes where note_id = $1 and user_id = $2',
+        'select note_id, title, content, tags, state, reminder_at, created_at, updated_at from notes where note_id = $1 and user_id = $2',
         [args.note_id, ctx.userId],
       );
       if (!row) return { found: false, noteId: args.note_id };
@@ -67,6 +69,8 @@ export function createGetNoteTool(): RegisteredTool {
         title: row.title,
         content: row.content,
         tags: row.tags,
+        state: row.state,
+        reminderAt: row.reminder_at,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

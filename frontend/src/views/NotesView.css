@@ -10,6 +10,37 @@
   gap: 0.6rem;
 }
 
+.note-editor-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: var(--font-size-sm);
+}
+
+.note-editor-meta button {
+  padding: 0.2rem 0.6rem;
+  font-size: var(--font-size-sm);
+}
+
+.note-editor-meta button.active {
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  border-color: var(--color-secondary);
+}
+
+.note-reminder {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--color-text-secondary);
+  margin-left: auto;
+}
+
+.note-reminder input {
+  font-size: var(--font-size-sm);
+  padding: 0.1rem 0.3rem;
+}
+
 .note-title-input {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);

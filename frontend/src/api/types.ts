@@ -8,6 +8,8 @@
  * this file has to be updated by hand too — nothing else will catch the drift.
  */
 
+export type ListItemPriority = 'P1' | 'P2' | 'P3';
+
 // plugins/lists/src/getListItemsTool.ts
 export interface ListItem {
   itemId: string;
@@ -15,6 +17,8 @@ export interface ListItem {
   section: string | null;
   itemName: string;
   status: 'pending' | 'done';
+  priority: ListItemPriority | null;
+  dueAt: string | null;
   createdAt: string;
   completedAt: string | null;
 }
@@ -25,8 +29,15 @@ export interface AddListItemResult {
   listId: string;
   listName: string;
   itemName: string;
+  priority: ListItemPriority | null;
+  dueAt: string | null;
   listWasCreated: boolean;
 }
+
+// plugins/lists/src/updateListItemTool.ts
+export type UpdateListItemResult =
+  | { found: false; itemId: string }
+  | { found: true; itemId: string; itemName: string; priority: ListItemPriority | null; dueAt: string | null };
 
 // plugins/lists/src/completeListItemTool.ts
 export type CompleteListItemResult =
@@ -211,23 +222,37 @@ export interface Folder {
   parentId: string | null;
 }
 
+export type NoteState = 'active' | 'pinned' | 'archived';
+
 // plugins/notes/src/getNotesTool.ts
 export interface NoteSummary {
   noteId: string;
   title: string;
+  state: NoteState;
   updatedAt: string;
 }
 
 // plugins/notes/src/getNoteTool.ts, updateNoteTool.ts
 export type NoteDetailResult =
   | { found: false; noteId: string }
-  | { found: true; noteId: string; title: string; content: string; tags: string[]; createdAt?: string; updatedAt: string };
+  | {
+      found: true;
+      noteId: string;
+      title: string;
+      content: string;
+      tags: string[];
+      state: NoteState;
+      reminderAt: string | null;
+      createdAt?: string;
+      updatedAt: string;
+    };
 
 // plugins/notes/src/createNoteTool.ts
 export interface CreateNoteResult {
   noteId: string;
   title: string;
   content: string;
+  reminderAt: string | null;
 }
 
 // plugins/notes/src/deleteNoteTool.ts

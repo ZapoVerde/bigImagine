@@ -1,7 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
-import type { AddListItemResult, CompleteListItemResult, ListItem } from '../api/types';
+import type { AddListItemResult, CompleteListItemResult, ListItem, ListItemPriority, UpdateListItemResult } from '../api/types';
 import './ListsView.css';
+
+const PRIORITIES: ListItemPriority[] = ['P1', 'P2', 'P3'];
+
+// <input type="date"> wants/returns "YYYY-MM-DD"; dueAt is a full ISO timestamp. Truncating loses
+// time-of-day on round-trip, same tradeoff TodayAgenda's isoDateInZone accepts elsewhere in this
+// app — a due *date* is the common case, not a due time.
+function toDateInputValue(iso: string | null): string {
+  return iso ? iso.slice(0, 10) : '';
+}
 
 interface ListsViewProps {
   apiKey: string | null;
@@ -30,6 +39,8 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
   const [error, setError] = useState<string | null>(null);
   const [newListName, setNewListName] = useState('');
   const [newItemName, setNewItemName] = useState('');
+  const [newItemPriority, setNewItemPriority] = useState('');
+  const [newItemDueAt, setNewItemDueAt] = useState('');
   const itemInputRef = useRef<HTMLInputElement>(null);
 
   async function reload() {
@@ -56,17 +67,33 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
     try {
       await callTool<AddListItemResult>(
         'add_list_item',
-        { list_name: listName, item_name: newItemName.trim() },
+        {
+          list_name: listName,
+          item_name: newItemName.trim(),
+          ...(newItemPriority ? { priority: newItemPriority } : {}),
+          ...(newItemDueAt ? { due_at: newItemDueAt } : {}),
+        },
         apiKey,
       );
       setNewItemName('');
       setNewListName('');
+      setNewItemPriority('');
+      setNewItemDueAt('');
       onSelectList(listName);
       onChanged();
       await reload();
       itemInputRef.current?.focus();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to add item');
+    }
+  }
+
+  async function updateItem(item: ListItem, patch: { priority?: string; due_at?: string }) {
+    try {
+      await callTool<UpdateListItemResult>('update_list_item', { item_id: item.itemId, ...patch }, apiKey);
+      await reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update item');
     }
   }
 
@@ -113,19 +140,46 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
             <div key={section} className="list-section">
               {section && <h3>{section}</h3>}
               <ul>
-                {sectionItems.map((item) => (
-                  <li key={item.itemId} className={item.status === 'done' ? 'done' : ''}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={item.status === 'done'}
-                        disabled={item.status === 'done'}
-                        onChange={() => completeItem(item)}
-                      />
-                      {item.itemName}
-                    </label>
-                  </li>
-                ))}
+                {sectionItems.map((item) => {
+                  const overdue = item.status === 'pending' && !!item.dueAt && item.dueAt < new Date().toISOString();
+                  return (
+                    <li key={item.itemId} className={item.status === 'done' ? 'done' : ''}>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={item.status === 'done'}
+                          disabled={item.status === 'done'}
+                          onChange={() => completeItem(item)}
+                        />
+                        {item.itemName}
+                        {item.priority && item.priority !== 'P2' && (
+                          <span className={`priority-badge ${item.priority.toLowerCase()}`}>{item.priority}</span>
+                        )}
+                        {item.dueAt && <span className={`due-badge${overdue ? ' overdue' : ''}`}>due {toDateInputValue(item.dueAt)}</span>}
+                      </label>
+                      {item.status === 'pending' && (
+                        <div className="item-controls">
+                          <select
+                            value={item.priority ?? ''}
+                            onChange={(e) => updateItem(item, { priority: e.target.value || 'P2' })}
+                          >
+                            <option value="">Priority…</option>
+                            {PRIORITIES.map((p) => (
+                              <option key={p} value={p}>
+                                {p}
+                              </option>
+                            ))}
+                          </select>
+                          <input
+                            type="date"
+                            value={toDateInputValue(item.dueAt)}
+                            onChange={(e) => e.target.value && updateItem(item, { due_at: e.target.value })}
+                          />
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           ))}
@@ -160,6 +214,15 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
           onChange={(e) => setNewItemName(e.target.value)}
           placeholder="Item name"
         />
+        <select value={newItemPriority} onChange={(e) => setNewItemPriority(e.target.value)}>
+          <option value="">Priority…</option>
+          {PRIORITIES.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
+          ))}
+        </select>
+        <input type="date" value={newItemDueAt} onChange={(e) => setNewItemDueAt(e.target.value)} />
         <button type="submit">Add</button>
       </form>
     </div>

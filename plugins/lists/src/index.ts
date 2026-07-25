@@ -1,6 +1,6 @@
 /**
  * @file plugins/lists/src/index.ts
- * @stamp 2026-07-23
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — plugin package entry point
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as document-ingestion and
@@ -21,7 +21,7 @@
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [create_list, add_list_item, complete_list_item, get_list_items,
- *   set_list_section_order]
+ *   update_list_item, set_list_section_order]
  *
  * @contract
  *   assertions:
@@ -37,6 +37,7 @@ import { createCreateListTool } from './createListTool.js';
 import { createAddListItemTool } from './addListItemTool.js';
 import { createCompleteListItemTool } from './completeListItemTool.js';
 import { createGetListItemsTool } from './getListItemsTool.js';
+import { createUpdateListItemTool } from './updateListItemTool.js';
 import { createSetListSectionOrderTool } from './setListSectionOrderTool.js';
 import { startNotionReconcileLoop } from './notionReconcile.js';
 
@@ -58,6 +59,7 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createAddListItemTool(deps.llm, deps.notion),
     createCompleteListItemTool(deps.notion),
     createGetListItemsTool(),
+    createUpdateListItemTool(),
     createSetListSectionOrderTool(),
   ];
 }

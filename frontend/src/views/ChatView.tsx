@@ -20,6 +20,7 @@ import { formatPricePerMillion } from '../api/pricing';
 import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import TodayAgenda from '../components/TodayAgenda';
+import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
 
@@ -309,6 +310,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length === 0 && !chatId && (
             <div className="chat-empty-landing">
               <TodayAgenda apiKey={apiKey} />
+              <PinnedNotesDrawer apiKey={apiKey} />
               {onSwitchView && (
                 <div className="view-switch-pills">
                   <span className="pills-label">Or open a specialist view:</span>
