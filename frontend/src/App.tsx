@@ -11,6 +11,7 @@ import { useTabs } from './hooks/useTabs';
 import { useTheme } from './hooks/useTheme';
 import CalendarView from './views/CalendarView';
 import ChatView from './views/ChatView';
+import DocumentsView from './views/DocumentsView';
 import ListsView from './views/ListsView';
 import MealPlanView from './views/MealPlanView';
 import NotesView from './views/NotesView';
@@ -153,6 +154,7 @@ export default function App() {
               />
             )}
             {tab.type === 'calendar' && <CalendarView apiKey={apiKey} />}
+            {tab.type === 'documents' && <DocumentsView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView />}
           </div>
         ))}

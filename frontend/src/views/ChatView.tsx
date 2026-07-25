@@ -32,6 +32,7 @@ const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string }[] = [
   { type: 'mealplan', label: 'Meal Plans' },
   { type: 'notes', label: 'Notes' },
   { type: 'calendar', label: 'Calendar' },
+  { type: 'documents', label: 'Documents' },
   { type: 'settings', label: 'Settings' },
 ];
 

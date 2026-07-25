@@ -235,6 +235,28 @@ export interface DeleteNoteResult {
   deleted: boolean;
 }
 
+// plugins/documents/src/listDocumentsTool.ts
+export interface DocumentSummary {
+  docId: string;
+  title: string | null;
+  summaryShort: string | null;
+  status: string;
+  updatedAt: string;
+}
+
+// plugins/documents/src/getDocumentTool.ts
+export type DocumentDetailResult =
+  | { found: false; docId: string }
+  | {
+      found: true;
+      docId: string;
+      title: string;
+      content: string;
+      summaryShort: string | null;
+      status: string;
+      updatedAt: string;
+    };
+
 // plugins/prompt-presets/src/getPromptPresetsTool.ts — a reusable named system-prompt snippet
 // ("instruction set"), applied by copying .content into a chat's own params.system.
 export interface PromptPreset {

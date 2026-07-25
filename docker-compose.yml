@@ -57,6 +57,10 @@ services:
       BIGBRAIN_OUTLOOK_ICS_URL: ${BIGBRAIN_OUTLOOK_ICS_URL:-}
       BIGBRAIN_MASK_WORK_CALENDAR: ${BIGBRAIN_MASK_WORK_CALENDAR:-false}
       BIGBRAIN_ORCHESTRATOR_PORT: 8787
+      # docs/spec.md §6.6 — one local git repo per user under this directory (plugins/documents/
+      # src/gitRepo.ts), on the named volume below so it survives an image rebuild. No remote, no
+      # offsite backup yet — a known, deliberately unaddressed gap; see §6.6's note on it.
+      BIGBRAIN_DOCUMENTS_DIR: /app/content
     ports:
       # Loopback-only fallback for the frontend/Settings tab (frontend/, adminServer.ts) via
       # `ssh -L 8787:localhost:8787 <user>@<host>` then http://localhost:8787/ — kept alongside the
@@ -65,6 +69,7 @@ services:
       - "127.0.0.1:8787:8787"
     volumes:
       - ./orchestrator/logs:/app/orchestrator/logs
+      - bigbrain-documents:/app/content
     networks:
       - default
       - traefik-net
@@ -87,6 +92,7 @@ services:
 
 volumes:
   bigbrain-pgdata:
+  bigbrain-documents:
 
 networks:
   traefik-net:

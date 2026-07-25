@@ -4,9 +4,15 @@
 FROM node:22-alpine
 WORKDIR /app
 
+# docs/spec.md §6.6: the documents plugin shells out to a real `git` binary (plugins/documents/src/
+# gitRepo.ts) to commit into each user's own local content repo — no remote, no push, so nothing
+# beyond the binary itself is needed here.
+RUN apk add --no-cache git
+
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY orchestrator/package.json orchestrator/package.json
 COPY plugins/document-ingestion/package.json plugins/document-ingestion/package.json
+COPY plugins/documents/package.json plugins/documents/package.json
 COPY plugins/shopping-analytics/package.json plugins/shopping-analytics/package.json
 COPY plugins/lists/package.json plugins/lists/package.json
 COPY plugins/recipes/package.json plugins/recipes/package.json
@@ -23,6 +29,7 @@ COPY plugins plugins
 COPY frontend frontend
 RUN npm run build --workspace=@bigbrain/orchestrator \
  && npm run build --workspace=@bigbrain/plugin-document-ingestion \
+ && npm run build --workspace=@bigbrain/plugin-documents \
  && npm run build --workspace=@bigbrain/plugin-shopping-analytics \
  && npm run build --workspace=@bigbrain/plugin-lists \
  && npm run build --workspace=@bigbrain/plugin-recipes \
