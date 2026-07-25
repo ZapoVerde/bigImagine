@@ -101,6 +101,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname } from 'node:path';
+import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -340,10 +341,19 @@ async function handleChatCompletions(
       ...(latestUserMessage && isNewTurn ? [{ role: 'user' as const, content: latestUserMessage.content }] : []),
       { role: 'assistant' as const, content: reply },
     ]);
-    // First exchange in a still-untitled session names it from the user's own words — a cheap
-    // stand-in until LLM-generated titles (a TASK_MODEL-style feature) exist as their own thing.
+    // First exchange in a still-untitled session names it, once — bigBrain never retitles a
+    // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
+    // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
+    // fallback keeps a naming hiccup from being visible as a broken turn.
     if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
-      await chats.updateChat(userId, body.chat_id, { title: latestUserMessage.content.slice(0, 60) });
+      let title: string;
+      try {
+        title = await generateChatTitle(llm, latestUserMessage.content, reply);
+      } catch (err) {
+        log.error('generateChatTitle failed, falling back to a truncated title', err);
+        title = latestUserMessage.content.slice(0, 60);
+      }
+      await chats.updateChat(userId, body.chat_id, { title });
     }
   }
 

@@ -952,7 +952,10 @@ server.close();
   const detailAfter = await chats3.getChat(userId3, chat.chatId);
   assert(detailAfter.messages.length === 2, 'a stateless request (no chat_id) does not touch any persisted session');
 
-  const statelessCall = capturedCalls[1];
+  // index 1 is generateChatTitle's own llm.complete() call, fired by the previous request's
+  // first-exchange auto-titling (chat.chatId's session was still untitled) — the stateless
+  // request's own turn is the one after that.
+  const statelessCall = capturedCalls[2];
   assert(
     statelessCall.messages[0].role === 'system' && statelessCall.messages[0].content.startsWith('Today is'),
     'the date-context line is prepended even for a request with no chat_id and no custom system prompt at all',
