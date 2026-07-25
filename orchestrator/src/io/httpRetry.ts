@@ -17,7 +17,15 @@
  * until complete()/listModels() returns successfully, so a retried LLM call can at worst waste
  * one duplicate API call, never a duplicate DB write.
  *
+ * retryOnFailure is the general shape underneath fetchWithRetry, pulled out so
+ * fetchUntrusted.ts's DNS lookup — a thrown-error-prone step ahead of the fetch itself, not the
+ * fetch — can retry on the same policy instead of duplicating the loop. Confirmed live: a
+ * transient `getaddrinfo EAI_AGAIN` on that lookup and a bare Voyage `fetch failed` both resolved
+ * on a plain retry with no code change, same class of problem as the stale-socket case above.
+ *
  * @api-declaration
+ * retryOnFailure(label, fn, maxRetries = 1) — retries only a thrown failure, logging each attempt
+ *   under `label`; the last error is rethrown once retries are exhausted
  * fetchWithRetry(url, init, maxRetries = 1) — retries only a thrown (network-level) failure,
  *   never an HTTP error status (4xx/5xx); those are real responses the caller must handle itself
  *
@@ -30,19 +38,23 @@
 
 import { log } from './logger.js';
 
-export async function fetchWithRetry(url: string, init: RequestInit, maxRetries = 1): Promise<Response> {
+export async function retryOnFailure<T>(label: string, fn: () => Promise<T>, maxRetries = 1): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      return await fetch(url, init);
+      return await fn();
     } catch (err) {
       lastError = err;
       const willRetry = attempt < maxRetries;
       log.warn(
-        `fetch to ${url} failed (attempt ${attempt + 1}/${maxRetries + 1})${willRetry ? ', retrying' : ', giving up'} — likely a stale keep-alive socket, see io/httpRetry.ts`,
+        `${label} failed (attempt ${attempt + 1}/${maxRetries + 1})${willRetry ? ', retrying' : ', giving up'}`,
         err,
       );
     }
   }
   throw lastError;
+}
+
+export function fetchWithRetry(url: string, init: RequestInit, maxRetries = 1): Promise<Response> {
+  return retryOnFailure(`fetch to ${url} — likely a stale keep-alive socket, see io/httpRetry.ts`, () => fetch(url, init), maxRetries);
 }

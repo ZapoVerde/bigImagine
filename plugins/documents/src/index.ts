@@ -5,14 +5,14 @@
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as notes/lists/recipes/document-
  * ingestion): an `info` object and an async `registerTools`. Needs deps.llm/deps.embeddings for
- * save_document/ingest_url's summarize+embed step (classifyDocument.ts) and search_documents'
+ * save_document/ingest_url's summarize+embed+tag step (classifyDocument.ts) and search_documents'
  * query embedding — everything else (gitRepo.ts's local repos, ctx.db) is either plugin-local or
  * supplied per-call, same as notes.
  *
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [save_document, get_document, list_documents, ingest_url,
- *   search_documents]
+ *   search_documents, list_document_tags]
  *
  * @contract
  *   assertions:
@@ -26,6 +26,7 @@ import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { createGetDocumentTool } from './getDocumentTool.js';
 import { createIngestUrlTool } from './ingestUrlTool.js';
 import { createListDocumentsTool } from './listDocumentsTool.js';
+import { createListDocumentTagsTool } from './listDocumentTagsTool.js';
 import { createSaveDocumentTool } from './saveDocumentTool.js';
 import { createSearchDocumentsTool } from './searchDocumentsTool.js';
 
@@ -42,5 +43,6 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createListDocumentsTool(),
     createIngestUrlTool(deps.llm, deps.embeddings),
     createSearchDocumentsTool(deps.embeddings),
+    createListDocumentTagsTool(),
   ];
 }

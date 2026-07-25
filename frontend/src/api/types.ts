@@ -255,6 +255,10 @@ export type DocumentDetailResult =
       summaryShort: string | null;
       status: string;
       updatedAt: string;
+      sourceUrl: string | null;
+      siteName: string | null;
+      author: string | null;
+      publishedAt: string | null;
     };
 
 // plugins/prompt-presets/src/getPromptPresetsTool.ts — a reusable named system-prompt snippet

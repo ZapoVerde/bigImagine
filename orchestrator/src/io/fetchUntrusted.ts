@@ -25,6 +25,11 @@
  * attacker who controls DNS for a domain they get the model to fetch, and pinning needs a custom
  * fetch dispatcher that's a bigger change than this warrants today.
  *
+ * The DNS lookup itself (not just the fetch fetchWithRetry already covers) turned out to be a
+ * second, separate spot a transient failure (`getaddrinfo EAI_AGAIN`) can surface — same class of
+ * problem httpRetry.ts's stale-socket case describes, just one step earlier. Retried on the same
+ * policy via httpRetry.ts's retryOnFailure rather than a second copy of that loop.
+ *
  * @api-declaration
  * fetchUntrustedUrl(url, init, maxRetries?, resolveHost?) — same contract as http-retry's
  *   fetchWithRetry, but throws before ever calling fetch() if the URL's protocol isn't http/https
@@ -40,7 +45,7 @@
  */
 
 import { lookup } from 'node:dns/promises';
-import { fetchWithRetry } from './httpRetry.js';
+import { fetchWithRetry, retryOnFailure } from './httpRetry.js';
 import { log } from './logger.js';
 import { isBlockedAddress } from '../util/ssrfGuard.js';
 
@@ -59,7 +64,7 @@ export async function fetchUntrustedUrl(
     throw new Error(`fetchUntrustedUrl: refusing non-http(s) protocol "${parsed.protocol}" for ${url}`);
   }
 
-  const records = await resolveHost(parsed.hostname);
+  const records = await retryOnFailure(`DNS lookup for ${parsed.hostname}`, () => resolveHost(parsed.hostname), maxRetries);
   const blocked = records.find((record) => isBlockedAddress(record.address));
   if (blocked) {
     log.warn(`fetchUntrustedUrl: refusing ${url} — ${parsed.hostname} resolves to ${blocked.address}, a private/reserved address`);

@@ -9,6 +9,11 @@
  * verifies every returned embedding actually has that length before handing it back — a silent
  * mismatch here would otherwise surface as a confusing Postgres error deep inside an insert.
  *
+ * Uses httpRetry.ts's fetchWithRetry rather than a bare fetch — this was the one outbound call in
+ * the app that wasn't already on that policy, and it hit exactly the failure mode httpRetry.ts
+ * documents (a bare `TypeError: fetch failed` on a long-idle keep-alive socket), confirmed live
+ * during a documents-plugin ingest_url smoke test.
+ *
  * @api-declaration
  * createVoyageEmbeddingProvider(config: VoyageConfig) — config.apiKey, config.model,
  *   config.outputDimension all required and read from env by io/embeddings/index.ts
@@ -20,6 +25,7 @@
  *     external_io:     [Voyage AI embeddings API]
  */
 
+import { fetchWithRetry } from '../httpRetry.js';
 import type { EmbeddingProvider } from './types.js';
 
 export interface VoyageConfig {
@@ -42,7 +48,7 @@ export function createVoyageEmbeddingProvider(config: VoyageConfig): EmbeddingPr
     async embed(texts: string[]): Promise<number[][]> {
       if (texts.length === 0) return [];
 
-      const response = await fetch(`${baseUrl}/v1/embeddings`, {
+      const response = await fetchWithRetry(`${baseUrl}/v1/embeddings`, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',

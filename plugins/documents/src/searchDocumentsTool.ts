@@ -8,8 +8,10 @@
  * but never read back. Ranks document_chunks by cosine distance to the embedded query via
  * pgvector's `<->` operator; no ivfflat/hnsw index yet (household-scale row counts don't need
  * one, a sequential scan is fine — add one later without touching this file if that changes).
- * Distinct from list_documents' exact-substring ILIKE match: this finds chunks by meaning, not
- * by matching text in the title/summary.
+ * Distinct from list_documents' lexical search: this finds chunks by meaning, not matching text.
+ *
+ * tags optionally narrows the candidate set (document_chunks.tags overlap, &&) before ranking —
+ * same auto-assigned tags list_documents/list_document_tags use.
  *
  * @api-declaration
  * createSearchDocumentsTool(embeddings) — returns the search_documents RegisteredTool
@@ -30,9 +32,10 @@ interface ChunkRow {
   title: string | null;
   heading_path: string | null;
   content: string;
+  tags: string[];
 }
 
-function isSearchDocumentsArgs(value: unknown): value is { query: string } {
+function isSearchDocumentsArgs(value: unknown): value is { query: string; tags?: string[] } {
   return (
     typeof value === 'object' &&
     value !== null &&
@@ -50,6 +53,7 @@ export function createSearchDocumentsTool(embeddings: EmbeddingProvider): Regist
         type: 'object',
         properties: {
           query: { type: 'string', description: 'What to search for.' },
+          tags: { type: 'array', items: { type: 'string' }, description: 'Optional: only consider chunks having at least one of these tags.' },
         },
         required: ['query'],
         additionalProperties: false,
@@ -59,21 +63,24 @@ export function createSearchDocumentsTool(embeddings: EmbeddingProvider): Regist
       if (!isSearchDocumentsArgs(args)) {
         throw new Error('search_documents requires a query: string argument');
       }
+      const tags = args.tags?.length ? args.tags : null;
       const [vector] = await embeddings.embed([args.query]);
       const rows = await ctx.db.query<ChunkRow>(
-        `select dc.doc_id, d.title, dc.heading_path, dc.content
+        `select dc.doc_id, d.title, dc.heading_path, dc.content, dc.tags
          from document_chunks dc
          join documents d on d.doc_id = dc.doc_id
          where dc.user_id = $1
+           and ($3::text[] is null or dc.tags && $3)
          order by dc.vector_embed <-> $2
          limit 8`,
-        [ctx.userId, toPgVectorLiteral(vector!)],
+        [ctx.userId, toPgVectorLiteral(vector!), tags],
       );
       return rows.map((r) => ({
         docId: r.doc_id,
         title: r.title,
         headingPath: r.heading_path,
         excerpt: r.content,
+        tags: r.tags,
       }));
     },
   };

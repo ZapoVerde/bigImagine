@@ -12,6 +12,11 @@
  * network. Same browser-shaped User-Agent as import_recipe, for the same reason: at least one real
  * site's response differs based on it.
  *
+ * htmlToMarkdown.ts's extracted siteName/author/publishedAt are passed through as saveDocument's
+ * `metadata` — this is the only caller that ever sets it, since save_document's manual path has no
+ * source page to attribute. That drives both a YAML frontmatter block in the saved file and the
+ * new documents.source_url/site_name/author/published_at columns; see saveDocument.ts.
+ *
  * @api-declaration
  * createIngestUrlTool(llm, embeddings) — returns the ingest_url RegisteredTool
  *
@@ -69,7 +74,13 @@ export function createIngestUrlTool(llm: LlmProvider, embeddings: EmbeddingProvi
 
       const result = await saveDocument({ llm, embeddings, db: ctx.db }, ctx.userId, {
         title: clipped.title,
-        contentMarkdown: `${clipped.markdown}\n\n---\nClipped from: ${args.url}\n`,
+        contentMarkdown: clipped.markdown,
+        metadata: {
+          sourceUrl: args.url,
+          siteName: clipped.siteName,
+          author: clipped.author,
+          publishedAt: clipped.publishedAt,
+        },
       });
 
       return {
@@ -79,6 +90,9 @@ export function createIngestUrlTool(llm: LlmProvider, embeddings: EmbeddingProvi
         summaryShort: result.summaryShort,
         commitSha: result.commitSha,
         sourceUrl: args.url,
+        siteName: clipped.siteName,
+        author: clipped.author,
+        publishedAt: clipped.publishedAt,
       };
     },
     focusHint: (result) => (result as { docId?: string }).docId ?? null,

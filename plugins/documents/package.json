@@ -12,7 +12,8 @@
     "@bigbrain/orchestrator": "*",
     "@mozilla/readability": "^0.6.0",
     "linkedom": "^0.18.13",
-    "turndown": "^7.2.4"
+    "turndown": "^7.2.4",
+    "yaml": "^2.4.2"
   },
   "devDependencies": {
     "@types/turndown": "^5.0.5",

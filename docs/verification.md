@@ -143,7 +143,22 @@ Two homes, by convention:
 
 ---
 
-7. What this can't do
+7. A recurring false negative: transient container egress failures
+-------------------------------------------------------------------------
+
+Outbound calls from the orchestrator container — a DNS lookup, the page fetch inside
+`ingest_url`, a call to Voyage or an LLM provider — occasionally fail transiently (a bare
+`getaddrinfo EAI_AGAIN`, or a bare `TypeError: fetch failed`) with no code-level cause; a plain
+retry succeeds without any change. Confirmed live during a `documents` plugin smoke test: both
+failures resolved on retry alone. `io/httpRetry.ts`'s `fetchWithRetry`/`retryOnFailure` now covers
+this for every outbound call in the app (`fetchUntrustedUrl`'s DNS lookup included, and Voyage's
+embeddings client, the last caller still on a bare `fetch`) — see that file's own header for the
+policy. Before chasing a live-tier failure as a real bug, retry it once; if it still fails, it's a
+real bug.
+
+---
+
+8. What this can't do
 -------------------------
 
 Local verification proves the code *would* behave correctly if the systems on the other end of

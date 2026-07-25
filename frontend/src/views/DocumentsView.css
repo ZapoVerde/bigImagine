@@ -65,4 +65,49 @@
 
 .document-detail-title {
   margin-top: 0;
+  margin-bottom: 0.2rem;
+}
+
+.document-detail-meta {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-faint);
+  margin-bottom: 1rem;
+}
+
+.document-detail-meta a {
+  color: inherit;
+}
+
+.documents-search-input {
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  margin-bottom: 0.4rem;
+}
+
+.documents-tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin-bottom: 0.4rem;
+}
+
+.tag-chip {
+  font: inherit;
+  font-size: var(--font-size-2xs);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--color-border-subtle);
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text-faint);
+}
+
+.tag-chip:hover {
+  background: var(--color-hover-surface);
+}
+
+.tag-chip.selected {
+  background: var(--color-active-surface);
+  color: inherit;
+  border-color: transparent;
 }

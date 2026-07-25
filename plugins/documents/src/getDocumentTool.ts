@@ -29,6 +29,10 @@ interface DocumentRow {
   summary_short: string | null;
   status: string;
   updated_at: string;
+  source_url: string | null;
+  site_name: string | null;
+  author: string | null;
+  published_at: string | null;
 }
 
 function isGetDocumentArgs(value: unknown): value is { doc_id: string } {
@@ -58,7 +62,9 @@ export function createGetDocumentTool(): RegisteredTool {
         throw new Error('get_document requires a doc_id: string argument');
       }
       const [row] = await ctx.db.query<DocumentRow>(
-        'select doc_id, title, file_path, summary_short, status, updated_at from documents where doc_id = $1 and user_id = $2',
+        `select doc_id, title, file_path, summary_short, status, updated_at,
+                source_url, site_name, author, published_at
+         from documents where doc_id = $1 and user_id = $2`,
         [args.doc_id, ctx.userId],
       );
       if (!row) return { found: false, docId: args.doc_id };
@@ -84,6 +90,10 @@ export function createGetDocumentTool(): RegisteredTool {
         summaryShort: row.summary_short,
         status: row.status,
         updatedAt: row.updated_at,
+        sourceUrl: row.source_url,
+        siteName: row.site_name,
+        author: row.author,
+        publishedAt: row.published_at,
       };
     },
     focusHint: (result) => {

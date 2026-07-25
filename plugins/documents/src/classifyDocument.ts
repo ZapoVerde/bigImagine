@@ -3,18 +3,23 @@
  * @stamp 2026-07-25
  * @architectural-role IO Wrapper — forced-schema LLM call
  * @description
- * The §6.1-style summarization step for a saved document, scoped to what `documents` actually has
- * a column for (`summary_short` — no `category`/`auto_tags`, unlike `unstructured_notes`; a
- * document is found by browsing/search over title and this summary, not tag filtering). Mirrors
- * plugins/document-ingestion/src/classifyNote.ts's forced-tool-call pattern exactly; duplicated
- * rather than imported across the plugin boundary, same precedent plugins/recipes' meal-plan
- * shopping-list tool already set — plugins are siblings with no exports map for cross-plugin
- * imports today, and this is a small enough amount of logic that a first-ever plugin-to-plugin
- * dependency isn't worth introducing for it.
+ * Two forced-schema LLM steps for a saved document. summarizeDocument is the §6.1-style
+ * one-sentence summary (mirrors plugins/document-ingestion/src/classifyNote.ts's pattern exactly;
+ * duplicated rather than imported across the plugin boundary, same precedent plugins/recipes'
+ * meal-plan shopping-list tool already set — plugins are siblings with no exports map for
+ * cross-plugin imports today). tagChunks is chunk-level, not document-level — search_documents/
+ * list_documents rank and filter at chunk granularity, so a tag has to say which chunk it applies
+ * to. Fed the user's existing tag vocabulary as a strong nudge toward reuse rather than inventing
+ * near-duplicates ("cooking" vs "recipes") — a nudge, not a guarantee: tags are inexact by nature,
+ * same tolerance already extended to unstructured_notes' auto_tags, which has run with zero
+ * vocabulary awareness at all. Validation is lenient on coverage (a chunk the model skips just
+ * gets no tags) since tagging is supplementary, unlike the summary a document row actually needs.
  *
  * @api-declaration
  * summarizeDocument(llm, title, markdown) — throws if the model doesn't call summarize_document,
  *   or calls it with a malformed payload, rather than returning a partially-guessed summary
+ * tagChunks(llm, existingTags, chunks) — throws only on a malformed top-level response; a chunk
+ *   the model omits from its answer just gets no tags rather than failing the whole call
  *
  * @contract
  *   assertions:
@@ -67,4 +72,85 @@ export async function summarizeDocument(llm: LlmProvider, title: string, markdow
     throw new Error(`summarizeDocument: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
   }
   return call.arguments.summary_short;
+}
+
+const tagChunksTool: ToolDefinition = {
+  name: 'tag_chunks',
+  description: 'Assign a few specific tags to each numbered chunk of a document.',
+  parameters: {
+    type: 'object',
+    properties: {
+      chunks: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            ordinal: { type: 'number', description: 'The chunk number this tag list is for.' },
+            tags: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['ordinal', 'tags'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['chunks'],
+    additionalProperties: false,
+  },
+};
+
+interface TagChunksResponse {
+  chunks: { ordinal: number; tags: string[] }[];
+}
+
+function isChunkTagEntry(value: unknown): value is { ordinal: number; tags: string[] } {
+  if (typeof value !== 'object' || value === null) return false;
+  const ordinal = (value as Record<string, unknown>).ordinal;
+  const tags = (value as Record<string, unknown>).tags;
+  return typeof ordinal === 'number' && Array.isArray(tags) && tags.every((t) => typeof t === 'string');
+}
+
+function isTagChunksResponse(value: unknown): value is TagChunksResponse {
+  if (typeof value !== 'object' || value === null) return false;
+  const chunks = (value as Record<string, unknown>).chunks;
+  return Array.isArray(chunks) && chunks.every(isChunkTagEntry);
+}
+
+export async function tagChunks(
+  llm: LlmProvider,
+  existingTags: string[],
+  chunks: { ordinal: number; headingPath: string | null; content: string }[],
+): Promise<Map<number, string[]>> {
+  const vocabulary = existingTags.length ? existingTags.join(', ') : '(none yet)';
+  const chunkList = chunks
+    .map((c) => `Chunk ${c.ordinal} (${c.headingPath ?? 'no heading'}):\n${c.content}`)
+    .join('\n\n');
+
+  const turn = await llm.complete(
+    [
+      {
+        role: 'system',
+        content:
+          `Tag each numbered chunk below with a few specific tags. Strongly prefer reusing one of ` +
+          `the existing tags if it fits; only add a new tag if none of them do. Always answer by ` +
+          `calling tag_chunks, with one entry per chunk number given.\n\nExisting tags: ${vocabulary}`,
+      },
+      { role: 'user', content: chunkList },
+    ],
+    [tagChunksTool],
+    { forceTool: 'tag_chunks' },
+  );
+
+  const call = turn.toolCalls.find((c) => c.name === 'tag_chunks');
+  if (!call) {
+    throw new Error('tagChunks: model did not call tag_chunks despite forceTool');
+  }
+  if (!isTagChunksResponse(call.arguments)) {
+    throw new Error(`tagChunks: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
+  }
+
+  const byOrdinal = new Map<number, string[]>();
+  for (const entry of call.arguments.chunks) {
+    byOrdinal.set(entry.ordinal, entry.tags);
+  }
+  return byOrdinal;
 }
