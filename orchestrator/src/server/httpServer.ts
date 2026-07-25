@@ -318,7 +318,7 @@ async function handleChatCompletions(
   // Settings takes effect on the very next turn, no restart.
   const timezone = await getHouseholdTimezone(deps.settings);
   const systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
-  const reply = await runTurn({
+  const { content: reply, focusedNoteId } = await runTurn({
     userId,
     messages,
     systemPrompt,
@@ -361,6 +361,12 @@ async function handleChatCompletions(
         title = latestUserMessage.content.slice(0, 60);
       }
       await chats.updateChat(userId, body.chat_id, { title });
+    }
+    // Canvas: only when this turn actually touched a note (a tool's own focusHint said so) —
+    // omitted entirely otherwise, so an unrelated turn never clears/overwrites the chat's
+    // existing canvas focus (updateChat's dynamic patch treats "not present" as "leave alone").
+    if (focusedNoteId !== undefined) {
+      await chats.updateChat(userId, body.chat_id, { canvasNoteId: focusedNoteId });
     }
   }
 
@@ -697,6 +703,7 @@ function isChatPatchBody(value: unknown): value is {
   folder_id?: string | null;
   params?: ChatParams;
   tool_names?: string[] | null;
+  canvas_note_id?: string | null;
 } {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -708,6 +715,9 @@ function isChatPatchBody(value: unknown): value is {
     v.tool_names !== null &&
     !(Array.isArray(v.tool_names) && v.tool_names.every((t) => typeof t === 'string'))
   ) {
+    return false;
+  }
+  if (v.canvas_note_id !== undefined && v.canvas_note_id !== null && typeof v.canvas_note_id !== 'string') {
     return false;
   }
   return true;
@@ -761,7 +771,7 @@ async function handleChatRoutes(
     if (req.method === 'POST') {
       const body = await readJsonBody(req);
       if (!isChatPatchBody(body)) {
-        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names? }' });
+        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id? }' });
         return;
       }
       const updated = await deps.chats.updateChat(userId, chatId, {
@@ -769,6 +779,7 @@ async function handleChatRoutes(
         folderId: body.folder_id,
         params: body.params,
         toolNames: body.tool_names,
+        canvasNoteId: body.canvas_note_id,
       });
       if (!updated) {
         sendJson(res, 404, { error: 'not found' });

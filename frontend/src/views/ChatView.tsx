@@ -18,6 +18,7 @@ import {
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
 import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
+import CanvasPanel from '../components/canvas/CanvasPanel';
 import './ChatView.css';
 
 interface ChatViewProps {
@@ -125,12 +126,25 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
     historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight });
   }, [messages, sending]);
 
-  // Re-fetches the active chat's messages from the server — the source of truth for real
-  // messageIds, called after every mutation (send/rerun/edit) rather than hand-constructing
-  // local state, so copy/edit/rerun/delete always have a real id to act on.
+  // Re-fetches the active chat from the server — the source of truth for real messageIds, called
+  // after every mutation (send/rerun/edit) rather than hand-constructing local state, so
+  // copy/edit/rerun/delete always have a real id to act on. Also refreshes activeChat itself
+  // (not just messages) so Canvas's canvasNoteId — which a turn may have just set server-side via
+  // a tool's focusHint — shows up without a separate request.
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
     setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content })));
+    setActiveChat(detail.session);
+  }
+
+  async function closeCanvas() {
+    if (!activeChat) return;
+    try {
+      const updated = await updateChat(activeChat.chatId, { canvas_note_id: null }, apiKey);
+      setActiveChat(updated);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to close canvas');
+    }
   }
 
   async function send() {
@@ -338,6 +352,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange 
           </button>
         </form>
       </div>
+
+      {activeChat?.canvasNoteId && (
+        <CanvasPanel
+          apiKey={apiKey}
+          noteId={activeChat.canvasNoteId}
+          refreshToken={messages.length}
+          onClose={closeCanvas}
+        />
+      )}
 
       <div className={`chat-settings-rail${settingsCollapsed ? ' collapsed' : ''}`}>
         <div className="chat-settings-rail-header">

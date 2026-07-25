@@ -1,4 +1,4 @@
-// Proves all six tools end to end through info/registerTools (the real loader contract), using a
+// Proves all eight tools end to end through info/registerTools (the real loader contract), using a
 // stateful fake Postgres pool (recipes_meals/meal_plan_entries/lists/list_items/notion_sync_map),
 // a fake LLM provider for the forced-schema extraction path, and a stubbed global fetch for the
 // URL-import path — including a real-shaped schema.org/Recipe JSON-LD fixture (mirroring what was
@@ -57,6 +57,35 @@ function createFakePool() {
               source_url: sourceUrl,
             });
             return { rows: [{ recipe_id }] };
+          }
+
+          if (sql.startsWith('update recipes_meals set')) {
+            const [recipeId, userId, ...rest] = params;
+            const recipe = recipesMeals.find((r) => r.recipe_id === recipeId && r.user_id === userId);
+            if (!recipe) return { rows: [] };
+            // sets order matches updateRecipeTool.ts: mealName?, ingredients?, instructions?, tags?, prepTime?, cookTime?, servings?
+            let i = 0;
+            if (sql.includes('meal_name = $')) recipe.meal_name = rest[i++];
+            if (sql.includes('ingredients = $')) recipe.ingredients = JSON.parse(rest[i++]);
+            if (sql.includes('instructions = $')) recipe.instructions = JSON.parse(rest[i++]);
+            if (sql.includes('tags = $')) recipe.tags = rest[i++];
+            if (sql.includes('prep_time = $')) recipe.prep_time = rest[i++];
+            if (sql.includes('cook_time = $')) recipe.cook_time = rest[i++];
+            if (sql.includes('servings = $')) recipe.servings = rest[i++];
+            return {
+              rows: [
+                {
+                  recipe_id: recipe.recipe_id,
+                  meal_name: recipe.meal_name,
+                  ingredients: recipe.ingredients,
+                  instructions: recipe.instructions,
+                  tags: recipe.tags,
+                  prep_time: recipe.prep_time,
+                  cook_time: recipe.cook_time,
+                  servings: recipe.servings,
+                },
+              ],
+            };
           }
 
           if (sql.includes('unnest(tags)')) {
@@ -243,9 +272,18 @@ const userId = '11111111-1111-1111-1111-111111111111';
   }));
   const notion = createFakeNotion();
   const tools = await registerTools({ llm, embeddings: null, cipher: null, notion });
-  assert(tools.length === 6, 'registerTools returns exactly six tools');
+  assert(tools.length === 8, 'registerTools returns exactly eight tools');
   const registry = createToolRegistry(tools);
-  for (const name of ['import_recipe', 'get_recipes', 'get_recipe', 'add_meal_plan_entry', 'get_meal_plan', 'generate_shopping_list_from_meal_plan']) {
+  for (const name of [
+    'import_recipe',
+    'create_recipe',
+    'get_recipes',
+    'get_recipe',
+    'update_recipe',
+    'add_meal_plan_entry',
+    'get_meal_plan',
+    'generate_shopping_list_from_meal_plan',
+  ]) {
     assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
   }
 
@@ -323,6 +361,91 @@ const userId = '11111111-1111-1111-1111-111111111111';
     } catch {
       assert(true, `import_recipe rejects ${JSON.stringify(badArgs)}`);
     }
+  }
+}
+
+// --- create_recipe: structured fields inserted directly, no LLM call ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => {
+    throw new Error('create_recipe must never call the LLM');
+  });
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+  const createTool = registry.get('create_recipe');
+
+  const result = await db.withUserScope(userId, (session) =>
+    createTool.handler(
+      {
+        mealName: 'Weeknight Stir Fry',
+        ingredients: ['2 chicken breasts', '1 bell pepper'],
+        instructions: ['Slice everything.', 'Stir fry over high heat.'],
+        tags: ['Quick'],
+        prepTime: '10 min',
+      },
+      { userId, db: session },
+    ),
+  );
+  assert(llm.calls.length === 0, 'create_recipe never calls the LLM');
+  assert(result.mealName === 'Weeknight Stir Fry' && result.ingredientCount === 2, 'create_recipe stores the given fields directly');
+  const stored = pool.recipesMeals.find((r) => r.recipe_id === result.recipeId);
+  assert(stored.source_url === null, 'create_recipe records no source_url — nothing was imported');
+  assert(stored.prep_time === '10 min' && stored.cook_time === null, 'create_recipe stores given optional fields and defaults omitted ones to null');
+
+  const untagged = await db.withUserScope(userId, (session) =>
+    createTool.handler({ mealName: 'Toast', ingredients: ['bread'], instructions: ['Toast it.'] }, { userId, db: session }),
+  );
+  assert(untagged.tags.length === 0, 'create_recipe defaults tags to an empty array when omitted');
+
+  for (const badArgs of [{ mealName: 'No ingredients', ingredients: [], instructions: [] }, { ingredients: ['x'], instructions: [] }]) {
+    try {
+      await db.withUserScope(userId, (session) => createTool.handler(badArgs, { userId, db: session }));
+      assert(false, `create_recipe rejects ${JSON.stringify(badArgs)}`);
+    } catch {
+      assert(true, `create_recipe rejects ${JSON.stringify(badArgs)}`);
+    }
+  }
+}
+
+// --- update_recipe: partial-patch semantics and cross-user isolation ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createFakeLlm(() => {
+    throw new Error('update_recipe must never call the LLM');
+  });
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const registry = createToolRegistry(tools);
+  const createTool = registry.get('create_recipe');
+  const updateTool = registry.get('update_recipe');
+  const otherUserId = '22222222-2222-2222-2222-222222222222';
+
+  const created = await db.withUserScope(userId, (session) =>
+    createTool.handler({ mealName: 'Draft Curry', ingredients: ['curry paste'], instructions: ['Simmer.'], tags: ['Thai'] }, { userId, db: session }),
+  );
+
+  const updated = await db.withUserScope(userId, (session) =>
+    updateTool.handler({ recipe_id: created.recipeId, ingredients: ['curry paste', 'coconut milk'] }, { userId, db: session }),
+  );
+  assert(updated.found === true && updated.ingredients.length === 2, 'update_recipe changes only the given field');
+  assert(updated.mealName === 'Draft Curry', 'update_recipe leaves an unspecified field untouched');
+
+  const updateMissing = await db.withUserScope(userId, (session) =>
+    updateTool.handler({ recipe_id: 'does-not-exist', mealName: 'x' }, { userId, db: session }),
+  );
+  assert(updateMissing.found === false, 'update_recipe reports not-found for a missing recipe rather than throwing');
+
+  const crossUserUpdate = await db.withUserScope(otherUserId, (session) =>
+    updateTool.handler({ recipe_id: created.recipeId, mealName: 'Hijacked' }, { userId: otherUserId, db: session }),
+  );
+  assert(crossUserUpdate.found === false, 'update_recipe cannot modify another user\'s recipe');
+
+  try {
+    await db.withUserScope(userId, (session) => updateTool.handler({ recipe_id: created.recipeId }, { userId, db: session }));
+    assert(false, 'update_recipe rejects a call with no fields to change');
+  } catch {
+    assert(true, 'update_recipe rejects a call with no fields to change');
   }
 }
 

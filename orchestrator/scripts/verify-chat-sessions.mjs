@@ -48,6 +48,7 @@ function createFakePool() {
               folder_id: folderId,
               params: {},
               tool_names: null,
+              canvas_note_id: null,
               created_at: now(),
               updated_at: now(),
             };
@@ -95,6 +96,7 @@ function createFakePool() {
             if (setParts.includes('folder_id =')) row.folder_id = params[idx++];
             if (setParts.includes('params =')) row.params = JSON.parse(params[idx++]);
             if (setParts.includes('tool_names =')) row.tool_names = params[idx++];
+            if (setParts.includes('canvas_note_id =')) row.canvas_note_id = params[idx++];
             return { rows: sql.includes('returning') ? [row] : [] };
           }
           // chat_messages
@@ -255,6 +257,19 @@ await store.appendMessages(USER_A, created.chatId, [
   assert(updated.params.system === 'Answer tersely.', 'params.system round-trips');
   assert(updated.params.temperature === 0.2, 'params.temperature round-trips');
   assert(updated.toolNames.length === 1 && updated.toolNames[0] === 'get_list_items', 'toolNames round-trips');
+}
+
+// --- updateChat: canvasNoteId (Canvas) round trip ---
+{
+  assert(created.canvasNoteId === null, 'a new chat starts with no canvas focus');
+  const focused = await store.updateChat(USER_A, created.chatId, { canvasNoteId: 'note-123' });
+  assert(focused.canvasNoteId === 'note-123', 'canvasNoteId round-trips through updateChat');
+
+  const untouched = await store.updateChat(USER_A, created.chatId, { title: 'Groceries planning (renamed)' });
+  assert(untouched.canvasNoteId === 'note-123', 'a patch that omits canvasNoteId leaves the existing focus alone');
+
+  const cleared = await store.updateChat(USER_A, created.chatId, { canvasNoteId: null });
+  assert(cleared.canvasNoteId === null, 'canvasNoteId can be explicitly cleared back to null');
 }
 
 // --- folders ---

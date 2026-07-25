@@ -1,12 +1,13 @@
 /**
  * @file orchestrator/src/orchestrator/toolRegistry.ts
- * @stamp 2026-07-21
+ * @stamp 2026-07-25
  * @architectural-role Stateful Owner — the one place registered tools live
  * @description
  * Plugins register a ToolDefinition (what the LLM sees) paired with a ToolHandler (what
  * actually runs). The registry itself does no reasoning about which tool to call — that
  * decision belongs to the LLM alone, per bb_principles.md §2 — it only looks handlers up by
- * the name the LLM chose.
+ * the name the LLM chose. A tool may optionally also declare focusHint (Canvas) — the registry
+ * doesn't act on it, just carries it alongside definition/handler for loop.ts to read.
  *
  * @api-declaration
  * createToolRegistry(tools: RegisteredTool[]) — .definitions() for the LLM's tool manifest,
@@ -35,6 +36,11 @@ export type ToolHandler = (args: unknown, ctx: ToolHandlerContext) => Promise<un
 export interface RegisteredTool {
   definition: ToolDefinition;
   handler: ToolHandler;
+  /** Given this tool's own result, returns an id worth surfacing as the chat's focused document
+   *  (e.g. a note id) — Canvas (orchestrator/src/orchestrator/loop.ts's runTurn) relays whatever
+   *  this returns without interpreting it; only the tool itself knows what "canvas-worthy" means
+   *  for its own domain. */
+  focusHint?: (result: unknown) => string | null;
 }
 
 export interface ToolRegistry {

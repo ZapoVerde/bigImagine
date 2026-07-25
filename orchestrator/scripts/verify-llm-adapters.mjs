@@ -72,7 +72,7 @@ await withMockedFetch(
     const db = createPostgresClient(createFakePool());
     const tools = createToolRegistry([echoTool]);
 
-    const reply = await runTurn({
+    const result = await runTurn({
       userId: 'u1',
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
@@ -80,7 +80,7 @@ await withMockedFetch(
       tools,
     });
 
-    assert(reply === 'final reply', 'Anthropic: runTurn returns the final reply after a real tool round-trip');
+    assert(result.content === 'final reply', 'Anthropic: runTurn returns the final reply after a real tool round-trip');
     assert(requests.length === 2, 'Anthropic: exactly two API calls were made (one per round)');
 
     const secondRequestMessages = requests[1].body.messages;
@@ -131,7 +131,7 @@ await withMockedFetch(
     const db = createPostgresClient(createFakePool());
     const tools = createToolRegistry([echoTool]);
 
-    const reply = await runTurn({
+    const result = await runTurn({
       userId: 'u1',
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
@@ -139,7 +139,7 @@ await withMockedFetch(
       tools,
     });
 
-    assert(reply === 'final reply', 'OpenAI-compatible: runTurn returns the final reply after a real tool round-trip');
+    assert(result.content === 'final reply', 'OpenAI-compatible: runTurn returns the final reply after a real tool round-trip');
     assert(requests.length === 2, 'OpenAI-compatible: exactly two API calls were made (one per round)');
 
     const secondRequestMessages = requests[1].body.messages;

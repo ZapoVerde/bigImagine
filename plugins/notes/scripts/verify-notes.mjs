@@ -125,6 +125,7 @@ const withTitle = await db.withUserScope(userId, (session) =>
   createTool.handler({ title: 'Trip plan', content: 'Pack sunscreen' }, { userId, db: session }),
 );
 assert(withTitle.title === 'Trip plan' && withTitle.content === 'Pack sunscreen', 'create_note stores the given title/content');
+assert(createTool.focusHint(withTitle) === withTitle.noteId, 'create_note\'s focusHint (Canvas) surfaces the new note\'s id');
 
 const untitled = await db.withUserScope(userId, (session) =>
   createTool.handler({ content: 'Buy milk' }, { userId, db: session }),
@@ -151,11 +152,13 @@ const found = await db.withUserScope(userId, (session) =>
   getNoteTool.handler({ note_id: withTitle.noteId }, { userId, db: session }),
 );
 assert(found.found === true && found.content === 'Pack sunscreen', 'get_note returns full content for an owned note');
+assert(getNoteTool.focusHint(found) === withTitle.noteId, 'get_note\'s focusHint (Canvas) surfaces the found note\'s id');
 
 const crossUser = await db.withUserScope(userId, (session) =>
   getNoteTool.handler({ note_id: otherUsersNote.noteId }, { userId, db: session }),
 );
 assert(crossUser.found === false, 'get_note cannot see another user\'s note');
+assert(getNoteTool.focusHint(crossUser) === null, 'get_note\'s focusHint is null for a not-found lookup, never focusing an inaccessible note');
 
 // --- update_note ---
 const updated = await db.withUserScope(userId, (session) =>
@@ -163,11 +166,13 @@ const updated = await db.withUserScope(userId, (session) =>
 );
 assert(updated.found === true && updated.content === 'Pack sunscreen and passports', 'update_note changes only the given field');
 assert(updated.title === 'Trip plan', 'update_note leaves an unspecified field untouched');
+assert(updateTool.focusHint(updated) === withTitle.noteId, 'update_note\'s focusHint (Canvas) surfaces the edited note\'s id');
 
 const updateMissing = await db.withUserScope(userId, (session) =>
   updateTool.handler({ note_id: 'does-not-exist', title: 'x' }, { userId, db: session }),
 );
 assert(updateMissing.found === false, 'update_note reports not-found for a missing note rather than throwing');
+assert(updateTool.focusHint(updateMissing) === null, 'update_note\'s focusHint is null for a not-found edit, never focusing a nonexistent note');
 
 // --- delete_note ---
 const deleted = await db.withUserScope(userId, (session) =>

@@ -1,14 +1,17 @@
 /**
  * @file plugins/notes/src/updateNoteTool.ts
- * @stamp 2026-07-24
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — edits a note's title/content/tags
  * @description
  * Only the fields actually supplied are changed — same "build the SET clause from present keys"
  * approach as chatSessions.ts's updateChat, so the LLM can say "add this to my grocery-trip note"
- * (content only) without needing to also resend the title. Always bumps updated_at.
+ * (content only) without needing to also resend the title. Always bumps updated_at. Declares
+ * focusHint (only when found) so editing a note during a chat turn makes/keeps it that chat's
+ * Canvas document (orchestrator/src/orchestrator/loop.ts) — a not-found edit must not focus a
+ * nonexistent note.
  *
  * @api-declaration
- * createUpdateNoteTool() — returns the update_note RegisteredTool
+ * createUpdateNoteTool() — returns the update_note RegisteredTool (with a focusHint)
  *
  * @contract
  *   assertions:
@@ -86,6 +89,10 @@ export function createUpdateNoteTool(): RegisteredTool {
         tags: row.tags,
         updatedAt: row.updated_at,
       };
+    },
+    focusHint: (result) => {
+      const r = result as { found?: boolean; noteId?: string };
+      return r.found ? r.noteId ?? null : null;
     },
   };
 }

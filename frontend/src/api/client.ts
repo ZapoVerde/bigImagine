@@ -128,7 +128,13 @@ export function getChat(chatId: string, apiKey: string | null): Promise<ChatDeta
 
 export function updateChat(
   chatId: string,
-  patch: { title?: string; folder_id?: string | null; params?: ChatParams; tool_names?: string[] | null },
+  patch: {
+    title?: string;
+    folder_id?: string | null;
+    params?: ChatParams;
+    tool_names?: string[] | null;
+    canvas_note_id?: string | null;
+  },
   apiKey: string | null,
 ): Promise<ChatSessionRow> {
   return jsonRequest<ChatSessionRow>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey, { method: 'POST', body: patch });

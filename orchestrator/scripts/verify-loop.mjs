@@ -66,14 +66,14 @@ async function runForUser(userId) {
     },
   ]);
 
-  const reply = await runTurn({
+  const result = await runTurn({
     userId,
     messages: [{ role: 'user', content: 'who am I?' }],
     llm,
     db,
     tools,
   });
-  return { reply, setConfigCalls: pool.setConfigCalls };
+  return { reply: result.content, setConfigCalls: pool.setConfigCalls };
 }
 
 const alice = await runForUser('11111111-1111-1111-1111-111111111111');
@@ -106,14 +106,59 @@ assert(
     },
     { message: { role: 'assistant', content: 'handled the missing tool' }, toolCalls: [] },
   ]);
-  const reply = await runTurn({
+  const result = await runTurn({
     userId: 'x',
     messages: [{ role: 'user', content: 'hi' }],
     llm,
     db,
     tools,
   });
-  assert(reply === 'handled the missing tool', 'an unknown tool name degrades gracefully instead of crashing the loop');
+  assert(result.content === 'handled the missing tool', 'an unknown tool name degrades gracefully instead of crashing the loop');
+  assert(result.focusedNoteId === undefined, 'no focusHint anywhere means focusedNoteId stays undefined');
+}
+
+// Canvas: a tool declaring focusHint surfaces its result through runTurn, last-call-wins, and a
+// focusHint that throws doesn't take the reply down with it.
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const focusingTool = {
+    definition: { name: 'touch_note', description: 'test', parameters: { type: 'object', properties: {} } },
+    handler: async () => ({ noteId: 'note-a' }),
+    focusHint: (result) => result.noteId ?? null,
+  };
+  const tools = createToolRegistry([focusingTool]);
+  const llm = createStubLlmProvider([
+    {
+      message: { role: 'assistant', content: '' },
+      toolCalls: [{ id: 'call_1', name: 'touch_note', arguments: {} }],
+    },
+    { message: { role: 'assistant', content: 'done' }, toolCalls: [] },
+  ]);
+  const result = await runTurn({ userId: 'x', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  assert(result.focusedNoteId === 'note-a', 'a tool call\'s focusHint surfaces as runTurn\'s focusedNoteId');
+}
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const throwingTool = {
+    definition: { name: 'touch_note', description: 'test', parameters: { type: 'object', properties: {} } },
+    handler: async () => ({ noteId: 'note-a' }),
+    focusHint: () => {
+      throw new Error('focusHint blew up');
+    },
+  };
+  const tools = createToolRegistry([throwingTool]);
+  const llm = createStubLlmProvider([
+    {
+      message: { role: 'assistant', content: '' },
+      toolCalls: [{ id: 'call_1', name: 'touch_note', arguments: {} }],
+    },
+    { message: { role: 'assistant', content: 'done anyway' }, toolCalls: [] },
+  ]);
+  const result = await runTurn({ userId: 'x', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  assert(result.content === 'done anyway', 'a throwing focusHint never breaks the turn\'s reply');
+  assert(result.focusedNoteId === undefined, 'a throwing focusHint just leaves focusedNoteId unset');
 }
 
 if (process.exitCode) {

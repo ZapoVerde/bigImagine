@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatSessions.ts
- * @stamp 2026-07-24
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — persisted chat sessions, messages, and folders
  * @description
  * The Postgres-backed store behind the frontend Chat tab's history sidebar
@@ -17,7 +17,9 @@
  * params carries defined keys only (system, temperature, top_p, max_tokens, model), merged over
  * provider defaults at request time by httpServer.ts's chat_id handling. toolNames: null = all
  * registered tools (pre-existing behavior), [] = none, else an allow-list applied via
- * toolRegistry.ts's filterToolRegistry.
+ * toolRegistry.ts's filterToolRegistry. canvasNoteId (Canvas): which note this chat's document
+ * panel is focused on, if any — written by httpServer.ts from runTurn's focusedNoteId, or cleared
+ * by the frontend's own close action; this store just persists whatever it's given.
  *
  * @api-declaration
  * createChatSessionStore(db) -> ChatSessionStore
@@ -56,6 +58,10 @@ export interface ChatSessionRow {
   folderId: string | null;
   params: ChatParams;
   toolNames: string[] | null;
+  /** Canvas: the note this chat's document panel is currently focused on, if any. Set by
+   *  httpServer.ts at the end of a turn whose tool call(s) surfaced one via focusHint
+   *  (toolRegistry.ts), or cleared by the frontend's own close action. */
+  canvasNoteId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -92,7 +98,13 @@ export interface ChatSessionStore {
   updateChat(
     userId: string,
     chatId: string,
-    patch: { title?: string; folderId?: string | null; params?: ChatParams; toolNames?: string[] | null },
+    patch: {
+      title?: string;
+      folderId?: string | null;
+      params?: ChatParams;
+      toolNames?: string[] | null;
+      canvasNoteId?: string | null;
+    },
   ): Promise<ChatSessionRow | undefined>;
   deleteChat(userId: string, chatId: string): Promise<boolean>;
   appendMessages(userId: string, chatId: string, messages: { role: 'user' | 'assistant'; content: string }[]): Promise<void>;
@@ -118,6 +130,7 @@ interface SessionDbRow {
   folder_id: string | null;
   params: ChatParams;
   tool_names: string[] | null;
+  canvas_note_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -129,12 +142,13 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     folderId: row.folder_id,
     params: row.params ?? {},
     toolNames: row.tool_names,
+    canvasNoteId: row.canvas_note_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const SESSION_COLUMNS = 'chat_id, title, folder_id, params, tool_names, created_at, updated_at';
+const SESSION_COLUMNS = 'chat_id, title, folder_id, params, tool_names, canvas_note_id, created_at, updated_at';
 
 export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
   return {
@@ -217,6 +231,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         if (patch.toolNames !== undefined) {
           params.push(patch.toolNames);
           sets.push(`tool_names = $${params.length}`);
+        }
+        if (patch.canvasNoteId !== undefined) {
+          params.push(patch.canvasNoteId);
+          sets.push(`canvas_note_id = $${params.length}`);
         }
         const rows = await session.query<SessionDbRow>(
           `update chat_sessions set ${sets.join(', ')} where chat_id = $1 returning ${SESSION_COLUMNS}`,

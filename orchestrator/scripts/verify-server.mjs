@@ -134,6 +134,7 @@ function createFakeChatSessionStore() {
         folderId: init.folderId ?? null,
         params: {},
         toolNames: null,
+        canvasNoteId: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -153,6 +154,7 @@ function createFakeChatSessionStore() {
       if (patch.folderId !== undefined) row.folderId = patch.folderId;
       if (patch.params !== undefined) row.params = patch.params;
       if (patch.toolNames !== undefined) row.toolNames = patch.toolNames;
+      if (patch.canvasNoteId !== undefined) row.canvasNoteId = patch.canvasNoteId;
       row.updatedAt = new Date().toISOString();
       return row;
     },
@@ -1197,6 +1199,88 @@ server.close();
   );
 
   server3.close();
+}
+
+// --- Part 6: Canvas — a tool call's focusHint persists as chat_sessions.canvas_note_id ---
+{
+  const focusingLlm = {
+    name: 'focusing',
+    calls: 0,
+    async complete() {
+      this.calls += 1;
+      if (this.calls === 1) {
+        return { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'c1', name: 'touch_note', arguments: {} }] };
+      }
+      return { message: { role: 'assistant', content: 'noted' }, toolCalls: [] };
+    },
+  };
+  const focusingTool = {
+    definition: { name: 'touch_note', description: 'test', parameters: { type: 'object', properties: {} } },
+    handler: async () => ({ noteId: 'note-canvas-1' }),
+    focusHint: (result) => result.noteId ?? null,
+  };
+  const db5 = createPostgresClient(createFakePool());
+  const apiKeys5 = createApiKeyStore('good-key-5:55555555-5555-5555-5555-555555555555');
+  const chats5 = createFakeChatSessionStore();
+  const userId5 = '55555555-5555-5555-5555-555555555555';
+  const server5 = startHttpServer({
+    llm: focusingLlm,
+    db: db5,
+    tools: createToolRegistry([focusingTool]),
+    apiKeys: apiKeys5,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chats5,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmProfiles,
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server5.once('listening', resolve));
+  const base5 = `http://127.0.0.1:${server5.address().port}`;
+  const auth5 = { authorization: 'Bearer good-key-5' };
+
+  const chat5 = await chats5.createChat(userId5, {});
+  assert(chat5.canvasNoteId === null, 'a fresh chat starts with no canvas focus');
+
+  const focusRes = await fetch(`${base5}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth5, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'draft me a note' }], chat_id: chat5.chatId }),
+  });
+  const focusBody = await focusRes.json();
+  assert(focusRes.status === 200, 'a turn whose tool call declares a focusHint still succeeds');
+  assert(
+    Object.keys(focusBody).sort().join(',') === 'choices,created,id,model,object'.split(',').sort().join(','),
+    'the OpenAI-shaped completion response carries no leaked canvas/focus field — Canvas is plumbed via chat_sessions, not this endpoint',
+  );
+  const afterFocus = await chats5.getChat(userId5, chat5.chatId);
+  assert(afterFocus.session.canvasNoteId === 'note-canvas-1', "the turn's focusHint persisted as the chat's canvas_note_id");
+
+  // A subsequent turn that doesn't call any focus-hinting tool must leave the existing focus alone.
+  const noFocusRes = await fetch(`${base5}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth5, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'thanks' }], chat_id: chat5.chatId }),
+  });
+  assert(noFocusRes.status === 200, 'a follow-up turn succeeds');
+  const afterNoFocus = await chats5.getChat(userId5, chat5.chatId);
+  assert(
+    afterNoFocus.session.canvasNoteId === 'note-canvas-1',
+    "a turn that doesn't touch any note leaves the chat's existing canvas focus untouched",
+  );
+
+  // The manual close path: POST /v1/chats/:id with canvas_note_id: null clears it.
+  const closeRes = await fetch(`${base5}/v1/chats/${chat5.chatId}`, {
+    method: 'POST',
+    headers: { ...auth5, 'content-type': 'application/json' },
+    body: JSON.stringify({ canvas_note_id: null }),
+  });
+  const closeBody = await closeRes.json();
+  assert(closeRes.status === 200 && closeBody.canvasNoteId === null, 'POST /v1/chats/:id with canvas_note_id: null clears the canvas focus');
+
+  server5.close();
 }
 
 // --- Admin timezone route (feeds handleChatCompletions's date-context line) ---

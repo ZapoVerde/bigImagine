@@ -71,3 +71,10 @@ Already applied by hand, not run automatically (see the file for the exact comma
   once, at boot, by whatever it configures — `plugins/calendar`'s ICS poll, `io/notion.ts`'s client
   construction), with the legacy `BIGBRAIN_*`-prefixed env var as the fallback until a value is set
   via `GET`/`POST /v1/admin/calendar-settings` or `/v1/admin/notion-settings`.
+- `0019_chat_canvas.sql` — adds `chat_sessions.canvas_note_id` (nullable FK to `notes`): Canvas, the
+  split-screen document panel in the Chat tab. Set by `httpServer.ts` whenever a notes-plugin tool
+  call's own `focusHint` (`orchestrator/src/orchestrator/toolRegistry.ts`) surfaces a note id during
+  a turn — `create_note`/`update_note`/`get_note` all declare one, "most recently focused note in
+  the turn wins." Deliberately plugin-driven rather than hardcoded to notes in the orchestrator, so
+  a future unstructured-content plugin (email/doc drafting) can opt into the same mechanism. No new
+  RLS policy needed — `chat_sessions`' existing `user_scoped` policy applies per-row already.

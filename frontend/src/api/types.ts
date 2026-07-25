@@ -187,6 +187,8 @@ export interface ChatSessionRow {
   folderId: string | null;
   params: ChatParams;
   toolNames: string[] | null;
+  /** Canvas: the note this chat's document panel is focused on, if any. */
+  canvasNoteId: string | null;
   createdAt: string;
   updatedAt: string;
 }

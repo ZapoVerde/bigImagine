@@ -18,7 +18,10 @@
  * @api-declaration
  * runTurn(options: RunTurnOptions) — drives one user message through to a final chat reply,
  *   executing any tool calls the LLM requests along the way; throws if maxToolRounds is
- *   exceeded rather than returning a partial/guessed answer
+ *   exceeded rather than returning a partial/guessed answer. Returns { content, focusedNoteId }:
+ *   focusedNoteId is Canvas's hook — the id a tool's own focusHint (toolRegistry.ts) surfaced,
+ *   last-one-wins across every tool call this turn, undefined if none did. This loop never asks
+ *   what the id *means* (still bb_principles.md §2) — it only relays what the tool itself declared.
  *
  * @contract
  *   assertions:
@@ -57,12 +60,19 @@ export interface RunTurnOptions {
   maxToolRounds?: number;
 }
 
-export async function runTurn(opts: RunTurnOptions): Promise<string> {
+export interface RunTurnResult {
+  content: string;
+  /** The id a tool's focusHint surfaced this turn (Canvas) — last one wins across every tool call
+   *  made in the turn, undefined if none of them declared one. */
+  focusedNoteId?: string;
+}
+
+export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const requestId = randomUUID();
   return runWithRequestId(requestId, () => runTurnInner(opts));
 }
 
-async function runTurnInner(opts: RunTurnOptions): Promise<string> {
+async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
   const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 5 } = opts;
 
   const messages: LlmMessage[] = [];
@@ -70,6 +80,8 @@ async function runTurnInner(opts: RunTurnOptions): Promise<string> {
   messages.push(...opts.messages);
 
   log.info(`runTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
+
+  let focusedNoteId: string | undefined;
 
   for (let round = 0; round < maxToolRounds; round++) {
     const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
@@ -80,7 +92,7 @@ async function runTurnInner(opts: RunTurnOptions): Promise<string> {
 
     if (turn.toolCalls.length === 0) {
       log.info(`runTurn done`, { userId, rounds: round + 1 });
-      return turn.message.content;
+      return { content: turn.message.content, focusedNoteId };
     }
 
     for (const call of turn.toolCalls) {
@@ -96,6 +108,15 @@ async function runTurnInner(opts: RunTurnOptions): Promise<string> {
           return { error: err instanceof Error ? err.message : String(err) };
         }
       });
+
+      if (tool?.focusHint) {
+        try {
+          const hint = tool.focusHint(resultPayload);
+          if (hint) focusedNoteId = hint;
+        } catch (err) {
+          log.error(`tool ${call.name}'s focusHint threw`, err);
+        }
+      }
 
       messages.push({
         role: 'tool',

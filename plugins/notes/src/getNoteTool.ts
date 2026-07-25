@@ -1,15 +1,16 @@
 /**
  * @file plugins/notes/src/getNoteTool.ts
- * @stamp 2026-07-24
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — reads one note's full content
  * @description
  * Companion to get_notes: that lists titles only, this fetches everything for one note once it's
  * been picked. found: false (rather than throwing) when the id doesn't exist or belongs to
  * another user — RLS makes cross-user rows simply not match, same as every other by-id lookup in
- * this codebase.
+ * this codebase. Declares focusHint (only when found) so the LLM re-reading a note to continue
+ * editing it also (re-)focuses that chat's Canvas document, not just create/update_note.
  *
  * @api-declaration
- * createGetNoteTool() — returns the get_note RegisteredTool
+ * createGetNoteTool() — returns the get_note RegisteredTool (with a focusHint)
  *
  * @contract
  *   assertions:
@@ -69,6 +70,10 @@ export function createGetNoteTool(): RegisteredTool {
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
+    },
+    focusHint: (result) => {
+      const r = result as { found?: boolean; noteId?: string };
+      return r.found ? r.noteId ?? null : null;
     },
   };
 }

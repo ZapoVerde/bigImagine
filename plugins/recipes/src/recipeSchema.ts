@@ -15,6 +15,9 @@
  * ParsedRecipe — the shared shape
  * isParsedRecipe(value) — the minimum-viable check: a non-empty mealName and at least one
  *   ingredient. Everything else is optional and defaults to empty/undefined rather than failing.
+ * isRecipeInstruction(value) — validates one instruction entry (a plain step, or a
+ *   {section, steps} group), exported so a partial-field update (updateRecipeTool.ts) can validate
+ *   just the instructions array without requiring a full ParsedRecipe.
  *
  * @contract
  *   assertions:
@@ -40,7 +43,7 @@ export interface ParsedRecipe {
   servings?: string;
 }
 
-function isRecipeInstruction(value: unknown): value is RecipeInstruction {
+export function isRecipeInstruction(value: unknown): value is RecipeInstruction {
   if (typeof value === 'string') return true;
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;

@@ -1,15 +1,16 @@
 /**
  * @file plugins/notes/src/createNoteTool.ts
- * @stamp 2026-07-24
+ * @stamp 2026-07-25
  * @architectural-role IO Wrapper — creates a note
  * @description
  * A note is just a title + freeform content blob, nothing structured — unlike lists (many items
  * per list) or chats (many messages per session), there is exactly one row per note. title
  * defaults to "Untitled note" when omitted, same fallback the Notes tab itself uses for a
- * freshly-created note before the user names it.
+ * freshly-created note before the user names it. Declares focusHint so creating a note during a
+ * chat turn makes it that chat's Canvas document (orchestrator/src/orchestrator/loop.ts).
  *
  * @api-declaration
- * createCreateNoteTool() — returns the create_note RegisteredTool
+ * createCreateNoteTool() — returns the create_note RegisteredTool (with a focusHint)
  *
  * @contract
  *   assertions:
@@ -60,5 +61,6 @@ export function createCreateNoteTool(): RegisteredTool {
       );
       return { noteId: row!.note_id, title: row!.title, content: row!.content };
     },
+    focusHint: (result) => (result as { noteId?: string }).noteId ?? null,
   };
 }
