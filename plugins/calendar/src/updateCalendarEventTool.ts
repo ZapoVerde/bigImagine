@@ -17,6 +17,14 @@
  * shape as adminServer.ts's settings setters. Best-effort pushed to Google afterward
  * (googleOutboundSync.ts's pushUpdateToGoogle), a no-op if this row was never mirrored.
  *
+ * visibility ('private' | 'shared', db/migrations/0025_calendar_links_visibility.sql) is the one
+ * field with side effects beyond its own column: flipping private → shared mints a Google mapping
+ * for a row that was never pushed (pushCreateToGoogle, same as if it had been created shared from
+ * the start); flipping shared → private pulls it back off Google (pushDeleteToGoogle) and drops
+ * the now-stale calendar_google_sync_map row, so a demoted event doesn't linger on the household's
+ * real Google Calendar. Staying shared with other fields edited still just calls
+ * pushUpdateToGoogle as before; staying private skips Google entirely.
+ *
  * @api-declaration
  * createUpdateCalendarEventTool(googleClient) — returns the update_calendar_event RegisteredTool
  *
@@ -32,7 +40,10 @@
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { GoogleCalendarClient } from '@bigbrain/orchestrator/google-calendar';
 import { sourceMeta, type CalendarSource } from './sourceMeta.js';
-import { pushUpdateToGoogle } from './googleOutboundSync.js';
+import { pushCreateToGoogle, pushDeleteToGoogle, pushUpdateToGoogle, lookupGoogleEventId } from './googleOutboundSync.js';
+
+const VALID_VISIBILITIES = ['private', 'shared'] as const;
+type CalendarVisibility = (typeof VALID_VISIBILITIES)[number];
 
 interface UpdateCalendarEventArgs {
   event_id: string;
@@ -41,6 +52,7 @@ interface UpdateCalendarEventArgs {
   end_time?: string;
   description?: string;
   assigned_members?: string[];
+  visibility?: CalendarVisibility;
 }
 
 function isUpdateCalendarEventArgs(value: unknown): value is UpdateCalendarEventArgs {
@@ -54,6 +66,7 @@ function isUpdateCalendarEventArgs(value: unknown): value is UpdateCalendarEvent
   if (v.assigned_members !== undefined) {
     if (!Array.isArray(v.assigned_members) || !v.assigned_members.every((m) => typeof m === 'string')) return false;
   }
+  if (v.visibility !== undefined && !VALID_VISIBILITIES.includes(v.visibility as CalendarVisibility)) return false;
   return true;
 }
 
@@ -65,6 +78,7 @@ interface ExistingEventRow {
   start_time: string;
   end_time: string;
   all_day: boolean;
+  visibility: CalendarVisibility;
 }
 
 export function createUpdateCalendarEventTool(googleClient: GoogleCalendarClient | undefined): RegisteredTool {
@@ -85,6 +99,11 @@ export function createUpdateCalendarEventTool(googleClient: GoogleCalendarClient
             items: { type: 'string' },
             description: 'New informational household-member tags — replaces the existing list.',
           },
+          visibility: {
+            type: 'string',
+            enum: [...VALID_VISIBILITIES],
+            description: 'Change whether this event syncs to the household\'s external Google Calendar connection.',
+          },
         },
         required: ['event_id'],
         additionalProperties: false,
@@ -96,7 +115,7 @@ export function createUpdateCalendarEventTool(googleClient: GoogleCalendarClient
       }
 
       const existingRows = await ctx.db.query<ExistingEventRow>(
-        `select source, title, description, location, start_time, end_time, all_day
+        `select source, title, description, location, start_time, end_time, all_day, visibility
          from calendar_events where event_id = $1 and user_id = $2`,
         [args.event_id, ctx.userId],
       );
@@ -119,22 +138,28 @@ export function createUpdateCalendarEventTool(googleClient: GoogleCalendarClient
 
       const title = args.title ?? existing.title;
       const description = args.description !== undefined ? args.description : existing.description;
+      const previousVisibility = existing.visibility; // captured before the update below — a same-referenced fake-pool row in tests would otherwise appear already mutated by the time this is checked
+      const visibility = args.visibility ?? previousVisibility;
 
       await ctx.db.query(
         `update calendar_events set title = $3, description = $4, start_time = $5, end_time = $6,
-           assigned_members = coalesce($7, assigned_members), updated_at = now()
+           assigned_members = coalesce($7, assigned_members), visibility = $8, updated_at = now()
          where event_id = $1 and user_id = $2`,
-        [args.event_id, ctx.userId, title, description, startTime, endTime, args.assigned_members ?? null],
+        [args.event_id, ctx.userId, title, description, startTime, endTime, args.assigned_members ?? null, visibility],
       );
 
-      await pushUpdateToGoogle(ctx.db, googleClient, args.event_id, {
-        title,
-        description,
-        location: existing.location,
-        startTime,
-        endTime,
-        allDay: existing.all_day,
-      });
+      const pushInput = { title, description, location: existing.location, startTime, endTime, allDay: existing.all_day };
+      if (visibility === 'shared' && previousVisibility === 'private') {
+        // never mirrored — mint it now, same as a fresh create
+        await pushCreateToGoogle(ctx.db, googleClient, args.event_id, pushInput);
+      } else if (visibility === 'private' && previousVisibility === 'shared') {
+        // pull it back off Google so a demoted event doesn't linger there
+        const googleEventId = await lookupGoogleEventId(ctx.db, args.event_id);
+        await pushDeleteToGoogle(googleClient, googleEventId);
+        await ctx.db.query('delete from calendar_google_sync_map where event_id = $1', [args.event_id]);
+      } else if (visibility === 'shared') {
+        await pushUpdateToGoogle(ctx.db, googleClient, args.event_id, pushInput);
+      }
 
       return {
         eventId: args.event_id,
@@ -143,6 +168,7 @@ export function createUpdateCalendarEventTool(googleClient: GoogleCalendarClient
         title,
         startTime,
         endTime,
+        visibility,
       };
     },
   };

@@ -80,14 +80,29 @@ function createFakePool() {
                 end_time: endTime,
                 all_day: allDay,
                 assigned_members: [],
+                visibility: 'shared',
+                linked_list_item_id: null,
+                linked_note_id: null,
               });
             }
             return { rows: [] };
           }
 
+          // --- createCalendarEventTool.ts: dedup lookup for a linked create ---
+          if (sql.startsWith('select event_id, title, start_time, end_time, visibility from calendar_events where user_id = $1 and linked_')) {
+            const [userId, linkedId] = params;
+            const field = sql.includes('linked_list_item_id') ? 'linked_list_item_id' : 'linked_note_id';
+            const existing = stagedEvents.find((e) => e.user_id === userId && e[field] === linkedId);
+            return {
+              rows: existing
+                ? [{ event_id: existing.event_id, title: existing.title, start_time: existing.start_time, end_time: existing.end_time, visibility: existing.visibility }]
+                : [],
+            };
+          }
+
           // --- createCalendarEventTool.ts: always source='native' ---
           if (sql.includes("values ($1, 'native', gen_random_uuid()")) {
-            const [userId, title, description, startTime, endTime, assignedMembers] = params;
+            const [userId, title, description, startTime, endTime, assignedMembers, visibility, linkedListItemId, linkedNoteId] = params;
             const event_id = `event-${++counter}`;
             stagedEvents.push({
               event_id,
@@ -101,6 +116,9 @@ function createFakePool() {
               end_time: endTime,
               all_day: false,
               assigned_members: assignedMembers,
+              visibility,
+              linked_list_item_id: linkedListItemId,
+              linked_note_id: linkedNoteId,
               updated_at: new Date().toISOString(),
             });
             return { rows: [{ event_id }] };
@@ -122,6 +140,9 @@ function createFakePool() {
               end_time: endTime,
               all_day: allDay,
               assigned_members: [],
+              visibility: 'shared',
+              linked_list_item_id: null,
+              linked_note_id: null,
               updated_at: new Date().toISOString(),
             });
             return { rows: [{ event_id }] };
@@ -154,7 +175,7 @@ function createFakePool() {
 
           // --- updateCalendarEventTool.ts: apply the actual edit ---
           if (sql.includes('assigned_members = coalesce($7, assigned_members)')) {
-            const [eventId, userId, title, description, startTime, endTime, assignedMembers] = params;
+            const [eventId, userId, title, description, startTime, endTime, assignedMembers, visibility] = params;
             const existing = stagedEvents.find((e) => e.event_id === eventId && e.user_id === userId);
             if (existing) {
               Object.assign(existing, {
@@ -163,8 +184,18 @@ function createFakePool() {
                 start_time: startTime,
                 end_time: endTime,
                 assigned_members: assignedMembers ?? existing.assigned_members,
+                visibility,
                 updated_at: new Date().toISOString(),
               });
+            }
+            return { rows: [] };
+          }
+
+          // --- updateCalendarEventTool.ts: shared -> private demotion drops the sync-map row ---
+          if (sql === 'delete from calendar_google_sync_map where event_id = $1') {
+            const [eventId] = params;
+            for (let i = stagedSyncMap.length - 1; i >= 0; i--) {
+              if (stagedSyncMap[i].event_id === eventId) stagedSyncMap.splice(i, 1);
             }
             return { rows: [] };
           }
@@ -423,6 +454,90 @@ async function main() {
     await withUser((ctx) => outUpdateTool.handler({ event_id: bare.eventId, title: 'Still unmirrored' }, ctx));
     await withUser((ctx) => outDeleteTool.handler({ event_id: bare.eventId }, ctx));
     assert(googleClient.updated.length === 0 && googleClient.deleted.length === 0, 'a never-mirrored event pushes nothing to Google on update/delete');
+  }
+
+  // --- linking + visibility (db/migrations/0025_calendar_links_visibility.sql) ---
+  {
+    const googleClient = createFakeGoogleOutboundClient();
+    const linkCreateTool = createCreateCalendarEventTool(googleClient);
+    const linkUpdateTool = createUpdateCalendarEventTool(googleClient);
+
+    // A plain event (no link) still defaults to visibility='shared' and pushes to Google, same as always.
+    const plain = await withUser((ctx) =>
+      linkCreateTool.handler({ title: 'Plain event', start_time: '2026-10-01T09:00:00.000Z', end_time: '2026-10-01T10:00:00.000Z' }, ctx),
+    );
+    assert(plain.visibility === 'shared', 'an unlinked event defaults to visibility="shared"');
+    assert(plain.created === true, 'an unlinked create always reports created: true (never deduplicated)');
+    assert(googleClient.inserted.some((i) => i.input.title === 'Plain event'), 'a shared unlinked event is still pushed to Google by default');
+
+    // A linked event defaults to visibility='private' and is NOT pushed, even with Google configured.
+    const linked = await withUser((ctx) =>
+      linkCreateTool.handler(
+        { title: 'Finish the report', start_time: '2026-10-02T09:00:00.000Z', end_time: '2026-10-02T09:00:00.000Z', linked_note_id: 'note-123' },
+        ctx,
+      ),
+    );
+    assert(linked.visibility === 'private', 'promoting a note deadline defaults to visibility="private"');
+    assert(linked.linkedNoteId === 'note-123' && linked.linkedListItemId === null, 'the link is recorded and the other link field stays null');
+    assert(!googleClient.inserted.some((i) => i.input.title === 'Finish the report'), 'a private linked event is never pushed to Google on create');
+    assert(linked.created === true, 'the first promotion of a given note reports created: true');
+
+    // Re-promoting the same note (e.g. a second click of "Add to calendar") is a dedup no-op, not a duplicate.
+    const eventCountBeforeRepeat = pool.events.length;
+    const repeated = await withUser((ctx) =>
+      linkCreateTool.handler(
+        { title: 'Finish the report (edited title, ignored)', start_time: '2026-11-01T09:00:00.000Z', end_time: '2026-11-01T09:00:00.000Z', linked_note_id: 'note-123' },
+        ctx,
+      ),
+    );
+    assert(repeated.created === false, 're-promoting the same note reports created: false instead of making a duplicate');
+    assert(repeated.eventId === linked.eventId, 're-promoting the same note returns the original event id');
+    assert(pool.events.length === eventCountBeforeRepeat, 're-promoting the same note does not insert a second calendar_events row');
+    assert(repeated.title === 'Finish the report', 'the reused event keeps its original title rather than being silently overwritten');
+
+    // A different link (a list item, not the note) is unaffected — dedup is scoped per link field/value.
+    const differentLink = await withUser((ctx) =>
+      linkCreateTool.handler(
+        { title: 'Pick up dry cleaning', start_time: '2026-11-02T09:00:00.000Z', end_time: '2026-11-02T09:00:00.000Z', linked_list_item_id: 'item-456' },
+        ctx,
+      ),
+    );
+    assert(differentLink.created === true && differentLink.eventId !== linked.eventId, 'a different linked_list_item_id is never deduped against an unrelated linked_note_id');
+
+    // Giving both link fields is rejected.
+    let rejectedBothLinks = false;
+    try {
+      await withUser((ctx) =>
+        linkCreateTool.handler(
+          { title: 'x', start_time: '2026-10-02T09:00:00.000Z', end_time: '2026-10-02T09:00:00.000Z', linked_note_id: 'n', linked_list_item_id: 'i' },
+          ctx,
+        ),
+      );
+    } catch {
+      rejectedBothLinks = true;
+    }
+    assert(rejectedBothLinks, 'create_calendar_event rejects linked_note_id and linked_list_item_id given together');
+
+    // Flipping private -> shared mints a Google mapping that never existed.
+    await withUser((ctx) => linkUpdateTool.handler({ event_id: linked.eventId, visibility: 'shared' }, ctx));
+    assert(googleClient.inserted.some((i) => i.input.title === 'Finish the report'), 'flipping a private linked event to shared pushes (mints) it on Google');
+    assert(pool.syncMap.some((m) => m.event_id === linked.eventId), 'the flip to shared leaves a sync-map row for the event');
+
+    // Flipping shared -> private pulls it back off Google and drops the mapping.
+    await withUser((ctx) => linkUpdateTool.handler({ event_id: linked.eventId, visibility: 'private' }, ctx));
+    assert(googleClient.deleted.length > 0, 'flipping back to private pulls the event off Google');
+    assert(!pool.syncMap.some((m) => m.event_id === linked.eventId), 'flipping back to private drops the now-stale sync-map row');
+
+    // get_calendar_schedule passes visibility/link fields straight through.
+    const withLinks = await withUser((ctx) => getTool.handler({ start_date: '2026-10-01', end_date: '2026-10-02' }, ctx));
+    const reportEvent = withLinks.find((e) => e.eventId === linked.eventId);
+    assert(reportEvent.visibility === 'private' && reportEvent.linkedNoteId === 'note-123', 'get_calendar_schedule returns visibility and linkedNoteId for a linked, currently-private event');
+
+    // cleanup so later "sanity: no native rows survived" assertions still hold
+    const cleanupDeleteTool = createDeleteCalendarEventTool(googleClient);
+    await withUser((ctx) => cleanupDeleteTool.handler({ event_id: plain.eventId }, ctx));
+    await withUser((ctx) => cleanupDeleteTool.handler({ event_id: linked.eventId }, ctx));
+    await withUser((ctx) => cleanupDeleteTool.handler({ event_id: differentLink.eventId }, ctx));
   }
 
   // --- inbound Google sync (googleSync.ts): insert / update-applied / update-skipped / cancel-delete ---

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ApiError, callTool, getTimezone } from '../api/client';
 import type { CalendarEvent } from '../api/types';
+import NoteEditor from '../components/notes/NoteEditor';
 import './CalendarView.css';
 
 interface CalendarViewProps {
@@ -84,6 +85,9 @@ export default function CalendarView({ apiKey }: CalendarViewProps) {
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
 
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+  const [openLinkedNoteId, setOpenLinkedNoteId] = useState<string | null>(null);
+
   async function reload(startDate: string, endDate: string) {
     setLoading(true);
     setError(null);
@@ -129,6 +133,16 @@ export default function CalendarView({ apiKey }: CalendarViewProps) {
     }
   }
 
+  async function toggleVisibility(event: CalendarEvent) {
+    setError(null);
+    try {
+      await callTool('update_calendar_event', { event_id: event.eventId, visibility: event.visibility === 'shared' ? 'private' : 'shared' }, apiKey);
+      await reload(rangeStart, rangeEnd);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update event visibility');
+    }
+  }
+
   const grouped = rangeStart && rangeEnd ? buildDayGroups(events, timezone, rangeStart, rangeEnd) : new Map<string, CalendarEvent[]>();
 
   return (
@@ -145,19 +159,55 @@ export default function CalendarView({ apiKey }: CalendarViewProps) {
               <p className="empty-day">Nothing scheduled.</p>
             ) : (
               <ul>
-                {dayEvents.map((event) => (
-                  <li key={event.eventId} className="calendar-event">
-                    <span className="source-dot" style={{ backgroundColor: event.colorCode }} title={event.label} />
-                    <span className="event-time">{formatTime(event)}</span>
-                    <span className="event-title">{event.title}</span>
-                    {event.location && <span className="event-location">{event.location}</span>}
-                    {event.isReadOnly && (
-                      <span className="read-only-badge" title={`Synced from ${event.label} (read-only)`}>
-                        🔒
-                      </span>
-                    )}
-                  </li>
-                ))}
+                {dayEvents.map((event) => {
+                  const isExpanded = expandedEventId === event.eventId;
+                  return (
+                    <li key={event.eventId} className="calendar-event-group">
+                      <button
+                        type="button"
+                        className="calendar-event"
+                        onClick={() => setExpandedEventId(isExpanded ? null : event.eventId)}
+                      >
+                        <span className="source-dot" style={{ backgroundColor: event.colorCode }} title={event.label} />
+                        <span className="event-time">{formatTime(event)}</span>
+                        <span className="event-title">{event.title}</span>
+                        {event.location && <span className="event-location">{event.location}</span>}
+                        {event.visibility === 'private' && <span className="private-badge" title="Not synced to Google Calendar">🔒 private</span>}
+                        {event.isReadOnly && (
+                          <span className="read-only-badge" title={`Synced from ${event.label} (read-only)`}>
+                            🔒
+                          </span>
+                        )}
+                      </button>
+                      {isExpanded && (
+                        <div className="calendar-event-details">
+                          {event.description && <p className="event-description">{event.description}</p>}
+                          {event.assignedMembers.length > 0 && <p className="event-members">For: {event.assignedMembers.join(', ')}</p>}
+                          {!event.isReadOnly && (
+                            <button type="button" className="visibility-toggle" onClick={() => toggleVisibility(event)}>
+                              {event.visibility === 'shared' ? 'Make private (stop syncing to Google)' : 'Share (sync to Google)'}
+                            </button>
+                          )}
+                          {event.linkedNoteId && (
+                            <button
+                              type="button"
+                              className="linked-note-toggle"
+                              onClick={() => setOpenLinkedNoteId(openLinkedNoteId === event.linkedNoteId ? null : event.linkedNoteId)}
+                            >
+                              🔗 {openLinkedNoteId === event.linkedNoteId ? 'Hide linked note' : 'Open linked note'}
+                            </button>
+                          )}
+                          {event.linkedListItemId && <p className="linked-item-note">🔗 Linked to a list item</p>}
+                          {event.linkedNoteId && openLinkedNoteId === event.linkedNoteId && (
+                            <div className="linked-note-editor">
+                              <NoteEditor apiKey={apiKey} noteId={event.linkedNoteId} />
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </section>

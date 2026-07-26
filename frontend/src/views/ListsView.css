@@ -78,7 +78,8 @@
 }
 
 .item-controls select,
-.item-controls input {
+.item-controls input,
+.item-controls button {
   font-size: var(--font-size-xs);
   padding: 0.1rem 0.3rem;
 }

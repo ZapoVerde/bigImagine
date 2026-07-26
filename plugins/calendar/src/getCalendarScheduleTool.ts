@@ -18,6 +18,11 @@
  * color_code/is_read_only are never stored (db/migrations/0013_calendar.sql) — sourceMeta.ts
  * derives them per row here, at read time, from source alone.
  *
+ * visibility/linked_list_item_id/linked_note_id (db/migrations/0025_calendar_links_visibility.sql)
+ * are passed straight through — visibility only ever gates the outbound Google push
+ * (googleOutboundSync.ts, called from create/updateCalendarEventTool.ts), never what this read
+ * returns, so a 'private' event is exactly as visible here as a 'shared' one.
+ *
  * @api-declaration
  * createGetCalendarScheduleTool(settings) — returns the get_calendar_schedule RegisteredTool
  *
@@ -108,8 +113,12 @@ export function createGetCalendarScheduleTool(settings: OrchestratorSettingsStor
         end_time: string;
         all_day: boolean;
         assigned_members: string[];
+        visibility: 'private' | 'shared';
+        linked_list_item_id: string | null;
+        linked_note_id: string | null;
       }>(
-        `select event_id, source, title, description, location, start_time, end_time, all_day, assigned_members
+        `select event_id, source, title, description, location, start_time, end_time, all_day, assigned_members,
+                visibility, linked_list_item_id, linked_note_id
          from calendar_events
          where user_id = $1
            and source = any($2)
@@ -130,6 +139,9 @@ export function createGetCalendarScheduleTool(settings: OrchestratorSettingsStor
         endTime: r.end_time,
         allDay: r.all_day,
         assignedMembers: r.assigned_members,
+        visibility: r.visibility,
+        linkedListItemId: r.linked_list_item_id,
+        linkedNoteId: r.linked_note_id,
       }));
     },
   };

@@ -108,6 +108,11 @@ export interface GenerateShoppingListResult {
 // plugins/calendar/src/getCalendarScheduleTool.ts / createCalendarEventTool.ts
 export type CalendarSource = 'cozi' | 'outlook' | 'google' | 'native';
 
+// db/migrations/0025_calendar_links_visibility.sql — 'private' skips the outbound Google push,
+// 'shared' pushes as before; linkedListItemId/linkedNoteId point back to a promoted list item/note
+// and are set once at creation, never kept in sync afterward.
+export type CalendarVisibility = 'private' | 'shared';
+
 export interface CalendarEvent {
   eventId: string;
   source: CalendarSource;
@@ -121,6 +126,27 @@ export interface CalendarEvent {
   endTime: string;
   allDay: boolean;
   assignedMembers: string[];
+  visibility: CalendarVisibility;
+  linkedListItemId: string | null;
+  linkedNoteId: string | null;
+}
+
+// plugins/calendar/src/createCalendarEventTool.ts's return shape — created:false when a
+// linked_list_item_id/linked_note_id create request found an existing linked event and reused it
+// instead of making a duplicate.
+export interface CreateCalendarEventResult {
+  eventId: string;
+  source: CalendarSource;
+  colorCode: string;
+  isReadOnly: boolean;
+  label: string;
+  title: string;
+  startTime: string;
+  endTime: string;
+  visibility: CalendarVisibility;
+  linkedListItemId: string | null;
+  linkedNoteId: string | null;
+  created: boolean;
 }
 
 // orchestrator/src/server/adminServer.ts getCalendarSettings()

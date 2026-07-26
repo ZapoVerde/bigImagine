@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../../api/client';
-import type { NoteDetailResult, NoteState } from '../../api/types';
+import type { CreateCalendarEventResult, NoteDetailResult, NoteState } from '../../api/types';
 
 function toDateInputValue(iso: string | null): string {
   return iso ? iso.slice(0, 10) : '';
@@ -30,6 +30,7 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
   const [notFound, setNotFound] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [calendarStatus, setCalendarStatus] = useState<'added' | 'already' | null>(null);
   const [dirty, setDirty] = useState(false);
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -101,6 +102,28 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
     }
   }
 
+  // Promotes the reminder to a real calendar event, linked back to this note (defaults to
+  // visibility='private' via create_calendar_event's own linked-event default — see
+  // db/migrations/0025_calendar_links_visibility.sql). One-directional: this note's reminderAt
+  // stays the source of truth and is never kept in sync with the event created here afterward.
+  // create_calendar_event is idempotent for a linked create (createCalendarEventTool.ts) — a
+  // second click reuses the existing event (created: false) rather than duplicating it.
+  async function addToCalendar() {
+    if (!reminderAt) return;
+    setError(null);
+    try {
+      const result = await callTool<CreateCalendarEventResult>(
+        'create_calendar_event',
+        { title, start_time: reminderAt, end_time: reminderAt, linked_note_id: noteId },
+        apiKey,
+      );
+      setCalendarStatus(result.created ? 'added' : 'already');
+      window.setTimeout(() => setCalendarStatus(null), 1500);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to add to calendar');
+    }
+  }
+
   if (notFound) {
     return (
       <div className="note-editor">
@@ -131,6 +154,11 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
           Remind me
           <input type="date" value={toDateInputValue(reminderAt)} onChange={(e) => setReminder(e.target.value)} />
         </label>
+        {reminderAt && (
+          <button type="button" onClick={addToCalendar}>
+            {calendarStatus === 'added' ? 'Added ✓' : calendarStatus === 'already' ? 'Already on calendar' : '📅 Add to calendar'}
+          </button>
+        )}
       </div>
       <input
         className="note-title-input"

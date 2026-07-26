@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
-import type { AddListItemResult, CompleteListItemResult, ListItem, ListItemPriority, UpdateListItemResult } from '../api/types';
+import type { AddListItemResult, CompleteListItemResult, CreateCalendarEventResult, ListItem, ListItemPriority, UpdateListItemResult } from '../api/types';
 import './ListsView.css';
 
 const PRIORITIES: ListItemPriority[] = ['P1', 'P2', 'P3'];
@@ -41,6 +41,8 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
   const [newItemName, setNewItemName] = useState('');
   const [newItemPriority, setNewItemPriority] = useState('');
   const [newItemDueAt, setNewItemDueAt] = useState('');
+  const [calendarStatusItemId, setCalendarStatusItemId] = useState<string | null>(null);
+  const [calendarStatus, setCalendarStatus] = useState<'added' | 'already' | null>(null);
   const itemInputRef = useRef<HTMLInputElement>(null);
 
   async function reload() {
@@ -94,6 +96,31 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
       await reload();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to update item');
+    }
+  }
+
+  // Promotes the due date to a real calendar event, linked back to this item (defaults to
+  // visibility='private' via create_calendar_event's own linked-event default — see
+  // db/migrations/0025_calendar_links_visibility.sql). One-directional: this item's dueAt stays
+  // the source of truth and is never kept in sync with the event created here afterward.
+  // create_calendar_event is idempotent for a linked create (createCalendarEventTool.ts) — a
+  // second click reuses the existing event (created: false) rather than duplicating it.
+  async function addToCalendar(item: ListItem) {
+    if (!item.dueAt) return;
+    try {
+      const result = await callTool<CreateCalendarEventResult>(
+        'create_calendar_event',
+        { title: item.itemName, start_time: item.dueAt, end_time: item.dueAt, linked_list_item_id: item.itemId },
+        apiKey,
+      );
+      setCalendarStatusItemId(item.itemId);
+      setCalendarStatus(result.created ? 'added' : 'already');
+      window.setTimeout(() => {
+        setCalendarStatusItemId(null);
+        setCalendarStatus(null);
+      }, 1500);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to add to calendar');
     }
   }
 
@@ -175,6 +202,15 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
                             value={toDateInputValue(item.dueAt)}
                             onChange={(e) => e.target.value && updateItem(item, { due_at: e.target.value })}
                           />
+                          {item.dueAt && (
+                            <button type="button" onClick={() => addToCalendar(item)}>
+                              {calendarStatusItemId === item.itemId
+                                ? calendarStatus === 'added'
+                                  ? 'Added ✓'
+                                  : 'Already on calendar'
+                                : '📅 Add to calendar'}
+                            </button>
+                          )}
                         </div>
                       )}
                     </li>
