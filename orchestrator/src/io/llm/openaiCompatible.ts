@@ -12,6 +12,15 @@
  * *string*, not a raw object — that parsing lives entirely in this file so nothing downstream
  * needs to know which shape the underlying wire format used.
  *
+ * A user message carrying LlmMessage.images gets `content` reshaped from a plain string into the
+ * documented OpenAI vision block array (`text` + one `image_url` per image, base64 data URI) —
+ * the shape OpenRouter and vision-capable DeepSeek-compatible models converge on, same "one shape
+ * not one adapter per vendor" precedent as the rest of this file. Every message without images
+ * keeps emitting a plain string, so a non-vision endpoint that might reject an array `content`
+ * field is never handed one. config.supportsVision is set from the resolved LlmProfile
+ * (io/llm/profiles.ts) by index.ts's createLlmProviderForProfile, never inferred here;
+ * server/httpServer.ts is what actually gates a turn on it before any message reaches this file.
+ *
  * @api-declaration
  * createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig) — apiKey, model, and baseUrl
  *   are all required and read from env by io/llm/index.ts, never hardcoded here
@@ -40,6 +49,7 @@ export interface OpenAiCompatibleConfig {
   model: string;
   baseUrl: string;
   maxTokens?: number;
+  supportsVision?: boolean;
 }
 
 interface OaiToolCall {
@@ -48,9 +58,15 @@ interface OaiToolCall {
   function: { name: string; arguments: string };
 }
 
+interface OaiContentBlock {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}
+
 interface OaiMessage {
   role: string;
-  content: string | null;
+  content: string | OaiContentBlock[] | null;
   tool_calls?: OaiToolCall[];
   tool_call_id?: string;
 }
@@ -70,6 +86,16 @@ function toOaiMessages(messages: LlmMessage[]): OaiMessage[] {
           function: { name: call.name, arguments: JSON.stringify(call.arguments) },
         })),
       };
+    }
+    if (m.role === 'user' && m.images && m.images.length > 0) {
+      // Content becomes a block array only when images are present — every other message keeps
+      // emitting a plain string exactly as before, so a non-vision-capable OpenAI-compatible
+      // endpoint (which may reject an array-shaped content field outright) never sees this shape.
+      const blocks: OaiContentBlock[] = [{ type: 'text', text: m.content }];
+      for (const img of m.images) {
+        blocks.push({ type: 'image_url', image_url: { url: `data:${img.mimeType};base64,${img.base64}` } });
+      }
+      return { role: m.role, content: blocks };
     }
     return { role: m.role, content: m.content };
   });
@@ -126,6 +152,7 @@ export async function listOpenAiCompatibleModels(
 export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig): LlmProvider {
   return {
     name: 'openai-compatible',
+    supportsVision: config.supportsVision ?? false,
     async complete(
       messages: LlmMessage[],
       tools: ToolDefinition[],

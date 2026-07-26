@@ -21,6 +21,7 @@ import { formatPricePerMillion } from '../api/pricing';
 import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
+import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import TodayAgenda from '../components/TodayAgenda';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
@@ -70,6 +71,30 @@ function toWireMessages(messages: DisplayMessage[]): ChatMessage[] {
   return messages.map(({ role, content }) => ({ role, content }));
 }
 
+// Mirrors orchestrator/src/server/openai.ts's own MAX_IMAGES_PER_TURN/MAX_IMAGE_BYTES/
+// ALLOWED_IMAGE_MIME_TYPES — client-side so an oversized/unsupported image is rejected before a
+// round trip, not duplicated logic the server relies on (the server's own check is still
+// authoritative; this is a fail-fast convenience, same relationship as other client-side caps in
+// this codebase, e.g. handleUploadAttachment.ts's MAX_UPLOAD_BYTES isn't imported by the frontend
+// either).
+const MAX_STAGED_IMAGES = 4;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
+function readImageAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Strip the "data:<mime>;base64," prefix readAsDataURL adds — the wire shape
+      // (orchestrator/src/server/openai.ts's IncomingImage) wants raw base64 only.
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error(`failed to read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
@@ -84,6 +109,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
   // the message carrying them is sent (see orchestrator/src/util/attachmentContext.ts).
   const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
+  // Staged images: never go through uploadAttachment/POST /v1/attachments/extract at all — read
+  // client-side as base64 (see orchestrator/src/io/attachments/dispatchExtraction.ts's own
+  // preamble on why there's nothing to extract). Same ephemeral, cleared-on-send lifecycle.
+  const [stagedImages, setStagedImages] = useState<StagedImageFile[]>([]);
   const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -177,15 +206,51 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   async function attachFiles(fileList: FileList | null) {
     if (!fileList || fileList.length === 0) return;
     setError(null);
-    setAttaching(true);
-    try {
-      const uploaded = await Promise.all(Array.from(fileList).map((file) => uploadAttachment(file, apiKey)));
-      const withIds: StagedFile[] = uploaded.map((file) => ({ ...file, id: crypto.randomUUID() }));
-      setStagedFiles((prev) => [...prev, ...withIds]);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to attach file');
-    } finally {
-      setAttaching(false);
+
+    // Images never go through uploadAttachment/POST /v1/attachments/extract — there's nothing to
+    // extract (bb_principles.md §2 — interpreting an image is the LLM's job). Split by MIME type
+    // so a single file-picker selection can mix ordinary attachments and images.
+    const files = Array.from(fileList);
+    const imageFiles = files.filter((f) => ALLOWED_IMAGE_MIME_TYPES.has(f.type));
+    const otherFiles = files.filter((f) => !ALLOWED_IMAGE_MIME_TYPES.has(f.type));
+
+    if (imageFiles.length > 0) {
+      if (stagedImages.length + imageFiles.length > MAX_STAGED_IMAGES) {
+        setError(`up to ${MAX_STAGED_IMAGES} images per message`);
+      } else {
+        const oversized = imageFiles.find((f) => f.size > MAX_IMAGE_BYTES);
+        if (oversized) {
+          setError(`${oversized.name} exceeds the ${Math.floor(MAX_IMAGE_BYTES / (1024 * 1024))}MB image limit`);
+        } else {
+          try {
+            const encoded = await Promise.all(
+              imageFiles.map(async (file) => ({
+                filename: file.name,
+                mimeType: file.type,
+                base64: await readImageAsBase64(file),
+                previewUrl: URL.createObjectURL(file),
+                id: crypto.randomUUID(),
+              })),
+            );
+            setStagedImages((prev) => [...prev, ...encoded]);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : 'failed to read image');
+          }
+        }
+      }
+    }
+
+    if (otherFiles.length > 0) {
+      setAttaching(true);
+      try {
+        const uploaded = await Promise.all(otherFiles.map((file) => uploadAttachment(file, apiKey)));
+        const withIds: StagedFile[] = uploaded.map((file) => ({ ...file, id: crypto.randomUUID() }));
+        setStagedFiles((prev) => [...prev, ...withIds]);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'failed to attach file');
+      } finally {
+        setAttaching(false);
+      }
     }
   }
 
@@ -193,16 +258,28 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setStagedFiles((prev) => prev.filter((f) => f.id !== id));
   }
 
+  function removeStagedImage(id: string) {
+    setStagedImages((prev) => {
+      const removed = prev.find((img) => img.id === id);
+      if (removed) URL.revokeObjectURL(removed.previewUrl);
+      return prev.filter((img) => img.id !== id);
+    });
+  }
+
   async function send() {
     const text = draft.trim();
-    if ((!text && stagedFiles.length === 0) || sending) return;
+    if ((!text && stagedFiles.length === 0 && stagedImages.length === 0) || sending) return;
 
-    // A file-only send (no typed text) still needs non-empty, readable content for the message
-    // that actually gets persisted — the file's own extracted text is never stored (see
-    // attachFiles/StagedAttachment), so history would otherwise show a blank bubble forever.
+    // A file/image-only send (no typed text) still needs non-empty, readable content for the
+    // message that actually gets persisted — neither a file's extracted text nor an image's bytes
+    // are ever stored (see attachFiles/StagedAttachment/StagedImage), so history would otherwise
+    // show a blank bubble forever.
+    const stagedCount = stagedFiles.length + stagedImages.length;
     const displayText =
       text ||
-      (stagedFiles.length === 1 ? `Sent ${stagedFiles[0]!.filename}` : `Sent ${stagedFiles.length} files`);
+      (stagedFiles.length === 1 && stagedImages.length === 0
+        ? `Sent ${stagedFiles[0]!.filename}`
+        : `Sent ${stagedCount} file${stagedCount === 1 ? '' : 's'}`);
 
     setError(null);
     setSending(true);
@@ -212,7 +289,12 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // Strip the client-only id (StagingBar's key/promotion-tracking field) before it goes over
     // the wire — the server's IncomingAttachment shape doesn't know about it.
     const attachments = stagedFiles.map(({ id: _id, ...rest }) => rest);
+    // Only {mimeType, base64} travels over the wire — the server's IncomingImage shape has no
+    // filename/previewUrl field (see client.ts's chatCompletion).
+    const images = stagedImages.map(({ mimeType, base64 }) => ({ mimeType, base64 }));
     setStagedFiles([]);
+    stagedImages.forEach((img) => URL.revokeObjectURL(img.previewUrl));
+    setStagedImages([]);
     try {
       let session = activeChat;
       if (!session) {
@@ -223,7 +305,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         }
         setActiveChat(session);
       }
-      await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId, attachments);
+      await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId, attachments, images);
       await refreshActiveMessages(session.chatId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to reach bigBrain');
@@ -402,6 +484,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         </div>
 
         <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
+        <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
 
         <form
           className="chat-input"
@@ -423,7 +506,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           <button
             type="button"
             className="chat-attach-button"
-            title="Attach a file"
+            title="Attach a file or image"
             disabled={attaching}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -442,7 +525,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             rows={2}
             autoFocus
           />
-          <button type="submit" disabled={sending || (!draft.trim() && stagedFiles.length === 0)}>
+          <button
+            type="submit"
+            disabled={sending || (!draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0)}
+          >
             Send
           </button>
         </form>

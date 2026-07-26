@@ -105,12 +105,19 @@ export async function uploadAttachment(file: File, apiKey: string | null): Promi
  *  request told the real provider (DeepSeek/OpenRouter) to use a model literally named
  *  "bigbrain", which doesn't exist, and it rejected every single message. Omitting it here falls
  *  back to the chat session's own params.model if set, else the active connection's configured
- *  default — never a fake label. */
+ *  default — never a fake label.
+ *
+ *  images never goes through POST /v1/attachments/extract (there's nothing to extract) — the
+ *  caller base64-encodes them client-side; only {mimeType, base64} travels over the wire, matching
+ *  orchestrator/src/server/openai.ts's IncomingImage shape exactly (no filename/preview data,
+ *  unlike attachments). A non-vision-capable active connection makes the whole request fail with a
+ *  422 server-side (httpServer.ts) rather than silently dropping the image. */
 export async function chatCompletion(
   messages: ChatMessage[],
   apiKey: string | null,
   chatId?: string,
   attachments?: StagedAttachment[],
+  images?: { mimeType: string; base64: string }[],
 ): Promise<ChatCompletionResponse> {
   const res = await fetch('/v1/chat/completions', {
     method: 'POST',
@@ -120,6 +127,7 @@ export async function chatCompletion(
       stream: false,
       ...(chatId ? { chat_id: chatId } : {}),
       ...(attachments?.length ? { attachments } : {}),
+      ...(images?.length ? { images } : {}),
     }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
@@ -244,12 +252,19 @@ export async function adminGetActiveProfile(adminKey: string | null): Promise<Ac
   return res.json() as Promise<ActiveProfileSetting>;
 }
 
-/** Resolves once the save is accepted (202) — same restart-on-save shape as adminSetCredential. */
-export async function adminSetActiveProfile(profileName: string, model: string, adminKey: string | null): Promise<void> {
+/** Resolves once the save is accepted (202) — same restart-on-save shape as adminSetCredential.
+ *  supportsVision, when passed, adds/removes profileName from the stored
+ *  llm_vision_capable_profiles list; omitted leaves that profile's flag untouched. */
+export async function adminSetActiveProfile(
+  profileName: string,
+  model: string,
+  adminKey: string | null,
+  supportsVision?: boolean,
+): Promise<void> {
   const res = await fetch('/v1/admin/settings', {
     method: 'POST',
     headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify({ value: profileName, model }),
+    body: JSON.stringify({ value: profileName, model, ...(supportsVision !== undefined ? { supportsVision } : {}) }),
   });
   if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
 }

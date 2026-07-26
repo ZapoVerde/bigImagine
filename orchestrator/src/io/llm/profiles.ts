@@ -18,6 +18,11 @@
  *   and createLlmProvider need no other changes to support that
  * withOverriddenModel(raw, profileName, model) — splices a DB-sourced model override
  *   (io/orchestratorSettings.ts's active_llm_model) onto one named profile, same idea
+ * withOverriddenSupportsVision(raw, flags) — splices a DB-sourced vision-capability flag
+ *   (io/orchestratorSettings.ts's llm_vision_capable_profiles) onto every named profile present in
+ *   flags, not just the active one — a chat can pick any configured profile via its own connection
+ *   override (server/httpServer.ts's sessionParams.profile), so the flag has to travel with every
+ *   profile, the same way withOverriddenApiKeys already does for every profile's own apiKey
  *
  * @contract
  *   assertions:
@@ -33,6 +38,12 @@ export interface LlmProfile {
   /** Required when kind is 'openai-compatible' (there's no sane default across vendors);
    *  optional override for 'anthropic', which already defaults to the real Anthropic API. */
   baseUrl?: string;
+  /** Whether this connection's model can accept image attachments. Never set directly in
+   *  BIGBRAIN_LLM_PROFILES — there's no reliable way to auto-detect vision capability across
+   *  arbitrary OpenAI-compatible endpoints, so this is always false until
+   *  withOverriddenSupportsVision splices in the admin-set, DB-backed flag
+   *  (io/orchestratorSettings.ts's llm_vision_capable_profiles) at boot. */
+  supportsVision: boolean;
 }
 
 function validateProfile(name: string, value: unknown): LlmProfile {
@@ -59,6 +70,7 @@ function validateProfile(name: string, value: unknown): LlmProfile {
     model: v.model,
     apiKey: v.apiKey,
     baseUrl: typeof v.baseUrl === 'string' ? v.baseUrl : undefined,
+    supportsVision: v.supportsVision === true,
   };
 }
 
@@ -111,5 +123,24 @@ export function withOverriddenModel(raw: string, profileName: string, model: str
   const profile = parsed[profileName];
   if (typeof profile !== 'object' || profile === null) return raw;
   parsed[profileName] = { ...(profile as Record<string, unknown>), model };
+  return JSON.stringify(parsed);
+}
+
+/**
+ * Pure: re-serializes `raw`'s parsed JSON with `supportsVision` set to true on every profile name
+ * present (and true) in `flags`, false on every other known profile — unlike withOverriddenModel,
+ * this applies to every profile in `flags`, not just one, since a chat can select any configured
+ * profile via its own connection override (server/httpServer.ts's sessionParams.profile), not just
+ * the household-wide active one; the vision flag has to travel with whichever profile a turn
+ * actually ends up using. A profile name in `flags` that isn't in `raw` is silently ignored (a
+ * stale Settings-tab entry for a since-removed profile), same "don't fail the whole boot over a
+ * stale reference" shape as withOverriddenApiKeys.
+ */
+export function withOverriddenSupportsVision(raw: string, flags: Record<string, boolean>): string {
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  for (const [name, profile] of Object.entries(parsed)) {
+    if (typeof profile !== 'object' || profile === null) continue;
+    parsed[name] = { ...(profile as Record<string, unknown>), supportsVision: flags[name] === true };
+  }
   return JSON.stringify(parsed);
 }

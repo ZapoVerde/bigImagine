@@ -45,7 +45,12 @@ import { setDefaultAutoSelectFamily } from 'node:net';
 import { Pool } from 'pg';
 import { log } from './io/logger.js';
 import { createLlmProvider } from './io/llm/index.js';
-import { parseLlmProfiles, withOverriddenApiKeys, withOverriddenModel } from './io/llm/profiles.js';
+import {
+  parseLlmProfiles,
+  withOverriddenApiKeys,
+  withOverriddenModel,
+  withOverriddenSupportsVision,
+} from './io/llm/profiles.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createFieldCipher } from './io/fieldCipher.js';
 import { createNotionClient } from './io/notion.js';
@@ -53,6 +58,7 @@ import { createAccessIdentityResolver } from './io/accessIdentity.js';
 import { createChatSessionStore } from './io/chatSessions.js';
 import { createPostgresClient } from './io/postgres.js';
 import { createProviderCredentialStore } from './io/providerCredentials.js';
+import { parseVisionCapableProfiles } from './server/adminServer.js';
 import { createOrchestratorSettingsStore } from './io/orchestratorSettings.js';
 import { createToolRegistry } from './orchestrator/toolRegistry.js';
 import { loadPlugins } from './orchestrator/pluginLoader.js';
@@ -121,15 +127,26 @@ async function main(): Promise<void> {
     deepseek: deepseekKey,
     openrouter: openrouterKey,
   });
-  // The unparsed, apiKey-resolved profiles map — passed to httpServer.ts so the Settings tab's
-  // model dropdown (GET /v1/admin/settings/models) can list any configured profile's catalog,
-  // even one that isn't currently active. Deliberately built from the pre-model-override JSON:
+  // Which configured profiles an admin has marked vision-capable (io/llm/profiles.ts's
+  // LlmProfile.supportsVision) — spliced onto every profile it names, not just the active one,
+  // since a chat can select any configured profile via its own connection override
+  // (server/httpServer.ts's sessionParams.profile). Same restart-on-save shape as the profile/
+  // model picker above.
+  const visionCapableProfiles = parseVisionCapableProfiles(await settings.get('llm_vision_capable_profiles'));
+  const profilesJsonWithVision = withOverriddenSupportsVision(
+    profilesJsonWithApiKeys,
+    Object.fromEntries(visionCapableProfiles.map((name) => [name, true])),
+  );
+  // The unparsed, apiKey/vision-resolved profiles map — passed to httpServer.ts so the Settings
+  // tab's model dropdown (GET /v1/admin/settings/models) can list any configured profile's
+  // catalog, and so a per-chat profile override carries its own supportsVision, even for a
+  // profile that isn't currently active. Deliberately built from the pre-model-override JSON:
   // a not-yet-active profile's "default model" should be its own static config, not whatever
   // model happens to be overridden onto a *different* (the currently active) profile.
-  const llmProfiles = parseLlmProfiles(profilesJsonWithApiKeys);
+  const llmProfiles = parseLlmProfiles(profilesJsonWithVision);
   const llm = createLlmProvider({
     ...process.env,
-    BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithApiKeys, activeProfile, activeModel),
+    BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithVision, activeProfile, activeModel),
     BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
   });
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });

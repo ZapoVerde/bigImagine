@@ -7,7 +7,7 @@ import { extractPlainText } from '../dist/io/attachments/extractPlainText.js';
 import { extractPdfText } from '../dist/io/attachments/extractPdfText.js';
 import { extractAttachmentText } from '../dist/io/attachments/dispatchExtraction.js';
 import { truncateForContext, buildTruncationBanner, DEFAULT_ATTACHMENT_CHAR_CAP } from '../dist/util/truncateForContext.js';
-import { appendAttachmentsToLatestUserMessage } from '../dist/util/attachmentContext.js';
+import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../dist/util/attachmentContext.js';
 import { startHttpServer } from '../dist/server/httpServer.js';
 import { createToolRegistry } from '../dist/orchestrator/toolRegistry.js';
 import { createApiKeyStore } from '../dist/server/apiKeyStore.js';
@@ -306,6 +306,38 @@ function buildMinimalTextPdf(text) {
   assert(spliced === messages, 'an empty attachments array returns the exact same array reference (no-op)');
 }
 
+// --- attachImagesToLatestUserMessage (Stage 5 — vision) ---
+
+{
+  const messages = [{ role: 'system', content: 'sys' }, { role: 'user', content: 'what is this?' }];
+  const spliced = attachImagesToLatestUserMessage(messages, [{ mimeType: 'image/png', base64: 'AAAA' }]);
+  assert(spliced !== messages, 'attachImagesToLatestUserMessage returns a new array');
+  assert(messages[1].images === undefined, 'the original message is never mutated');
+  assert(
+    spliced[1].images.length === 1 && spliced[1].images[0].mimeType === 'image/png' && spliced[1].images[0].base64 === 'AAAA',
+    'the latest user message carries the given image',
+  );
+  assert(spliced[1].content === 'what is this?', 'content is left untouched — images ride on their own field, never text');
+}
+
+{
+  const messages = [{ role: 'user', content: 'hi', images: [{ mimeType: 'image/png', base64: 'existing' }] }];
+  const spliced = attachImagesToLatestUserMessage(messages, [{ mimeType: 'image/jpeg', base64: 'new' }]);
+  assert(spliced[0].images.length === 2, 'a second call appends to, rather than replaces, an existing images array');
+}
+
+{
+  const messages = [{ role: 'user', content: 'hi' }];
+  const spliced = attachImagesToLatestUserMessage(messages, []);
+  assert(spliced === messages, 'an empty images array returns the exact same array reference (no-op)');
+}
+
+{
+  const messages = [{ role: 'assistant', content: 'hi' }];
+  const spliced = attachImagesToLatestUserMessage(messages, [{ mimeType: 'image/png', base64: 'AAAA' }]);
+  assert(spliced === messages, 'no user message present is a no-op, same as appendAttachmentsToLatestUserMessage');
+}
+
 // --- End to end: a real multipart POST against a real running server ---
 
 const llm = createStubLlmProvider([{ message: { role: 'assistant', content: 'saw it' }, toolCalls: [] }]);
@@ -324,6 +356,7 @@ const apiKeys = createApiKeyStore('good-key:11111111-1111-1111-1111-111111111111
 const capturedTurns = [];
 const capturingLlm = {
   name: 'capturing',
+  supportsVision: true,
   async complete(messages) {
     capturedTurns.push(messages);
     return { message: { role: 'assistant', content: 'ok' }, toolCalls: [] };
@@ -405,7 +438,110 @@ const noAttachmentsRes = await fetch(`${base}/v1/chat/completions`, {
 });
 assert(noAttachmentsRes.status === 200, 'a chat completion with no attachments field at all still works');
 
+// A chat turn that includes `images` gets them spliced onto the message's own images field
+// (never into content/Markdown) when the active connection supports vision...
+const chatWithImageRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer good-key', 'content-type': 'application/json' },
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'what is in this photo?' }],
+    images: [{ mimeType: 'image/png', base64: 'AAAA' }],
+  }),
+});
+assert(chatWithImageRes.status === 200, 'a chat completion with images succeeds when the active connection supports vision');
+const imageTurnSent = capturedTurns.at(-1);
+const imageUserMsg = imageTurnSent.find((m) => m.role === 'user');
+assert(
+  imageUserMsg.content === 'what is in this photo?' &&
+    imageUserMsg.images?.length === 1 &&
+    imageUserMsg.images[0].mimeType === 'image/png' &&
+    imageUserMsg.images[0].base64 === 'AAAA',
+  'the model actually received the image alongside the original text, on its own field',
+);
+
+// --- images validation (server/openai.ts's isChatCompletionRequestBody) — rejected before ever
+// reaching the vision gate or runTurn, exercised at the HTTP boundary like the rest of this file ---
+
+const badMimeRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer good-key', 'content-type': 'application/json' },
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'hi' }],
+    images: [{ mimeType: 'image/tiff', base64: 'AAAA' }],
+  }),
+});
+assert(badMimeRes.status === 400, 'an image with a disallowed mime type is rejected with 400');
+
+const tooManyImagesRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer good-key', 'content-type': 'application/json' },
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'hi' }],
+    images: Array.from({ length: 5 }, () => ({ mimeType: 'image/png', base64: 'AAAA' })),
+  }),
+});
+assert(tooManyImagesRes.status === 400, 'more than 4 images in one turn is rejected with 400');
+
+// One byte past openai.ts's own MAX_IMAGE_BASE64_LENGTH (8MB raw, base64-inflated) — proves the
+// cap is enforced on the encoded length itself, not decoded first.
+const oversizedBase64 = 'A'.repeat(11_184_812);
+const oversizedImageRes = await fetch(`${base}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer good-key', 'content-type': 'application/json' },
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'hi' }],
+    images: [{ mimeType: 'image/png', base64: oversizedBase64 }],
+  }),
+});
+assert(oversizedImageRes.status === 400, 'an image whose base64 exceeds the 8MB-equivalent cap is rejected with 400');
+
 server.close();
+
+// --- Explicit-failure gate: a non-vision-capable connection never even reaches llm.complete ---
+
+const noVisionLlm = {
+  name: 'no-vision',
+  supportsVision: false,
+  async complete() {
+    throw new Error('llm.complete must never be called when the active connection does not support vision');
+  },
+};
+const server2 = startHttpServer({
+  llm: noVisionLlm,
+  db,
+  tools: createToolRegistry([]),
+  apiKeys,
+  accessIdentity: { async userIdForAccessJwt() { return undefined; } },
+  chats: { async getChat() { return undefined; } },
+  adminApiKey: 'unused',
+  credentials: { async list() { return []; } },
+  settings: { async get() { return undefined; }, async set() {} },
+  llmProfiles: {},
+  modelName: 'bigbrain',
+  port: 0,
+});
+await new Promise((resolve) => server2.once('listening', resolve));
+const base2 = `http://127.0.0.1:${server2.address().port}`;
+
+const rejectedRes = await fetch(`${base2}/v1/chat/completions`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer good-key', 'content-type': 'application/json' },
+  body: JSON.stringify({
+    messages: [{ role: 'user', content: 'what is this?' }],
+    images: [{ mimeType: 'image/png', base64: 'AAAA' }],
+  }),
+});
+const rejectedBody = await rejectedRes.json();
+assert(
+  rejectedRes.status === 422,
+  'a chat completion with images against a non-vision-capable connection is rejected with 422, never reaching llm.complete',
+);
+assert(
+  /doesn't support image input/i.test(rejectedBody.error),
+  'the 422 error is specific and actionable (names the fix), not a generic failure message',
+);
+
+server2.close();
 
 if (process.exitCode) {
   console.error('\nattachments verification FAILED');

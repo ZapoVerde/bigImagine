@@ -9,6 +9,12 @@
  * `tool_use` content blocks rather than a separate field. All of that stays inside this file —
  * per bb_principles.md §6, nothing outside io/llm/ may know this vendor's shape exists.
  *
+ * A user message carrying LlmMessage.images becomes an `image` content block per image (base64,
+ * as Anthropic's Messages API expects), prepended before the text block — config.supportsVision
+ * is set from the resolved LlmProfile (io/llm/profiles.ts) by index.ts's
+ * createLlmProviderForProfile, never inferred here; server/httpServer.ts is what actually gates a
+ * turn on it before any message reaches this file.
+ *
  * @api-declaration
  * createAnthropicLlmProvider(config: AnthropicConfig) — config.apiKey and config.model are
  *   required and read from env by io/llm/index.ts, never hardcoded here
@@ -36,16 +42,18 @@ export interface AnthropicConfig {
   apiVersion?: string;
   baseUrl?: string;
   maxTokens?: number;
+  supportsVision?: boolean;
 }
 
 interface AnthropicContentBlock {
-  type: 'text' | 'tool_use' | 'tool_result';
+  type: 'text' | 'tool_use' | 'tool_result' | 'image';
   text?: string;
   id?: string;
   name?: string;
   input?: unknown;
   tool_use_id?: string;
   content?: string;
+  source?: { type: 'base64'; media_type: string; data: string };
 }
 
 interface AnthropicMessage {
@@ -77,6 +85,16 @@ function toAnthropicMessages(messages: LlmMessage[]): {
         blocks.push({ type: 'tool_use', id: call.id, name: call.name, input: call.arguments });
       }
       return { role: 'assistant', content: blocks };
+    }
+    if (m.role === 'user' && m.images && m.images.length > 0) {
+      // Images precede the text block — Anthropic has no ordering requirement here, but this
+      // matches how a human would describe "here's a photo, and here's my question about it."
+      const blocks: AnthropicContentBlock[] = m.images.map((img) => ({
+        type: 'image',
+        source: { type: 'base64', media_type: img.mimeType, data: img.base64 },
+      }));
+      blocks.push({ type: 'text', text: m.content });
+      return { role: 'user', content: blocks };
     }
     return {
       role: m.role === 'assistant' ? 'assistant' : 'user',
@@ -114,6 +132,7 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
 
   return {
     name: 'anthropic',
+    supportsVision: config.supportsVision ?? false,
     async complete(
       messages: LlmMessage[],
       tools: ToolDefinition[],

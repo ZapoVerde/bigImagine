@@ -38,6 +38,15 @@
  * household_timezone, so a Settings-tab change takes effect on the next scale, no restart. Not a
  * secret — a number, not a credential.
  *
+ * llm_vision_capable_profiles is the one value here that isn't a bare scalar: a JSON-encoded array
+ * of BIGBRAIN_LLM_PROFILES names an admin has marked vision-capable (io/llm/profiles.ts's
+ * LlmProfile.supportsVision), read once at boot (index.ts) alongside active_llm_profile —
+ * same restart-on-save shape, since it's spliced into the static profiles JSON the same way
+ * withOverriddenApiKeys/withOverriddenModel already are. A single scalar can't express this: a
+ * chat can pick any configured profile via its own connection override (server/httpServer.ts's
+ * sessionParams.profile), not just the household-wide active one, so the flag has to be per
+ * profile name, not per "the active choice."
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -66,6 +75,7 @@ export const SETTING_NAMES = [
   'google_calendar_id',
   'google_calendar_sync_token',
   'default_recipe_servings',
+  'llm_vision_capable_profiles',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

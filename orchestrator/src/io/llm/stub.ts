@@ -11,8 +11,11 @@
  * flow a real provider would trigger, with no reasoning happening on either side.
  *
  * @api-declaration
- * createStubLlmProvider(scriptedTurns: LlmTurn[]) — returns an LlmProvider that yields
- *   scriptedTurns in order, one per complete() call; throws if called more times than scripted
+ * createStubLlmProvider(scriptedTurns: LlmTurn[], options?: {supportsVision?: boolean}) — returns
+ *   an LlmProvider that yields scriptedTurns in order, one per complete() call; throws if called
+ *   more times than scripted. supportsVision defaults to false, same as a real adapter's own
+ *   default when a profile doesn't set it — pass true to test the images/vision-gate success path
+ *   (server/httpServer.ts) without a real provider.
  *
  * @contract
  *   assertions:
@@ -29,11 +32,12 @@ import type {
   ToolDefinition,
 } from './types.js';
 
-export function createStubLlmProvider(scriptedTurns: LlmTurn[]): LlmProvider {
+export function createStubLlmProvider(scriptedTurns: LlmTurn[], options?: { supportsVision?: boolean }): LlmProvider {
   let callIndex = 0;
 
   return {
     name: 'stub',
+    supportsVision: options?.supportsVision ?? false,
     async complete(
       _messages: LlmMessage[],
       _tools: ToolDefinition[],

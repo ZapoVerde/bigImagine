@@ -78,3 +78,9 @@ Already applied by hand, not run automatically (see the file for the exact comma
   the turn wins." Deliberately plugin-driven rather than hardcoded to notes in the orchestrator, so
   a future unstructured-content plugin (email/doc drafting) can opt into the same mechanism. No new
   RLS policy needed — `chat_sessions`' existing `user_scoped` policy applies per-row already.
+- `0030_llm_vision_capable_profiles.sql` — widens `orchestrator_settings.key`'s `CHECK` vocabulary
+  with `llm_vision_capable_profiles`: which named `BIGBRAIN_LLM_PROFILES` connections can accept
+  image attachments (`io/llm/profiles.ts`'s `LlmProfile.supportsVision`). DB-backed/Settings-tab
+  editable per §13, same restart-on-save shape as `active_llm_profile`. The one setting whose value
+  is a small JSON array rather than a bare scalar — a single flag can't say "vision-capable" per
+  profile name, and a chat can pick any configured profile, not just the household-wide active one.

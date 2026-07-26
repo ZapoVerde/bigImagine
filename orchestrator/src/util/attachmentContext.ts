@@ -18,10 +18,17 @@
  * chat's history forever; the browser is expected to resend a file's extracted text again if it's
  * still relevant to a later message.
  *
+ * attachImagesToLatestUserMessage follows suit for LlmMessage.images: same ephemeral,
+ * request-scoped lifecycle, same "find the latest user message, return a new array" shape.
+ * Images never touch content/Markdown at all — they ride on the message's own images field,
+ * which server/httpServer.ts only ever populates after confirming the resolved LlmProvider's
+ * supportsVision is true (bb_principles.md §2 — no silent drop, no guessing).
+ *
  * @api-declaration
  * AttachmentForContext
  * appendAttachmentsToLatestUserMessage(messages, attachments) — returns a new array; the input
  *   array and its messages are never mutated
+ * attachImagesToLatestUserMessage(messages, images) — same shape, for LlmMessage.images
  *
  * @contract
  *   assertions:
@@ -31,7 +38,7 @@
  */
 
 import { buildTruncationBanner, type TruncationMeta } from './truncateForContext.js';
-import type { LlmMessage } from '../io/llm/types.js';
+import type { LlmImageAttachment, LlmMessage } from '../io/llm/types.js';
 
 export interface AttachmentForContext {
   filename: string;
@@ -65,6 +72,22 @@ export function appendAttachmentsToLatestUserMessage(
   updated[targetIndex] = {
     ...updated[targetIndex]!,
     content: `${updated[targetIndex]!.content}\n\n${block}`,
+  };
+  return updated;
+}
+
+export function attachImagesToLatestUserMessage(
+  messages: LlmMessage[],
+  images: LlmImageAttachment[],
+): LlmMessage[] {
+  if (images.length === 0) return messages;
+  const targetIndex = findLastUserIndex(messages);
+  if (targetIndex === -1) return messages;
+
+  const updated = [...messages];
+  updated[targetIndex] = {
+    ...updated[targetIndex]!,
+    images: [...(updated[targetIndex]!.images ?? []), ...images],
   };
   return updated;
 }

@@ -20,9 +20,23 @@
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface LlmImageAttachment {
+  /** e.g. "image/png", "image/jpeg", "image/webp", "image/gif" — validated at the server boundary
+   *  (server/openai.ts), trusted as-is by the time it reaches an adapter. */
+  mimeType: string;
+  /** Raw base64 payload, no "data:...;base64," prefix. */
+  base64: string;
+}
+
 export interface LlmMessage {
   role: LlmRole;
   content: string;
+  /** Set only on a 'user' message: images to attach alongside the text content, this turn only.
+   *  Never persisted (see util/attachmentContext.ts) — same ephemeral, client-resent shape as a
+   *  text attachment's Markdown. Only meaningful when the resolved LlmProvider's own
+   *  supportsVision is true; server/httpServer.ts is the one place that check happens, before any
+   *  adapter ever sees a message carrying this. */
+  images?: LlmImageAttachment[];
   /** Set only when role === 'tool': echoes the ToolCall.id this message answers. */
   toolCallId?: string;
   /** Set only on an assistant message that requested tool calls. Required for a follow-up
@@ -71,6 +85,13 @@ export interface LlmCompleteOptions {
 
 export interface LlmProvider {
   readonly name: string;
+  /** Whether this connection's configured model can accept LlmMessage.images. Set once, at
+   *  construction, from the resolved LlmProfile.supportsVision (io/llm/profiles.ts) — there's no
+   *  reliable way to detect this from the wire protocol itself, so it's always an explicit,
+   *  admin-set flag, never inferred. server/httpServer.ts checks this before ever building a
+   *  message carrying images, so a non-vision-capable connection fails the turn visibly instead of
+   *  silently dropping the image or letting the model claim to have seen it (bb_principles.md §2). */
+  readonly supportsVision: boolean;
   complete(
     messages: LlmMessage[],
     tools: ToolDefinition[],

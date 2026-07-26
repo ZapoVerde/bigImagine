@@ -144,10 +144,29 @@ export function setCredential(store: ProviderCredentialStore, name: CredentialNa
   return store.set(name, value);
 }
 
+// llm_vision_capable_profiles' value is a JSON array of profile names, the one setting here that
+// isn't a bare scalar (io/orchestratorSettings.ts's own preamble explains why) — parsed
+// defensively since it's operator/admin-set indirectly via this route, not hand-edited. Exported
+// so index.ts's boot sequence can reuse the exact same parse when splicing the flag onto every
+// profile via profiles.ts's withOverriddenSupportsVision, rather than a second copy of this logic.
+export function parseVisionCapableProfiles(raw: string | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((name) => typeof name === 'string') ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 export interface ActiveProfileSetting {
   activeProfile: string;
   activeModel: string;
   profileNames: string[];
+  /** Every configured profile name an admin has marked vision-capable — not just the active
+   *  one, since the Settings tab's picker can preview any configured profile's own flag before
+   *  committing to it (io/llm/profiles.ts's LlmProfile.supportsVision). */
+  visionCapableProfiles: string[];
 }
 
 export async function getActiveProfileSetting(
@@ -158,25 +177,42 @@ export async function getActiveProfileSetting(
   const activeProfile = (await store.get('active_llm_profile')) ?? envActiveProfile;
   const storedModel = await store.get('active_llm_model');
   const activeModel = storedModel ?? profiles[activeProfile]?.model ?? '';
-  return { activeProfile, activeModel, profileNames: Object.keys(profiles) };
+  const visionCapableProfiles = parseVisionCapableProfiles(await store.get('llm_vision_capable_profiles'));
+  return { activeProfile, activeModel, profileNames: Object.keys(profiles), visionCapableProfiles };
 }
 
 export interface SetActiveProfileBody {
   profile: string;
   model?: string;
+  /** Undefined leaves this profile's stored vision flag untouched — same "only touch what's
+   *  given" shape as model. Set (true or false) to add/remove `profile` from the stored
+   *  llm_vision_capable_profiles list. */
+  supportsVision?: boolean;
 }
 
 export function parseSetActiveProfileBody(raw: unknown, profileNames: string[]): SetActiveProfileBody | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { value, model } = raw as Record<string, unknown>;
+  const { value, model, supportsVision } = raw as Record<string, unknown>;
   if (typeof value !== 'string' || !profileNames.includes(value)) return undefined;
   if (model !== undefined && (typeof model !== 'string' || model.length === 0)) return undefined;
-  return { profile: value, model: typeof model === 'string' ? model : undefined };
+  if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
+  return {
+    profile: value,
+    model: typeof model === 'string' ? model : undefined,
+    supportsVision: typeof supportsVision === 'boolean' ? supportsVision : undefined,
+  };
 }
 
 export async function setActiveProfile(store: OrchestratorSettingsStore, body: SetActiveProfileBody): Promise<void> {
   await store.set('active_llm_profile', body.profile);
   if (body.model) await store.set('active_llm_model', body.model);
+  if (body.supportsVision !== undefined) {
+    const current = parseVisionCapableProfiles(await store.get('llm_vision_capable_profiles'));
+    const next = body.supportsVision
+      ? Array.from(new Set([...current, body.profile]))
+      : current.filter((name) => name !== body.profile);
+    await store.set('llm_vision_capable_profiles', JSON.stringify(next));
+  }
 }
 
 export interface ProfileModelsResult {

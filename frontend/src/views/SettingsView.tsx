@@ -97,6 +97,12 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [modelsError, setModelsError] = useState('');
   const [connectionStatus, setConnectionStatus] = useState('');
   const connectionPollRef = useRef<number | null>(null);
+  // Which configured profiles are marked vision-capable (io/llm/profiles.ts's
+  // LlmProfile.supportsVision) — not just the active one, since the checkbox below previews
+  // whichever profile is currently *selected* in the dropdown, same live-preview shape as the
+  // model dropdown next to it.
+  const [visionCapableProfiles, setVisionCapableProfiles] = useState<string[]>([]);
+  const [selectedSupportsVision, setSelectedSupportsVision] = useState(false);
 
   const [timezone, setTimezone] = useState('');
   const [selectedTimezone, setSelectedTimezone] = useState('');
@@ -191,6 +197,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         setActiveModel(connection.activeModel);
         setSelectedProfile(connection.activeProfile);
         setSelectedModel(connection.activeModel);
+        setVisionCapableProfiles(connection.visionCapableProfiles);
+        setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
         setTimezone(tz);
         setSelectedTimezone(tz);
         setDefaultServings(defaultRecipeServings);
@@ -227,6 +235,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setActiveModel(connection.activeModel);
       setSelectedProfile(connection.activeProfile);
       setSelectedModel(connection.activeModel);
+      setVisionCapableProfiles(connection.visionCapableProfiles);
+      setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
       setTimezone(tz);
       setSelectedTimezone(tz);
       setDefaultServings(defaultRecipeServings);
@@ -268,9 +278,12 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   }
 
   // Refetches the model catalog whenever a different connection is picked, so the model dropdown
-  // always reflects the currently *selected* profile, not whichever one is live right now.
+  // always reflects the currently *selected* profile, not whichever one is live right now. The
+  // vision checkbox follows the same live-preview shape — no fetch needed, visionCapableProfiles
+  // already has every profile's flag.
   useEffect(() => {
     if (!unlocked || !selectedProfile) return;
+    setSelectedSupportsVision(visionCapableProfiles.includes(selectedProfile));
     let cancelled = false;
     setModelsError('');
     setModelsLoading(true);
@@ -292,13 +305,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProfile, unlocked]);
+  }, [selectedProfile, unlocked, visionCapableProfiles]);
 
   async function saveConnection() {
-    if (!selectedModel || (selectedProfile === activeProfile && selectedModel === activeModel)) return;
+    const visionChanged = selectedSupportsVision !== visionCapableProfiles.includes(selectedProfile);
+    if (!selectedModel || (selectedProfile === activeProfile && selectedModel === activeModel && !visionChanged)) {
+      return;
+    }
     setConnectionStatus('');
     try {
-      await adminSetActiveProfile(selectedProfile, selectedModel, adminKey);
+      await adminSetActiveProfile(selectedProfile, selectedModel, adminKey, selectedSupportsVision);
     } catch (err) {
       setConnectionStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
       return;
@@ -312,6 +328,11 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           if (connectionPollRef.current) clearInterval(connectionPollRef.current);
           setActiveProfile(selectedProfile);
           setActiveModel(selectedModel);
+          setVisionCapableProfiles((prev) =>
+            selectedSupportsVision
+              ? Array.from(new Set([...prev, selectedProfile]))
+              : prev.filter((name) => name !== selectedProfile),
+          );
           setConnectionStatus('Back up — reload to confirm.');
         }
       } catch {
@@ -542,10 +563,23 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
             })}
         </select>
         <br />
+        <label>
+          <input
+            type="checkbox"
+            checked={selectedSupportsVision}
+            onChange={(e) => setSelectedSupportsVision(e.target.checked)}
+          />
+          {' '}This connection can see images (vision)
+        </label>
+        <br />
         <button
           onClick={saveConnection}
           disabled={
-            modelsLoading || !selectedModel || (selectedProfile === activeProfile && selectedModel === activeModel)
+            modelsLoading ||
+            !selectedModel ||
+            (selectedProfile === activeProfile &&
+              selectedModel === activeModel &&
+              selectedSupportsVision === visionCapableProfiles.includes(selectedProfile))
           }
         >
           Switch &amp; Restart

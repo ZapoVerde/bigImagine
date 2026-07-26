@@ -35,10 +35,20 @@ export type { LlmProfile } from './profiles.js';
 
 export function createLlmProviderForProfile(profile: LlmProfile): LlmProvider {
   if (profile.kind === 'anthropic') {
-    return createAnthropicLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl });
+    return createAnthropicLlmProvider({
+      apiKey: profile.apiKey,
+      model: profile.model,
+      baseUrl: profile.baseUrl,
+      supportsVision: profile.supportsVision,
+    });
   }
   // profile.kind === 'openai-compatible'; profiles.ts already guarantees baseUrl is set for this kind.
-  return createOpenAiCompatibleLlmProvider({ apiKey: profile.apiKey, model: profile.model, baseUrl: profile.baseUrl! });
+  return createOpenAiCompatibleLlmProvider({
+    apiKey: profile.apiKey,
+    model: profile.model,
+    baseUrl: profile.baseUrl!,
+    supportsVision: profile.supportsVision,
+  });
 }
 
 export function createLlmProvider(env: NodeJS.ProcessEnv = process.env): LlmProvider {

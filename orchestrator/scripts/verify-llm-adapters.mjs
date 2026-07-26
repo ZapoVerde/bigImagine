@@ -233,6 +233,89 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
   assert(body.max_tokens === 1024, 'OpenAI-compatible: max_tokens falls back to the 1024 default when unset');
 });
 
+// --- Images/vision (Stage 5) ---
+assert(
+  createAnthropicLlmProvider({ apiKey: 'k', model: 'm' }).supportsVision === false,
+  'Anthropic: supportsVision defaults to false when config omits it',
+);
+assert(
+  createOpenAiCompatibleLlmProvider({ apiKey: 'k', model: 'm', baseUrl: 'https://example.invalid/v1' }).supportsVision === false,
+  'OpenAI-compatible: supportsVision defaults to false when config omits it',
+);
+
+await withMockedFetch([{ content: [{ type: 'text', text: 'I see a cat' }] }], async (requests) => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model', supportsVision: true });
+  assert(llm.supportsVision === true, 'Anthropic: supportsVision is set from config');
+
+  await llm.complete(
+    [{ role: 'user', content: 'what is this?', images: [{ mimeType: 'image/png', base64: 'AAAA' }] }],
+    [],
+  );
+
+  const userMsg = requests[0].body.messages.find((m) => m.role === 'user');
+  const imageBlock = userMsg.content.find((b) => b.type === 'image');
+  const textBlock = userMsg.content.find((b) => b.type === 'text');
+  assert(!!imageBlock, 'Anthropic: a user message with images produces an image content block');
+  assert(
+    imageBlock?.source?.type === 'base64' && imageBlock?.source?.media_type === 'image/png' && imageBlock?.source?.data === 'AAAA',
+    'Anthropic: the image block carries the correct base64/media_type',
+  );
+  assert(textBlock?.text === 'what is this?', 'Anthropic: the text block is still present alongside the image');
+  assert(
+    userMsg.content.indexOf(imageBlock) < userMsg.content.indexOf(textBlock),
+    'Anthropic: the image block precedes the text block',
+  );
+});
+
+await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requests) => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  await llm.complete([{ role: 'user', content: 'hi' }], []);
+  const userMsg = requests[0].body.messages.find((m) => m.role === 'user');
+  assert(
+    userMsg.content.length === 1 && userMsg.content[0].type === 'text',
+    'Anthropic: no image block is added when a message carries no images',
+  );
+});
+
+await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+    supportsVision: true,
+  });
+  assert(llm.supportsVision === true, 'OpenAI-compatible: supportsVision is set from config');
+
+  await llm.complete(
+    [{ role: 'user', content: 'what is this?', images: [{ mimeType: 'image/jpeg', base64: 'BBBB' }] }],
+    [],
+  );
+
+  const userMsg = requests[0].body.messages.find((m) => m.role === 'user');
+  assert(Array.isArray(userMsg.content), 'OpenAI-compatible: a user message with images has array-shaped content');
+  const textBlock = userMsg.content.find((b) => b.type === 'text');
+  const imageBlock = userMsg.content.find((b) => b.type === 'image_url');
+  assert(textBlock?.text === 'what is this?', 'OpenAI-compatible: the text block is present');
+  assert(
+    imageBlock?.image_url?.url === 'data:image/jpeg;base64,BBBB',
+    'OpenAI-compatible: the image block is a data URI with the correct mime/base64',
+  );
+});
+
+await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+  });
+  await llm.complete([{ role: 'user', content: 'hi' }], []);
+  const userMsg = requests[0].body.messages.find((m) => m.role === 'user');
+  assert(
+    typeof userMsg.content === 'string',
+    'OpenAI-compatible: content stays a plain string when a message carries no images',
+  );
+});
+
 if (process.exitCode) {
   console.error('\nLLM adapter verification FAILED');
   process.exit(1);

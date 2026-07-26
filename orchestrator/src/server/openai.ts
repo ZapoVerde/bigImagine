@@ -15,6 +15,14 @@
  * this turn only (util/attachmentContext.ts), never persisting it. Clients that never send it
  * (Open WebUI) are completely unaffected.
  *
+ * `images` is a second, separate bigBrain extension: unlike `attachments`, an image never goes
+ * through POST /v1/attachments/extract at all (there's nothing to extract — bb_principles.md §2
+ * puts interpreting an image on the LLM, not a preprocessing step) — the frontend base64-encodes
+ * it client-side and sends it straight here. MAX_IMAGES/MAX_IMAGE_BASE64_LENGTH are enforced in
+ * the type guard itself so a malformed/oversized request is rejected before httpServer.ts ever
+ * builds a message from it; httpServer.ts separately gates on the active connection's
+ * LlmProvider.supportsVision before ever calling runTurn.
+ *
  * @api-declaration
  * isChatCompletionRequestBody(value) — type guard for the incoming request body
  * buildChatCompletion / buildChatCompletionChunk / buildModelsList — response builders
@@ -39,6 +47,22 @@ export interface IncomingAttachment {
   meta?: { totalChars: number; totalLines: number };
 }
 
+export interface IncomingImage {
+  mimeType: string;
+  /** Raw base64, no "data:...;base64," prefix — client-encoded, never touches
+   *  POST /v1/attachments/extract. */
+  base64: string;
+}
+
+// Unlike text, an oversized image can only be rejected, never truncated — and per-vendor limits
+// differ, so this is a conservative, provider-agnostic ceiling, not any one vendor's actual limit.
+const MAX_IMAGES_PER_TURN = 4;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+// Reject on the encoded length itself (base64 inflates raw bytes by 4/3) rather than decoding
+// first — a cheap string-length check ahead of ever allocating a Buffer for a hostile payload.
+const MAX_IMAGE_BASE64_LENGTH = Math.ceil((MAX_IMAGE_BYTES * 4) / 3);
+const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+
 export interface ChatCompletionRequestBody {
   model?: string;
   messages: IncomingChatMessage[];
@@ -50,6 +74,10 @@ export interface ChatCompletionRequestBody {
   /** bigBrain extension: staged files' extracted text, spliced onto the latest user message for
    *  this turn only (util/attachmentContext.ts) — see this file's own preamble. */
   attachments?: IncomingAttachment[];
+  /** bigBrain extension: staged images, spliced onto the latest user message for this turn only
+   *  (util/attachmentContext.ts) — see this file's own preamble. httpServer.ts separately rejects
+   *  the whole turn before runTurn if the active connection isn't vision-capable. */
+  images?: IncomingImage[];
 }
 
 function isIncomingChatMessage(value: unknown): value is IncomingChatMessage {
@@ -74,12 +102,27 @@ function isIncomingAttachment(value: unknown): value is IncomingAttachment {
   return true;
 }
 
+function isIncomingImage(value: unknown): value is IncomingImage {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.mimeType !== 'string' || !ALLOWED_IMAGE_MIME_TYPES.has(v.mimeType)) return false;
+  if (typeof v.base64 !== 'string' || v.base64.length === 0 || v.base64.length > MAX_IMAGE_BASE64_LENGTH) {
+    return false;
+  }
+  return true;
+}
+
 export function isChatCompletionRequestBody(value: unknown): value is ChatCompletionRequestBody {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   if (v.chat_id !== undefined && typeof v.chat_id !== 'string') return false;
   if (v.attachments !== undefined && !(Array.isArray(v.attachments) && v.attachments.every(isIncomingAttachment))) {
     return false;
+  }
+  if (v.images !== undefined) {
+    if (!Array.isArray(v.images) || v.images.length > MAX_IMAGES_PER_TURN || !v.images.every(isIncomingImage)) {
+      return false;
+    }
   }
   return Array.isArray(v.messages) && v.messages.every(isIncomingChatMessage);
 }

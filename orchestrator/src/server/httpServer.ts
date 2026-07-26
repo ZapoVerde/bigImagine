@@ -98,6 +98,12 @@
  * (util/attachmentContext.ts) — the chat's stored history and auto-generated title still derive
  * from the original, un-spliced messages, so an attached file never bloats a chat's history.
  *
+ * `images` on the request body never goes through an extraction endpoint at all — the frontend
+ * base64-encodes them client-side (openai.ts's own preamble). handleChatCompletions gates on the
+ * resolved connection's LlmProvider.supportsVision before splicing them in: an image sent to a
+ * non-vision-capable connection fails the whole turn with a 422 before runTurn/llm.complete is
+ * ever called, never a silent drop (bb_principles.md §2/§11).
+ *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
  *
@@ -116,7 +122,7 @@ import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
-import { appendAttachmentsToLatestUserMessage } from '../util/attachmentContext.js';
+import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
@@ -192,9 +198,26 @@ export interface HttpServerDeps {
 
 const ALLOWED_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
 
+// Uncapped until Stage 5 (images/vision) — a chat-completions body carrying several base64-encoded
+// images is the first realistic way this could balloon; everything else here is chat text, which
+// never approached a size worth guarding against. Generous enough for MAX_IMAGES_PER_TURN images
+// at openai.ts's own MAX_IMAGE_BYTES ceiling, plus normal chat text/attachments Markdown.
+const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
+
+class JsonBodyTooLargeError extends Error {
+  constructor(public readonly maxBytes: number) {
+    super(`request body exceeded ${maxBytes} bytes`);
+  }
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
-  for await (const chunk of req) chunks.push(chunk as Buffer);
+  let totalBytes = 0;
+  for await (const chunk of req) {
+    totalBytes += (chunk as Buffer).length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) throw new JsonBodyTooLargeError(MAX_JSON_BODY_BYTES);
+    chunks.push(chunk as Buffer);
+  }
   const raw = Buffer.concat(chunks).toString('utf8');
   return raw ? JSON.parse(raw) : {};
 }
@@ -290,7 +313,16 @@ async function handleChatCompletions(
     return;
   }
 
-  const body = await readJsonBody(req);
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    if (err instanceof JsonBodyTooLargeError) {
+      sendJson(res, 413, { error: `request body exceeds the ${Math.floor(err.maxBytes / (1024 * 1024))}MB limit` });
+      return;
+    }
+    throw err;
+  }
   if (!isChatCompletionRequestBody(body)) {
     sendJson(res, 400, { error: 'expected { messages: [{role, content}, ...] }' });
     return;
@@ -303,8 +335,10 @@ async function handleChatCompletions(
   // Attached files (already turned into Markdown by POST /v1/attachments/extract) are appended
   // only to the copy of history sent to the model this one turn — never persisted. Everything
   // below that reads from `messages` (chat storage, the auto-generated title) deliberately keeps
-  // using the original, un-spliced array; only the runTurn call below gets messagesForLlm.
-  const messagesForLlm = body.attachments?.length
+  // using the original, un-spliced array; only the runTurn call below gets messagesForLlm. Images
+  // (if any) are spliced in further down, only after confirming the resolved connection actually
+  // supports vision — see the explicit-failure gate below.
+  let messagesForLlm = body.attachments?.length
     ? appendAttachmentsToLatestUserMessage(messages, body.attachments)
     : messages;
 
@@ -351,6 +385,22 @@ async function handleChatCompletions(
         `chat_id ${body.chat_id} names unknown profile "${sessionParams.profile}" (not in BIGBRAIN_LLM_PROFILES) — falling back to the active connection`,
       );
     }
+  }
+
+  // The one deterministic gate bb_principles.md §2/§11 requires for images: fail the whole turn
+  // visibly, before runTurn/llm.complete is ever called, rather than silently dropping the image
+  // or letting a non-vision model claim to have seen it. Checked against whichever connection this
+  // turn actually resolved to (a per-chat override or the household-wide active one), not just the
+  // active one — supportsVision travels with the profile (io/llm/profiles.ts), not the pick.
+  if (body.images?.length) {
+    if (!turnLlm.supportsVision) {
+      const connectionLabel = sessionParams.profile ? `the "${sessionParams.profile}" connection` : 'the active connection';
+      sendJson(res, 422, {
+        error: `${connectionLabel} doesn't support image input — enable vision support for it in Settings, or switch connections`,
+      });
+      return;
+    }
+    messagesForLlm = attachImagesToLatestUserMessage(messagesForLlm, body.images);
   }
 
   // A client's own model picker (Open WebUI's dropdown, populated from GET /v1/models) sends

@@ -270,6 +270,17 @@ export interface StagedAttachment {
   meta: { totalChars: number; totalLines: number };
 }
 
+// A staged image, client-encoded — never goes through POST /v1/attachments/extract (there's
+// nothing to extract; see orchestrator/src/io/attachments/dispatchExtraction.ts's own preamble).
+// mimeType/base64 are the wire shape orchestrator/src/server/openai.ts's IncomingImage expects;
+// previewUrl (an object URL, revoked on removal) is purely local, never sent to the server.
+export interface StagedImage {
+  filename: string;
+  mimeType: string;
+  base64: string;
+  previewUrl: string;
+}
+
 // orchestrator/src/io/providerCredentials.ts CredentialSummary
 export interface CredentialSummary {
   name: string;
@@ -282,6 +293,7 @@ export interface ActiveProfileSetting {
   activeProfile: string;
   activeModel: string;
   profileNames: string[];
+  visionCapableProfiles: string[];
 }
 
 // orchestrator/src/server/adminServer.ts ProfileModelsResult

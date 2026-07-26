@@ -520,6 +520,10 @@ assert(
     JSON.stringify(settingsGetBody.profileNames) === JSON.stringify(['deepseek', 'openrouter']),
   'GET /v1/admin/settings falls back to the env active profile and its static model before anything has been saved, and lists every known profile',
 );
+assert(
+  Array.isArray(settingsGetBody.visionCapableProfiles) && settingsGetBody.visionCapableProfiles.length === 0,
+  'GET /v1/admin/settings reports no vision-capable profiles before anything has been saved',
+);
 
 const settingsSetNoAuthRes = await fetch(`${base}/v1/admin/settings`, {
   method: 'POST',
@@ -582,6 +586,60 @@ const settingsSetProfileOnlyRes = await fetch(`${base}/v1/admin/settings`, {
 assert(settingsSetProfileOnlyRes.status === 202, 'switching profile alone (no model) still succeeds');
 assert(settings.setCalls.length === 3, 'omitting model means only the profile write happens, not a second settings.set call');
 
+// --- Admin settings: supportsVision toggle (Stage 5 — vision) ---
+
+const settingsSetVisionOnRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4', supportsVision: true }),
+});
+assert(settingsSetVisionOnRes.status === 202, 'marking a profile vision-capable succeeds');
+
+const settingsGetAfterVisionOnBody = await (
+  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
+).json();
+assert(
+  JSON.stringify(settingsGetAfterVisionOnBody.visionCapableProfiles) === JSON.stringify(['openrouter']),
+  'GET /v1/admin/settings reflects the newly marked vision-capable profile',
+);
+
+// Omitting supportsVision on a later save of the SAME profile leaves its flag untouched.
+const settingsResaveNoVisionFieldRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4' }),
+});
+assert(settingsResaveNoVisionFieldRes.status === 202, 'resaving the same profile without supportsVision still succeeds');
+const settingsGetAfterResaveBody = await (
+  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
+).json();
+assert(
+  JSON.stringify(settingsGetAfterResaveBody.visionCapableProfiles) === JSON.stringify(['openrouter']),
+  'omitting supportsVision on a save leaves the previously stored flag untouched',
+);
+
+// Explicitly turning it back off removes it from the stored list.
+const settingsSetVisionOffRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4', supportsVision: false }),
+});
+assert(settingsSetVisionOffRes.status === 202, 'unmarking a profile as vision-capable succeeds');
+const settingsGetAfterVisionOffBody = await (
+  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
+).json();
+assert(
+  settingsGetAfterVisionOffBody.visionCapableProfiles.length === 0,
+  'explicitly setting supportsVision: false removes the profile from the stored list',
+);
+
+const settingsSetBadVisionRes = await fetch(`${base}/v1/admin/settings`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ value: 'openrouter', supportsVision: 'yes' }),
+});
+assert(settingsSetBadVisionRes.status === 400, 'POST /v1/admin/settings rejects a non-boolean supportsVision');
+
 // --- Admin calendar-settings route (docs/bb_principles.md §13) ---
 
 const calNoAuthRes = await fetch(`${base}/v1/admin/calendar-settings`);
@@ -624,7 +682,7 @@ assert(
 );
 
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 4, 'triggerRestart fired again after the calendar settings save flushed');
+assert(restartCalls.length === 7, 'triggerRestart fired again after the calendar settings save flushed');
 
 // --- Admin notion-settings route (docs/bb_principles.md §13) ---
 
@@ -645,7 +703,7 @@ assert(
 );
 
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 5, 'triggerRestart fired again after the notion settings save flushed');
+assert(restartCalls.length === 8, 'triggerRestart fired again after the notion settings save flushed');
 
 // --- Admin google-calendar routes: settings, then the OAuth auth-url/callback dance ---
 
@@ -669,7 +727,7 @@ assert(
   'the settings store recorded the client id write',
 );
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 6, 'triggerRestart fired again after the google-calendar settings save flushed');
+assert(restartCalls.length === 9, 'triggerRestart fired again after the google-calendar settings save flushed');
 
 // The client secret is a real secret (bb_principles.md §12) — set through the generic credentials
 // route, same as any other provider_credentials entry, not a google-calendar-specific field.
@@ -680,7 +738,7 @@ const gcalSecretRes = await fetch(`${base}/v1/admin/credentials`, {
 });
 assert(gcalSecretRes.status === 202, 'setting google_calendar_client_secret via the generic credentials route succeeds');
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 7, 'triggerRestart fired again after the client secret write flushed');
+assert(restartCalls.length === 10, 'triggerRestart fired again after the client secret write flushed');
 
 const authUrlRes = await fetch(`${base}/v1/admin/google-calendar/auth-url`, {
   headers: { authorization: 'Bearer the-admin-key' },
@@ -728,7 +786,7 @@ try {
     'the returned refresh token was written to provider_credentials',
   );
   await new Promise((resolve) => setTimeout(resolve, 250));
-  assert(restartCalls.length === 8, 'triggerRestart fired again after the refresh token write flushed');
+  assert(restartCalls.length === 11, 'triggerRestart fired again after the refresh token write flushed');
 
   const callbackReplayRes = await fetch(`${base}/v1/admin/google-calendar/callback?code=real-code&state=${encodeURIComponent(state)}`, {
     redirect: 'manual',

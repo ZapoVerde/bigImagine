@@ -10,8 +10,8 @@ import {
   UNMANAGED_SENTINEL,
   createProviderCredentialStore,
 } from '../dist/io/providerCredentials.js';
-import { withOverriddenApiKeys } from '../dist/io/llm/profiles.js';
-import { parseSetCredentialBody } from '../dist/server/adminServer.js';
+import { withOverriddenApiKeys, withOverriddenSupportsVision } from '../dist/io/llm/profiles.js';
+import { parseSetCredentialBody, parseVisionCapableProfiles } from '../dist/server/adminServer.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -127,6 +127,36 @@ const store = createProviderCredentialStore(db, cipher);
   assert(merged.deepseek.apiKey === 'new-deepseek', 'withOverriddenApiKeys overrides the named profile present in overrides');
   assert(merged.deepseek.kind === 'openai-compatible' && merged.deepseek.model === 'x' && merged.deepseek.baseUrl === 'https://x', 'withOverriddenApiKeys leaves kind/baseUrl/model untouched');
   assert(merged.openrouter.apiKey === 'old-openrouter', 'an undefined override leaves that profile\'s existing apiKey untouched');
+}
+
+// --- withOverriddenSupportsVision (Stage 5 — vision) ---
+{
+  const raw = JSON.stringify({
+    deepseek: { kind: 'openai-compatible', model: 'x', apiKey: 'k', baseUrl: 'https://x' },
+    openrouter: { kind: 'openai-compatible', model: 'y', apiKey: 'k', baseUrl: 'https://y' },
+    anthropic: { kind: 'anthropic', model: 'z', apiKey: 'k' },
+  });
+  const merged = JSON.parse(withOverriddenSupportsVision(raw, { openrouter: true }));
+  assert(merged.openrouter.supportsVision === true, 'withOverriddenSupportsVision sets true on a profile named in flags');
+  assert(merged.deepseek.supportsVision === false, 'a profile not named in flags is explicitly set to false, not left unset');
+  assert(merged.anthropic.supportsVision === false, 'every profile gets an explicit value, not just the ones in flags');
+  assert(merged.openrouter.kind === 'openai-compatible' && merged.openrouter.model === 'y' && merged.openrouter.baseUrl === 'https://y', 'other fields are left untouched');
+
+  const unsetAgain = JSON.parse(withOverriddenSupportsVision(JSON.stringify(merged), {}));
+  assert(unsetAgain.openrouter.supportsVision === false, 'an empty flags object clears every profile\'s flag back to false');
+
+  const staleName = JSON.parse(withOverriddenSupportsVision(raw, { 'removed-profile': true }));
+  assert(!('removed-profile' in staleName), 'a flags entry naming a profile not present in raw is silently ignored');
+}
+
+// --- parseVisionCapableProfiles (server/adminServer.ts) ---
+{
+  assert(parseVisionCapableProfiles(undefined).length === 0, 'parseVisionCapableProfiles defaults to [] when unset');
+  assert(parseVisionCapableProfiles('not json').length === 0, 'parseVisionCapableProfiles defaults to [] on malformed JSON');
+  assert(parseVisionCapableProfiles('{"not":"an array"}').length === 0, 'parseVisionCapableProfiles defaults to [] when the JSON is not an array');
+  assert(parseVisionCapableProfiles('["a", 5, "b"]').length === 0, 'parseVisionCapableProfiles defaults to [] when any element is not a string');
+  const parsed = parseVisionCapableProfiles('["openrouter","anthropic"]');
+  assert(parsed.length === 2 && parsed.includes('openrouter') && parsed.includes('anthropic'), 'parseVisionCapableProfiles parses a well-formed JSON array');
 }
 
 // --- parseSetCredentialBody ---
