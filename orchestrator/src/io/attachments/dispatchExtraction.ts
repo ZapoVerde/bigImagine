@@ -3,11 +3,12 @@
  * @stamp 2026-07-26
  * @architectural-role Orchestrator — routes a staged file to its extractor by extension
  * @description
- * The one place bigBrain decides how an uploaded file becomes chat-turn Markdown. Only the plain
- * text/code/data track (extractPlainText.ts) is wired in yet; rich documents (docx/odt/rtf) and
- * PDFs route to an honest "not yet" rather than being silently mis-decoded as garbage text — the
- * `needs-ocr` status exists from the start so a later sandboxed-conversion stage can be wired in
- * here without any of this module's callers changing at all.
+ * The one place bigBrain decides how an uploaded file becomes chat-turn Markdown. Plain text/
+ * code/data (extractPlainText.ts) and PDFs with a real text layer (extractPdfText.ts) are wired
+ * in; rich documents (docx/odt/rtf) and scanned/image-only PDFs route to an honest "not yet"
+ * rather than being silently mis-decoded as garbage text or lost entirely — the `needs-ocr`
+ * status exists specifically so a later sandboxed-OCR stage can fill in the scanned-PDF case here
+ * without any of this module's callers changing at all.
  *
  * Fencing is conditional on language tag, not automatic: a real code/data file (a real
  * languageTag from extractPlainText.ts) is wrapped in a fenced block, since that's the right
@@ -24,13 +25,15 @@
  *
  * @contract
  *   assertions:
- *     purity:          impure (declared as such because later stages' extractors will do real IO;
- *                      today's only wired branch is pure)
+ *     purity:          impure (declared as such because a later sandboxed-conversion stage will
+ *                      call out over the network from here; both branches wired today are pure)
  *     state_ownership: []
  *     external_io:     []
  */
 
+import { extractPdfText } from './extractPdfText.js';
 import { extractPlainText } from './extractPlainText.js';
+import { log } from '../logger.js';
 import { truncateForContext, DEFAULT_ATTACHMENT_CHAR_CAP, type TruncationMeta } from '../../util/truncateForContext.js';
 
 export interface AttachmentFile {
@@ -46,7 +49,7 @@ export type ExtractionResult =
 
 // Formats with their own dedicated track, landing in a later implementation stage — routed to an
 // explicit "not yet" so an upload never silently turns into mis-decoded garbage text.
-const RICH_DOCUMENT_EXTENSIONS = new Set(['.pdf', '.doc', '.docx', '.odt', '.rtf']);
+const RICH_DOCUMENT_EXTENSIONS = new Set(['.doc', '.docx', '.odt', '.rtf']);
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic', '.heif', '.svg']);
 
 function extensionOf(filename: string): string {
@@ -54,8 +57,29 @@ function extensionOf(filename: string): string {
   return idx === -1 ? '' : filename.slice(idx).toLowerCase();
 }
 
+function capAndReturn(content: string, isProse: boolean, languageTag: string): ExtractionResult {
+  const { text, truncated, meta } = truncateForContext(content, DEFAULT_ATTACHMENT_CHAR_CAP);
+  const markdown = isProse ? text : `\`\`\`${languageTag}\n${text}\n\`\`\``;
+  return { status: 'ok', markdown, truncated, meta };
+}
+
 export async function extractAttachmentText(file: AttachmentFile): Promise<ExtractionResult> {
   const extension = extensionOf(file.filename);
+
+  if (extension === '.pdf') {
+    let extraction;
+    try {
+      extraction = await extractPdfText(file.bytes);
+    } catch (err) {
+      log.error('failed to parse a PDF attachment', err);
+      return { status: 'unsupported', reason: "this PDF couldn't be read — it may be corrupted or password-protected" };
+    }
+    if (!extraction.hasTextLayer) {
+      return { status: 'needs-ocr' };
+    }
+    // Extracted PDF text is prose, like a plain-text/Markdown file — never fenced.
+    return capAndReturn(extraction.text, true, '');
+  }
 
   if (RICH_DOCUMENT_EXTENSIONS.has(extension)) {
     return { status: 'unsupported', reason: `${extension || 'this file type'} isn't supported yet` };
@@ -68,8 +92,6 @@ export async function extractAttachmentText(file: AttachmentFile): Promise<Extra
   }
 
   const { content, languageTag } = extractPlainText(file.filename, file.bytes);
-  const { text, truncated, meta } = truncateForContext(content, DEFAULT_ATTACHMENT_CHAR_CAP);
   const isProse = languageTag === '' || languageTag === 'markdown';
-  const markdown = isProse ? text : `\`\`\`${languageTag}\n${text}\n\`\`\``;
-  return { status: 'ok', markdown, truncated, meta };
+  return capAndReturn(content, isProse, languageTag);
 }

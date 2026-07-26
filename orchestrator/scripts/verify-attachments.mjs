@@ -4,6 +4,7 @@
 // persisted to chat history.
 
 import { extractPlainText } from '../dist/io/attachments/extractPlainText.js';
+import { extractPdfText } from '../dist/io/attachments/extractPdfText.js';
 import { extractAttachmentText } from '../dist/io/attachments/dispatchExtraction.js';
 import { truncateForContext, buildTruncationBanner, DEFAULT_ATTACHMENT_CHAR_CAP } from '../dist/util/truncateForContext.js';
 import { appendAttachmentsToLatestUserMessage } from '../dist/util/attachmentContext.js';
@@ -20,6 +21,43 @@ function assert(cond, message) {
   } else {
     console.log(`ok: ${message}`);
   }
+}
+
+// A minimal, hand-built single-page PDF with a real xref table (byte offsets computed as the
+// file is assembled, not hardcoded) — real enough for pdf.js to parse without triggering its
+// xref-recovery fallback, which is what actual malformed/corrupted PDFs would exercise instead.
+// An empty `text` produces a page with no text-showing operator at all (a stand-in for a
+// scanned/image-only page, which likewise has no text layer for pdf.js to find).
+//
+// MediaBox width is sized to the text (18pt Helvetica, ~11pt average advance — generous, not
+// exact) rather than a fixed page size: pdf.js's content-stream interpreter stops extracting a
+// single Tj run once its glyph positions run past the page's own MediaBox, which a real document
+// never does (real authoring tools wrap text within their page bounds) — a fixed narrow page here
+// would silently truncate the fixture's own text and produce a false test failure, not a real bug.
+function buildMinimalTextPdf(text) {
+  const mediaBoxWidth = Math.max(300, text.length * 11 + 40);
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /MediaBox [0 0 ${mediaBoxWidth} 300] /Contents 5 0 R >>`,
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+  ];
+  const streamContent = text ? `BT /F1 18 Tf 20 250 Td (${text}) Tj ET` : 'BT ET';
+  objects.push(`<< /Length ${streamContent.length} >>\nstream\n${streamContent}\nendstream`);
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [];
+  objects.forEach((obj, i) => {
+    offsets.push(pdf.length);
+    pdf += `${i + 1} 0 obj\n${obj}\nendobj\n`;
+  });
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (const offset of offsets) {
+    pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+  return Buffer.from(pdf, 'latin1');
 }
 
 // --- extractPlainText: decoding, language tags, JSON pretty-printing ---
@@ -70,7 +108,68 @@ function assert(cond, message) {
   assert(banner.includes('10') && banner.includes('50'), 'the banner names both the shown and true total size');
 }
 
+// --- extractPdfText: real PDF parsing via pdfjs-dist ---
+
+{
+  const result = await extractPdfText(buildMinimalTextPdf('Hello World'));
+  assert(result.hasTextLayer === false, 'sanity check on the fixture itself: "Hello World" alone is below the meaningful-chars floor');
+  assert(result.text === 'Hello World', 'text is extracted verbatim from a real PDF text layer');
+}
+
+{
+  const longText = 'This is a real paragraph of extracted PDF body text, well past the floor.';
+  const result = await extractPdfText(buildMinimalTextPdf(longText));
+  assert(result.hasTextLayer === true, 'a PDF with a substantial text layer is recognized as having one');
+}
+
+{
+  const result = await extractPdfText(buildMinimalTextPdf(''));
+  assert(result.hasTextLayer === false && result.text === '', 'a page with no text-showing operator at all (stand-in for a scanned page) has no text layer');
+}
+
+{
+  let threw = false;
+  try {
+    await extractPdfText(Buffer.from('not a pdf at all'));
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'garbage bytes with no PDF structure at all make extractPdfText reject, rather than silently returning empty text');
+}
+
 // --- dispatchExtraction: routing by extension ---
+
+{
+  const longText = 'This document has a real, substantial text layer well past the meaningful-chars floor.';
+  const result = await extractAttachmentText({
+    filename: 'report.pdf',
+    mimeType: 'application/pdf',
+    bytes: buildMinimalTextPdf(longText),
+  });
+  assert(result.status === 'ok', 'a PDF with a real text layer is extracted successfully');
+  assert(result.markdown === longText, 'extracted PDF text is attached unfenced, as prose, same as .txt/.md');
+}
+
+{
+  const result = await extractAttachmentText({
+    filename: 'scanned.pdf',
+    mimeType: 'application/pdf',
+    bytes: buildMinimalTextPdf(''),
+  });
+  assert(result.status === 'needs-ocr', 'a PDF with no text layer (a stand-in for a scanned page) reports needs-ocr, not a false success');
+}
+
+{
+  const result = await extractAttachmentText({
+    filename: 'broken.pdf',
+    mimeType: 'application/pdf',
+    bytes: Buffer.from('not actually a pdf'),
+  });
+  assert(
+    result.status === 'unsupported' && result.reason.includes("couldn't be read"),
+    'a corrupted/non-PDF file with a .pdf extension gets an honest "could not be read" instead of needs-ocr or a crash',
+  );
+}
 
 {
   const result = await extractAttachmentText({ filename: 'todo.md', mimeType: 'text/markdown', bytes: Buffer.from('# Title\n\nbody') });
