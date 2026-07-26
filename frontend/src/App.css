@@ -172,7 +172,7 @@ body {
   background: var(--color-hover-surface);
 }
 
-.tab-bar .theme-toggle {
+.tab-bar .settings-gear {
   font-size: var(--font-size-base);
   background: none;
   border: none;
@@ -184,7 +184,7 @@ body {
   margin-left: 0.4rem;
 }
 
-.tab-bar .theme-toggle:hover {
+.tab-bar .settings-gear:hover {
   color: var(--color-text-primary);
   background: var(--color-hover-surface);
 }

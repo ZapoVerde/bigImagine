@@ -69,7 +69,12 @@ function formatUtcOffset(tz: string): string {
 // So on mount this probes both admin endpoints with no key at all; if Access already covers it,
 // Settings unlocks immediately and the key form never appears. Only a deployment with no Access
 // configured (or a non-browser caller) ever needs to type the static admin key below.
-export default function SettingsView() {
+interface SettingsViewProps {
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
+}
+
+export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps) {
   const [adminKey, setAdminKey] = useState('');
   const [checking, setChecking] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
@@ -465,6 +470,13 @@ export default function SettingsView() {
   return (
     <div className="settings-view">
       <h1>bigBrain — provider credentials</h1>
+
+      <fieldset>
+        <legend>Theme</legend>
+        <button onClick={onToggleTheme}>
+          {theme === 'dark' ? '☀ Switch to light mode' : '☾ Switch to dark mode'}
+        </button>
+      </fieldset>
 
       <fieldset>
         <legend>Connection</legend>

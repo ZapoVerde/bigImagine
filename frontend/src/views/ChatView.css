@@ -275,15 +275,17 @@
   gap: 0.5rem;
 }
 
-.pills-label {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-}
-
 .view-switch-pills button {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
   padding: 0.4rem 0.9rem;
   font-size: var(--font-size-sm);
   border-radius: var(--radius-md);
+}
+
+.pill-icon {
+  font-size: var(--font-size-base);
 }
 
 .view-switch-pills button:hover {

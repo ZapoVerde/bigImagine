@@ -24,17 +24,16 @@ import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
 
-// Lists/Recipes/etc. are the "come here to do a task" specialist views; Settings isn't one of
-// those, but TypePicker (superseded by the chat-first default below) was its only entry point
-// anywhere in the app, so it stays in this row rather than becoming unreachable.
-const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string }[] = [
-  { type: 'lists', label: 'Lists' },
-  { type: 'recipes', label: 'Recipes' },
-  { type: 'mealplan', label: 'Meal Plans' },
-  { type: 'notes', label: 'Notes' },
-  { type: 'calendar', label: 'Calendar' },
-  { type: 'documents', label: 'Documents' },
-  { type: 'settings', label: 'Settings' },
+// The "come here to do a task" specialist views. Settings is reachable via TabStrip's gear icon
+// instead (always available, not just from this empty-chat landing state), so it isn't one of
+// these.
+const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }[] = [
+  { type: 'lists', label: 'Lists', icon: '📋' },
+  { type: 'recipes', label: 'Recipes', icon: '🍳' },
+  { type: 'mealplan', label: 'Meal Plans', icon: '🍽' },
+  { type: 'notes', label: 'Notes', icon: '📝' },
+  { type: 'calendar', label: 'Calendar', icon: '📅' },
+  { type: 'documents', label: 'Documents', icon: '📄' },
 ];
 
 interface ChatViewProps {
@@ -309,18 +308,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length === 0 && chatId && <div className="empty-state">Ask bigBrain something.</div>}
           {messages.length === 0 && !chatId && (
             <div className="chat-empty-landing">
-              <TodayAgenda apiKey={apiKey} />
-              <PinnedNotesDrawer apiKey={apiKey} />
               {onSwitchView && (
                 <div className="view-switch-pills">
-                  <span className="pills-label">Or open a specialist view:</span>
                   {VIEW_SWITCH_OPTIONS.map((opt) => (
                     <button key={opt.type} type="button" onClick={() => onSwitchView(opt.type)}>
+                      <span className="pill-icon">{opt.icon}</span>
                       {opt.label}
                     </button>
                   ))}
                 </div>
               )}
+              <TodayAgenda apiKey={apiKey} />
+              <PinnedNotesDrawer apiKey={apiKey} />
             </div>
           )}
           {messages.map((m, i) => {

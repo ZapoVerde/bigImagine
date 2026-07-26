@@ -101,8 +101,7 @@ export default function App() {
           onSelect={focus}
           onClose={close}
           onNew={openBlank}
-          theme={theme}
-          onToggleTheme={toggleTheme}
+          onOpenSettings={() => summon('settings')}
           onChangeKey={
             auth.mode === 'key'
               ? () => {
@@ -155,7 +154,7 @@ export default function App() {
             )}
             {tab.type === 'calendar' && <CalendarView apiKey={apiKey} />}
             {tab.type === 'documents' && <DocumentsView apiKey={apiKey} />}
-            {tab.type === 'settings' && <SettingsView />}
+            {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
           </div>
         ))}
       </div>

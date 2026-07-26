@@ -6,8 +6,7 @@ interface TabStripProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
-  theme: 'light' | 'dark';
-  onToggleTheme: () => void;
+  onOpenSettings: () => void;
   /** Omitted entirely under Cloudflare Access SSO — there's no key to change. */
   onChangeKey?: () => void;
 }
@@ -18,8 +17,7 @@ export default function TabStrip({
   onSelect,
   onClose,
   onNew,
-  theme,
-  onToggleTheme,
+  onOpenSettings,
   onChangeKey,
 }: TabStripProps) {
   return (
@@ -49,12 +47,8 @@ export default function TabStrip({
           +
         </button>
       </nav>
-      <button
-        className="theme-toggle"
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-        onClick={onToggleTheme}
-      >
-        {theme === 'dark' ? '☀' : '☾'}
+      <button className="settings-gear" title="Settings" onClick={onOpenSettings}>
+        ⚙
       </button>
       {onChangeKey && (
         <button className="change-key" onClick={onChangeKey}>
