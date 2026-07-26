@@ -261,6 +261,26 @@ export async function adminSetTimezone(timezone: string, adminKey: string | null
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
+/** The household's default recipe scale ("always show recipes scaled for 6") — null until ever
+ *  set, in which case scale_recipe falls back further to each recipe's own base_servings. Same
+ *  no-restart shape as timezone: scale_recipe reads it live on every call. */
+export async function adminGetDefaultRecipeServings(adminKey: string | null): Promise<number | null> {
+  const res = await fetch('/v1/admin/recipe-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { defaultServings: number | null };
+  return body.defaultServings;
+}
+
+/** Resolves once saved — no restart, no polling; the next scale_recipe call reads it live. */
+export async function adminSetDefaultRecipeServings(value: number, adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/recipe-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ value }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
 /** docs/bb_principles.md §13: non-secret runtime config, DB-backed and Settings-tab-editable
  *  rather than .env-only. Both calendar and Notion settings are read once at boot, so a save
  *  restarts the orchestrator (202/restarting), same UX as the connection picker. */

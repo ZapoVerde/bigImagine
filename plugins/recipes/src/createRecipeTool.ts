@@ -13,17 +13,23 @@
  * recipeSchema.ts's isParsedRecipe so this and import_recipe never validate the shape differently.
  * No source_url (nothing was fetched).
  *
+ * After insert, ingredients are structured best-effort (structureNewRecipeBestEffort,
+ * ensureStructuredIngredients.ts) — same reasoning as import_recipe: gives RecipesView's
+ * just-created validation moment something real to show, and a failure never blocks the create.
+ *
  * @api-declaration
- * createCreateRecipeTool() — returns the create_recipe RegisteredTool
+ * createCreateRecipeTool(llm) — returns the create_recipe RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session)
+ *     purity:          impure (Postgres IO via the injected session, best-effort LLM structuring call)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given)]
+ *     external_io:     [Postgres (via the DbSession it's given), LLM]
  */
 
+import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
+import { structureNewRecipeBestEffort } from './ensureStructuredIngredients.js';
 import { isParsedRecipe, type ParsedRecipe } from './recipeSchema.js';
 
 function toCandidateRecipe(value: unknown): unknown {
@@ -35,7 +41,7 @@ function toCandidateRecipe(value: unknown): unknown {
   return value;
 }
 
-export function createCreateRecipeTool(): RegisteredTool {
+export function createCreateRecipeTool(llm: LlmProvider): RegisteredTool {
   return {
     definition: {
       name: 'create_recipe',
@@ -106,8 +112,11 @@ export function createCreateRecipeTool(): RegisteredTool {
         ],
       );
 
+      const recipeId = rows[0]!.recipe_id;
+      await structureNewRecipeBestEffort(ctx.db, llm, recipeId, recipe.ingredients, recipe.servings ?? null);
+
       return {
-        recipeId: rows[0]!.recipe_id,
+        recipeId,
         mealName: recipe.mealName,
         ingredientCount: recipe.ingredients.length,
         tags: recipe.tags,

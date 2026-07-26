@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
-import type { ImportRecipeResult, RecipeDetailResult } from '../api/types';
+import type { ImportRecipeResult, RecipeDetailResult, RecipeIngredient, ScaleRecipeResult, ScaledIngredient } from '../api/types';
 import './RecipesView.css';
 
 interface RecipesViewProps {
@@ -13,23 +13,62 @@ interface RecipesViewProps {
   onChanged: () => void;
 }
 
+// A line's amount/unit, formatted for the "amount | ingredient" default display. scale_recipe's
+// ScaledIngredient carries a fraction-formatted amountDisplay; get_recipe's plain RecipeIngredient
+// (shown only while scale_recipe hasn't resolved yet) doesn't, so this falls back to the raw
+// number in that case.
+function displayAmount(ing: RecipeIngredient | ScaledIngredient): string | null {
+  if (ing.amount === null) return null;
+  const amount = 'amountDisplay' in ing && ing.amountDisplay !== null ? ing.amountDisplay : String(ing.amount);
+  return ing.unit ? `${amount} ${ing.unit}` : amount;
+}
+
 // Detail/import half of the recipes master-detail split — browsing and tag filtering live in the
 // sidebar's RecipesBrowser now.
 export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe, onChanged }: RecipesViewProps) {
   const [detail, setDetail] = useState<RecipeDetailResult | null>(null);
+  const [scaled, setScaled] = useState<ScaleRecipeResult | null>(null);
+  const [targetServingsInput, setTargetServingsInput] = useState('');
+  const [scaling, setScaling] = useState(false);
+  const [revealedRaw, setRevealedRaw] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [importUrl, setImportUrl] = useState('');
   const [importing, setImporting] = useState(false);
+  // Tracks a just-imported/created recipe so its ingredient list opens with raw text visible —
+  // the validation moment for the LLM's structuring pass. Cleared after the first load.
+  const [justCreatedName, setJustCreatedName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedRecipeName) {
       setDetail(null);
+      setScaled(null);
+      setRevealedRaw(new Set());
       return;
     }
     setError(null);
+
     callTool<RecipeDetailResult>('get_recipe', { meal_name: selectedRecipeName }, apiKey)
-      .then(setDetail)
+      .then((d) => {
+        setDetail(d);
+        if (d.found && selectedRecipeName === justCreatedName) {
+          setRevealedRaw(new Set(d.ingredients.map((_, i) => i)));
+          setJustCreatedName(null);
+        } else {
+          setRevealedRaw(new Set());
+        }
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load recipe'));
+
+    // Best-effort: the household default (or the recipe's own base) scaled view. If this fails,
+    // the unscaled structured ingredients from get_recipe above still render.
+    setScaled(null);
+    callTool<ScaleRecipeResult>('scale_recipe', { meal_name: selectedRecipeName }, apiKey)
+      .then((s) => {
+        setScaled(s);
+        if (s.found && s.scaled) setTargetServingsInput(String(s.targetServings));
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRecipeName, apiKey]);
 
   async function importFromUrl() {
@@ -40,12 +79,61 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
       const result = await callTool<ImportRecipeResult>('import_recipe', { url: importUrl.trim() }, apiKey);
       setImportUrl('');
       onChanged();
+      setJustCreatedName(result.mealName);
       onSelectRecipe(result.mealName);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to import recipe');
     } finally {
       setImporting(false);
     }
+  }
+
+  async function applyScale() {
+    if (!selectedRecipeName || scaling) return;
+    const target = Number(targetServingsInput);
+    if (!Number.isFinite(target) || target <= 0) return;
+    setScaling(true);
+    setError(null);
+    try {
+      const result = await callTool<ScaleRecipeResult>(
+        'scale_recipe',
+        { meal_name: selectedRecipeName, target_servings: target },
+        apiKey,
+      );
+      setScaled(result);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to scale recipe');
+    } finally {
+      setScaling(false);
+    }
+  }
+
+  async function resetScale() {
+    if (!detail?.found || detail.baseServings === null || scaling) return;
+    setTargetServingsInput(String(detail.baseServings));
+    setScaling(true);
+    setError(null);
+    try {
+      const result = await callTool<ScaleRecipeResult>(
+        'scale_recipe',
+        { meal_name: detail.mealName, target_servings: detail.baseServings },
+        apiKey,
+      );
+      setScaled(result);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to reset scale');
+    } finally {
+      setScaling(false);
+    }
+  }
+
+  function toggleRaw(i: number) {
+    setRevealedRaw((prev) => {
+      const next = new Set(prev);
+      if (next.has(i)) next.delete(i);
+      else next.add(i);
+      return next;
+    });
   }
 
   const importForm = (
@@ -73,6 +161,9 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
     );
   }
 
+  const ingredients: (RecipeIngredient | ScaledIngredient)[] =
+    scaled?.found && scaled.scaled ? scaled.ingredients : detail?.found ? detail.ingredients : [];
+
   return (
     <div className="recipes-view">
       {error && <div className="error-banner">{error}</div>}
@@ -91,11 +182,50 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
               </span>
             ))}
           </div>
+
+          {detail.baseServings !== null && (
+            <div className="recipe-scale">
+              <label>
+                Scale to
+                <input
+                  type="number"
+                  min="1"
+                  value={targetServingsInput}
+                  onChange={(e) => setTargetServingsInput(e.target.value)}
+                />
+                servings
+              </label>
+              <button onClick={applyScale} disabled={scaling || !targetServingsInput}>
+                Scale
+              </button>
+              {scaled?.found && scaled.scaled && scaled.targetServings !== scaled.baseServings && (
+                <button onClick={resetScale} disabled={scaling}>
+                  Reset to original ({detail.baseServings})
+                </button>
+              )}
+            </div>
+          )}
+
           <h3>Ingredients</h3>
           <ul>
-            {detail.ingredients.map((ing, i) => (
-              <li key={i}>{ing}</li>
-            ))}
+            {ingredients.map((ing, i) => {
+              const amount = displayAmount(ing);
+              return (
+                <li key={i}>
+                  {amount ? (
+                    <>
+                      <span className="ingredient-amount">{amount}</span> | <span className="ingredient-item">{ing.item}</span>
+                    </>
+                  ) : (
+                    <span className="ingredient-item">{ing.item}</span>
+                  )}{' '}
+                  <button type="button" className="raw-toggle" onClick={() => toggleRaw(i)}>
+                    {revealedRaw.has(i) ? 'hide original' : 'show original'}
+                  </button>
+                  {revealedRaw.has(i) && <div className="ingredient-raw">{ing.raw}</div>}
+                </li>
+              );
+            })}
           </ul>
           <h3>Instructions</h3>
           {detail.instructions.map((step, i) =>

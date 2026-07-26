@@ -35,6 +35,12 @@
  * parseSetTimezoneBody validates the given name is one Intl actually recognizes, rejecting a typo
  * before it's stored rather than failing later inside dateContext.ts.
  *
+ * Also backs the Settings tab's default recipe scale field (GET/POST /v1/admin/recipe-settings) —
+ * the household-wide default target serving count plugins/recipes/src/scaleRecipeTool.ts falls
+ * back to whenever scale_recipe is called with no explicit target_servings ("always show recipes
+ * scaled for 6"). Same live-update shape as timezone, not calendar/Notion's restart-on-save one:
+ * scale_recipe reads it fresh on every call, so a change takes effect on the next scale.
+ *
  * Also backs two more boot-time settings groups (docs/bb_principles.md §13 — non-secret runtime
  * config belongs in the database, not .env), same restart-on-save shape as the connection picker
  * rather than timezone's live-update one, since each is only read once when the thing it
@@ -61,6 +67,10 @@
  * parseSetTimezoneBody(raw) — validates {value} is a real IANA zone name Intl recognizes;
  *   undefined on any malformed shape or unrecognized name
  * setHouseholdTimezone(store, value) — upserts household_timezone
+ * getDefaultRecipeServings(store) — the stored default target serving count, or null if never set
+ * parseSetDefaultRecipeServingsBody(raw) — validates {value} is a positive number; undefined on
+ *   any malformed shape
+ * setDefaultRecipeServings(store, value) — upserts default_recipe_servings
  * getCalendarSettings(store) — { ownerUserId, maskWorkCalendar }, DB value or env fallback
  * parseSetCalendarSettingsBody(raw) — validates {owner_user_id?, mask_work_calendar?}, at least
  *   one present; undefined on any malformed shape
@@ -211,6 +221,30 @@ export function parseSetTimezoneBody(raw: unknown): string | undefined {
 
 export function setHouseholdTimezone(store: OrchestratorSettingsStore, value: string): Promise<void> {
   return store.set('household_timezone', value);
+}
+
+// --- Default recipe scale (docs/bb_principles.md §13, §2 — the target serving count itself is
+// not reasoning, just a stored number scale_recipe's arithmetic uses) ---
+// Live-read shape, same as timezone: null (not a hardcoded number, unlike DEFAULT_TIMEZONE) means
+// scale_recipe should fall back further, to the recipe's own base_servings — there's no household-
+// wide default that's a safe guess the way UTC is for timezone.
+
+export async function getDefaultRecipeServings(store: OrchestratorSettingsStore): Promise<number | null> {
+  const raw = await store.get('default_recipe_servings');
+  if (raw === undefined) return null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function parseSetDefaultRecipeServingsBody(raw: unknown): number | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { value } = raw as Record<string, unknown>;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return value;
+}
+
+export function setDefaultRecipeServings(store: OrchestratorSettingsStore, value: number): Promise<void> {
+  return store.set('default_recipe_servings', String(value));
 }
 
 // --- Calendar settings (docs/bb_principles.md §13) ---

@@ -13,6 +13,10 @@
  * duplicate, but a household deliberately wanting two things on the same date/label is a fine
  * outcome the schema doesn't need to prevent.
  *
+ * target_servings is an optional per-planned-meal scale override ("plan this for 8, we're having
+ * people over Thursday") — null/omitted means generate_shopping_list_from_meal_plan uses the
+ * recipe's own base_servings, unscaled.
+ *
  * @api-declaration
  * createAddMealPlanEntryTool() — returns the add_meal_plan_entry RegisteredTool
  *
@@ -29,6 +33,7 @@ interface AddMealPlanEntryArgs {
   meal_name: string;
   planned_date: string;
   meal_label?: string;
+  target_servings?: number;
 }
 
 function isAddMealPlanEntryArgs(value: unknown): value is AddMealPlanEntryArgs {
@@ -39,7 +44,8 @@ function isAddMealPlanEntryArgs(value: unknown): value is AddMealPlanEntryArgs {
     v.meal_name !== '' &&
     typeof v.planned_date === 'string' &&
     v.planned_date !== '' &&
-    (v.meal_label === undefined || typeof v.meal_label === 'string')
+    (v.meal_label === undefined || typeof v.meal_label === 'string') &&
+    (v.target_servings === undefined || (typeof v.target_servings === 'number' && v.target_servings > 0))
   );
 }
 
@@ -58,6 +64,10 @@ export function createAddMealPlanEntryTool(): RegisteredTool {
             type: 'string',
             description: 'Optional label like "Breakfast" or "Lunch". Leave unset for the default (dinner).',
           },
+          target_servings: {
+            type: 'number',
+            description: 'Optional scale override for this planned meal (e.g. 8 for a bigger crowd). Omit to use the recipe as written.',
+          },
         },
         required: ['meal_name', 'planned_date'],
         additionalProperties: false,
@@ -68,6 +78,7 @@ export function createAddMealPlanEntryTool(): RegisteredTool {
         throw new Error('add_meal_plan_entry requires meal_name: string and planned_date: string (YYYY-MM-DD)');
       }
       const mealLabel = args.meal_label ?? null;
+      const targetServings = args.target_servings ?? null;
 
       const recipe = await ctx.db.query<{ recipe_id: string; meal_name: string }>(
         `select recipe_id, meal_name from recipes_meals
@@ -87,14 +98,15 @@ export function createAddMealPlanEntryTool(): RegisteredTool {
       );
 
       if (existing[0]) {
-        await ctx.db.query(`update meal_plan_entries set recipe_id = $2 where plan_entry_id = $1`, [
+        await ctx.db.query(`update meal_plan_entries set recipe_id = $2, target_servings = $3 where plan_entry_id = $1`, [
           existing[0].plan_entry_id,
           recipe[0].recipe_id,
+          targetServings,
         ]);
       } else {
         await ctx.db.query(
-          `insert into meal_plan_entries (user_id, recipe_id, planned_date, meal_label) values ($1, $2, $3, $4)`,
-          [ctx.userId, recipe[0].recipe_id, args.planned_date, mealLabel],
+          `insert into meal_plan_entries (user_id, recipe_id, planned_date, meal_label, target_servings) values ($1, $2, $3, $4, $5)`,
+          [ctx.userId, recipe[0].recipe_id, args.planned_date, mealLabel, targetServings],
         );
       }
 
@@ -103,6 +115,7 @@ export function createAddMealPlanEntryTool(): RegisteredTool {
         mealName: recipe[0].meal_name,
         plannedDate: args.planned_date,
         mealLabel,
+        targetServings,
         replaced: Boolean(existing[0]),
       };
     },

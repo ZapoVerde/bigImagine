@@ -8,6 +8,13 @@
  * uuid). Ambiguous/no match is a normal, expected outcome (not an error) so the model can tell the
  * user "couldn't find that" or ask which one they meant, rather than the tool call failing.
  *
+ * Never triggers ingredient structuring — reading a recipe stays free/instant regardless of
+ * whether it's been scaled/shopped-from yet. A legacy (pre-feature or reverted-by-edit) row is
+ * normalized on the fly for the response only (normalizeLegacyIngredient,
+ * recipeIngredientSchema.ts) so the response shape is always RecipeIngredient[], without
+ * persisting anything or calling the LLM — that only happens via scale_recipe/
+ * generate_shopping_list_from_meal_plan (ensureStructuredIngredients.ts).
+ *
  * @api-declaration
  * createGetRecipeTool() — returns the get_recipe RegisteredTool
  *
@@ -19,6 +26,7 @@
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
+import { isStructuredIngredients, normalizeLegacyIngredient, type RecipeIngredient } from './recipeIngredientSchema.js';
 
 function isGetRecipeArgs(value: unknown): value is { meal_name: string } {
   const v = value as Record<string, unknown>;
@@ -47,14 +55,15 @@ export function createGetRecipeTool(): RegisteredTool {
       const rows = await ctx.db.query<{
         recipe_id: string;
         meal_name: string;
-        ingredients: string[];
+        ingredients: unknown[];
         instructions: unknown[];
         tags: string[];
         prep_time: string | null;
         cook_time: string | null;
         servings: string | null;
+        base_servings: number | null;
       }>(
-        `select recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings
+        `select recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings
          from recipes_meals
          where user_id = $1 and lower(meal_name) like lower($2)
          order by (lower(meal_name) = lower($3)) desc, meal_name
@@ -67,16 +76,21 @@ export function createGetRecipeTool(): RegisteredTool {
         return { found: false, mealName: args.meal_name };
       }
 
+      const ingredients: RecipeIngredient[] = isStructuredIngredients(recipe.ingredients)
+        ? recipe.ingredients
+        : (recipe.ingredients as string[]).map(normalizeLegacyIngredient);
+
       return {
         found: true,
         recipeId: recipe.recipe_id,
         mealName: recipe.meal_name,
-        ingredients: recipe.ingredients,
+        ingredients,
         instructions: recipe.instructions,
         tags: recipe.tags,
         prepTime: recipe.prep_time,
         cookTime: recipe.cook_time,
         servings: recipe.servings,
+        baseServings: recipe.base_servings,
       };
     },
   };

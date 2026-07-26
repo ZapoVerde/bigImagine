@@ -3,6 +3,7 @@ import {
   ApiError,
   adminGetActiveProfile,
   adminGetCalendarSettings,
+  adminGetDefaultRecipeServings,
   adminGetGoogleCalendarAuthUrl,
   adminGetGoogleCalendarSettings,
   adminGetNotionSettings,
@@ -12,6 +13,7 @@ import {
   adminSetActiveProfile,
   adminSetCalendarSettings,
   adminSetCredential,
+  adminSetDefaultRecipeServings,
   adminSetGoogleCalendarSettings,
   adminSetNotionSettings,
   adminSetTimezone,
@@ -102,6 +104,10 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const timezoneOptions = listTimezoneOptions();
   const deviceTimezone = browserTimezone();
 
+  const [defaultServings, setDefaultServings] = useState<number | null>(null);
+  const [selectedDefaultServings, setSelectedDefaultServings] = useState('');
+  const [defaultServingsStatus, setDefaultServingsStatus] = useState('');
+
   const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
   const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
   const [maskWorkCalendar, setMaskWorkCalendar] = useState(false);
@@ -168,14 +174,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz, calendarSettings, notionSettings, googleCalendarSettings] = await Promise.all([
-          adminListCredentials(null),
-          adminGetActiveProfile(null),
-          adminGetTimezone(null),
-          adminGetCalendarSettings(null),
-          adminGetNotionSettings(null),
-          adminGetGoogleCalendarSettings(null),
-        ]);
+        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings] =
+          await Promise.all([
+            adminListCredentials(null),
+            adminGetActiveProfile(null),
+            adminGetTimezone(null),
+            adminGetDefaultRecipeServings(null),
+            adminGetCalendarSettings(null),
+            adminGetNotionSettings(null),
+            adminGetGoogleCalendarSettings(null),
+          ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
         setProfileNames(connection.profileNames);
@@ -185,6 +193,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         setSelectedModel(connection.activeModel);
         setTimezone(tz);
         setSelectedTimezone(tz);
+        setDefaultServings(defaultRecipeServings);
+        setSelectedDefaultServings(defaultRecipeServings === null ? '' : String(defaultRecipeServings));
         applyCalendarSettings(calendarSettings);
         applyNotionSettings(notionSettings);
         applyGoogleCalendarSettings(googleCalendarSettings);
@@ -200,14 +210,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz, calendarSettings, notionSettings, googleCalendarSettings] = await Promise.all([
-        adminListCredentials(adminKey),
-        adminGetActiveProfile(adminKey),
-        adminGetTimezone(adminKey),
-        adminGetCalendarSettings(adminKey),
-        adminGetNotionSettings(adminKey),
-        adminGetGoogleCalendarSettings(adminKey),
-      ]);
+      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings] =
+        await Promise.all([
+          adminListCredentials(adminKey),
+          adminGetActiveProfile(adminKey),
+          adminGetTimezone(adminKey),
+          adminGetDefaultRecipeServings(adminKey),
+          adminGetCalendarSettings(adminKey),
+          adminGetNotionSettings(adminKey),
+          adminGetGoogleCalendarSettings(adminKey),
+        ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
       setProfileNames(connection.profileNames);
@@ -217,6 +229,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setSelectedModel(connection.activeModel);
       setTimezone(tz);
       setSelectedTimezone(tz);
+      setDefaultServings(defaultRecipeServings);
+      setSelectedDefaultServings(defaultRecipeServings === null ? '' : String(defaultRecipeServings));
       applyCalendarSettings(calendarSettings);
       applyNotionSettings(notionSettings);
       applyGoogleCalendarSettings(googleCalendarSettings);
@@ -237,6 +251,20 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setTimezone(selectedTimezone);
     setTimezoneStatus('Saved — takes effect on the next message, no restart needed.');
+  }
+
+  async function saveDefaultServings() {
+    const parsed = Number(selectedDefaultServings);
+    if (!selectedDefaultServings || !Number.isFinite(parsed) || parsed <= 0 || parsed === defaultServings) return;
+    setDefaultServingsStatus('');
+    try {
+      await adminSetDefaultRecipeServings(parsed, adminKey);
+    } catch (err) {
+      setDefaultServingsStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setDefaultServings(parsed);
+    setDefaultServingsStatus('Saved — takes effect on the next recipe you scale, no restart needed.');
   }
 
   // Refetches the model catalog whenever a different connection is picked, so the model dropdown
@@ -552,6 +580,29 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{timezoneStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Recipe scaling</legend>
+        <label>
+          Default scale (servings)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedDefaultServings}
+            onChange={(e) => setSelectedDefaultServings(e.target.value)}
+            placeholder="e.g. 6 — leave blank to use each recipe as written"
+          />
+        </label>
+        <br />
+        <button
+          onClick={saveDefaultServings}
+          disabled={!selectedDefaultServings || Number(selectedDefaultServings) === defaultServings}
+        >
+          Save
+        </button>
+        <div className="status">{defaultServingsStatus}</div>
       </fieldset>
 
       <fieldset>

@@ -63,8 +63,9 @@ export function createGetMealPlanTool(): RegisteredTool {
         meal_label: string | null;
         meal_name: string;
         recipe_id: string;
+        target_servings: number | null;
       }>(
-        `select mpe.planned_date, mpe.meal_label, rm.meal_name, rm.recipe_id
+        `select mpe.planned_date, mpe.meal_label, rm.meal_name, rm.recipe_id, mpe.target_servings
          from meal_plan_entries mpe
          join recipes_meals rm on rm.recipe_id = mpe.recipe_id
          where mpe.user_id = $1 and mpe.planned_date between $2 and $3
@@ -77,6 +78,7 @@ export function createGetMealPlanTool(): RegisteredTool {
         mealLabel: r.meal_label,
         mealName: r.meal_name,
         recipeId: r.recipe_id,
+        targetServings: r.target_servings,
       }));
     },
   };

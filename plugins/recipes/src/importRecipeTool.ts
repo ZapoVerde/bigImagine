@@ -18,6 +18,11 @@
  * rather than the plain fetchWithRetry other IO wrappers use — a prompt-injected page could
  * otherwise steer this tool at an internal address on the same Docker network.
  *
+ * After insert, ingredients are structured best-effort (structureNewRecipeBestEffort,
+ * ensureStructuredIngredients.ts) — gives RecipesView's just-created validation moment something
+ * real to show, and a failure never blocks the import (recipe stays legacy, backfilled lazily on
+ * first scale/shopping-list use).
+ *
  * @api-declaration
  * createImportRecipeTool(llm) — returns the import_recipe RegisteredTool
  *
@@ -33,6 +38,7 @@ import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { htmlToText } from './htmlToText.js';
 import { extractRecipeWithLlm } from './extractRecipeWithLlm.js';
+import { structureNewRecipeBestEffort } from './ensureStructuredIngredients.js';
 import { extractSchemaOrgRecipe } from './schemaOrgRecipeParser.js';
 import type { ParsedRecipe } from './recipeSchema.js';
 
@@ -109,8 +115,11 @@ export function createImportRecipeTool(llm: LlmProvider): RegisteredTool {
         ],
       );
 
+      const recipeId = rows[0]!.recipe_id;
+      await structureNewRecipeBestEffort(ctx.db, llm, recipeId, recipe.ingredients, recipe.servings ?? null);
+
       return {
-        recipeId: rows[0]!.recipe_id,
+        recipeId,
         mealName: recipe.mealName,
         ingredientCount: recipe.ingredients.length,
         tags: recipe.tags,

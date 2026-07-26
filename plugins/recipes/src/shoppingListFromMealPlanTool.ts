@@ -1,15 +1,24 @@
 /**
  * @file plugins/recipes/src/shoppingListFromMealPlanTool.ts
- * @stamp 2026-07-23
+ * @stamp 2026-07-26
  * @architectural-role IO Wrapper — turns a date range's meal plan into grocery list items
  * @description
- * Aggregates recipe ingredients across every meal planned in a date range, dedupes by name (no
- * quantity math/unit conversion — list_items has no quantity field, and "2 cups + 1 cup" unit
- * arithmetic is exactly the kind of complexity this project keeps deciding to punt on), and adds
- * each as a list_items row via the same primitive plugins/lists uses (find-or-create the named
- * list, insert, best-effort Notion sync). Also skips ingredients that already exist as a pending
- * item on the target list, so re-running this for an overlapping date range doesn't pile up
- * duplicates.
+ * Aggregates recipe ingredients across every meal planned in a date range. Each planned meal is
+ * structured (ensureStructuredIngredients.ts, lazily backfilling legacy recipes) and scaled
+ * (scaleIngredients.ts) against its own meal_plan_entries.target_servings override before
+ * aggregation (aggregateScaledIngredients.ts sums same-item-same-unit amounts — cross-unit
+ * conversion, e.g. cups vs. tbsp, stays out of scope, same punt this file always had, just
+ * narrowed from "no math at all" to "same-unit math only"). Structuring is de-duped per unique
+ * recipe_id, not per planned entry — the same recipe planned on three dates in the range triggers
+ * one LLM structuring call, not three. Adds each aggregated item as a list_items row via the same
+ * primitive plugins/lists uses (find-or-create the named list, insert, best-effort Notion sync).
+ * Also skips items already pending on the target list, so re-running this for an overlapping date
+ * range doesn't pile up duplicates.
+ *
+ * Structuring is per-meal try/catch, not all-or-nothing (consistent with this file's existing
+ * best-effort ethos for section classification/Notion sync below): one recipe with a structuring
+ * failure shouldn't drop a whole week's list. Its ingredients just don't contribute, and its meal
+ * name is surfaced via mealsWithErrors instead of silently vanishing from the result.
  *
  * Duplicates (rather than imports) plugins/lists' find-or-create-list and Notion-sync logic:
  * plugins are siblings with no exports map for cross-plugin imports today (only
@@ -49,6 +58,10 @@ import type { DbSession } from '@bigbrain/orchestrator/postgres';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { classifySection } from './classifySection.js';
+import { ensureStructuredIngredients } from './ensureStructuredIngredients.js';
+import { scaleIngredients } from './scaleIngredients.js';
+import { aggregateScaledIngredients } from './aggregateScaledIngredients.js';
+import type { RecipeIngredient, ScaledIngredient } from './recipeIngredientSchema.js';
 
 // Must match plugins/lists' notionSync.ts SOURCE_TABLE — see the file docstring above.
 const SOURCE_TABLE = 'list_items';
@@ -144,8 +157,15 @@ export function createGenerateShoppingListFromMealPlanTool(
       const endDate = (args as ShoppingListFromMealPlanArgs).end_date ?? isoDate(defaultEnd);
       const listName = (args as ShoppingListFromMealPlanArgs).list_name ?? 'Grocery List';
 
-      const planned = await ctx.db.query<{ ingredients: string[] }>(
-        `select rm.ingredients
+      const planned = await ctx.db.query<{
+        recipe_id: string;
+        meal_name: string;
+        ingredients: unknown[];
+        servings: string | null;
+        base_servings: number | null;
+        target_servings: number | null;
+      }>(
+        `select rm.recipe_id, rm.meal_name, rm.ingredients, rm.servings, rm.base_servings, mpe.target_servings
          from meal_plan_entries mpe
          join recipes_meals rm on rm.recipe_id = mpe.recipe_id
          where mpe.user_id = $1 and mpe.planned_date between $2 and $3`,
@@ -153,15 +173,45 @@ export function createGenerateShoppingListFromMealPlanTool(
       );
 
       if (planned.length === 0) {
-        return { listName, itemsAdded: [], itemsSkipped: [], mealsConsidered: 0 };
+        return { listName, itemsAdded: [], itemsSkipped: [], mealsConsidered: 0, mealsWithErrors: [] };
       }
 
-      const seen = new Map<string, string>(); // lowercase -> original casing, first-seen wins
-      for (const { ingredients } of planned) {
-        for (const ingredient of ingredients) {
-          const key = ingredient.trim().toLowerCase();
-          if (key && !seen.has(key)) seen.set(key, ingredient.trim());
+      // De-dupe structuring by recipe_id — the same recipe planned on several dates in the range
+      // should only cost one LLM structuring call, not one per planned entry.
+      const structuredByRecipe = new Map<string, { ingredients: RecipeIngredient[]; baseServings: number | null } | null>();
+      const mealsWithErrors: string[] = [];
+      const mealIngredientLists: ScaledIngredient[][] = [];
+
+      for (const meal of planned) {
+        if (!structuredByRecipe.has(meal.recipe_id)) {
+          try {
+            const result = await ensureStructuredIngredients(ctx.db, llm, {
+              recipeId: meal.recipe_id,
+              ingredients: meal.ingredients,
+              servings: meal.servings,
+              baseServings: meal.base_servings,
+            });
+            structuredByRecipe.set(meal.recipe_id, result);
+          } catch (err) {
+            log.error(`ingredient structuring failed for "${meal.meal_name}" (recipe_id ${meal.recipe_id}) — excluded from this shopping list`, err);
+            structuredByRecipe.set(meal.recipe_id, null);
+            mealsWithErrors.push(meal.meal_name);
+          }
         }
+
+        const structured = structuredByRecipe.get(meal.recipe_id);
+        if (!structured || structured.baseServings === null) continue;
+
+        const targetServings = meal.target_servings ?? structured.baseServings;
+        const ratio = targetServings / structured.baseServings;
+        mealIngredientLists.push(scaleIngredients(structured.ingredients, ratio));
+      }
+
+      const aggregated = aggregateScaledIngredients(mealIngredientLists);
+      const seen = new Map<string, string>(); // lowercase -> original casing, first-seen wins
+      for (const { itemName } of aggregated) {
+        const key = itemName.trim().toLowerCase();
+        if (key && !seen.has(key)) seen.set(key, itemName.trim());
       }
 
       const listId = await findOrCreateList(ctx.db, ctx.userId, listName);
@@ -201,7 +251,7 @@ export function createGenerateShoppingListFromMealPlanTool(
         itemsAdded.push(itemName);
       }
 
-      return { listName, itemsAdded, itemsSkipped, mealsConsidered: planned.length };
+      return { listName, itemsAdded, itemsSkipped, mealsConsidered: planned.length, mealsWithErrors };
     },
   };
 }

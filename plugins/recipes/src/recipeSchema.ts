@@ -7,9 +7,17 @@
  * extractRecipeWithLlm.ts's forced-schema fallback) produce, so importRecipeTool.ts's insert
  * code doesn't care which path a given recipe came through. Modeled on schema.org/Recipe
  * (verified live against a real recipetineats.com page's own JSON-LD) but deliberately narrower:
- * ingredients stay flat strings — schema.org itself doesn't decompose "3 chicken breasts
- * (300g/10oz each)" into qty/unit/item, so there's no reason bigBrain should either — and
- * nutrition/author/publish-date are dropped entirely since nothing here uses them.
+ * ingredients stay flat strings AT EXTRACTION TIME — schema.org itself doesn't decompose "3
+ * chicken breasts (300g/10oz each)" into qty/unit/item, so there's no reason bigBrain's extraction
+ * step should either — and nutrition/author/publish-date are dropped entirely since nothing here
+ * uses them.
+ *
+ * That decomposition does happen downstream, as a separate LLM pass, once recipe scaling needed
+ * it (recipeIngredientSchema.ts's RecipeIngredient, structureIngredientsWithLlm.ts). ParsedRecipe
+ * here is deliberately untouched by that: it's still the shape both import paths hand off raw,
+ * and structuring is decoupled from extraction on purpose, since the deterministic
+ * schemaOrgRecipeParser.ts path never touches the LLM at all and would otherwise have no
+ * structuring step of its own.
  *
  * @api-declaration
  * ParsedRecipe — the shared shape

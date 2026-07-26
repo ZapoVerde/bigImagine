@@ -51,6 +51,20 @@ export interface CreateListResult {
   created: boolean;
 }
 
+// plugins/recipes/src/recipeIngredientSchema.ts
+export interface RecipeIngredient {
+  raw: string;
+  amount: number | null;
+  unit: string | null;
+  item: string;
+  scalable: boolean;
+}
+
+// plugins/recipes/src/recipeIngredientSchema.ts / scaleIngredients.ts
+export interface ScaledIngredient extends RecipeIngredient {
+  amountDisplay: string | null;
+}
+
 // plugins/recipes/src/getRecipesTool.ts
 export interface RecipeSummary {
   recipeId: string;
@@ -58,7 +72,10 @@ export interface RecipeSummary {
   tags: string[];
   prepTime: string | null;
   cookTime: string | null;
-  servings: number | null;
+  // Free-text yield, e.g. "4-6" — NOT a number. (Previously mistyped as number | null here; the
+  // real DB/tool value has always been the human-readable string.) baseServings is the numeric one.
+  servings: string | null;
+  baseServings: number | null;
 }
 
 // plugins/recipes/src/getRecipeTool.ts
@@ -68,12 +85,27 @@ export type RecipeDetailResult =
       found: true;
       recipeId: string;
       mealName: string;
-      ingredients: string[];
+      ingredients: RecipeIngredient[];
       instructions: (string | { section: string; steps: string[] })[];
       tags: string[];
       prepTime: string | null;
       cookTime: string | null;
-      servings: number | null;
+      servings: string | null;
+      baseServings: number | null;
+    };
+
+// plugins/recipes/src/scaleRecipeTool.ts
+export type ScaleRecipeResult =
+  | { found: false; mealName: string }
+  | { found: true; scaled: false; reason: string; recipeId: string; mealName: string }
+  | {
+      found: true;
+      scaled: true;
+      recipeId: string;
+      mealName: string;
+      baseServings: number;
+      targetServings: number;
+      ingredients: ScaledIngredient[];
     };
 
 // plugins/recipes/src/importRecipeTool.ts
@@ -90,12 +122,20 @@ export interface MealPlanEntry {
   mealLabel: string | null;
   mealName: string;
   recipeId: string | null;
+  targetServings: number | null;
 }
 
 // plugins/recipes/src/addMealPlanEntryTool.ts
 export type AddMealPlanEntryResult =
   | { planned: false; reason: string }
-  | { planned: true; mealName: string; plannedDate: string; mealLabel: string | null; replaced: boolean };
+  | {
+      planned: true;
+      mealName: string;
+      plannedDate: string;
+      mealLabel: string | null;
+      targetServings: number | null;
+      replaced: boolean;
+    };
 
 // plugins/recipes/src/shoppingListFromMealPlanTool.ts
 export interface GenerateShoppingListResult {
@@ -103,6 +143,7 @@ export interface GenerateShoppingListResult {
   itemsAdded: string[];
   itemsSkipped: string[];
   mealsConsidered: number;
+  mealsWithErrors: string[];
 }
 
 // plugins/calendar/src/getCalendarScheduleTool.ts / createCalendarEventTool.ts

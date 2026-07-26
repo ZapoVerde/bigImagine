@@ -9,6 +9,15 @@
  * Identified by recipe_id (from create_recipe/import_recipe/get_recipe), not meal_name, so an
  * in-progress rename can't collide with get_recipe's fuzzy name match.
  *
+ * An `ingredients` edit is always bare lines on the wire (same as create_recipe/import_recipe —
+ * a manual edit is honest text, not yet re-interpreted) and, stored as-is, reverts the row to
+ * legacy shape: it's re-structured lazily next time it's scaled/shopped
+ * (ensureStructuredIngredients.ts), rather than silently re-inferring it inline here, per
+ * bb_principles.md §3 (explicit signal outranks inferred). A `servings` edit nulls out
+ * `base_servings` too, even if `ingredients` isn't also touched — otherwise a stale numeric base
+ * would silently miscompute scaling ratios against a serving count that no longer matches the
+ * displayed text.
+ *
  * @api-declaration
  * createUpdateRecipeTool() — returns the update_recipe RegisteredTool
  *
@@ -21,6 +30,7 @@
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { isRecipeInstruction } from './recipeSchema.js';
+import { isStructuredIngredients, normalizeLegacyIngredient, type RecipeIngredient } from './recipeIngredientSchema.js';
 
 interface UpdateRecipeArgs {
   recipe_id: string;
@@ -46,12 +56,13 @@ function isUpdateRecipeArgs(value: unknown): value is UpdateRecipeArgs {
 interface RecipeRow {
   recipe_id: string;
   meal_name: string;
-  ingredients: string[];
+  ingredients: unknown[];
   instructions: unknown[];
   tags: string[];
   prep_time: string | null;
   cook_time: string | null;
   servings: string | null;
+  base_servings: number | null;
 }
 
 export function createUpdateRecipeTool(): RegisteredTool {
@@ -108,6 +119,11 @@ export function createUpdateRecipeTool(): RegisteredTool {
       if (args.prepTime !== undefined) push('prep_time', args.prepTime);
       if (args.cookTime !== undefined) push('cook_time', args.cookTime);
       if (args.servings !== undefined) push('servings', args.servings);
+      // A bare-lines ingredients edit reverts the row to legacy shape on its own (it's just a
+      // string[] write). base_servings needs an explicit null-out on either edit, though — an
+      // ingredients edit means the old structure/base no longer describes what's stored, and a
+      // servings edit means the old numeric base no longer matches the displayed text.
+      if (args.ingredients !== undefined || args.servings !== undefined) push('base_servings', null);
 
       if (sets.length === 0) {
         throw new Error('update_recipe requires at least one field to change');
@@ -115,17 +131,21 @@ export function createUpdateRecipeTool(): RegisteredTool {
 
       const [row] = await ctx.db.query<RecipeRow>(
         `update recipes_meals set ${sets.join(', ')} where recipe_id = $1 and user_id = $2
-         returning recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings`,
+         returning recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings`,
         params,
       );
       if (!row) return { found: false, recipeId: args.recipe_id };
+      const ingredients: RecipeIngredient[] = isStructuredIngredients(row.ingredients)
+        ? row.ingredients
+        : (row.ingredients as string[]).map(normalizeLegacyIngredient);
       return {
         found: true,
         recipeId: row.recipe_id,
         mealName: row.meal_name,
-        ingredients: row.ingredients,
+        ingredients,
         instructions: row.instructions,
         tags: row.tags,
+        baseServings: row.base_servings,
         prepTime: row.prep_time,
         cookTime: row.cook_time,
         servings: row.servings,

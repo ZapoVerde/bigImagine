@@ -32,6 +32,12 @@
  * rather than once at boot, cleared and rebuilt via a full resync if Google ever reports it
  * expired (410).
  *
+ * default_recipe_servings is the household-wide default target serving count ("always show
+ * recipes scaled for 6") — plugins/recipes/src/scaleRecipeTool.ts reads it live on every
+ * scale_recipe call that omits an explicit target_servings, same live-read shape as
+ * household_timezone, so a Settings-tab change takes effect on the next scale, no restart. Not a
+ * secret — a number, not a credential.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -59,6 +65,7 @@ export const SETTING_NAMES = [
   'google_calendar_owner_user_id',
   'google_calendar_id',
   'google_calendar_sync_token',
+  'default_recipe_servings',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

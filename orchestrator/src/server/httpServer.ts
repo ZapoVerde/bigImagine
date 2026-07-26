@@ -81,6 +81,10 @@
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
  * into anything at boot, so a POST here just writes the value and responds 200 immediately.
  *
+ * Same admin gate, same no-restart shape, for GET/POST /v1/admin/recipe-settings — the household's
+ * default recipe scale (plugins/recipes/src/scaleRecipeTool.ts reads it live on every scale_recipe
+ * call that omits an explicit target_servings).
+ *
  * Same admin gate, same restart-on-save shape as credentials/settings, for GET/POST
  * /v1/admin/calendar-settings and GET/POST /v1/admin/notion-settings (docs/bb_principles.md
  * §13 — non-secret runtime config belongs in the database, not .env). Each is read once at boot
@@ -120,6 +124,7 @@ import {
   consumeGoogleOauthState,
   getActiveProfileSetting,
   getCalendarSettings,
+  getDefaultRecipeServings,
   getGoogleCalendarSettings,
   getHouseholdTimezone,
   getNotionSettings,
@@ -129,12 +134,14 @@ import {
   parseSetActiveProfileBody,
   parseSetCalendarSettingsBody,
   parseSetCredentialBody,
+  parseSetDefaultRecipeServingsBody,
   parseSetGoogleCalendarSettingsBody,
   parseSetNotionSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
   setCalendarSettings,
   setCredential,
+  setDefaultRecipeServings,
   setGoogleCalendarSettings,
   setHouseholdTimezone,
   setNotionSettings,
@@ -545,6 +552,31 @@ async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps
   await setHouseholdTimezone(deps.settings, value);
   // No restart needed — the very next chat turn reads it live (handleChatCompletions).
   sendJson(res, 200, { timezone: value });
+}
+
+async function handleRecipeSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const defaultServings = await getDefaultRecipeServings(deps.settings);
+  sendJson(res, 200, { defaultServings });
+}
+
+async function handleRecipeSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const value = parseSetDefaultRecipeServingsBody(raw);
+  if (value === undefined) {
+    sendJson(res, 400, { error: 'expected { value: a positive number }' });
+    return;
+  }
+
+  await setDefaultRecipeServings(deps.settings, value);
+  // No restart needed — the next scale_recipe call reads it live.
+  sendJson(res, 200, { defaultServings: value });
 }
 
 async function handleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -1009,6 +1041,22 @@ async function handleRequest(
       return;
     }
     await handleTimezoneSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/recipe-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleRecipeSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/recipe-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleRecipeSettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/calendar-settings') {
