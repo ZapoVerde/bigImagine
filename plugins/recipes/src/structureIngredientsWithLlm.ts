@@ -42,10 +42,15 @@
  * ounce (US labeling convention, even for liquid-ish contents like canned tomatoes); genuinely
  * unclear -> ounce, since recipe writers reach for "fl oz" explicitly when they mean volume.
  *
+ * A bad response here (truncated tool-call JSON, or a line-count mismatch from the model merging/
+ * splitting lines) is usually a one-off — retrying the exact same request often just works, since
+ * it's a fresh, independent completion. So structureIngredients retries once (two attempts total)
+ * before giving up, logging a warning in between rather than propagating the first attempt's
+ * failure straight to the caller.
+ *
  * @api-declaration
- * structureIngredients(llm, rawIngredients, rawServings) -> {ingredients, baseServings} — throws
- *   if the model doesn't call structure_ingredients, returns a mismatched-length array, or
- *   violates the amount/scalable pairing, rather than returning a partially-trustworthy result
+ * structureIngredients(llm, rawIngredients, rawServings) -> {ingredients, baseServings} — retries
+ *   once on failure; throws if both attempts fail to produce a shape-valid, line-aligned result
  *
  * @contract
  *   assertions:
@@ -55,6 +60,7 @@
  */
 
 import type { LlmProvider, ToolDefinition } from '@bigbrain/orchestrator/llm-types';
+import { log } from '@bigbrain/orchestrator/logger';
 import { isRecipeIngredient, type RecipeIngredient } from './recipeIngredientSchema.js';
 import { convertIngredientUnitsToMetric } from './convertIngredientUnitsToMetric.js';
 
@@ -132,7 +138,28 @@ const structureIngredientsTool: ToolDefinition = {
   },
 };
 
+const MAX_ATTEMPTS = 2;
+
 export async function structureIngredients(
+  llm: LlmProvider,
+  rawIngredients: string[],
+  rawServings: string | null,
+): Promise<{ ingredients: RecipeIngredient[]; baseServings: number | null }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await attemptStructureIngredients(llm, rawIngredients, rawServings);
+    } catch (err) {
+      lastError = err;
+      if (attempt < MAX_ATTEMPTS) {
+        log.warn(`structureIngredients: attempt ${attempt}/${MAX_ATTEMPTS} failed, retrying`, err);
+      }
+    }
+  }
+  throw lastError;
+}
+
+async function attemptStructureIngredients(
   llm: LlmProvider,
   rawIngredients: string[],
   rawServings: string | null,
