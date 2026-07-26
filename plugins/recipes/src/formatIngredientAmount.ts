@@ -17,8 +17,15 @@
  *     purely to pick a rung — never stored that way): promotes to tablespoon at 1 tbsp (3 tsp), to
  *     cup at a quarter-cup (12 tsp / 4 tbsp) rather than only at a full cup, since "3/4 cup" reads
  *     far better than "12 Tablespoon" and the household's own kitchens measure quarter-cups
- *     directly. Cup/tablespoon/teaspoon amounts are fraction-snapped via formatAmount (below) since
- *     that's how a household actually reads a measuring cup.
+ *     directly. Promotion is also gated on reading cleanly at the bigger unit — formatCleanFraction
+ *     (below) only accepts amounts within 10% of a common cooking fraction (eighths/quarters/
+ *     thirds/halves) or a whole number; an amount that would land on an ugly decimal (e.g. 0.42 cup)
+ *     stays at the smaller, finer-grained unit instead, checked the same way one rung down, with
+ *     teaspoon as the unconditional floor. This tolerance is deliberately relative (10% of the
+ *     fraction's own size), unlike formatAmount's absolute 0.03 used everywhere else — a fixed
+ *     absolute tolerance is right for count units (a borderline decimal shouldn't get mislabeled as
+ *     "7 3/8 cloves") but wrong here, since how close is "close enough" to 1/3 cup vs. 1/8 cup isn't
+ *     the same fixed amount.
  *
  * Metric amounts are tiered by magnitude rather than rounded to one fixed increment, because a
  * flat rounding step is either too coarse for a small amount or too precise-looking for a large
@@ -102,14 +109,54 @@ function formatMetricTiered(amount: number, smallUnit: string, bigUnit: string):
   return `${rounded} ${smallUnit}`;
 }
 
+// formatAmount's own snap tolerance is absolute (0.03), which is right for count units (a
+// borderline fraction should stay a plain decimal rather than mislabel "7 cloves" as "7 3/8") but
+// wrong for deciding whether to *promote* to a bigger measuring unit: a physical cup measure only
+// reads cleanly at eighths/quarters/thirds/halves, and how close is "close enough" scales with the
+// fraction itself, not a fixed absolute amount. Returns the formatted fraction only when it lands
+// within 10% of a common cooking fraction (or is already ~whole); null otherwise, signaling the
+// caller to stay at a smaller, finer-grained unit instead of showing an ugly decimal here.
+const RELATIVE_SNAP_TOLERANCE = 0.1;
+
+function formatCleanFraction(amount: number): string | null {
+  const whole = Math.floor(amount);
+  const fraction = amount - whole;
+
+  if (fraction < FRACTION_MATCH_TOLERANCE) return String(whole);
+  if (fraction > 1 - FRACTION_MATCH_TOLERANCE) return String(whole + 1);
+
+  let bestNumerator = 0;
+  let bestDenominator = 1;
+  let bestRelativeError = RELATIVE_SNAP_TOLERANCE;
+  for (const d of COMMON_DENOMINATORS) {
+    const n = Math.round(fraction * d);
+    if (n === 0 || n === d) continue;
+    const candidate = n / d;
+    const relativeError = Math.abs(fraction - candidate) / candidate;
+    if (relativeError <= bestRelativeError) {
+      bestRelativeError = relativeError;
+      bestNumerator = n;
+      bestDenominator = d;
+    }
+  }
+
+  if (bestNumerator === 0) return null;
+
+  const g = gcd(bestNumerator, bestDenominator);
+  const fractionStr = `${bestNumerator / g}/${bestDenominator / g}`;
+  return whole > 0 ? `${whole} ${fractionStr}` : fractionStr;
+}
+
 function formatImperialVolume(amount: number, unit: 'teaspoon' | 'tablespoon' | 'cup'): string {
   const tspEquivalent = unit === 'teaspoon' ? amount : unit === 'tablespoon' ? amount * TSP_PER_TBSP : amount * TSP_PER_CUP;
 
   if (tspEquivalent >= TSP_PER_CUP / 4) {
-    return `${formatAmount(tspEquivalent / TSP_PER_CUP)} cup`;
+    const cupFraction = formatCleanFraction(tspEquivalent / TSP_PER_CUP);
+    if (cupFraction !== null) return `${cupFraction} cup`;
   }
   if (tspEquivalent >= TSP_PER_TBSP) {
-    return `${formatAmount(tspEquivalent / TSP_PER_TBSP)} tablespoon`;
+    const tbspFraction = formatCleanFraction(tspEquivalent / TSP_PER_TBSP);
+    if (tbspFraction !== null) return `${tbspFraction} tablespoon`;
   }
   return `${formatAmount(tspEquivalent)} teaspoon`;
 }

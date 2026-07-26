@@ -187,6 +187,9 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
                 <input
                   type="number"
                   min="1"
+                  autoComplete="off"
+                  data-1p-ignore
+                  data-lpignore="true"
                   value={targetServingsInput}
                   onChange={(e) => setTargetServingsInput(e.target.value)}
                 />
