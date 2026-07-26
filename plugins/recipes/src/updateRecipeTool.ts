@@ -18,6 +18,10 @@
  * would silently miscompute scaling ratios against a serving count that no longer matches the
  * displayed text.
  *
+ * isFavorite is a plain boolean, not a rating — the sidebar star toggle (RecipesBrowser.tsx) calls
+ * this tool directly (same as get_recipe/scale_recipe do from RecipesView.tsx) rather than needing
+ * a dedicated tool, since it's just one more field in the same "only supplied fields change" set.
+ *
  * @api-declaration
  * createUpdateRecipeTool() — returns the update_recipe RegisteredTool
  *
@@ -41,6 +45,7 @@ interface UpdateRecipeArgs {
   prepTime?: string;
   cookTime?: string;
   servings?: string;
+  isFavorite?: boolean;
 }
 
 function isUpdateRecipeArgs(value: unknown): value is UpdateRecipeArgs {
@@ -50,6 +55,7 @@ function isUpdateRecipeArgs(value: unknown): value is UpdateRecipeArgs {
   if (v.ingredients !== undefined && !(Array.isArray(v.ingredients) && v.ingredients.every((i) => typeof i === 'string'))) return false;
   if (v.instructions !== undefined && !(Array.isArray(v.instructions) && v.instructions.every(isRecipeInstruction))) return false;
   if (v.tags !== undefined && !(Array.isArray(v.tags) && v.tags.every((t) => typeof t === 'string'))) return false;
+  if (v.isFavorite !== undefined && typeof v.isFavorite !== 'boolean') return false;
   return true;
 }
 
@@ -63,6 +69,7 @@ interface RecipeRow {
   cook_time: string | null;
   servings: string | null;
   base_servings: number | null;
+  is_favorite: boolean;
 }
 
 export function createUpdateRecipeTool(): RegisteredTool {
@@ -97,6 +104,7 @@ export function createUpdateRecipeTool(): RegisteredTool {
           prepTime: { type: 'string' },
           cookTime: { type: 'string' },
           servings: { type: 'string' },
+          isFavorite: { type: 'boolean', description: 'Mark or unmark this recipe as a favorite.' },
         },
         required: ['recipe_id'],
         additionalProperties: false,
@@ -119,6 +127,7 @@ export function createUpdateRecipeTool(): RegisteredTool {
       if (args.prepTime !== undefined) push('prep_time', args.prepTime);
       if (args.cookTime !== undefined) push('cook_time', args.cookTime);
       if (args.servings !== undefined) push('servings', args.servings);
+      if (args.isFavorite !== undefined) push('is_favorite', args.isFavorite);
       // A bare-lines ingredients edit reverts the row to legacy shape on its own (it's just a
       // string[] write). base_servings needs an explicit null-out on either edit, though — an
       // ingredients edit means the old structure/base no longer describes what's stored, and a
@@ -131,7 +140,7 @@ export function createUpdateRecipeTool(): RegisteredTool {
 
       const [row] = await ctx.db.query<RecipeRow>(
         `update recipes_meals set ${sets.join(', ')} where recipe_id = $1 and user_id = $2
-         returning recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings`,
+         returning recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings, is_favorite`,
         params,
       );
       if (!row) return { found: false, recipeId: args.recipe_id };
@@ -149,6 +158,7 @@ export function createUpdateRecipeTool(): RegisteredTool {
         prepTime: row.prep_time,
         cookTime: row.cook_time,
         servings: row.servings,
+        isFavorite: row.is_favorite,
       };
     },
   };

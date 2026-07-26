@@ -87,6 +87,7 @@ export interface RecipeSummary {
   // real DB/tool value has always been the human-readable string.) baseServings is the numeric one.
   servings: string | null;
   baseServings: number | null;
+  isFavorite: boolean;
 }
 
 // plugins/recipes/src/getRecipeTool.ts
@@ -103,6 +104,24 @@ export type RecipeDetailResult =
       cookTime: string | null;
       servings: string | null;
       baseServings: number | null;
+      isFavorite: boolean;
+    };
+
+// plugins/recipes/src/updateRecipeTool.ts
+export type UpdateRecipeResult =
+  | { found: false; recipeId: string }
+  | {
+      found: true;
+      recipeId: string;
+      mealName: string;
+      ingredients: RecipeIngredient[];
+      instructions: (string | { section: string; steps: string[] })[];
+      tags: string[];
+      baseServings: number | null;
+      prepTime: string | null;
+      cookTime: string | null;
+      servings: string | null;
+      isFavorite: boolean;
     };
 
 // plugins/recipes/src/scaleRecipeTool.ts

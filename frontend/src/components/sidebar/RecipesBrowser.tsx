@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApiError, callTool } from '../../api/client';
-import type { DeleteRecipeResult, RecipeSummary } from '../../api/types';
+import type { DeleteRecipeResult, RecipeSummary, UpdateRecipeResult } from '../../api/types';
 
 interface RecipesBrowserProps {
   apiKey: string | null;
@@ -28,6 +28,20 @@ export default function RecipesBrowser({ apiKey, selectedRecipeName, onSelect, o
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, refreshKey]);
+
+  async function toggleFavorite(recipe: RecipeSummary) {
+    setError(null);
+    try {
+      await callTool<UpdateRecipeResult>(
+        'update_recipe',
+        { recipe_id: recipe.recipeId, isFavorite: !recipe.isFavorite },
+        apiKey,
+      );
+      await reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update recipe');
+    }
+  }
 
   async function removeRecipe(recipe: RecipeSummary) {
     if (!window.confirm(`Delete "${recipe.mealName}"? This cannot be undone.`)) return;
@@ -70,6 +84,16 @@ export default function RecipesBrowser({ apiKey, selectedRecipeName, onSelect, o
             className={`sidebar-row${recipe.mealName === selectedRecipeName ? ' active' : ''}`}
             onClick={() => onSelect(recipe.mealName)}
           >
+            <button
+              className={`sidebar-row-favorite${recipe.isFavorite ? ' active' : ''}`}
+              title={recipe.isFavorite ? 'Unfavorite' : 'Favorite'}
+              onClick={(e) => {
+                e.stopPropagation();
+                toggleFavorite(recipe);
+              }}
+            >
+              {recipe.isFavorite ? '★' : '☆'}
+            </button>
             <span className="sidebar-row-title">{recipe.mealName}</span>
             <button
               className="sidebar-row-delete"

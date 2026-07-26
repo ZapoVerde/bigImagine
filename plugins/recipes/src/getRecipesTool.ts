@@ -56,12 +56,13 @@ export function createGetRecipesTool(): RegisteredTool {
         cook_time: string | null;
         servings: string | null;
         base_servings: number | null;
+        is_favorite: boolean;
       }>(
         tag
-          ? `select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings from recipes_meals
+          ? `select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings, is_favorite from recipes_meals
              where user_id = $1 and exists (select 1 from unnest(tags) t where lower(t) = lower($2))
              order by meal_name`
-          : `select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings from recipes_meals
+          : `select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings, is_favorite from recipes_meals
              where user_id = $1 order by meal_name`,
         tag ? [ctx.userId, tag] : [ctx.userId],
       );
@@ -74,6 +75,7 @@ export function createGetRecipesTool(): RegisteredTool {
         cookTime: r.cook_time,
         servings: r.servings,
         baseServings: r.base_servings,
+        isFavorite: r.is_favorite,
       }));
     },
   };

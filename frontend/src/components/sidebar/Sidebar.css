@@ -148,6 +148,24 @@
   white-space: nowrap;
 }
 
+.sidebar-row-favorite {
+  background: none;
+  border: none;
+  color: var(--color-text-faint);
+  cursor: pointer;
+  font-size: var(--font-size-base);
+  padding: 0 0.1rem;
+  line-height: 1;
+}
+
+.sidebar-row-favorite.active {
+  color: var(--color-accent);
+}
+
+.sidebar-row-favorite:hover {
+  color: var(--color-accent);
+}
+
 .sidebar-row-delete {
   background: none;
   border: none;

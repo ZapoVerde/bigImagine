@@ -62,8 +62,9 @@ export function createGetRecipeTool(): RegisteredTool {
         cook_time: string | null;
         servings: string | null;
         base_servings: number | null;
+        is_favorite: boolean;
       }>(
-        `select recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings
+        `select recipe_id, meal_name, ingredients, instructions, tags, prep_time, cook_time, servings, base_servings, is_favorite
          from recipes_meals
          where user_id = $1 and lower(meal_name) like lower($2)
          order by (lower(meal_name) = lower($3)) desc, meal_name
@@ -91,6 +92,7 @@ export function createGetRecipeTool(): RegisteredTool {
         cookTime: recipe.cook_time,
         servings: recipe.servings,
         baseServings: recipe.base_servings,
+        isFavorite: recipe.is_favorite,
       };
     },
   };
