@@ -164,8 +164,9 @@ export function createGenerateShoppingListFromMealPlanTool(
         servings: string | null;
         base_servings: number | null;
         target_servings: number | null;
+        ingredient_structure_version: number | null;
       }>(
-        `select rm.recipe_id, rm.meal_name, rm.ingredients, rm.servings, rm.base_servings, mpe.target_servings
+        `select rm.recipe_id, rm.meal_name, rm.ingredients, rm.servings, rm.base_servings, mpe.target_servings, rm.ingredient_structure_version
          from meal_plan_entries mpe
          join recipes_meals rm on rm.recipe_id = mpe.recipe_id
          where mpe.user_id = $1 and mpe.planned_date between $2 and $3`,
@@ -190,6 +191,7 @@ export function createGenerateShoppingListFromMealPlanTool(
               ingredients: meal.ingredients,
               servings: meal.servings,
               baseServings: meal.base_servings,
+              ingredientStructureVersion: meal.ingredient_structure_version,
             });
             structuredByRecipe.set(meal.recipe_id, result);
           } catch (err) {

@@ -21,15 +21,24 @@
  * modifier (added after the initial structuring pass shipped) separates a prep instruction — what
  * to do to the ingredient before using it — from item, so "garlic, peeled and smashed" doesn't
  * leave "peeled and smashed" stuck inside item where it reads oddly once amount/unit are pulled
- * out ("1 head | garlic, peeled and smashed" vs. today's "1 | garlic, peeled and smashed"). Because
- * isRecipeIngredient requires modifier to be present (string or null, never simply absent), a row
- * structured before this field existed fails validation and is treated as not-yet-structured —
- * ensureStructuredIngredients.ts re-runs the LLM pass once, self-healing old rows the same lazy
- * way it already handles never-structured ones, rather than needing a backfill migration.
+ * out ("1 head | garlic, peeled and smashed" vs. today's "1 | garlic, peeled and smashed").
+ *
+ * CURRENT_STRUCTURE_VERSION (db/migrations/0028_ingredient_structure_version.sql's
+ * recipes_meals.ingredient_structure_version) is the authoritative "does this recipe's structuring
+ * reflect the latest contract" signal — ensureStructuredIngredients.ts compares a recipe's stored
+ * version against this constant and re-structures if it's behind (or null, meaning it predates
+ * versioning entirely). This replaced an earlier ad hoc trick of checking whether a specific field
+ * (originally modifier) was present at all — that only ever catches one contract change; a real
+ * version number keeps working for however many more there end up being. isRecipeIngredient's
+ * shape validation is a separate, complementary check: it catches structurally malformed data
+ * regardless of version, but the version number is what actually decides whether it's time to
+ * re-run the LLM pass.
  *
  * @api-declaration
  * RecipeIngredient — {raw, amount, unit, item, modifier, scalable}, the structured shape
  * ScaledIngredient — RecipeIngredient + amountDisplay (fraction-formatted, scaling's own output)
+ * CURRENT_STRUCTURE_VERSION — bump whenever the structuring contract changes (a new field, a new
+ *   normalization pass) so ensureStructuredIngredients.ts knows to re-run existing recipes once
  * isRecipeIngredient(value) — validates one structured ingredient, including the
  *   amount===null <=> scalable===false pairing scaleIngredients.ts trusts without re-deriving
  * isLegacyIngredients(value) — true if this is a pre-structuring bare-string ingredients array
@@ -46,6 +55,8 @@
  *     state_ownership: []
  *     external_io:     []
  */
+
+export const CURRENT_STRUCTURE_VERSION = 1;
 
 export interface RecipeIngredient {
   raw: string;

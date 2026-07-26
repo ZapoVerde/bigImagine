@@ -12,7 +12,11 @@
  * Only same-item, same-unit amounts sum ("2 cups flour" + "1 cup flour", not "2 cups" + "3 tbsp") —
  * cross-unit conversion stays explicitly out of scope, same punt this file's caller already
  * documented before this feature. Non-scalable lines (amount null, e.g. "salt to taste") just
- * dedupe by item text, first-seen wins — there's nothing to sum.
+ * dedupe by item text, first-seen wins — there's nothing to sum. The unit key itself is the
+ * *stored* base unit (e.g. always "gram" for a converted ingredient, per
+ * convertIngredientUnitsToMetric.ts) — this is a quiet correctness win from metric normalization:
+ * two recipes that wrote "8 oz" and "0.5 lb" of the same ingredient now both structure down to
+ * grams and sum correctly, where they never could have matched as free text.
  *
  * @api-declaration
  * AggregatedIngredient — {itemName} the final grocery-list display string
@@ -27,7 +31,7 @@
  */
 
 import type { ScaledIngredient } from './recipeIngredientSchema.js';
-import { formatAmount } from './scaleIngredients.js';
+import { formatIngredientAmount } from './formatIngredientAmount.js';
 
 export interface AggregatedIngredient {
   itemName: string;
@@ -63,8 +67,8 @@ export function aggregateScaledIngredients(mealIngredients: ScaledIngredient[][]
   return order.map((key) => {
     const entry = byKey.get(key)!;
     if (entry.scalable && entry.amount !== null) {
-      const display = formatAmount(entry.amount);
-      return { itemName: entry.unit ? `${display} ${entry.unit} ${entry.item}` : `${display} ${entry.item}` };
+      // formatIngredientAmount already includes the (possibly promoted, e.g. g -> kg) unit.
+      return { itemName: `${formatIngredientAmount(entry.amount, entry.unit)} ${entry.item}` };
     }
     return { itemName: entry.item };
   });

@@ -14,13 +14,15 @@ interface RecipesViewProps {
 }
 
 // A line's amount/unit, formatted for the "amount | ingredient" default display. scale_recipe's
-// ScaledIngredient carries a fraction-formatted amountDisplay; get_recipe's plain RecipeIngredient
-// (shown only while scale_recipe hasn't resolved yet) doesn't, so this falls back to the raw
-// number in that case.
+// ScaledIngredient carries amountDisplay — a complete string with its own (possibly promoted, e.g.
+// g -> kg or tbsp -> cup) unit already baked in by formatIngredientAmount.ts server-side, so it's
+// returned as-is rather than having a unit appended again here. get_recipe's plain RecipeIngredient
+// (shown only while scale_recipe hasn't resolved yet) has no amountDisplay at all, so that case
+// still glues the raw amount + unit together itself.
 function displayAmount(ing: RecipeIngredient | ScaledIngredient): string | null {
   if (ing.amount === null) return null;
-  const amount = 'amountDisplay' in ing && ing.amountDisplay !== null ? ing.amountDisplay : String(ing.amount);
-  return ing.unit ? `${amount} ${ing.unit}` : amount;
+  if ('amountDisplay' in ing && ing.amountDisplay !== null) return ing.amountDisplay;
+  return ing.unit ? `${ing.amount} ${ing.unit}` : String(ing.amount);
 }
 
 // modifier is a prep instruction ("peeled and smashed") separated from item ("garlic") server-side

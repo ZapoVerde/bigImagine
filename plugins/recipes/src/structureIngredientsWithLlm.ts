@@ -30,6 +30,18 @@
  * as the model wrote it — it's free descriptive text, not something a corrupted value could
  * misattribute an amount to.
  *
+ * unit is asked for in exact canonical spelling for the ~11 measurement units this household cares
+ * about normalizing (teaspoon/tablespoon/cup/pinch, which stay imperial forever, and
+ * ounce/fluid ounce/pound/quart/pint/gallon/stick, which convertIngredientUnitsToMetric.ts converts
+ * right after this call returns) — dispatch there is exact-string-match, not fuzzy parsing, so the
+ * canonical spelling has to come from here. Everything else (cloves, cans, heads — open-ended count
+ * units) stays free text exactly as the model would naturally write it. Bare "ounce" is genuinely
+ * ambiguous (weight vs. fluid) and the prompt resolves it with a heuristic rather than leaving it
+ * for a guess downstream: liquid ingredient -> fluid ounce; solid/semi-solid -> ounce; explicit
+ * "fl oz"/"fluid ounce" in the text -> fluid ounce, no guessing needed; canned/packaged goods ->
+ * ounce (US labeling convention, even for liquid-ish contents like canned tomatoes); genuinely
+ * unclear -> ounce, since recipe writers reach for "fl oz" explicitly when they mean volume.
+ *
  * @api-declaration
  * structureIngredients(llm, rawIngredients, rawServings) -> {ingredients, baseServings} — throws
  *   if the model doesn't call structure_ingredients, returns a mismatched-length array, or
@@ -44,6 +56,7 @@
 
 import type { LlmProvider, ToolDefinition } from '@bigbrain/orchestrator/llm-types';
 import { isRecipeIngredient, type RecipeIngredient } from './recipeIngredientSchema.js';
+import { convertIngredientUnitsToMetric } from './convertIngredientUnitsToMetric.js';
 
 interface StructureIngredientsResult {
   lines: { amount: number | null; unit: string | null; item: string; modifier: string | null; scalable: boolean }[];
@@ -79,7 +92,17 @@ const structureIngredientsTool: ToolDefinition = {
           type: 'object',
           properties: {
             amount: { type: ['number', 'null'], description: 'The numeric quantity, e.g. 2 for "2 cups flour". Null if not cleanly scalable (e.g. "salt to taste").' },
-            unit: { type: ['string', 'null'], description: 'The unit, e.g. "cup". Null if there is no unit (e.g. "3 eggs") or amount is null.' },
+            unit: {
+              type: ['string', 'null'],
+              description:
+                'The unit. Null if there is no unit (e.g. "3 eggs") or amount is null. For these specific measurement units, use this exact spelling, singular: ' +
+                '"teaspoon", "tablespoon", "cup", "pinch" (never converted — kitchens measure with these directly), or ' +
+                '"ounce", "fluid ounce", "pound", "quart", "pint", "gallon", "stick" (converted to metric right after this call). ' +
+                'Bare "oz"/"ounce" is ambiguous between weight and volume — write "ounce" for a solid/semi-solid ingredient or a canned/packaged good ' +
+                '(US labeling convention labels those by weight even when the contents are liquid-ish, e.g. canned tomatoes), "fluid ounce" only when the text says ' +
+                '"fl oz"/"fluid ounce" or the ingredient is clearly a poured liquid; default to "ounce" if genuinely unclear. ' +
+                'Any other unit (e.g. "clove", "can", "head", "slice") is free text exactly as written.',
+            },
             item: {
               type: 'string',
               description:
@@ -124,7 +147,8 @@ export async function structureIngredients(
           'entry per input line, in the same order. Never guess a scalable amount that is not actually present in the ' +
           'text. Separate a prep instruction (modifier, e.g. "diced", "peeled and smashed") from the ingredient itself ' +
           '(item) — but keep a descriptor in item when it names the product as commonly sold (e.g. "diced tomatoes", ' +
-          '"ground beef") rather than an instruction to the cook.',
+          '"ground beef") rather than an instruction to the cook. Use the exact canonical unit spelling requested in the ' +
+          'schema for the measurement units it lists, including resolving ambiguous "oz" to "ounce" or "fluid ounce".',
       },
       {
         role: 'user',
@@ -158,5 +182,10 @@ export async function structureIngredients(
     throw new Error('structureIngredients: assembled ingredients failed validation after zipping with raw lines');
   }
 
-  return { ingredients, baseServings: call.arguments.baseServings };
+  // Deterministic, not the model's job (bb_principles.md §2) — convert the fixed imperial units
+  // this household normalizes (ounce/pound/stick/fluid ounce/quart/pint/gallon) to grams/
+  // milliliters now that the LLM has already decided which unit each line is written in.
+  const metricIngredients = ingredients.map(convertIngredientUnitsToMetric);
+
+  return { ingredients: metricIngredients, baseServings: call.arguments.baseServings };
 }

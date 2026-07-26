@@ -23,9 +23,11 @@
  * legacy.
  *
  * @api-declaration
- * ensureStructuredIngredients(db, llm, recipe) -> {ingredients, baseServings} — already-structured
- *   recipes (with a resolved base_servings) are returned as-is with no LLM call; anything else is
- *   structured and persisted before returning; throws on structuring failure
+ * ensureStructuredIngredients(db, llm, recipe) -> {ingredients, baseServings} — recipes that are
+ *   already structured, resolved, AND on CURRENT_STRUCTURE_VERSION (recipeIngredientSchema.ts) are
+ *   returned as-is with no LLM call; anything else (never structured, stale contract version, or
+ *   missing base_servings) is structured and persisted before returning; throws on structuring
+ *   failure
  * structureNewRecipeBestEffort(db, llm, recipeId, ingredients, servings) -> void — structures and
  *   persists a freshly-created recipe's ingredients; logs and returns (recipe stays legacy) on
  *   failure instead of throwing
@@ -40,7 +42,12 @@
 import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { DbSession } from '@bigbrain/orchestrator/postgres';
 import { log } from '@bigbrain/orchestrator/logger';
-import { isStructuredIngredients, rawLineOf, type RecipeIngredient } from './recipeIngredientSchema.js';
+import {
+  CURRENT_STRUCTURE_VERSION,
+  isStructuredIngredients,
+  rawLineOf,
+  type RecipeIngredient,
+} from './recipeIngredientSchema.js';
 import { structureIngredients } from './structureIngredientsWithLlm.js';
 
 interface RecipeToStructure {
@@ -48,6 +55,7 @@ interface RecipeToStructure {
   ingredients: unknown[];
   servings: string | null;
   baseServings: number | null;
+  ingredientStructureVersion: number | null;
 }
 
 export async function ensureStructuredIngredients(
@@ -55,23 +63,26 @@ export async function ensureStructuredIngredients(
   llm: LlmProvider,
   recipe: RecipeToStructure,
 ): Promise<{ ingredients: RecipeIngredient[]; baseServings: number | null }> {
-  if (isStructuredIngredients(recipe.ingredients) && recipe.baseServings !== null) {
+  if (
+    isStructuredIngredients(recipe.ingredients) &&
+    recipe.baseServings !== null &&
+    recipe.ingredientStructureVersion === CURRENT_STRUCTURE_VERSION
+  ) {
     return { ingredients: recipe.ingredients, baseServings: recipe.baseServings };
   }
 
-  // rawLineOf handles all three possible shapes uniformly: never-structured (bare strings),
-  // structured before a later field (e.g. modifier) was added, and the current shape with a
-  // stale/null base_servings — every one of those has to fall back to re-deriving raw text from
-  // whatever's actually there rather than assuming a shape isStructuredIngredients just rejected.
+  // rawLineOf handles every possible shape uniformly: never-structured (bare strings), structured
+  // under an older contract version, and the current shape with a stale/null base_servings — every
+  // one of those has to fall back to re-deriving raw text from whatever's actually there rather
+  // than assuming a shape isStructuredIngredients/the version check just rejected.
   const rawLines = recipe.ingredients.map(rawLineOf);
 
   const result = await structureIngredients(llm, rawLines, recipe.servings);
 
-  await db.query(`update recipes_meals set ingredients = $1, base_servings = $2 where recipe_id = $3`, [
-    JSON.stringify(result.ingredients),
-    result.baseServings,
-    recipe.recipeId,
-  ]);
+  await db.query(
+    `update recipes_meals set ingredients = $1, base_servings = $2, ingredient_structure_version = $3 where recipe_id = $4`,
+    [JSON.stringify(result.ingredients), result.baseServings, CURRENT_STRUCTURE_VERSION, recipe.recipeId],
+  );
 
   return result;
 }
@@ -85,11 +96,10 @@ export async function structureNewRecipeBestEffort(
 ): Promise<void> {
   try {
     const result = await structureIngredients(llm, ingredients, servings);
-    await db.query(`update recipes_meals set ingredients = $1, base_servings = $2 where recipe_id = $3`, [
-      JSON.stringify(result.ingredients),
-      result.baseServings,
-      recipeId,
-    ]);
+    await db.query(
+      `update recipes_meals set ingredients = $1, base_servings = $2, ingredient_structure_version = $3 where recipe_id = $4`,
+      [JSON.stringify(result.ingredients), result.baseServings, CURRENT_STRUCTURE_VERSION, recipeId],
+    );
   } catch (err) {
     log.error(`ingredient structuring failed for newly-created recipe ${recipeId} (recipe still created, ingredients left legacy — will be structured on first scale/shopping-list use)`, err);
   }

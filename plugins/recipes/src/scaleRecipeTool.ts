@@ -74,8 +74,9 @@ export function createScaleRecipeTool(llm: LlmProvider, settings: OrchestratorSe
         ingredients: unknown[];
         servings: string | null;
         base_servings: number | null;
+        ingredient_structure_version: number | null;
       }>(
-        `select recipe_id, meal_name, ingredients, servings, base_servings
+        `select recipe_id, meal_name, ingredients, servings, base_servings, ingredient_structure_version
          from recipes_meals
          where user_id = $1 and lower(meal_name) like lower($2)
          order by (lower(meal_name) = lower($3)) desc, meal_name
@@ -93,6 +94,7 @@ export function createScaleRecipeTool(llm: LlmProvider, settings: OrchestratorSe
         ingredients: recipe.ingredients,
         servings: recipe.servings,
         baseServings: recipe.base_servings,
+        ingredientStructureVersion: recipe.ingredient_structure_version,
       });
 
       if (structured.baseServings === null) {
