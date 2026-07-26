@@ -15,10 +15,20 @@ import {
   listToolNames,
   truncateMessagesFrom,
   updateChat,
+  uploadAttachment,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
+import type {
+  ChatMessage,
+  ChatParams,
+  ChatSessionRow,
+  Folder,
+  ProfileModelsResult,
+  PromptPreset,
+  StagedAttachment,
+} from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
+import StagingBar from '../components/attachments/StagingBar';
 import TodayAgenda from '../components/TodayAgenda';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
@@ -78,6 +88,12 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Staged file attachments: held only in this tab's own state, never persisted — cleared once
+  // the message carrying them is sent (see orchestrator/src/util/attachmentContext.ts).
+  const [stagedFiles, setStagedFiles] = useState<StagedAttachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Per-message edit/copy UI state
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -166,15 +182,42 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
+  async function attachFiles(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+    setError(null);
+    setAttaching(true);
+    try {
+      const uploaded = await Promise.all(Array.from(fileList).map((file) => uploadAttachment(file, apiKey)));
+      setStagedFiles((prev) => [...prev, ...uploaded]);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to attach file');
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  function removeStagedFile(index: number) {
+    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
   async function send() {
     const text = draft.trim();
-    if (!text || sending) return;
+    if ((!text && stagedFiles.length === 0) || sending) return;
+
+    // A file-only send (no typed text) still needs non-empty, readable content for the message
+    // that actually gets persisted — the file's own extracted text is never stored (see
+    // attachFiles/StagedAttachment), so history would otherwise show a blank bubble forever.
+    const displayText =
+      text ||
+      (stagedFiles.length === 1 ? `Sent ${stagedFiles[0]!.filename}` : `Sent ${stagedFiles.length} files`);
 
     setError(null);
     setSending(true);
-    const nextMessages: DisplayMessage[] = [...messages, { role: 'user', content: text }];
+    const nextMessages: DisplayMessage[] = [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
     setDraft('');
+    const attachments = stagedFiles;
+    setStagedFiles([]);
     try {
       let session = activeChat;
       if (!session) {
@@ -185,7 +228,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         }
         setActiveChat(session);
       }
-      await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId);
+      await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId, attachments);
       await refreshActiveMessages(session.chatId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to reach bigBrain');
@@ -363,6 +406,8 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {sending && <div className="chat-bubble assistant pending">…</div>}
         </div>
 
+        <StagingBar attachments={stagedFiles} onRemove={removeStagedFile} />
+
         <form
           className="chat-input"
           onSubmit={(e) => {
@@ -370,6 +415,25 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             send();
           }}
         >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(e) => {
+              attachFiles(e.target.files);
+              e.target.value = '';
+            }}
+          />
+          <button
+            type="button"
+            className="chat-attach-button"
+            title="Attach a file"
+            disabled={attaching}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            📎
+          </button>
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -383,7 +447,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             rows={2}
             autoFocus
           />
-          <button type="submit" disabled={sending || !draft.trim()}>
+          <button type="submit" disabled={sending || (!draft.trim() && stagedFiles.length === 0)}>
             Send
           </button>
         </form>

@@ -1,0 +1,57 @@
+.staging-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem 0;
+}
+
+.staged-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.4rem 0.6rem;
+  max-width: 16rem;
+}
+
+.staged-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.staged-card-filename {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staged-card-meta {
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-muted);
+}
+
+.staged-card-truncated {
+  font-size: var(--font-size-2xs);
+  color: var(--color-secondary);
+}
+
+.staged-card-remove {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-base);
+  line-height: 1;
+  padding: 0.1rem 0.2rem;
+  flex-shrink: 0;
+}
+
+.staged-card-remove:hover {
+  color: var(--color-text-primary);
+}

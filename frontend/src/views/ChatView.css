@@ -420,3 +420,16 @@
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
 }
+
+.chat-input button.chat-attach-button {
+  flex: 0 0 auto;
+  padding: 0.5rem 0.7rem;
+  background: var(--color-bg-panel);
+  color: var(--color-text-primary);
+  border-color: var(--color-border);
+}
+
+.chat-input button.chat-attach-button:hover {
+  background: var(--color-hover-surface);
+  border-color: var(--color-border);
+}

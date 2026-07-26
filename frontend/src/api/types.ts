@@ -259,6 +259,17 @@ export interface ChatMessage {
   content: string;
 }
 
+// orchestrator/src/server/handleUploadAttachment.ts's extractAttachmentUpload() response shape.
+// Held only in the composer's local state until sent — never persisted server-side (see
+// orchestrator/src/util/attachmentContext.ts's own preamble).
+export interface StagedAttachment {
+  filename: string;
+  mimeType: string;
+  markdown: string;
+  truncated: boolean;
+  meta: { totalChars: number; totalLines: number };
+}
+
 // orchestrator/src/io/providerCredentials.ts CredentialSummary
 export interface CredentialSummary {
   name: string;

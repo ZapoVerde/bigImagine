@@ -91,6 +91,13 @@
  * (plugins/calendar's ICS poll; io/notion.ts's client construction), so a live update with no
  * restart would silently do nothing until the next one anyway — unlike timezone.
  *
+ * POST /v1/attachments/extract (handleUploadAttachment.ts's extractAttachmentUpload) turns a
+ * staged file into Markdown ahead of a chat turn — same Bearer/Access auth as chat completions,
+ * no persistence of its own. handleChatCompletions then splices any `attachments` in the request
+ * body onto the copy of `messages` sent to the model this one turn only
+ * (util/attachmentContext.ts) — the chat's stored history and auto-generated title still derive
+ * from the original, un-spliced messages, so an attached file never bloats a chat's history.
+ *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
  *
@@ -109,7 +116,9 @@ import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
+import { appendAttachmentsToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
+import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
@@ -291,6 +300,14 @@ async function handleChatCompletions(
     .filter((m) => ALLOWED_ROLES.has(m.role))
     .map((m) => ({ role: m.role as LlmMessage['role'], content: m.content }));
 
+  // Attached files (already turned into Markdown by POST /v1/attachments/extract) are appended
+  // only to the copy of history sent to the model this one turn — never persisted. Everything
+  // below that reads from `messages` (chat storage, the auto-generated title) deliberately keeps
+  // using the original, un-spliced array; only the runTurn call below gets messagesForLlm.
+  const messagesForLlm = body.attachments?.length
+    ? appendAttachmentsToLatestUserMessage(messages, body.attachments)
+    : messages;
+
   // Persisted-session path (bigBrain's own frontend): chat_id ties this turn to a chat_sessions
   // row — its params/tool allow-list apply and the exchange is stored after the turn resolves.
   // No chat_id (Open WebUI's traffic) keeps the original fully stateless behavior.
@@ -349,7 +366,7 @@ async function handleChatCompletions(
   const systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
   const { content: reply, focusedNoteId } = await runTurn({
     userId,
-    messages,
+    messages: messagesForLlm,
     systemPrompt,
     model,
     sampling: {
@@ -448,6 +465,20 @@ async function handleToolInvoke(
   }
 
   const { status, body } = await invokeTool(deps.db, deps.tools, userId, toolName, args);
+  sendJson(res, status, body);
+}
+
+async function handleUploadAttachment(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: HttpServerDeps,
+): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  const { status, body } = await extractAttachmentUpload(req);
   sendJson(res, status, body);
 }
 
@@ -980,6 +1011,10 @@ async function handleRequest(
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
     await handleChatCompletions(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/attachments/extract') {
+    await handleUploadAttachment(req, res, deps);
     return;
   }
   if (req.url === '/v1/chats' || req.url?.startsWith('/v1/chats/') || req.url?.startsWith('/v1/chats?')) {

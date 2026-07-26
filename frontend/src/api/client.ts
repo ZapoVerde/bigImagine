@@ -12,6 +12,7 @@ import type {
   GoogleCalendarSettings,
   NotionSettings,
   ProfileModelsResult,
+  StagedAttachment,
 } from './types';
 
 export class ApiError extends Error {
@@ -75,6 +76,23 @@ export async function callTool<T>(name: string, args: unknown, apiKey: string | 
   return res.json() as Promise<T>;
 }
 
+/** POST /v1/attachments/extract — turns a staged file into Markdown ahead of sending it in a chat
+ *  turn. `content-type` is deliberately omitted: FormData needs the browser to set it itself
+ *  (with the multipart boundary it generates), which only happens when this code never sets the
+ *  header explicitly — every other request in this file sets 'content-type': 'application/json'
+ *  and JSON.stringifies its body, but a file upload can't go through that same path. */
+export async function uploadAttachment(file: File, apiKey: string | null): Promise<StagedAttachment> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  const res = await fetch('/v1/attachments/extract', {
+    method: 'POST',
+    headers: authHeaders(apiKey),
+    body: form,
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<StagedAttachment>;
+}
+
 /** POST /v1/chat/completions — non-streaming: runTurn resolves the full reply server-side before
  *  anything is sent back, so there's no token stream worth consuming here. chatId ties the turn
  *  to a persisted session (the server applies its params/tools and stores the exchange).
@@ -92,11 +110,17 @@ export async function chatCompletion(
   messages: ChatMessage[],
   apiKey: string | null,
   chatId?: string,
+  attachments?: StagedAttachment[],
 ): Promise<ChatCompletionResponse> {
   const res = await fetch('/v1/chat/completions', {
     method: 'POST',
     headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
-    body: JSON.stringify({ messages, stream: false, ...(chatId ? { chat_id: chatId } : {}) }),
+    body: JSON.stringify({
+      messages,
+      stream: false,
+      ...(chatId ? { chat_id: chatId } : {}),
+      ...(attachments?.length ? { attachments } : {}),
+    }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<ChatCompletionResponse>;
