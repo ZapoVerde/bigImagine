@@ -14,8 +14,13 @@
  * approach the reference uses (no vectors anywhere in its chat search either), just against
  * normalized rows instead of a JSON blob.
  *
- * params carries defined keys only (system, temperature, top_p, max_tokens, model), merged over
- * provider defaults at request time by httpServer.ts's chat_id handling. toolNames: null = all
+ * params carries defined keys only (system, temperature, top_p, max_tokens, model, profile), merged
+ * over provider defaults at request time by httpServer.ts's chat_id handling. profile names one of
+ * BIGBRAIN_LLM_PROFILES (io/llm/profiles.ts) to run this chat's turns through instead of the
+ * household's active connection (io/orchestratorSettings.ts's active_llm_profile) — unlike that
+ * household-wide setting, picking a different profile per chat needs no restart, since httpServer.ts
+ * builds a throwaway provider for it the same way the Settings tab's model-catalog preview already
+ * does (server/adminServer.ts's listModelsForProfile). toolNames: null = all
  * registered tools (pre-existing behavior), [] = none, else an allow-list applied via
  * toolRegistry.ts's filterToolRegistry. canvasNoteId (Canvas): which note this chat's document
  * panel is focused on, if any — written by httpServer.ts from runTurn's focusedNoteId, or cleared
@@ -50,6 +55,9 @@ export interface ChatParams {
   top_p?: number;
   max_tokens?: number;
   model?: string;
+  /** Which BIGBRAIN_LLM_PROFILES connection to use for this chat, overriding the household's
+   *  active one. Unset means "use whichever connection is active" (the pre-existing behavior). */
+  profile?: string;
 }
 
 export interface ChatSessionRow {

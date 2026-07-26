@@ -447,11 +447,17 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   );
   const [saved, setSaved] = useState(false);
 
-  // The connection (provider/API key) stays a global, household-wide choice (Settings tab) — only
-  // the model is a per-chat override. Reuses the same admin endpoints SettingsView's own model
-  // picker uses; harmless to call under Cloudflare Access (isAdminAuthorized trusts the Access
-  // identity the same way the rest of the app already does), see client.ts's doc comments.
+  // The household's active connection (Settings tab) is still the default every chat starts
+  // from, but both the connection and the model within it can now be overridden per chat —
+  // io/orchestratorSettings.ts's active_llm_profile stays what a brand-new chat uses, this is
+  // just an escape hatch. Reuses the same admin endpoints SettingsView's own picker uses;
+  // harmless to call under Cloudflare Access (isAdminAuthorized trusts the Access identity the
+  // same way the rest of the app already does), see client.ts's doc comments. Unlike the
+  // Settings-tab connection switch, picking a different one here needs no restart — httpServer.ts
+  // builds a throwaway provider for this chat's turns instead of the boot-time one.
   const [activeProfile, setActiveProfile] = useState('');
+  const [profileNames, setProfileNames] = useState<string[]>([]);
+  const [profile, setProfile] = useState(session?.params.profile ?? '');
   const [modelOptions, setModelOptions] = useState<ProfileModelsResult['models']>([]);
   const [modelsError, setModelsError] = useState('');
 
@@ -459,11 +465,29 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     adminGetActiveProfile(null)
       .then((connection) => {
         setActiveProfile(connection.activeProfile);
-        return adminListModelsForProfile(connection.activeProfile, null);
+        setProfileNames(connection.profileNames);
       })
-      .then((result) => setModelOptions(result.models))
-      .catch((err) => setModelsError(err instanceof ApiError ? err.message : 'failed to load models'));
+      .catch((err) => setModelsError(err instanceof ApiError ? err.message : 'failed to load connections'));
   }, []);
+
+  // Refetches the model catalog whenever a different connection is picked (or the household
+  // default resolves), so the model dropdown always reflects whichever connection this chat would
+  // actually use — same dependent-select shape as SettingsView's own connection/model pair.
+  useEffect(() => {
+    const effectiveProfile = profile || activeProfile;
+    if (!effectiveProfile) return;
+    let cancelled = false;
+    adminListModelsForProfile(effectiveProfile, null)
+      .then((result) => {
+        if (!cancelled) setModelOptions(result.models);
+      })
+      .catch((err) => {
+        if (!cancelled) setModelsError(err instanceof ApiError ? err.message : 'failed to load models');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile, activeProfile]);
 
   // Instruction sets: a personal library of reusable named system-prompt snippets. Picking one
   // only copies its content into the textarea below — still freely hand-editable, and not saved
@@ -516,6 +540,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     if (temperature.trim() && !Number.isNaN(Number(temperature))) params.temperature = Number(temperature);
     if (maxTokens.trim() && !Number.isNaN(Number(maxTokens))) params.max_tokens = Number(maxTokens);
     if (model.trim()) params.model = model.trim();
+    if (profile.trim()) params.profile = profile.trim();
     const allSelected = allToolNames.length > 0 && allToolNames.every((t) => selectedTools.has(t));
     await onSave({
       title: title.trim() || session?.title || 'New chat',
@@ -563,6 +588,21 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
       </label>
 
       <label>
+        Connection
+        <select value={profile} onChange={(e) => setProfile(e.target.value)}>
+          <option value="">
+            (household default{activeProfile ? ` — ${activeProfile}` : ''})
+          </option>
+          {profileNames.map((name) => (
+            <option key={name} value={name}>
+              {name}
+            </option>
+          ))}
+        </select>
+        <span className="model-connection-note">Household default set in Settings; this only affects this chat.</span>
+      </label>
+
+      <label>
         Model
         <select value={model} onChange={(e) => setModel(e.target.value)}>
           <option value="">(connection default)</option>
@@ -581,7 +621,6 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
               );
             })}
         </select>
-        {activeProfile && <span className="model-connection-note">Connection: {activeProfile} (change in Settings)</span>}
         {modelsError && <div className="error-banner">{modelsError}</div>}
       </label>
 

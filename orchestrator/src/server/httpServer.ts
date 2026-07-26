@@ -106,13 +106,13 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname } from 'node:path';
 import { generateChatTitle } from '../io/llm/generateChatTitle.js';
+import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
-import type { LlmProfile } from '../io/llm/index.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -314,9 +314,31 @@ async function handleChatCompletions(
     }
   }
 
+  // A chat's own profile override (a per-chat connection picker, distinct from the household-wide
+  // one in Settings) swaps in a throwaway provider for that one named connection, built fresh per
+  // turn the same way the Settings tab's model-catalog preview already does (server/adminServer.ts's
+  // listModelsForProfile) — cheap, since every provider here is a stateless fetch wrapper
+  // (io/llm/anthropic.ts, io/llm/openaiCompatible.ts). Unlike the household setting, this needs no
+  // restart to take effect. An unknown profile name (stale override, a profile since removed from
+  // BIGBRAIN_LLM_PROFILES) falls back to the household's active connection rather than failing the
+  // whole turn, logging why per bb_principles.md §11.
+  let turnLlm = llm;
+  let turnDefaultModel = modelName;
+  if (sessionParams.profile) {
+    const profile = deps.llmProfiles[sessionParams.profile];
+    if (profile) {
+      turnLlm = createLlmProviderForProfile(profile);
+      turnDefaultModel = profile.model;
+    } else {
+      log.error(
+        `chat_id ${body.chat_id} names unknown profile "${sessionParams.profile}" (not in BIGBRAIN_LLM_PROFILES) — falling back to the active connection`,
+      );
+    }
+  }
+
   // A client's own model picker (Open WebUI's dropdown, populated from GET /v1/models) sends
   // its selection here — that's what actually takes effect, not the fixed modelName below.
-  // modelName only remains as the label echoed back when the request didn't specify one.
+  // turnDefaultModel only remains as the label echoed back when the request didn't specify one.
   const model = body.model ?? sessionParams.model;
   // Unconditional, on every turn — a model has no reliable sense of "today" on its own, and
   // date-taking tools (add_meal_plan_entry, get_meal_plan, ...) need it regardless of whether
@@ -335,11 +357,11 @@ async function handleChatCompletions(
       topP: sessionParams.top_p,
       maxTokens: sessionParams.max_tokens,
     },
-    llm,
+    llm: turnLlm,
     db,
     tools: sessionTools,
   });
-  const echoedModel = model ?? modelName;
+  const echoedModel = model ?? turnDefaultModel;
 
   if (body.chat_id) {
     const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
@@ -362,7 +384,7 @@ async function handleChatCompletions(
     if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
       let title: string;
       try {
-        title = await generateChatTitle(llm, latestUserMessage.content, reply);
+        title = await generateChatTitle(turnLlm, latestUserMessage.content, reply);
       } catch (err) {
         log.error('generateChatTitle failed, falling back to a truncated title', err);
         title = latestUserMessage.content.slice(0, 60);

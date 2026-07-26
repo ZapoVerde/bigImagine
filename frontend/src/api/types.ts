@@ -286,6 +286,9 @@ export interface ChatParams {
   top_p?: number;
   max_tokens?: number;
   model?: string;
+  /** Which BIGBRAIN_LLM_PROFILES connection this chat uses, overriding the household's active
+   *  one. Unset means "use whichever connection is active". */
+  profile?: string;
 }
 
 export interface ChatSummary {

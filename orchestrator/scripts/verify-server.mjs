@@ -1198,6 +1198,64 @@ server.close();
     'an edit resend (one more message than already persisted) appends both the edited user message and the new reply',
   );
 
+  // --- A chat's own profile override swaps in a throwaway provider for that turn, no restart ---
+  const originalFetch3 = globalThis.fetch;
+  const capturedProfileCalls = [];
+  globalThis.fetch = async (url, init) => {
+    if (url !== 'https://example.invalid/openrouter/chat/completions') return originalFetch3(url, init);
+    capturedProfileCalls.push({ url, authorization: init.headers.authorization });
+    return {
+      ok: true,
+      json: async () => ({ choices: [{ message: { role: 'assistant', content: 'from openrouter' } }] }),
+      text: async () => '',
+    };
+  };
+  try {
+    const profileChat = await chats3.createChat(userId3, {});
+    // title set away from the default so the auto-titling call (also routed through turnLlm) doesn't
+    // fire and muddy capturedProfileCalls — that behavior is already covered in Part 5 above.
+    await chats3.updateChat(userId3, profileChat.chatId, { params: { profile: 'openrouter' }, title: 'Already named' });
+
+    const profileRes = await fetch(`${base3}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth3, 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'which connection is this' }], chat_id: profileChat.chatId }),
+    });
+    const profileBody = await profileRes.json();
+    assert(profileRes.status === 200, "a chat_id whose params name a valid profile still succeeds");
+    assert(
+      capturedProfileCalls.length === 1 && capturedProfileCalls[0].authorization === 'Bearer sk-test-openrouter',
+      "the turn was routed through the chat's overridden profile (openrouter), not the boot-time llm",
+    );
+    assert(
+      profileBody.choices[0].message.content === 'from openrouter',
+      "the reply came back from the overridden connection's own response",
+    );
+    assert(
+      profileBody.model === 'google/gemini-3.5-flash-lite',
+      "the echoed model falls back to the overridden profile's own default model, not the boot-time modelName",
+    );
+
+    const capturedCallsBefore = capturedCalls.length;
+    const unknownProfileChat = await chats3.createChat(userId3, {});
+    await chats3.updateChat(userId3, unknownProfileChat.chatId, {
+      params: { profile: 'not-a-real-profile' },
+      title: 'Already named',
+    });
+    const unknownProfileRes = await fetch(`${base3}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...auth3, 'content-type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: unknownProfileChat.chatId }),
+    });
+    assert(unknownProfileRes.status === 200, 'a chat_id naming an unknown profile still succeeds (falls back, does not fail the turn)');
+    assert(
+      capturedCalls.length === capturedCallsBefore + 1 && capturedProfileCalls.length === 1,
+      'an unknown profile override falls back to the boot-time llm rather than throwing or hitting any provider',
+    );
+  } finally {
+    globalThis.fetch = originalFetch3;
+  }
+
   server3.close();
 }
 
