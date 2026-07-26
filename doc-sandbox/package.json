@@ -1,5 +1,5 @@
 {
-  "name": "@bigbrain/plugin-documents",
+  "name": "doc-sandbox",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -8,13 +8,8 @@
     "build": "tsc",
     "check": "tsc --noEmit"
   },
-  "dependencies": {
-    "@bigbrain/orchestrator": "*",
-    "@mozilla/readability": "^0.6.0",
-    "linkedom": "^0.18.13",
-    "yaml": "^2.4.2"
-  },
   "devDependencies": {
+    "@types/node": "^22.0.0",
     "typescript": "~6.0.2"
   }
 }

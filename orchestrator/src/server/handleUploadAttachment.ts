@@ -34,9 +34,8 @@ import Busboy from 'busboy';
 import { extractAttachmentText } from '../io/attachments/dispatchExtraction.js';
 import { log } from '../io/logger.js';
 
-// Generous for anything in the plain text/code/data track — a rich document or PDF would still be
-// small binary files well under this once those tracks land; this isn't meant to be the ceiling
-// that shapes those.
+// Generous for anything in the plain text/code/data track, and for the rich-document/PDF tracks
+// too — a household-scale docx/PDF is comfortably under this.
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 interface ParsedUpload {
@@ -112,9 +111,6 @@ export async function extractAttachmentUpload(req: IncomingMessage): Promise<{ s
 
   if (result.status === 'unsupported') {
     return { status: 422, body: { error: result.reason } };
-  }
-  if (result.status === 'needs-ocr') {
-    return { status: 422, body: { error: 'this file has no extractable text layer; OCR support is not yet enabled' } };
   }
 
   log.info('extracted chat attachment', {

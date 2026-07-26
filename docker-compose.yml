@@ -1,7 +1,7 @@
 # bigBrain stack — Dockge-managed, alongside the other stacks under /opt/stacks.
 # Services land in build order:
 #   Phase 1 — postgres
-#   Phase 4 — orchestrator (this file)
+#   Phase 4 — orchestrator, doc-sandbox (this file)
 #   Phase 4 (external) — open-webui reaches orchestrator over traefik-net by container name;
 #     see stacks/open-webui for that stack's own compose file
 
@@ -23,6 +23,30 @@ services:
     # network. Nothing outside this stack needs direct DB access (principle #7 — clients talk
     # to the orchestrator's API, never the database), and Phase 5 keeps inbound closed anyway.
 
+  # Isolated, internal-only conversion service for untrusted file uploads: docx/odt/rtf/doc via
+  # headless LibreOffice, scanned-PDF OCR via poppler + Tesseract (doc-sandbox/). Kept as a
+  # separate container rather than added to the orchestrator image because it parses
+  # attacker-shaped binary formats with a heavyweight, historically CVE-prone toolchain
+  # (LibreOffice especially) — a crafted upload crashing or resource-exhausting this container
+  # only breaks file uploads, not the same process holding the Postgres pool, the field-encryption
+  # key, every provider credential, and every household member's live session. LibreOffice and
+  # Alpine (the orchestrator image's base) are also a poor pairing (musl-libc issues), so this runs
+  # on Debian slim instead rather than forcing that tradeoff onto the main image.
+  #
+  # `default` network only — no `traefik-net`, no published port, reachable only by container name
+  # from `orchestrator`, the same internal-only shape as `postgres`. mem_limit/pids_limit bound
+  # what a single malicious conversion can do to the host regardless of any one binary's own
+  # timeout (doc-sandbox/src/convertOffice.ts and ocrPdf.ts already bound wall-clock time per call).
+  doc-sandbox:
+    build:
+      context: ./doc-sandbox
+    container_name: bigbrain-doc-sandbox
+    restart: unless-stopped
+    mem_limit: 1g
+    pids_limit: 256
+    networks:
+      - default
+
   orchestrator:
     build:
       context: .
@@ -31,6 +55,7 @@ services:
     restart: unless-stopped
     depends_on:
       - postgres
+      - doc-sandbox
     environment:
       BIGBRAIN_PG_HOST: postgres
       BIGBRAIN_PG_PORT: ${BIGBRAIN_PG_PORT:-5432}
@@ -61,6 +86,10 @@ services:
       # src/gitRepo.ts), on the named volume below so it survives an image rebuild. No remote, no
       # offsite backup yet — a known, deliberately unaddressed gap; see §6.6's note on it.
       BIGBRAIN_DOCUMENTS_DIR: /app/content
+      # Hardcoded internal wiring an operator never edits, same category as BIGBRAIN_PG_HOST above
+      # — not a bb_principles.md §12/§13 secret-or-setting decision, just how this container
+      # reaches its sibling by compose-internal DNS name.
+      BIGBRAIN_DOC_SANDBOX_URL: http://doc-sandbox:8788
     ports:
       # Loopback-only fallback for the frontend/Settings tab (frontend/, adminServer.ts) via
       # `ssh -L 8787:localhost:8787 <user>@<host>` then http://localhost:8787/ — kept alongside the

@@ -19,7 +19,8 @@
     "./logger": "./dist/io/logger.js",
     "./http-retry": "./dist/io/httpRetry.js",
     "./fetch-untrusted": "./dist/io/fetchUntrusted.js",
-    "./pgvector": "./dist/util/pgvector.js"
+    "./pgvector": "./dist/util/pgvector.js",
+    "./html-to-markdown": "./dist/util/htmlToMarkdown.js"
   },
   "scripts": {
     "build": "tsc",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",
+    "@types/turndown": "^5.0.5",
     "typescript": "~6.0.2"
   },
   "dependencies": {
@@ -35,6 +37,7 @@
     "busboy": "^1.6.0",
     "jose": "^6.0.0",
     "pdfjs-dist": "^6.1.200",
-    "pg": "^8.22.0"
+    "pg": "^8.22.0",
+    "turndown": "^7.2.4"
   }
 }

@@ -10,8 +10,12 @@
  * Firefox's own reader view uses — then `turndown` converts what's left to real Markdown:
  * headings, links, lists, bold/italic survive, instead of htmlToText's flattened plain text.
  * `linkedom` supplies the DOM Readability needs without pulling in jsdom's much heavier footprint.
+ * The actual HTML->Markdown conversion (Turndown config + heading normalization) now lives in
+ * @bigbrain/orchestrator/html-to-markdown, shared with the rich-document attachment track
+ * (docx/odt/rtf, converted via a sandboxed headless-LibreOffice step that also emits HTML) — this
+ * file keeps only what's specific to a *web page*: boilerplate stripping and metadata extraction.
  *
- * Three passes happen before/around Readability, in a specific order:
+ * Two passes happen before/around Readability, in a specific order:
  *   1. extractMetadata reads whatever structured source info the page publishes (Schema.org
  *      JSON-LD, OpenGraph, a plain <meta name="author">) plus Readability's own byline/siteName/
  *      publishedTime as a last-resort fallback — deterministic sources first, matching the same
@@ -23,11 +27,6 @@
  *      this pass specifically, but running it before keeps both DOM passes together). Fixes the
  *      previously-known limitation where a clipped page's relative links/images passed through
  *      unresolved and rendered broken once the page's own base URL was gone.
- *   3. normalizeHeadings runs on Turndown's output, after conversion. Sites often misuse heading
- *      levels for visual styling rather than real nesting; DocumentsView.tsx renders a document's
- *      title as its own <h2>, so body headings are remapped to start at H3 (nesting under the
- *      title) and compressed with no gaps, so every clip gets a consistent, sane outline instead
- *      of whatever a given site's CSS-driven markup happened to produce.
  *
  * @api-declaration
  * htmlToMarkdown(html, url) — throws if Readability finds no extractable article content
@@ -39,9 +38,9 @@
  *     external_io:     []
  */
 
+import { convertHtmlToMarkdown } from '@bigbrain/orchestrator/html-to-markdown';
 import { parseHTML } from 'linkedom';
 import { Readability } from '@mozilla/readability';
-import TurndownService from 'turndown';
 
 export interface ClippedDocument {
   title: string;
@@ -51,8 +50,6 @@ export interface ClippedDocument {
   author: string | null;
   publishedAt: string | null;
 }
-
-const turndown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
 
 interface ExtractedMetadata {
   siteName: string | null;
@@ -117,47 +114,6 @@ function resolveRelativeUrls(document: Document, baseUrl: string): void {
   }
 }
 
-const FENCE_RE = /^(```|~~~)/;
-const HEADING_RE = /^(#{1,6})(\s+.*)$/;
-
-/** Remaps whatever heading levels a site actually used so the shallowest one becomes H3 (body
- *  content nests under DocumentsView's own <h2> title) and deeper levels compress with no gaps.
- *  Skips lines inside fenced code blocks so a code comment starting with "#" is never touched. */
-function normalizeHeadings(markdown: string): string {
-  const lines = markdown.split('\n');
-  const levelsUsed = new Set<number>();
-  let inFence = false;
-
-  for (const line of lines) {
-    if (FENCE_RE.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    const match = HEADING_RE.exec(line);
-    if (match) levelsUsed.add(match[1]!.length);
-  }
-  if (levelsUsed.size === 0) return markdown;
-
-  const sorted = Array.from(levelsUsed).sort((a, b) => a - b);
-  const remap = new Map<number, number>(sorted.map((level, i) => [level, Math.min(i + 3, 6)]));
-
-  inFence = false;
-  return lines
-    .map((line) => {
-      if (FENCE_RE.test(line)) {
-        inFence = !inFence;
-        return line;
-      }
-      if (inFence) return line;
-      const match = HEADING_RE.exec(line);
-      if (!match) return line;
-      const newLevel = remap.get(match[1]!.length)!;
-      return '#'.repeat(newLevel) + match[2];
-    })
-    .join('\n');
-}
-
 export function htmlToMarkdown(html: string, url: string): ClippedDocument {
   const { document } = parseHTML(html);
   const dom = document as unknown as Document;
@@ -173,7 +129,7 @@ export function htmlToMarkdown(html: string, url: string): ClippedDocument {
 
   return {
     title: article.title?.trim() || url,
-    markdown: normalizeHeadings(turndown.turndown(article.content)),
+    markdown: convertHtmlToMarkdown(article.content),
     excerpt: article.excerpt ?? '',
     siteName: metadata.siteName ?? article.siteName ?? null,
     author: metadata.author ?? article.byline ?? null,

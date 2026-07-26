@@ -152,23 +152,77 @@ function buildMinimalTextPdf(text) {
 
 {
   const result = await extractAttachmentText({
-    filename: 'scanned.pdf',
-    mimeType: 'application/pdf',
-    bytes: buildMinimalTextPdf(''),
-  });
-  assert(result.status === 'needs-ocr', 'a PDF with no text layer (a stand-in for a scanned page) reports needs-ocr, not a false success');
-}
-
-{
-  const result = await extractAttachmentText({
     filename: 'broken.pdf',
     mimeType: 'application/pdf',
     bytes: Buffer.from('not actually a pdf'),
   });
   assert(
     result.status === 'unsupported' && result.reason.includes("couldn't be read"),
-    'a corrupted/non-PDF file with a .pdf extension gets an honest "could not be read" instead of needs-ocr or a crash',
+    'a corrupted/non-PDF file with a .pdf extension gets an honest "could not be read" instead of a crash',
   );
+}
+
+// --- doc-sandbox-backed branches (rich documents, scanned-PDF OCR): mocked fetch, no live
+// container needed to run this script — matching this repo's own convention (verify-server.mjs
+// mocks fetch the same way for Google's OAuth endpoint and OpenRouter's /models). The actual
+// soffice/pdftoppm/tesseract behavior (real filter names, --infilter argv shape, the
+// silently-accepts-garbage-without-it bug, the <style>-leak-into-Markdown bug) was verified by
+// hand against a real built doc-sandbox image and real fixture files — that's not something a
+// mocked unit test can catch, so it isn't pretended to be covered here.
+{
+  const originalFetch = globalThis.fetch;
+  const originalUrl = process.env.BIGBRAIN_DOC_SANDBOX_URL;
+  process.env.BIGBRAIN_DOC_SANDBOX_URL = 'http://fake-doc-sandbox.invalid';
+
+  try {
+    globalThis.fetch = async (url, init) => {
+      const u = new URL(url);
+      if (u.pathname === '/convert-office' && u.searchParams.get('ext') === 'docx') {
+        return new Response('<html><head><style>p{color:red}</style></head><body><h1>Title</h1><p>Body text.</p></body></html>', { status: 200 });
+      }
+      if (u.pathname === '/convert-office' && u.searchParams.get('ext') === 'odt') {
+        return new Response(JSON.stringify({ error: 'conversion failed' }), { status: 422 });
+      }
+      if (u.pathname === '/ocr-pdf') {
+        return new Response('Recognized text from a scanned page.', { status: 200 });
+      }
+      if (u.pathname === '/convert-office' && u.searchParams.get('ext') === 'rtf') {
+        throw new TypeError('fetch failed'); // simulates the sandbox container being unreachable
+      }
+      return originalFetch(url, init);
+    };
+
+    const docxResult = await extractAttachmentText({ filename: 'report.docx', mimeType: 'x', bytes: Buffer.from('fake docx bytes') });
+    assert(docxResult.status === 'ok', 'a docx converts successfully via doc-sandbox');
+    assert(
+      docxResult.markdown === '### Title\n\nBody text.',
+      'the converted HTML runs through the shared Turndown pipeline — headings normalized to H3, <style> text stripped, unfenced as prose',
+    );
+
+    const odtResult = await extractAttachmentText({ filename: 'report.odt', mimeType: 'x', bytes: Buffer.from('fake odt bytes') });
+    assert(
+      odtResult.status === 'unsupported' && odtResult.reason.includes('odt'),
+      'doc-sandbox reporting a conversion failure (a corrupted/password-protected file) becomes an honest unsupported result, not a crash',
+    );
+
+    const rtfResult = await extractAttachmentText({ filename: 'report.rtf', mimeType: 'x', bytes: Buffer.from('fake rtf bytes') });
+    assert(
+      rtfResult.status === 'unsupported',
+      'doc-sandbox being unreachable (network failure) also becomes an honest unsupported result, not an unhandled rejection',
+    );
+
+    const ocrResult = await extractAttachmentText({
+      filename: 'scanned.pdf',
+      mimeType: 'application/pdf',
+      bytes: buildMinimalTextPdf(''),
+    });
+    assert(ocrResult.status === 'ok', 'a PDF with no text layer routes to doc-sandbox OCR and succeeds');
+    assert(ocrResult.markdown === 'Recognized text from a scanned page.', "the OCR'd text is attached unfenced, as prose");
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (originalUrl === undefined) delete process.env.BIGBRAIN_DOC_SANDBOX_URL;
+    else process.env.BIGBRAIN_DOC_SANDBOX_URL = originalUrl;
+  }
 }
 
 {
@@ -194,8 +248,11 @@ function buildMinimalTextPdf(text) {
 }
 
 {
+  // With no BIGBRAIN_DOC_SANDBOX_URL configured (the state everywhere else in this script outside
+  // the mocked-fetch block above), a docx correctly fails honestly rather than hanging or crashing
+  // — docx success/failure behavior *with* a sandbox configured is covered by the mocked block above.
   const result = await extractAttachmentText({ filename: 'report.docx', mimeType: 'application/vnd.openxmlformats', bytes: Buffer.from('PK...') });
-  assert(result.status === 'unsupported', 'a .docx file is explicitly unsupported rather than mis-decoded as garbage text');
+  assert(result.status === 'unsupported', 'a .docx file with no doc-sandbox configured fails honestly rather than hanging or mis-decoding as garbage text');
 }
 
 {
@@ -318,7 +375,7 @@ const docxRes = await fetch(`${base}/v1/attachments/extract`, {
   headers: { authorization: 'Bearer good-key' },
   body: docxForm,
 });
-assert(docxRes.status === 422, 'a .docx upload returns 422 (explicit "not supported yet"), not a 200 with garbage text');
+assert(docxRes.status === 422, 'a .docx upload with no doc-sandbox configured returns 422, not a 200 with garbage text');
 
 // A chat turn that includes `attachments` gets them spliced into what the model sees...
 const chatRes = await fetch(`${base}/v1/chat/completions`, {
