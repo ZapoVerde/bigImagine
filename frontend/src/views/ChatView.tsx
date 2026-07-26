@@ -18,17 +18,9 @@ import {
   uploadAttachment,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type {
-  ChatMessage,
-  ChatParams,
-  ChatSessionRow,
-  Folder,
-  ProfileModelsResult,
-  PromptPreset,
-  StagedAttachment,
-} from '../api/types';
+import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
-import StagingBar from '../components/attachments/StagingBar';
+import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import TodayAgenda from '../components/TodayAgenda';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
@@ -91,7 +83,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
   // the message carrying them is sent (see orchestrator/src/util/attachmentContext.ts).
-  const [stagedFiles, setStagedFiles] = useState<StagedAttachment[]>([]);
+  const [stagedFiles, setStagedFiles] = useState<StagedFile[]>([]);
   const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -188,7 +180,8 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setAttaching(true);
     try {
       const uploaded = await Promise.all(Array.from(fileList).map((file) => uploadAttachment(file, apiKey)));
-      setStagedFiles((prev) => [...prev, ...uploaded]);
+      const withIds: StagedFile[] = uploaded.map((file) => ({ ...file, id: crypto.randomUUID() }));
+      setStagedFiles((prev) => [...prev, ...withIds]);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to attach file');
     } finally {
@@ -196,8 +189,8 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  function removeStagedFile(index: number) {
-    setStagedFiles((prev) => prev.filter((_, i) => i !== index));
+  function removeStagedFile(id: string) {
+    setStagedFiles((prev) => prev.filter((f) => f.id !== id));
   }
 
   async function send() {
@@ -216,7 +209,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     const nextMessages: DisplayMessage[] = [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
     setDraft('');
-    const attachments = stagedFiles;
+    // Strip the client-only id (StagingBar's key/promotion-tracking field) before it goes over
+    // the wire — the server's IncomingAttachment shape doesn't know about it.
+    const attachments = stagedFiles.map(({ id: _id, ...rest }) => rest);
     setStagedFiles([]);
     try {
       let session = activeChat;
@@ -406,7 +401,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {sending && <div className="chat-bubble assistant pending">…</div>}
         </div>
 
-        <StagingBar attachments={stagedFiles} onRemove={removeStagedFile} />
+        <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
 
         <form
           className="chat-input"
