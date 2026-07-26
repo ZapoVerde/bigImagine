@@ -32,6 +32,16 @@ function displayItem(ing: RecipeIngredient | ScaledIngredient): string {
   return ing.modifier ? `${ing.item}, ${ing.modifier}` : ing.item;
 }
 
+// get_recipe's detail.baseServings is a snapshot from whenever it was fetched -- but scale_recipe
+// (fired alongside it, same load) can complete its own lazy-structuring backfill a moment later
+// and persist a base_servings get_recipe never saw (e.g. a freshly-imported recipe whose eager
+// structuring attempt failed, then self-healed via scale_recipe's own retry). Preferring scaled's
+// fresher value here means the scale control doesn't stay hidden until the next navigation/refresh.
+function effectiveBaseServings(detail: RecipeDetailResult | null, scaled: ScaleRecipeResult | null): number | null {
+  if (scaled?.found && scaled.scaled) return scaled.baseServings;
+  return detail?.found ? detail.baseServings : null;
+}
+
 // Detail/import half of the recipes master-detail split — browsing and tag filtering live in the
 // sidebar's RecipesBrowser now.
 export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe, onChanged }: RecipesViewProps) {
@@ -129,8 +139,9 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
   }, [targetServingsInput]);
 
   function resetScale() {
-    if (!detail?.found || detail.baseServings === null) return;
-    setTargetServingsInput(String(detail.baseServings));
+    const baseServings = effectiveBaseServings(detail, scaled);
+    if (baseServings === null) return;
+    setTargetServingsInput(String(baseServings));
   }
 
   const importForm = (
@@ -180,7 +191,7 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
             ))}
           </div>
 
-          {detail.baseServings !== null && (
+          {effectiveBaseServings(detail, scaled) !== null && (
             <div className="recipe-scale">
               <label>
                 Scale to
@@ -198,7 +209,7 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
               {scaling && <span className="status-text">scaling…</span>}
               {scaled?.found && scaled.scaled && scaled.targetServings !== scaled.baseServings && (
                 <button onClick={resetScale} disabled={scaling}>
-                  Reset to original ({detail.baseServings})
+                  Reset to original ({effectiveBaseServings(detail, scaled)})
                 </button>
               )}
             </div>
