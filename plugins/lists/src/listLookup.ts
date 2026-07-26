@@ -11,6 +11,8 @@
  *
  * @api-declaration
  * findOrCreateList(db, userId, name, tags?) — returns the existing or newly-created list_id
+ * findListByName(db, userId, name) — the read-only half of the same lookup, for callers (like
+ *   delete_list) that must never create a list that doesn't already exist
  *
  * @contract
  *   assertions:
@@ -21,18 +23,23 @@
 
 import type { DbSession } from '@bigbrain/orchestrator/postgres';
 
+export async function findListByName(db: DbSession, userId: string, name: string): Promise<{ listId: string } | undefined> {
+  const existing = await db.query<{ list_id: string }>(
+    `select list_id from lists where user_id = $1 and lower(name) = lower($2) limit 1`,
+    [userId, name],
+  );
+  return existing[0] ? { listId: existing[0].list_id } : undefined;
+}
+
 export async function findOrCreateList(
   db: DbSession,
   userId: string,
   name: string,
   tags: string[] = [],
 ): Promise<{ listId: string; created: boolean }> {
-  const existing = await db.query<{ list_id: string }>(
-    `select list_id from lists where user_id = $1 and lower(name) = lower($2) limit 1`,
-    [userId, name],
-  );
-  if (existing[0]) {
-    return { listId: existing[0].list_id, created: false };
+  const existing = await findListByName(db, userId, name);
+  if (existing) {
+    return { listId: existing.listId, created: false };
   }
 
   const inserted = await db.query<{ list_id: string }>(

@@ -40,6 +40,8 @@
  *   and BIGBRAIN_NOTION_OWNER_USER_ID are all set
  * NotionClient.upsertListItemPage({ pageId?, itemName, listName, done, completedAt }) — creates a
  *   page if pageId is omitted, otherwise updates the existing one
+ * NotionClient.archivePage(pageId) — archives (Notion's equivalent of deleting) a page; used when
+ *   the list_items row it mirrors is deleted, so a removed todo doesn't linger in Notion forever
  * NotionClient.queryListItemsDataSource() — every page currently in the Lists data source
  *
  * @contract
@@ -75,6 +77,7 @@ export interface NotionClient {
   readonly listsDataSourceId: string;
   readonly ownerUserId: string;
   upsertListItemPage(args: UpsertListItemPageArgs): Promise<{ pageId: string }>;
+  archivePage(pageId: string): Promise<void>;
   queryListItemsDataSource(): Promise<NotionListItemPage[]>;
 }
 
@@ -157,6 +160,19 @@ function createNotionClientImpl(config: NotionConfig): NotionClient {
 
       const payload = (await response.json()) as { id: string };
       return { pageId: payload.id };
+    },
+
+    async archivePage(pageId: string): Promise<void> {
+      const response = await throttledFetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ archived: true }),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Notion API error ${response.status} archiving page: ${errorBody}`);
+      }
     },
 
     async queryListItemsDataSource(): Promise<NotionListItemPage[]> {

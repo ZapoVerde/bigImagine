@@ -17,8 +17,8 @@
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [import_recipe, create_recipe, get_recipes, get_recipe,
- *   update_recipe, add_meal_plan_entry, get_meal_plan, generate_shopping_list_from_meal_plan,
- *   scale_recipe]
+ *   update_recipe, delete_recipe, add_meal_plan_entry, get_meal_plan,
+ *   generate_shopping_list_from_meal_plan, scale_recipe]
  *
  * @contract
  *   assertions:
@@ -34,6 +34,7 @@ import { createCreateRecipeTool } from './createRecipeTool.js';
 import { createGetRecipesTool } from './getRecipesTool.js';
 import { createGetRecipeTool } from './getRecipeTool.js';
 import { createUpdateRecipeTool } from './updateRecipeTool.js';
+import { createDeleteRecipeTool } from './deleteRecipeTool.js';
 import { createAddMealPlanEntryTool } from './addMealPlanEntryTool.js';
 import { createGetMealPlanTool } from './getMealPlanTool.js';
 import { createGenerateShoppingListFromMealPlanTool } from './shoppingListFromMealPlanTool.js';
@@ -52,6 +53,7 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createGetRecipesTool(),
     createGetRecipeTool(),
     createUpdateRecipeTool(),
+    createDeleteRecipeTool(),
     createAddMealPlanEntryTool(),
     createGetMealPlanTool(),
     createGenerateShoppingListFromMealPlanTool(deps.llm, deps.notion),

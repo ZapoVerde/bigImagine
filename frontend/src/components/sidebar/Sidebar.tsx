@@ -13,6 +13,7 @@ interface SidebarProps {
 
   selectedListName: string | null;
   onSelectList: (name: string) => void;
+  onDeselectList: () => void;
   listsRefreshKey: number;
 
   selectedNoteId: string | null;
@@ -22,6 +23,7 @@ interface SidebarProps {
 
   selectedRecipeName: string | null;
   onSelectRecipe: (mealName: string) => void;
+  onDeselectRecipe: () => void;
   recipesRefreshKey: number;
 }
 
@@ -60,6 +62,7 @@ export default function Sidebar(props: SidebarProps) {
               apiKey={props.apiKey}
               selectedListName={props.selectedListName}
               onSelect={props.onSelectList}
+              onDeselect={props.onDeselectList}
               refreshKey={props.listsRefreshKey}
             />
           )}
@@ -77,6 +80,7 @@ export default function Sidebar(props: SidebarProps) {
               apiKey={props.apiKey}
               selectedRecipeName={props.selectedRecipeName}
               onSelect={props.onSelectRecipe}
+              onDeselect={props.onDeselectRecipe}
               refreshKey={props.recipesRefreshKey}
             />
           )}

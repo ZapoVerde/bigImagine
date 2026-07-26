@@ -22,6 +22,9 @@
  *
  * @api-declaration
  * syncListItemToNotion(db, notion, userId, item) — fire-and-forget-safe; never throws
+ * cleanupListItemNotionPage(db, notion, userId, itemId) — archives the mirrored Notion page (if
+ *   any) and drops its notion_sync_map row; same never-throw contract, called before a list_items
+ *   row is deleted so Notion never keeps a "living" copy of a fact Postgres no longer has
  *
  * @contract
  *   assertions:
@@ -82,5 +85,27 @@ export async function syncListItemToNotion(
     }
   } catch (err) {
     log.error(`Notion sync failed for list_items row ${item.itemId} (Postgres write already succeeded, unaffected)`, err);
+  }
+}
+
+export async function cleanupListItemNotionPage(
+  db: DbSession,
+  notion: NotionClient | undefined,
+  userId: string,
+  itemId: string,
+): Promise<void> {
+  if (!notion || userId !== notion.ownerUserId) return;
+
+  try {
+    const existing = await db.query<{ notion_page_id: string }>(
+      `select notion_page_id from notion_sync_map where source_table = $1 and source_row_id = $2`,
+      [SOURCE_TABLE, itemId],
+    );
+    if (!existing[0]) return;
+
+    await notion.archivePage(existing[0].notion_page_id);
+    await db.query(`delete from notion_sync_map where source_table = $1 and source_row_id = $2`, [SOURCE_TABLE, itemId]);
+  } catch (err) {
+    log.error(`Notion cleanup failed for list_items row ${itemId} (Postgres delete proceeds regardless)`, err);
   }
 }

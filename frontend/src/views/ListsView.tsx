@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
-import type { AddListItemResult, CompleteListItemResult, CreateCalendarEventResult, ListItem, ListItemPriority, UpdateListItemResult } from '../api/types';
+import type {
+  AddListItemResult,
+  CompleteListItemResult,
+  CreateCalendarEventResult,
+  DeleteListItemResult,
+  ListItem,
+  ListItemPriority,
+  UpdateListItemResult,
+} from '../api/types';
 import './ListsView.css';
 
 const PRIORITIES: ListItemPriority[] = ['P1', 'P2', 'P3'];
@@ -124,6 +132,16 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
     }
   }
 
+  async function removeItem(item: ListItem) {
+    if (!window.confirm(`Delete "${item.itemName}"?`)) return;
+    try {
+      await callTool<DeleteListItemResult>('delete_list_item', { item_id: item.itemId }, apiKey);
+      await reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to delete item');
+    }
+  }
+
   async function completeItem(item: ListItem) {
     try {
       await callTool<CompleteListItemResult>(
@@ -184,6 +202,9 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
                         )}
                         {item.dueAt && <span className={`due-badge${overdue ? ' overdue' : ''}`}>due {toDateInputValue(item.dueAt)}</span>}
                       </label>
+                      <button type="button" className="sidebar-row-delete" title="Delete item" onClick={() => removeItem(item)}>
+                        &times;
+                      </button>
                       {item.status === 'pending' && (
                         <div className="item-controls">
                           <select

@@ -154,6 +154,38 @@ function createFakePool() {
             if (match) match.synced = true;
             return { rows: [] };
           }
+          if (sql.startsWith('delete from notion_sync_map')) {
+            const [sourceTable, sourceRowId] = params;
+            const idx = syncMap.findIndex((m) => m.source_table === sourceTable && m.source_row_id === sourceRowId);
+            if (idx !== -1) syncMap.splice(idx, 1);
+            return { rows: [] };
+          }
+          if (sql.startsWith('delete from list_items where item_id')) {
+            const [itemId, userId] = params;
+            const idx = items.findIndex((it) => it.item_id === itemId && it.user_id === userId);
+            if (idx === -1) return { rows: [] };
+            const [removed] = items.splice(idx, 1);
+            return { rows: [{ item_id: removed.item_id }] };
+          }
+          if (sql.includes('select item_id from list_items where list_id')) {
+            const [listId, userId] = params;
+            const rows = items.filter((it) => it.list_id === listId && it.user_id === userId).map((it) => ({ item_id: it.item_id }));
+            return { rows };
+          }
+          if (sql.startsWith('delete from list_items where list_id')) {
+            const [listId, userId] = params;
+            for (let i = items.length - 1; i >= 0; i--) {
+              if (items[i].list_id === listId && items[i].user_id === userId) items.splice(i, 1);
+            }
+            return { rows: [] };
+          }
+          if (sql.startsWith('delete from lists where list_id')) {
+            const [listId, userId] = params;
+            const idx = lists.findIndex((l) => l.list_id === listId && l.user_id === userId);
+            if (idx === -1) return { rows: [] };
+            const [removed] = lists.splice(idx, 1);
+            return { rows: [{ list_id: removed.list_id, name: removed.name }] };
+          }
 
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -177,6 +209,12 @@ function createFakeNotionClient({ shouldThrow = false, ownerUserId = OWNER_USER_
       if (shouldThrow) throw new Error('simulated Notion API failure');
       return { pageId: args.pageId ?? `notion-page-${++pageCounter}` };
     },
+    archivedPageIds: [],
+    async archivePage(pageId) {
+      calls.push({ archivePage: pageId });
+      if (shouldThrow) throw new Error('simulated Notion API failure');
+      this.archivedPageIds.push(pageId);
+    },
   };
 }
 
@@ -187,10 +225,19 @@ assert(
 
 const notion = createFakeNotionClient();
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion });
-assert(pluginTools.length === 6, 'registerTools returns exactly six tools');
+assert(pluginTools.length === 8, 'registerTools returns exactly eight tools');
 
 const registry = createToolRegistry(pluginTools);
-for (const name of ['create_list', 'add_list_item', 'complete_list_item', 'get_list_items', 'update_list_item', 'set_list_section_order']) {
+for (const name of [
+  'create_list',
+  'add_list_item',
+  'complete_list_item',
+  'get_list_items',
+  'update_list_item',
+  'set_list_section_order',
+  'delete_list_item',
+  'delete_list',
+]) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -334,6 +381,52 @@ try {
   assert(result.itemId !== undefined, "add_list_item still succeeds for a non-owner user (Postgres write is unaffected)");
   assert(nonOwnerNotion.calls.length === 0, "a non-owner user's add_list_item never calls the Notion API at all");
   assert(nonOwnerPool.syncMap.length === 0, 'no notion_sync_map row is created for a non-owner user');
+}
+
+// --- delete_list_item and delete_list, including Notion cleanup and user-scoping ---
+{
+  const delNotion = createFakeNotionClient();
+  const delPool = createFakePool();
+  const delDb = createPostgresClient(delPool);
+  const delTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: delNotion });
+  const delRegistry = createToolRegistry(delTools);
+  const delUserId = OWNER_USER_ID;
+  const withDelUser = (fn) => delDb.withUserScope(delUserId, (session) => fn({ userId: delUserId, db: session }));
+
+  const milk = await withDelUser((ctx) => delRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'milk' }, ctx));
+  const eggs = await withDelUser((ctx) => delRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'eggs' }, ctx));
+  assert(delPool.syncMap.length === 2, 'both new items were synced to Notion, minting two sync-map rows');
+  const milkPageId = delPool.syncMap.find((m) => m.source_row_id === milk.itemId).notion_page_id;
+
+  const deletedMilk = await withDelUser((ctx) => delRegistry.get('delete_list_item').handler({ item_id: milk.itemId }, ctx));
+  assert(deletedMilk.deleted === true, 'delete_list_item deletes an existing item');
+  assert(delPool.items.find((i) => i.item_id === milk.itemId) === undefined, 'the deleted item is gone from list_items');
+  assert(delPool.syncMap.find((m) => m.source_row_id === milk.itemId) === undefined, 'the deleted item\'s notion_sync_map row is gone too');
+  assert(delNotion.archivedPageIds.includes(milkPageId), 'the deleted item\'s Notion page was archived');
+
+  const deletedMissing = await withDelUser((ctx) => delRegistry.get('delete_list_item').handler({ item_id: 'no-such-item' }, ctx));
+  assert(deletedMissing.deleted === false, 'delete_list_item on a nonexistent id returns deleted: false rather than throwing');
+
+  const otherUserId = '55555555-5555-5555-5555-555555555555';
+  const deletedWrongUser = await delDb.withUserScope(otherUserId, (session) =>
+    delRegistry.get('delete_list_item').handler({ item_id: eggs.itemId }, { userId: otherUserId, db: session }),
+  );
+  assert(deletedWrongUser.deleted === false, 'delete_list_item is user-scoped: another user cannot delete this item');
+  assert(delPool.items.find((i) => i.item_id === eggs.itemId) !== undefined, 'the item survives a wrong-user delete attempt');
+
+  const deletedUnknownList = await withDelUser((ctx) => delRegistry.get('delete_list').handler({ list_name: 'Nonexistent List' }, ctx));
+  assert(
+    deletedUnknownList.deleted === false && typeof deletedUnknownList.reason === 'string',
+    'delete_list on an unknown name returns {deleted:false, reason} rather than throwing',
+  );
+
+  const eggsPageId = delPool.syncMap.find((m) => m.source_row_id === eggs.itemId).notion_page_id;
+  const deletedList = await withDelUser((ctx) => delRegistry.get('delete_list').handler({ list_name: 'grocery list' }, ctx));
+  assert(deletedList.deleted === true && deletedList.itemsDeleted === 1, 'delete_list (case-insensitive) removes the list and reports its one remaining item');
+  assert(delPool.lists.length === 0, 'the list row itself is gone');
+  assert(delPool.items.length === 0, 'no items remain after delete_list');
+  assert(delPool.syncMap.length === 0, 'delete_list cleaned up every item\'s notion_sync_map row');
+  assert(delNotion.archivedPageIds.includes(eggsPageId), 'delete_list archived the remaining item\'s Notion page too');
 }
 
 function createFakeLlm(sectionFor) {

@@ -85,6 +85,7 @@ export default function App() {
         onOpenChat={openChat}
         selectedListName={selectedListName}
         onSelectList={setSelectedListName}
+        onDeselectList={() => setSelectedListName(null)}
         listsRefreshKey={listsRefreshKey}
         selectedNoteId={selectedNoteId}
         onSelectNote={setSelectedNoteId}
@@ -92,6 +93,7 @@ export default function App() {
         notesRefreshKey={notesRefreshKey}
         selectedRecipeName={selectedRecipeName}
         onSelectRecipe={setSelectedRecipeName}
+        onDeselectRecipe={() => setSelectedRecipeName(null)}
         recipesRefreshKey={recipesRefreshKey}
       />
       <div className="app-main">

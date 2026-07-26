@@ -51,6 +51,16 @@ export interface CreateListResult {
   created: boolean;
 }
 
+// plugins/lists/src/deleteListItemTool.ts
+export interface DeleteListItemResult {
+  deleted: boolean;
+}
+
+// plugins/lists/src/deleteListTool.ts
+export type DeleteListResult =
+  | { deleted: false; reason: string }
+  | { deleted: true; listId: string; name: string; itemsDeleted: number };
+
 // plugins/recipes/src/recipeIngredientSchema.ts
 export interface RecipeIngredient {
   raw: string;
@@ -107,6 +117,12 @@ export type ScaleRecipeResult =
       targetServings: number;
       ingredients: ScaledIngredient[];
     };
+
+// plugins/recipes/src/deleteRecipeTool.ts
+export interface DeleteRecipeResult {
+  deleted: boolean;
+  mealName?: string;
+}
 
 // plugins/recipes/src/importRecipeTool.ts
 export interface ImportRecipeResult {

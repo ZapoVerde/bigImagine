@@ -21,6 +21,7 @@ function assert(cond, message) {
 function createFakePool() {
   const recipesMeals = [];
   const mealPlanEntries = [];
+  const shoppingLogs = [];
   const lists = [];
   const listItems = [];
   const syncMap = [];
@@ -32,6 +33,7 @@ function createFakePool() {
   return {
     recipesMeals,
     mealPlanEntries,
+    shoppingLogs,
     lists,
     listItems,
     syncMap,
@@ -54,9 +56,23 @@ function createFakePool() {
               prep_time: prepTime,
               cook_time: cookTime,
               servings,
+              base_servings: null,
               source_url: sourceUrl,
             });
             return { rows: [{ recipe_id }] };
+          }
+
+          // ensureStructuredIngredients.ts / structureNewRecipeBestEffort's persistence call —
+          // checked before the generic 'update recipes_meals set' branch below, which it would
+          // otherwise also match (same prefix).
+          if (sql === 'update recipes_meals set ingredients = $1, base_servings = $2 where recipe_id = $3') {
+            const [ingredients, baseServings, recipeId] = params;
+            const recipe = recipesMeals.find((r) => r.recipe_id === recipeId);
+            if (recipe) {
+              recipe.ingredients = JSON.parse(ingredients);
+              recipe.base_servings = baseServings;
+            }
+            return { rows: [] };
           }
 
           if (sql.startsWith('update recipes_meals set')) {
@@ -95,12 +111,22 @@ function createFakePool() {
               .sort((a, b) => a.meal_name.localeCompare(b.meal_name));
             return { rows };
           }
-          if (sql.startsWith('select recipe_id, meal_name, tags, prep_time, cook_time, servings from recipes_meals')) {
+          if (sql.startsWith('select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings from recipes_meals')) {
             const [userId] = params;
             return { rows: recipesMeals.filter((r) => r.user_id === userId).sort((a, b) => a.meal_name.localeCompare(b.meal_name)) };
           }
 
           if (sql.includes('ingredients, instructions, tags')) {
+            const [userId, likePattern, exact] = params;
+            const needle = likePattern.replace(/%/g, '').toLowerCase();
+            const match = recipesMeals
+              .filter((r) => r.user_id === userId && r.meal_name.toLowerCase().includes(needle))
+              .sort((a, b) => (a.meal_name.toLowerCase() === exact.toLowerCase() ? -1 : 1))[0];
+            return { rows: match ? [match] : [] };
+          }
+
+          // scale_recipe's narrower select (no instructions/tags)
+          if (sql.startsWith('select recipe_id, meal_name, ingredients, servings, base_servings from recipes_meals')) {
             const [userId, likePattern, exact] = params;
             const needle = likePattern.replace(/%/g, '').toLowerCase();
             const match = recipesMeals
@@ -126,19 +152,23 @@ function createFakePool() {
             return { rows: match ? [{ plan_entry_id: match.plan_entry_id }] : [] };
           }
           if (sql.startsWith('update meal_plan_entries')) {
-            const [planEntryId, recipeId] = params;
+            const [planEntryId, recipeId, targetServings] = params;
             const entry = mealPlanEntries.find((e) => e.plan_entry_id === planEntryId);
-            if (entry) entry.recipe_id = recipeId;
+            if (entry) {
+              entry.recipe_id = recipeId;
+              entry.target_servings = targetServings ?? null;
+            }
             return { rows: [] };
           }
           if (sql.startsWith('insert into meal_plan_entries')) {
-            const [userId, recipeId, plannedDate, mealLabel] = params;
+            const [userId, recipeId, plannedDate, mealLabel, targetServings] = params;
             mealPlanEntries.push({
               plan_entry_id: `plan-${++planEntryCounter}`,
               user_id: userId,
               recipe_id: recipeId,
               planned_date: plannedDate,
               meal_label: mealLabel ?? null,
+              target_servings: targetServings ?? null,
             });
             return { rows: [] };
           }
@@ -149,17 +179,53 @@ function createFakePool() {
               .filter((e) => e.user_id === userId && e.planned_date >= start && e.planned_date <= end)
               .map((e) => {
                 const recipe = recipesMeals.find((r) => r.recipe_id === e.recipe_id);
-                return { planned_date: e.planned_date, meal_label: e.meal_label, meal_name: recipe.meal_name, recipe_id: recipe.recipe_id };
+                return {
+                  planned_date: e.planned_date,
+                  meal_label: e.meal_label,
+                  meal_name: recipe.meal_name,
+                  recipe_id: recipe.recipe_id,
+                  target_servings: e.target_servings ?? null,
+                };
               })
               .sort((a, b) => a.planned_date.localeCompare(b.planned_date));
             return { rows };
           }
 
-          if (sql.startsWith('select rm.ingredients')) {
+          if (sql.startsWith('select planned_date from meal_plan_entries')) {
+            const [recipeId, userId] = params;
+            const rows = mealPlanEntries
+              .filter((e) => e.recipe_id === recipeId && e.user_id === userId)
+              .map((e) => ({ planned_date: e.planned_date }));
+            return { rows };
+          }
+          if (sql.startsWith('select count(*)::text as count from shopping_logs')) {
+            const [recipeId, userId] = params;
+            const count = shoppingLogs.filter((l) => l.recipe_id === recipeId && l.user_id === userId).length;
+            return { rows: [{ count: String(count) }] };
+          }
+          if (sql.startsWith('delete from recipes_meals')) {
+            const [recipeId, userId] = params;
+            const idx = recipesMeals.findIndex((r) => r.recipe_id === recipeId && r.user_id === userId);
+            if (idx === -1) return { rows: [] };
+            const [removed] = recipesMeals.splice(idx, 1);
+            return { rows: [{ recipe_id: removed.recipe_id, meal_name: removed.meal_name }] };
+          }
+
+          if (sql.startsWith('select rm.recipe_id, rm.meal_name, rm.ingredients')) {
             const [userId, start, end] = params;
             const rows = mealPlanEntries
               .filter((e) => e.user_id === userId && e.planned_date >= start && e.planned_date <= end)
-              .map((e) => ({ ingredients: recipesMeals.find((r) => r.recipe_id === e.recipe_id).ingredients }));
+              .map((e) => {
+                const recipe = recipesMeals.find((r) => r.recipe_id === e.recipe_id);
+                return {
+                  recipe_id: recipe.recipe_id,
+                  meal_name: recipe.meal_name,
+                  ingredients: recipe.ingredients,
+                  servings: recipe.servings,
+                  base_servings: recipe.base_servings ?? null,
+                  target_servings: e.target_servings ?? null,
+                };
+              });
             return { rows };
           }
 
@@ -203,6 +269,28 @@ function createFakePool() {
   };
 }
 
+// A safe, generic response for structureIngredientsWithLlm.ts's forced structure_ingredients call
+// — every ingredient line comes back non-scalable, using the original line text as `item`, so
+// aggregateScaledIngredients.ts still dedupes/names items exactly the way tests written before the
+// structuring feature already expect (e.g. "flour" in, "flour" out). baseServings is a fixed
+// nonzero placeholder: shoppingListFromMealPlanTool.ts's ratio always resolves to 1 in these tests
+// (no meal_plan_entries.target_servings is ever set), so its actual value never affects scaling —
+// it only has to be non-null so the recipe doesn't get skipped as "no discoverable serving count".
+const FAKE_STRUCTURED_BASE_SERVINGS = 4;
+
+function defaultStructureIngredientsResponse(messages) {
+  const content = messages[1].content;
+  const ingredientsSection = content.split('Ingredients:\n')[1] ?? '';
+  const items = ingredientsSection
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => line.replace(/^\d+\.\s*/, ''));
+  return {
+    lines: items.map((item) => ({ amount: null, unit: null, item, scalable: false })),
+    baseServings: FAKE_STRUCTURED_BASE_SERVINGS,
+  };
+}
+
 function createFakeLlm(responder) {
   const calls = [];
   return {
@@ -210,6 +298,16 @@ function createFakeLlm(responder) {
     calls,
     async complete(messages, _tools, options) {
       calls.push({ messages, options });
+      // create_recipe/import_recipe (best-effort, eager) and scale_recipe/shopping-list
+      // (required, lazy) all funnel through this one forced tool — handled generically here so
+      // every test's own `responder` only ever has to answer for extraction/classification, the
+      // calls it actually cares about.
+      if (options.forceTool === 'structure_ingredients') {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [{ id: `call-${calls.length}`, name: 'structure_ingredients', arguments: defaultStructureIngredientsResponse(messages) }],
+        };
+      }
       return { message: { role: 'assistant', content: '' }, toolCalls: [{ id: 'call-1', name: options.forceTool, arguments: responder(messages) }] };
     },
   };
@@ -272,7 +370,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
   }));
   const notion = createFakeNotion();
   const tools = await registerTools({ llm, embeddings: null, cipher: null, notion });
-  assert(tools.length === 8, 'registerTools returns exactly eight tools');
+  assert(tools.length === 10, 'registerTools returns exactly ten tools');
   const registry = createToolRegistry(tools);
   for (const name of [
     'import_recipe',
@@ -280,9 +378,11 @@ const userId = '11111111-1111-1111-1111-111111111111';
     'get_recipes',
     'get_recipe',
     'update_recipe',
+    'delete_recipe',
     'add_meal_plan_entry',
     'get_meal_plan',
     'generate_shopping_list_from_meal_plan',
+    'scale_recipe',
   ]) {
     assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
   }
@@ -290,10 +390,12 @@ const userId = '11111111-1111-1111-1111-111111111111';
   const result = await db.withUserScope(userId, (session) =>
     registry.get('import_recipe').handler({ raw_text: 'broth, noodles, boil it' }, { userId, db: session }),
   );
-  assert(llm.calls.length === 1, 'raw_text import called the LLM extraction path');
+  assert(llm.calls.filter((c) => c.options.forceTool === 'extract_recipe').length === 1, 'raw_text import called the LLM extraction path');
+  assert(llm.calls.some((c) => c.options.forceTool === 'structure_ingredients'), 'the imported recipe was also best-effort structured');
   assert(result.mealName === 'Grandma Soup', 'the LLM-extracted recipe was inserted');
   assert(pool.recipesMeals[0].ingredients.length === 2, 'ingredients were stored as a parsed array');
   assert(pool.recipesMeals[0].source_url === null, 'no source_url is recorded for a raw_text import');
+  assert(typeof pool.recipesMeals[0].base_servings === 'number', 'structuring persisted a base_servings for the newly-imported recipe');
 }
 
 // --- import_recipe: url with real-shaped schema.org/Recipe JSON-LD takes the deterministic path ---
@@ -318,6 +420,10 @@ const userId = '11111111-1111-1111-1111-111111111111';
     assert(stored.tags.includes('Mains') && stored.tags.includes('Mexican') && stored.tags.includes('tacos'), 'category/cuisine/keywords were folded into tags');
     assert(stored.prep_time === '10 min' && stored.cook_time === '20 min', 'ISO 8601 durations were humanized');
     assert(stored.source_url === 'https://example.com/tacos', 'the source URL is recorded');
+    assert(
+      llm.calls.length === 1 && llm.calls[0].options.forceTool === 'structure_ingredients',
+      'the LLM was never asked to extract (deterministic parse succeeded) but was still used for best-effort structuring afterward',
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -340,7 +446,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
     const result = await db.withUserScope(userId, (session) =>
       registry.get('import_recipe').handler({ url: 'https://example.com/soup' }, { userId, db: session }),
     );
-    assert(llm.calls.length === 1, 'a page with no JSON-LD falls back to the LLM path');
+    assert(llm.calls.filter((c) => c.options.forceTool === 'extract_recipe').length === 1, 'a page with no JSON-LD falls back to the LLM path');
+    assert(llm.calls.some((c) => c.options.forceTool === 'structure_ingredients'), 'the fallback-extracted recipe was also best-effort structured');
     assert(result.mealName === "Grandma's Soup", 'the LLM-fallback recipe was inserted');
   } finally {
     globalThis.fetch = originalFetch;
@@ -364,12 +471,13 @@ const userId = '11111111-1111-1111-1111-111111111111';
   }
 }
 
-// --- create_recipe: structured fields inserted directly, no LLM call ---
+// --- create_recipe: structured fields inserted directly (no extraction call), but still
+// best-effort structures ingredients/base_servings afterward, same as import_recipe ---
 {
   const pool = createFakePool();
   const db = createPostgresClient(pool);
   const llm = createFakeLlm(() => {
-    throw new Error('create_recipe must never call the LLM');
+    throw new Error('create_recipe must never call the LLM for extraction — it already has structured fields');
   });
   const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
   const registry = createToolRegistry(tools);
@@ -387,7 +495,10 @@ const userId = '11111111-1111-1111-1111-111111111111';
       { userId, db: session },
     ),
   );
-  assert(llm.calls.length === 0, 'create_recipe never calls the LLM');
+  assert(
+    llm.calls.length === 1 && llm.calls[0].options.forceTool === 'structure_ingredients',
+    'create_recipe never calls the LLM for extraction — only once, best-effort, to structure ingredients',
+  );
   assert(result.mealName === 'Weeknight Stir Fry' && result.ingredientCount === 2, 'create_recipe stores the given fields directly');
   const stored = pool.recipesMeals.find((r) => r.recipe_id === result.recipeId);
   assert(stored.source_url === null, 'create_recipe records no source_url — nothing was imported');
@@ -413,7 +524,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
   const pool = createFakePool();
   const db = createPostgresClient(pool);
   const llm = createFakeLlm(() => {
-    throw new Error('update_recipe must never call the LLM');
+    throw new Error('update_recipe must never call the LLM for extraction/classification');
   });
   const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
   const registry = createToolRegistry(tools);
@@ -424,6 +535,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
   const created = await db.withUserScope(userId, (session) =>
     createTool.handler({ mealName: 'Draft Curry', ingredients: ['curry paste'], instructions: ['Simmer.'], tags: ['Thai'] }, { userId, db: session }),
   );
+  const callsAfterSeedCreate = llm.calls.length; // one best-effort structuring call from create_recipe above
 
   const updated = await db.withUserScope(userId, (session) =>
     updateTool.handler({ recipe_id: created.recipeId, ingredients: ['curry paste', 'coconut milk'] }, { userId, db: session }),
@@ -447,6 +559,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
   } catch {
     assert(true, 'update_recipe rejects a call with no fields to change');
   }
+
+  assert(llm.calls.length === callsAfterSeedCreate, 'update_recipe itself never calls the LLM (only the seed create_recipe call above did)');
 }
 
 // --- get_recipes / get_recipe, and the meal-plan + shopping-list flow, sharing one populated pool ---
@@ -471,6 +585,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
       prep_time: null,
       cook_time: null,
       servings: null,
+      base_servings: null,
       source_url: null,
     });
 
@@ -544,6 +659,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
     prep_time: null,
     cook_time: null,
     servings: null,
+    base_servings: null,
     source_url: null,
   });
   await db.withUserScope(userId, (session) =>
@@ -576,6 +692,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
     prep_time: null,
     cook_time: null,
     servings: null,
+    base_servings: null,
     source_url: null,
   });
   await db.withUserScope(nonOwnerUserId, (session) =>
@@ -613,6 +730,7 @@ const userId = '11111111-1111-1111-1111-111111111111';
     prep_time: null,
     cook_time: null,
     servings: null,
+    base_servings: null,
     source_url: null,
   });
   // Pre-define the target list's section order, same as plugins/lists' set_list_section_order —
@@ -629,9 +747,73 @@ const userId = '11111111-1111-1111-1111-111111111111';
   );
 
   assert(result.itemsAdded.length === 2, 'both ingredients were added to the pre-existing sectioned list');
-  assert(sectionLlm.calls.length === 2, 'each new ingredient triggered exactly one section classification call');
+  const classifyCalls = sectionLlm.calls.filter((c) => c.options.forceTool === 'classify_section');
+  assert(classifyCalls.length === 2, 'each new ingredient triggered exactly one section classification call');
   assert(pool.listItems.find((i) => i.item_name === 'flour').section === 'baking', 'flour was classified into the baking section');
   assert(pool.listItems.find((i) => i.item_name === 'onion').section === 'veggies', 'onion was classified into the veggies section');
+}
+
+// --- delete_recipe: blocks when still planned or logged, succeeds otherwise, is user-scoped ---
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const notion = createFakeNotion();
+  const tools = await registerTools({ llm: createFakeLlm(() => ({})), embeddings: null, cipher: null, notion });
+  const registry = createToolRegistry(tools);
+  const withUser = (fn) => db.withUserScope(userId, (session) => fn({ userId, db: session }));
+  const seedRecipe = (recipeId, mealName) =>
+    pool.recipesMeals.push({
+      recipe_id: recipeId,
+      user_id: userId,
+      meal_name: mealName,
+      ingredients: [],
+      instructions: [],
+      tags: [],
+      prep_time: null,
+      cook_time: null,
+      servings: null,
+      source_url: null,
+    });
+
+  seedRecipe('planned-recipe', 'Planned Dish');
+  pool.mealPlanEntries.push({ plan_entry_id: 'plan-x', user_id: userId, recipe_id: 'planned-recipe', planned_date: '2026-08-05', meal_label: null });
+
+  let plannedError;
+  try {
+    await withUser((ctx) => registry.get('delete_recipe').handler({ recipe_id: 'planned-recipe' }, ctx));
+  } catch (err) {
+    plannedError = err;
+  }
+  assert(plannedError instanceof Error && /meal plan/i.test(plannedError.message), 'delete_recipe throws a descriptive error when the recipe is still planned');
+  assert(pool.recipesMeals.some((r) => r.recipe_id === 'planned-recipe'), 'the recipe still exists after a blocked delete');
+
+  seedRecipe('logged-recipe', 'Logged Dish');
+  pool.shoppingLogs.push({ log_id: 'log-1', user_id: userId, recipe_id: 'logged-recipe', item_name: 'broth', is_staple: false });
+
+  let loggedError;
+  try {
+    await withUser((ctx) => registry.get('delete_recipe').handler({ recipe_id: 'logged-recipe' }, ctx));
+  } catch (err) {
+    loggedError = err;
+  }
+  assert(loggedError instanceof Error && /shopping log/i.test(loggedError.message), 'delete_recipe throws a descriptive error when the recipe is still referenced by a shopping log entry');
+  assert(pool.recipesMeals.some((r) => r.recipe_id === 'logged-recipe'), 'the recipe still exists after being blocked by a shopping log reference');
+
+  seedRecipe('free-recipe', 'Free Dish');
+  const deleted = await withUser((ctx) => registry.get('delete_recipe').handler({ recipe_id: 'free-recipe' }, ctx));
+  assert(deleted.deleted === true && deleted.mealName === 'Free Dish', 'delete_recipe succeeds for a recipe with no meal-plan or shopping-log references');
+  assert(!pool.recipesMeals.some((r) => r.recipe_id === 'free-recipe'), 'the deleted recipe is gone from recipes_meals');
+
+  const missing = await withUser((ctx) => registry.get('delete_recipe').handler({ recipe_id: 'no-such-recipe' }, ctx));
+  assert(missing.deleted === false, 'delete_recipe on a nonexistent id returns deleted: false rather than throwing');
+
+  seedRecipe('someone-elses-recipe', 'Someone Elses Dish');
+  const otherUserId = '99999999-9999-9999-9999-999999999999';
+  const wrongUserResult = await db.withUserScope(otherUserId, (session) =>
+    registry.get('delete_recipe').handler({ recipe_id: 'someone-elses-recipe' }, { userId: otherUserId, db: session }),
+  );
+  assert(wrongUserResult.deleted === false, 'delete_recipe is user-scoped: another user cannot delete this recipe');
+  assert(pool.recipesMeals.some((r) => r.recipe_id === 'someone-elses-recipe'), 'the recipe survives a wrong-user delete attempt');
 }
 
 if (process.exitCode) {
