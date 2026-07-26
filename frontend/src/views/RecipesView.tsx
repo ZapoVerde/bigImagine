@@ -97,10 +97,8 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
     }
   }
 
-  async function applyScale() {
-    if (!selectedRecipeName || scaling) return;
-    const target = Number(targetServingsInput);
-    if (!Number.isFinite(target) || target <= 0) return;
+  async function scaleTo(target: number) {
+    if (!selectedRecipeName) return;
     setScaling(true);
     setError(null);
     try {
@@ -117,23 +115,20 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
     }
   }
 
-  async function resetScale() {
-    if (!detail?.found || detail.baseServings === null || scaling) return;
+  // Scaling is a cheap call — no "Scale" button, it just happens as the input settles. Debounced
+  // so typing "12" doesn't fire a call for "1" and then "12".
+  useEffect(() => {
+    const target = Number(targetServingsInput);
+    if (!Number.isFinite(target) || target <= 0) return;
+    if (scaled?.found && scaled.scaled && scaled.targetServings === target) return;
+    const timeout = setTimeout(() => scaleTo(target), 400);
+    return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetServingsInput]);
+
+  function resetScale() {
+    if (!detail?.found || detail.baseServings === null) return;
     setTargetServingsInput(String(detail.baseServings));
-    setScaling(true);
-    setError(null);
-    try {
-      const result = await callTool<ScaleRecipeResult>(
-        'scale_recipe',
-        { meal_name: detail.mealName, target_servings: detail.baseServings },
-        apiKey,
-      );
-      setScaled(result);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to reset scale');
-    } finally {
-      setScaling(false);
-    }
   }
 
   const importForm = (
@@ -195,9 +190,7 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
                 />
                 servings
               </label>
-              <button onClick={applyScale} disabled={scaling || !targetServingsInput}>
-                Scale
-              </button>
+              {scaling && <span className="status-text">scaling…</span>}
               {scaled?.found && scaled.scaled && scaled.targetServings !== scaled.baseServings && (
                 <button onClick={resetScale} disabled={scaling}>
                   Reset to original ({detail.baseServings})

@@ -82,6 +82,10 @@
   font: inherit;
 }
 
+.recipe-scale .status-text {
+  color: var(--color-text-muted);
+}
+
 .ingredients-heading {
   display: flex;
   align-items: baseline;
