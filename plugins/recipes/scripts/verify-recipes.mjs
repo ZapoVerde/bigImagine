@@ -58,6 +58,8 @@ function createFakePool() {
               servings,
               base_servings: null,
               source_url: sourceUrl,
+              is_favorite: false,
+              ingredient_structure_version: null,
             });
             return { rows: [{ recipe_id }] };
           }
@@ -65,12 +67,13 @@ function createFakePool() {
           // ensureStructuredIngredients.ts / structureNewRecipeBestEffort's persistence call —
           // checked before the generic 'update recipes_meals set' branch below, which it would
           // otherwise also match (same prefix).
-          if (sql === 'update recipes_meals set ingredients = $1, base_servings = $2 where recipe_id = $3') {
-            const [ingredients, baseServings, recipeId] = params;
+          if (sql === 'update recipes_meals set ingredients = $1, base_servings = $2, ingredient_structure_version = $3 where recipe_id = $4') {
+            const [ingredients, baseServings, structureVersion, recipeId] = params;
             const recipe = recipesMeals.find((r) => r.recipe_id === recipeId);
             if (recipe) {
               recipe.ingredients = JSON.parse(ingredients);
               recipe.base_servings = baseServings;
+              recipe.ingredient_structure_version = structureVersion;
             }
             return { rows: [] };
           }
@@ -79,7 +82,7 @@ function createFakePool() {
             const [recipeId, userId, ...rest] = params;
             const recipe = recipesMeals.find((r) => r.recipe_id === recipeId && r.user_id === userId);
             if (!recipe) return { rows: [] };
-            // sets order matches updateRecipeTool.ts: mealName?, ingredients?, instructions?, tags?, prepTime?, cookTime?, servings?
+            // sets order matches updateRecipeTool.ts: mealName?, ingredients?, instructions?, tags?, prepTime?, cookTime?, servings?, isFavorite?, base_servings?
             let i = 0;
             if (sql.includes('meal_name = $')) recipe.meal_name = rest[i++];
             if (sql.includes('ingredients = $')) recipe.ingredients = JSON.parse(rest[i++]);
@@ -88,6 +91,8 @@ function createFakePool() {
             if (sql.includes('prep_time = $')) recipe.prep_time = rest[i++];
             if (sql.includes('cook_time = $')) recipe.cook_time = rest[i++];
             if (sql.includes('servings = $')) recipe.servings = rest[i++];
+            if (sql.includes('is_favorite = $')) recipe.is_favorite = rest[i++];
+            if (sql.includes('base_servings = $')) recipe.base_servings = rest[i++];
             return {
               rows: [
                 {
@@ -99,6 +104,8 @@ function createFakePool() {
                   prep_time: recipe.prep_time,
                   cook_time: recipe.cook_time,
                   servings: recipe.servings,
+                  base_servings: recipe.base_servings,
+                  is_favorite: recipe.is_favorite,
                 },
               ],
             };
@@ -111,7 +118,7 @@ function createFakePool() {
               .sort((a, b) => a.meal_name.localeCompare(b.meal_name));
             return { rows };
           }
-          if (sql.startsWith('select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings from recipes_meals')) {
+          if (sql.startsWith('select recipe_id, meal_name, tags, prep_time, cook_time, servings, base_servings, is_favorite from recipes_meals')) {
             const [userId] = params;
             return { rows: recipesMeals.filter((r) => r.user_id === userId).sort((a, b) => a.meal_name.localeCompare(b.meal_name)) };
           }
@@ -126,7 +133,7 @@ function createFakePool() {
           }
 
           // scale_recipe's narrower select (no instructions/tags)
-          if (sql.startsWith('select recipe_id, meal_name, ingredients, servings, base_servings from recipes_meals')) {
+          if (sql.startsWith('select recipe_id, meal_name, ingredients, servings, base_servings, ingredient_structure_version')) {
             const [userId, likePattern, exact] = params;
             const needle = likePattern.replace(/%/g, '').toLowerCase();
             const match = recipesMeals
@@ -224,6 +231,7 @@ function createFakePool() {
                   servings: recipe.servings,
                   base_servings: recipe.base_servings ?? null,
                   target_servings: e.target_servings ?? null,
+                  ingredient_structure_version: recipe.ingredient_structure_version ?? null,
                 };
               });
             return { rows };
@@ -286,7 +294,7 @@ function defaultStructureIngredientsResponse(messages) {
     .filter(Boolean)
     .map((line) => line.replace(/^\d+\.\s*/, ''));
   return {
-    lines: items.map((item) => ({ amount: null, unit: null, item, scalable: false })),
+    lines: items.map((item) => ({ amount: null, unit: null, item, modifier: null, scalable: false })),
     baseServings: FAKE_STRUCTURED_BASE_SERVINGS,
   };
 }
@@ -587,6 +595,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
       servings: null,
       base_servings: null,
       source_url: null,
+      is_favorite: false,
+      ingredient_structure_version: null,
     });
 
   insertRecipe('Chicken Parmigiana', ['chicken breast', 'flour', 'onion'], ['Italian', 'Mains']);
@@ -661,6 +671,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
     servings: null,
     base_servings: null,
     source_url: null,
+    is_favorite: false,
+    ingredient_structure_version: null,
   });
   await db.withUserScope(userId, (session) =>
     registry.get('add_meal_plan_entry').handler({ meal_name: 'Only Dish', planned_date: '2026-08-01' }, { userId, db: session }),
@@ -694,6 +706,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
     servings: null,
     base_servings: null,
     source_url: null,
+    is_favorite: false,
+    ingredient_structure_version: null,
   });
   await db.withUserScope(nonOwnerUserId, (session) =>
     registry.get('add_meal_plan_entry').handler({ meal_name: 'Non-Owner Dish', planned_date: '2026-08-01' }, { userId: nonOwnerUserId, db: session }),
@@ -732,6 +746,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
     servings: null,
     base_servings: null,
     source_url: null,
+    is_favorite: false,
+    ingredient_structure_version: null,
   });
   // Pre-define the target list's section order, same as plugins/lists' set_list_section_order —
   // duplicated here since this fake pool doesn't share state with that plugin's own tests.
@@ -773,6 +789,8 @@ const userId = '11111111-1111-1111-1111-111111111111';
       cook_time: null,
       servings: null,
       source_url: null,
+      is_favorite: false,
+      ingredient_structure_version: null,
     });
 
   seedRecipe('planned-recipe', 'Planned Dish');
