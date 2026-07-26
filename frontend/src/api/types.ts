@@ -67,6 +67,7 @@ export interface RecipeIngredient {
   amount: number | null;
   unit: string | null;
   item: string;
+  modifier: string | null;
   scalable: boolean;
 }
 

@@ -18,6 +18,18 @@
  * drops, or reorders lines would otherwise silently misattribute amounts to the wrong ingredient,
  * so a length mismatch is rejected the same way a malformed tool call is (throws, doesn't guess).
  *
+ * modifier separates a prep instruction (what to do to the ingredient before using it) from item
+ * (what the ingredient is) — "garlic, peeled and smashed" becomes item "garlic", modifier "peeled
+ * and smashed", not item "garlic, peeled and smashed". The prompt below gives the model a
+ * position-based rule for the one real ambiguity here: a descriptor is part of the product's
+ * identity (stays in item) when it appears *before* the noun or names something bought that way —
+ * "diced tomatoes", "ground beef", "shredded cheese" are all things a store sells under that exact
+ * name. A descriptor is a prep instruction (goes in modifier) when it follows the noun, typically
+ * after a comma — "onion, diced", "butter, softened", "garlic, peeled and smashed" are all
+ * something the cook does, not something printed on a label. modifier, unlike raw, is trusted
+ * as the model wrote it — it's free descriptive text, not something a corrupted value could
+ * misattribute an amount to.
+ *
  * @api-declaration
  * structureIngredients(llm, rawIngredients, rawServings) -> {ingredients, baseServings} — throws
  *   if the model doesn't call structure_ingredients, returns a mismatched-length array, or
@@ -34,7 +46,7 @@ import type { LlmProvider, ToolDefinition } from '@bigbrain/orchestrator/llm-typ
 import { isRecipeIngredient, type RecipeIngredient } from './recipeIngredientSchema.js';
 
 interface StructureIngredientsResult {
-  lines: { amount: number | null; unit: string | null; item: string; scalable: boolean }[];
+  lines: { amount: number | null; unit: string | null; item: string; modifier: string | null; scalable: boolean }[];
   baseServings: number | null;
 }
 
@@ -49,13 +61,14 @@ function isStructureIngredientsResult(value: unknown, expectedLength: number): v
     if (typeof line.item !== 'string' || typeof line.scalable !== 'boolean') return false;
     if (line.amount !== null && typeof line.amount !== 'number') return false;
     if (line.unit !== null && typeof line.unit !== 'string') return false;
+    if (line.modifier !== null && typeof line.modifier !== 'string') return false;
     return (line.amount === null) === (line.scalable === false);
   });
 }
 
 const structureIngredientsTool: ToolDefinition = {
   name: 'structure_ingredients',
-  description: 'Parse each ingredient line into a numeric amount/unit/item, and resolve a single numeric base serving count.',
+  description: 'Parse each ingredient line into a numeric amount/unit/item/modifier, and resolve a single numeric base serving count.',
   parameters: {
     type: 'object',
     properties: {
@@ -67,10 +80,22 @@ const structureIngredientsTool: ToolDefinition = {
           properties: {
             amount: { type: ['number', 'null'], description: 'The numeric quantity, e.g. 2 for "2 cups flour". Null if not cleanly scalable (e.g. "salt to taste").' },
             unit: { type: ['string', 'null'], description: 'The unit, e.g. "cup". Null if there is no unit (e.g. "3 eggs") or amount is null.' },
-            item: { type: 'string', description: 'The ingredient name, without amount/unit, e.g. "flour". If amount is null, the full descriptive text, e.g. "salt to taste".' },
+            item: {
+              type: 'string',
+              description:
+                'The ingredient name only, without amount/unit/modifier, e.g. "garlic" not "garlic, peeled and smashed". If amount is null, the full descriptive text, e.g. "salt to taste". ' +
+                'Keep a descriptor in item when it names the product as sold — "diced tomatoes", "ground beef", "shredded cheese" — since that\'s what you\'d ask for at a store.',
+            },
+            modifier: {
+              type: ['string', 'null'],
+              description:
+                'A prep instruction — what to do to the ingredient before using it — e.g. "peeled and smashed" for "garlic, peeled and smashed", or "diced" for "onion, diced". ' +
+                'This is different from a descriptor that\'s part of the product name (see item) even when it\'s the same word: "1 can diced tomatoes" has no modifier (diced stays in item, ' +
+                'it\'s what the can is labeled), but "1 onion, diced" has modifier "diced" (it\'s an instruction to the cook). Null if there is no separate prep instruction.',
+            },
             scalable: { type: 'boolean', description: 'True iff amount is a real number that should be multiplied when scaling the recipe.' },
           },
-          required: ['amount', 'unit', 'item', 'scalable'],
+          required: ['amount', 'unit', 'item', 'modifier', 'scalable'],
           additionalProperties: false,
         },
       },
@@ -94,9 +119,12 @@ export async function structureIngredients(
       {
         role: 'system',
         content:
-          'Parse each given ingredient line into a numeric amount/unit/item, and resolve the given servings text to a ' +
-          'single representative number. Always answer by calling structure_ingredients, with exactly one lines entry ' +
-          'per input line, in the same order. Never guess a scalable amount that is not actually present in the text.',
+          'Parse each given ingredient line into a numeric amount/unit/item/modifier, and resolve the given servings text ' +
+          'to a single representative number. Always answer by calling structure_ingredients, with exactly one lines ' +
+          'entry per input line, in the same order. Never guess a scalable amount that is not actually present in the ' +
+          'text. Separate a prep instruction (modifier, e.g. "diced", "peeled and smashed") from the ingredient itself ' +
+          '(item) — but keep a descriptor in item when it names the product as commonly sold (e.g. "diced tomatoes", ' +
+          '"ground beef") rather than an instruction to the cook.',
       },
       {
         role: 'user',
@@ -122,6 +150,7 @@ export async function structureIngredients(
     amount: line.amount,
     unit: line.unit,
     item: line.item,
+    modifier: line.modifier,
     scalable: line.scalable,
   }));
 

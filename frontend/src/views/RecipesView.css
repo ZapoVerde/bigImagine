@@ -82,6 +82,16 @@
   font: inherit;
 }
 
+.ingredients-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.ingredients-heading h3 {
+  margin: 0;
+}
+
 .ingredient-amount {
   font-weight: var(--font-weight-semibold);
 }

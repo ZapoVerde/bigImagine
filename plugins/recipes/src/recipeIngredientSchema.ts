@@ -18,15 +18,27 @@
  * can treat the two shapes uniformly without a schema migration or a "structured: boolean" column
  * — the shape of the first element says which kind of row this is.
  *
+ * modifier (added after the initial structuring pass shipped) separates a prep instruction — what
+ * to do to the ingredient before using it — from item, so "garlic, peeled and smashed" doesn't
+ * leave "peeled and smashed" stuck inside item where it reads oddly once amount/unit are pulled
+ * out ("1 head | garlic, peeled and smashed" vs. today's "1 | garlic, peeled and smashed"). Because
+ * isRecipeIngredient requires modifier to be present (string or null, never simply absent), a row
+ * structured before this field existed fails validation and is treated as not-yet-structured —
+ * ensureStructuredIngredients.ts re-runs the LLM pass once, self-healing old rows the same lazy
+ * way it already handles never-structured ones, rather than needing a backfill migration.
+ *
  * @api-declaration
- * RecipeIngredient — {raw, amount, unit, item, scalable}, the structured shape
+ * RecipeIngredient — {raw, amount, unit, item, modifier, scalable}, the structured shape
  * ScaledIngredient — RecipeIngredient + amountDisplay (fraction-formatted, scaling's own output)
  * isRecipeIngredient(value) — validates one structured ingredient, including the
  *   amount===null <=> scalable===false pairing scaleIngredients.ts trusts without re-deriving
  * isLegacyIngredients(value) — true if this is a pre-structuring bare-string ingredients array
- * isStructuredIngredients(value) — true if every element is already a RecipeIngredient
+ * isStructuredIngredients(value) — true if every element is already a (fully current-shape)
+ *   RecipeIngredient — false for both legacy strings and pre-modifier structured rows alike
  * normalizeLegacyIngredient(raw) — wraps one legacy string line into the structured shape for
- *   display, without claiming to have parsed it (amount/unit null, scalable false)
+ *   display, without claiming to have parsed it (amount/unit/modifier null, scalable false)
+ * rawLineOf(value) — the original text of one ingredients[] element regardless of which of the
+ *   three shapes (legacy string / pre-modifier structured / current structured) it's currently in
  *
  * @contract
  *   assertions:
@@ -40,6 +52,7 @@ export interface RecipeIngredient {
   amount: number | null;
   unit: string | null;
   item: string;
+  modifier: string | null;
   scalable: boolean;
 }
 
@@ -53,6 +66,7 @@ export function isRecipeIngredient(value: unknown): value is RecipeIngredient {
   if (typeof v.raw !== 'string' || typeof v.item !== 'string' || typeof v.scalable !== 'boolean') return false;
   if (v.amount !== null && typeof v.amount !== 'number') return false;
   if (v.unit !== null && typeof v.unit !== 'string') return false;
+  if (v.modifier !== null && typeof v.modifier !== 'string') return false;
   return (v.amount === null) === (v.scalable === false);
 }
 
@@ -65,5 +79,13 @@ export function isStructuredIngredients(value: unknown[]): value is RecipeIngred
 }
 
 export function normalizeLegacyIngredient(raw: string): RecipeIngredient {
-  return { raw, amount: null, unit: null, item: raw, scalable: false };
+  return { raw, amount: null, unit: null, item: raw, modifier: null, scalable: false };
+}
+
+export function rawLineOf(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && value !== null && typeof (value as Record<string, unknown>).raw === 'string') {
+    return (value as Record<string, unknown>).raw as string;
+  }
+  return String(value);
 }

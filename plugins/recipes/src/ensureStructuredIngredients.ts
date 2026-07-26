@@ -40,7 +40,7 @@
 import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { DbSession } from '@bigbrain/orchestrator/postgres';
 import { log } from '@bigbrain/orchestrator/logger';
-import { isStructuredIngredients, type RecipeIngredient } from './recipeIngredientSchema.js';
+import { isStructuredIngredients, rawLineOf, type RecipeIngredient } from './recipeIngredientSchema.js';
 import { structureIngredients } from './structureIngredientsWithLlm.js';
 
 interface RecipeToStructure {
@@ -59,9 +59,11 @@ export async function ensureStructuredIngredients(
     return { ingredients: recipe.ingredients, baseServings: recipe.baseServings };
   }
 
-  const rawLines = isStructuredIngredients(recipe.ingredients)
-    ? recipe.ingredients.map((i) => i.raw)
-    : (recipe.ingredients as string[]);
+  // rawLineOf handles all three possible shapes uniformly: never-structured (bare strings),
+  // structured before a later field (e.g. modifier) was added, and the current shape with a
+  // stale/null base_servings — every one of those has to fall back to re-deriving raw text from
+  // whatever's actually there rather than assuming a shape isStructuredIngredients just rejected.
+  const rawLines = recipe.ingredients.map(rawLineOf);
 
   const result = await structureIngredients(llm, rawLines, recipe.servings);
 

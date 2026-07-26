@@ -23,6 +23,13 @@ function displayAmount(ing: RecipeIngredient | ScaledIngredient): string | null 
   return ing.unit ? `${amount} ${ing.unit}` : amount;
 }
 
+// modifier is a prep instruction ("peeled and smashed") separated from item ("garlic") server-side
+// (structureIngredientsWithLlm.ts) — recombined here only for display, comma-joined the way a
+// recipe would actually read it.
+function displayItem(ing: RecipeIngredient | ScaledIngredient): string {
+  return ing.modifier ? `${ing.item}, ${ing.modifier}` : ing.item;
+}
+
 // Detail/import half of the recipes master-detail split — browsing and tag filtering live in the
 // sidebar's RecipesBrowser now.
 export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe, onChanged }: RecipesViewProps) {
@@ -30,7 +37,9 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
   const [scaled, setScaled] = useState<ScaleRecipeResult | null>(null);
   const [targetServingsInput, setTargetServingsInput] = useState('');
   const [scaling, setScaling] = useState(false);
-  const [revealedRaw, setRevealedRaw] = useState<Set<number>>(new Set());
+  // One toggle for the whole ingredients list, next to the "Ingredients" heading — not a button
+  // per row.
+  const [showOriginal, setShowOriginal] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importUrl, setImportUrl] = useState('');
   const [importing, setImporting] = useState(false);
@@ -42,7 +51,7 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
     if (!selectedRecipeName) {
       setDetail(null);
       setScaled(null);
-      setRevealedRaw(new Set());
+      setShowOriginal(false);
       return;
     }
     setError(null);
@@ -51,10 +60,10 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
       .then((d) => {
         setDetail(d);
         if (d.found && selectedRecipeName === justCreatedName) {
-          setRevealedRaw(new Set(d.ingredients.map((_, i) => i)));
+          setShowOriginal(true);
           setJustCreatedName(null);
         } else {
-          setRevealedRaw(new Set());
+          setShowOriginal(false);
         }
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load recipe'));
@@ -127,15 +136,6 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
     }
   }
 
-  function toggleRaw(i: number) {
-    setRevealedRaw((prev) => {
-      const next = new Set(prev);
-      if (next.has(i)) next.delete(i);
-      else next.add(i);
-      return next;
-    });
-  }
-
   const importForm = (
     <form
       className="import-form"
@@ -206,7 +206,12 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
             </div>
           )}
 
-          <h3>Ingredients</h3>
+          <div className="ingredients-heading">
+            <h3>Ingredients</h3>
+            <button type="button" className="raw-toggle" onClick={() => setShowOriginal((v) => !v)}>
+              {showOriginal ? 'hide original' : 'show original'}
+            </button>
+          </div>
           <ul>
             {ingredients.map((ing, i) => {
               const amount = displayAmount(ing);
@@ -214,15 +219,12 @@ export default function RecipesView({ apiKey, selectedRecipeName, onSelectRecipe
                 <li key={i}>
                   {amount ? (
                     <>
-                      <span className="ingredient-amount">{amount}</span> | <span className="ingredient-item">{ing.item}</span>
+                      <span className="ingredient-amount">{amount}</span> | <span className="ingredient-item">{displayItem(ing)}</span>
                     </>
                   ) : (
-                    <span className="ingredient-item">{ing.item}</span>
-                  )}{' '}
-                  <button type="button" className="raw-toggle" onClick={() => toggleRaw(i)}>
-                    {revealedRaw.has(i) ? 'hide original' : 'show original'}
-                  </button>
-                  {revealedRaw.has(i) && <div className="ingredient-raw">{ing.raw}</div>}
+                    <span className="ingredient-item">{displayItem(ing)}</span>
+                  )}
+                  {showOriginal && <div className="ingredient-raw">{ing.raw}</div>}
                 </li>
               );
             })}
