@@ -9,6 +9,15 @@
  * `needs-ocr` status exists from the start so a later sandboxed-conversion stage can be wired in
  * here without any of this module's callers changing at all.
  *
+ * Fencing is conditional on language tag, not automatic: a real code/data file (a real
+ * languageTag from extractPlainText.ts) is wrapped in a fenced block, since that's the right
+ * rendering everywhere it ends up — the chat turn, a promoted Note, or a promoted Document (which
+ * already expects fenced code, per plugins/documents' own Turndown output). Plain text and
+ * Markdown files (no tag, or the 'markdown' tag) are attached completely unfenced, because their
+ * content already *is* the document body: fencing a Markdown file's own headings would turn them
+ * into inert literal text the instant it's promoted to a Document (rendered via ReactMarkdown,
+ * same as any other saved document) — the exact bug this comment is here to prevent regressing.
+ *
  * @api-declaration
  * AttachmentFile, ExtractionResult
  * extractAttachmentText(file) — never throws; unsupported/needs-ocr are results, not exceptions
@@ -60,6 +69,7 @@ export async function extractAttachmentText(file: AttachmentFile): Promise<Extra
 
   const { content, languageTag } = extractPlainText(file.filename, file.bytes);
   const { text, truncated, meta } = truncateForContext(content, DEFAULT_ATTACHMENT_CHAR_CAP);
-  const markdown = `\`\`\`${languageTag}\n${text}\n\`\`\``;
+  const isProse = languageTag === '' || languageTag === 'markdown';
+  const markdown = isProse ? text : `\`\`\`${languageTag}\n${text}\n\`\`\``;
   return { status: 'ok', markdown, truncated, meta };
 }

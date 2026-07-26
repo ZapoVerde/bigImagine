@@ -75,7 +75,23 @@ function assert(cond, message) {
 {
   const result = await extractAttachmentText({ filename: 'todo.md', mimeType: 'text/markdown', bytes: Buffer.from('# Title\n\nbody') });
   assert(result.status === 'ok', 'a .md file routes to the plain-text track and succeeds');
-  assert(result.markdown.startsWith('```markdown\n') && result.markdown.endsWith('\n```'), 'the result is fenced with the markdown language tag, fence intact');
+  assert(
+    result.markdown === '# Title\n\nbody',
+    'a Markdown file is attached completely unfenced, so its own headings stay real headings once promoted to a Document',
+  );
+}
+
+{
+  // .txt (no language tag at all) gets the same unfenced treatment as .md — it's prose, not code.
+  const result = await extractAttachmentText({ filename: 'notes.txt', mimeType: 'text/plain', bytes: Buffer.from('just some notes') });
+  assert(result.markdown === 'just some notes', 'a plain .txt file is also attached unfenced');
+}
+
+{
+  // A real code file still gets fenced — that's the correct rendering everywhere it ends up
+  // (chat, a promoted Note, or a promoted Document, which already expects fenced code blocks).
+  const result = await extractAttachmentText({ filename: 'script.py', mimeType: 'text/x-python', bytes: Buffer.from('print(1)') });
+  assert(result.markdown === '```python\nprint(1)\n```', 'a code file is still wrapped in a language-tagged fence');
 }
 
 {
@@ -91,10 +107,12 @@ function assert(cond, message) {
 {
   // A raw content string long enough to force truncation, wrapped in a fence afterward — proves
   // the fence always closes even when the underlying text was cut (fence-after-truncate ordering).
-  const bigContent = 'line\n'.repeat(60_000); // well over DEFAULT_ATTACHMENT_CHAR_CAP
-  const result = await extractAttachmentText({ filename: 'huge.txt', mimeType: 'text/plain', bytes: Buffer.from(bigContent) });
+  // Uses a code extension deliberately: prose files (.txt/.md) are never fenced at all, so this
+  // needs a language-tagged file to actually exercise the fence-after-truncate ordering.
+  const bigContent = 'print(1)\n'.repeat(30_000); // well over DEFAULT_ATTACHMENT_CHAR_CAP
+  const result = await extractAttachmentText({ filename: 'huge.py', mimeType: 'text/x-python', bytes: Buffer.from(bigContent) });
   assert(result.status === 'ok' && result.truncated === true, 'a file over the char cap comes back truncated');
-  assert(result.markdown.endsWith('\n```'), 'truncation happens before fencing, so the closing fence is never cut off');
+  assert(result.markdown.startsWith('```python\n') && result.markdown.endsWith('\n```'), 'truncation happens before fencing, so the closing fence is never cut off');
   assert(result.meta.totalChars === bigContent.length, 'meta reports the true pre-truncation size');
 }
 
