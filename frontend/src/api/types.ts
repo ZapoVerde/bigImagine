@@ -389,6 +389,15 @@ export interface DeleteNoteResult {
   deleted: boolean;
 }
 
+// plugins/documents/src/saveDocumentTool.ts
+export interface SaveDocumentResult {
+  docId: string;
+  title: string;
+  filePath: string;
+  summaryShort: string;
+  commitSha: string;
+}
+
 // plugins/documents/src/listDocumentsTool.ts
 export interface DocumentSummary {
   docId: string;

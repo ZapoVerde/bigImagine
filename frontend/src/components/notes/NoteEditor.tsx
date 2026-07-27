@@ -1,10 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../../api/client';
-import type { CreateCalendarEventResult, NoteDetailResult, NoteState } from '../../api/types';
+import type {
+  CreateCalendarEventResult,
+  DeleteNoteResult,
+  NoteDetailResult,
+  NoteState,
+  SaveDocumentResult,
+} from '../../api/types';
 
 function toDateInputValue(iso: string | null): string {
   return iso ? iso.slice(0, 10) : '';
 }
+
+// Mirrors plugins/documents/src/chunkDocument.ts's CHUNK_CHAR_CAP (~750 tokens at the same
+// ~4-chars/token heuristic, no tokenizer dependency anywhere in this repo) — past this size a
+// note's single whole-note embedding stops meaningfully representing its content, while a
+// document gets chunked per-section. That's the actual point a table (one row, one embedding)
+// becomes the wrong shape, not an arbitrary word count.
+const NOTE_TO_DOC_CHAR_THRESHOLD = 3000;
 
 interface NoteEditorProps {
   apiKey: string | null;
@@ -28,6 +41,7 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
   const [state, setStateValue] = useState<NoteState>('active');
   const [reminderAt, setReminderAt] = useState<string | null>(null);
   const [notFound, setNotFound] = useState(false);
+  const [converted, setConverted] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [calendarStatus, setCalendarStatus] = useState<'added' | 'already' | null>(null);
@@ -67,6 +81,15 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
 
   async function save() {
     setError(null);
+    if (content.length > NOTE_TO_DOC_CHAR_THRESHOLD) {
+      const saveAsDoc = window.confirm(
+        "This note is getting long. For better search quality, save it as a document instead?\n\nOK — save as a document (this note will be removed)\nCancel — save it as a note anyway",
+      );
+      if (saveAsDoc) {
+        await saveAsDocument();
+        return;
+      }
+    }
     try {
       await callTool<NoteDetailResult>('update_note', { note_id: noteId, title, content }, apiKey);
       setDirty(false);
@@ -75,6 +98,25 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
       onChanged?.();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to save note');
+    }
+  }
+
+  // Promotion, not a duplicate: once the document save succeeds, the note is deleted so the
+  // content lives in exactly one place — same one-copy-of-the-truth reasoning as every other
+  // canonical-record decision in this app, just crossing from Postgres-canonical (notes) to
+  // git-canonical (documents) instead of staying within one table.
+  async function saveAsDocument() {
+    try {
+      await callTool<SaveDocumentResult>(
+        'save_document',
+        { title: title.trim() || 'Untitled note', content_markdown: content },
+        apiKey,
+      );
+      await callTool<DeleteNoteResult>('delete_note', { note_id: noteId }, apiKey);
+      setConverted(true);
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to save as a document');
     }
   }
 
@@ -128,6 +170,14 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
     return (
       <div className="note-editor">
         <div className="empty-state">This note no longer exists.</div>
+      </div>
+    );
+  }
+
+  if (converted) {
+    return (
+      <div className="note-editor">
+        <div className="empty-state">Saved as a document — find it in Documents. This note has been removed.</div>
       </div>
     );
   }
