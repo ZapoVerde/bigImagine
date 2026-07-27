@@ -1,0 +1,20 @@
+{
+  "name": "@bigbrain/plugin-math-utils",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "verify": "npm run build && node scripts/verify-math-utils.mjs"
+  },
+  "dependencies": {
+    "@bigbrain/orchestrator": "*",
+    "mathjs": "^15.2.0",
+    "decimal.js": "^10.6.0"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}
