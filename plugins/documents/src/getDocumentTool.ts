@@ -9,7 +9,7 @@
  * makes cross-user rows simply not match, same as every other by-id lookup in this codebase.
  *
  * @api-declaration
- * createGetDocumentTool() — returns the get_document RegisteredTool (with a focusHint)
+ * createGetDocumentTool() — returns the get_document RegisteredTool
  *
  * @contract
  *   assertions:
@@ -95,10 +95,6 @@ export function createGetDocumentTool(): RegisteredTool {
         author: row.author,
         publishedAt: row.published_at,
       };
-    },
-    focusHint: (result) => {
-      const r = result as { found?: boolean; docId?: string };
-      return r.found ? r.docId ?? null : null;
     },
   };
 }

@@ -66,6 +66,5 @@ export function createSaveDocumentTool(llm: LlmProvider, embeddings: EmbeddingPr
         commitSha: result.commitSha,
       };
     },
-    focusHint: (result) => (result as { docId?: string }).docId ?? null,
   };
 }

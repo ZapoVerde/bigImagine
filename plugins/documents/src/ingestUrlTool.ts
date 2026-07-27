@@ -95,6 +95,5 @@ export function createIngestUrlTool(llm: LlmProvider, embeddings: EmbeddingProvi
         publishedAt: clipped.publishedAt,
       };
     },
-    focusHint: (result) => (result as { docId?: string }).docId ?? null,
   };
 }
