@@ -1,12 +1,14 @@
-// Proves all three tools end to end through info/registerTools (the real loader contract), plus
-// timerPoll.ts's pollTick directly (rather than waiting on real wall-clock setInterval ticks) —
-// same small stateful fake Postgres pool style as plugins/lists' verify-lists.mjs, since these
-// tools genuinely depend on prior state (a timer inserted by one call is read/updated by another).
+// Proves all four tools end to end through info/registerTools (the real loader contract), plus
+// timerPoll.ts's pollTick and jobPoll.ts's pollJobsTick directly (rather than waiting on real
+// wall-clock setInterval ticks) — same small stateful fake Postgres pool style as plugins/lists'
+// verify-lists.mjs, since these tools genuinely depend on prior state.
 
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
 import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
 import { info, registerTools } from '../dist/index.js';
 import { pollTick } from '../dist/timerPoll.js';
+import { pollJobsTick } from '../dist/jobPoll.js';
+import { nextDailyOccurrence } from '../dist/nextOccurrence.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -19,10 +21,13 @@ function assert(cond, message) {
 
 function createFakePool(users) {
   const timers = [];
+  const jobs = [];
   let timerCounter = 0;
+  let jobCounter = 0;
 
   return {
     timers,
+    jobs,
     async connect() {
       let scopedUserId;
       return {
@@ -85,6 +90,85 @@ function createFakePool(users) {
             return { rows: rows.map((t) => ({ timer_id: t.timer_id, label: t.label, duration_seconds: t.duration_seconds, end_at: t.end_at, status: t.status })) };
           }
 
+          if (sql.includes('insert into scheduled_jobs')) {
+            const [userId, title, scheduleKind, timeOfDay, timezone, nextRunAt, linkedChatId] = params;
+            assert(scopedUserId === userId, 'schedule_routine inserts scoped to the requesting user');
+            const job_id = `job-${++jobCounter}`;
+            jobs.push({
+              job_id,
+              user_id: userId,
+              title,
+              classification: 'alarm',
+              schedule_kind: scheduleKind,
+              time_of_day: timeOfDay,
+              timezone,
+              status: 'active',
+              last_run_at: null,
+              next_run_at: nextRunAt,
+              linked_chat_id: linkedChatId,
+              updated_at: new Date().toISOString(),
+            });
+            const row = jobs[jobs.length - 1];
+            return { rows: [row] };
+          }
+
+          if (sql.includes('update scheduled_jobs set status = $2')) {
+            const [jobId, status] = params;
+            const job = jobs.find((j) => j.job_id === jobId && j.user_id === scopedUserId);
+            if (!job) return { rows: [] };
+            job.status = status;
+            job.updated_at = new Date().toISOString();
+            return { rows: [job] };
+          }
+
+          if (sql.includes("select job_id, schedule_kind, time_of_day, timezone, next_run_at from scheduled_jobs")) {
+            const now = Date.now();
+            const due = jobs.filter(
+              (j) => j.user_id === scopedUserId && j.status === 'active' && j.classification === 'alarm' && new Date(j.next_run_at).getTime() <= now,
+            );
+            return { rows: due.map((j) => ({ job_id: j.job_id, schedule_kind: j.schedule_kind, time_of_day: j.time_of_day, timezone: j.timezone, next_run_at: j.next_run_at })) };
+          }
+
+          if (sql.includes('update scheduled_jobs set last_run_at = $2, next_run_at = $3')) {
+            const [jobId, lastRunAt, nextRunAt] = params;
+            const job = jobs.find((j) => j.job_id === jobId);
+            job.last_run_at = lastRunAt;
+            job.next_run_at = nextRunAt;
+            job.updated_at = new Date().toISOString();
+            return { rows: [] };
+          }
+
+          if (sql.includes("update scheduled_jobs set status = 'completed'")) {
+            const [jobId, lastRunAt] = params;
+            const job = jobs.find((j) => j.job_id === jobId);
+            job.status = 'completed';
+            job.last_run_at = lastRunAt;
+            job.updated_at = new Date().toISOString();
+            return { rows: [] };
+          }
+
+          if (sql.includes('select job_id, title, schedule_kind, time_of_day, timezone, status, next_run_at, last_run_at from scheduled_jobs')) {
+            const oneHourAgo = Date.now() - 60 * 60 * 1000;
+            const rows = jobs.filter(
+              (j) =>
+                j.user_id === scopedUserId &&
+                j.classification === 'alarm' &&
+                (j.status === 'active' || new Date(j.updated_at).getTime() > oneHourAgo),
+            );
+            return {
+              rows: rows.map((j) => ({
+                job_id: j.job_id,
+                title: j.title,
+                schedule_kind: j.schedule_kind,
+                time_of_day: j.time_of_day,
+                timezone: j.timezone,
+                status: j.status,
+                next_run_at: j.next_run_at,
+                last_run_at: j.last_run_at,
+              })),
+            };
+          }
+
           throw new Error(`fake pool: unhandled query: ${sql}`);
         },
         release() {},
@@ -98,10 +182,11 @@ assert(info.id === 'temporal' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is pres
 const fakePool = createFakePool(['user-a', 'user-b']);
 const db = createPostgresClient(fakePool);
 
-const tools = await registerTools({ db });
-assert(tools.length === 3, 'registerTools returns exactly three tools');
+const fakeSettings = { get: async () => 'America/Los_Angeles' };
+const tools = await registerTools({ db, settings: fakeSettings });
+assert(tools.length === 4, 'registerTools returns exactly four tools');
 const registry = createToolRegistry(tools);
-for (const name of ['set_timer', 'cancel_timer', 'list_temporal_state']) {
+for (const name of ['set_timer', 'cancel_timer', 'list_temporal_state', 'schedule_routine']) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -148,3 +233,61 @@ await db.withUserScope('user-b', async (session) => {
   const state = await registry.get('list_temporal_state').handler({}, { userId: 'user-b', db: session });
   assert(state.running.length === 0 && state.completed.length === 0 && state.cancelled.length === 0, "user-b's list_temporal_state sees none of user-a's timers");
 });
+
+// --- schedule_routine: create once/daily, defaults timezone from settings ---
+let onceJobId;
+let dailyJobId;
+await db.withUserScope('user-a', async (session) => {
+  const once = await registry.get('schedule_routine').handler(
+    { title: 'Take out trash', scheduleKind: 'once', runAt: new Date(Date.now() - 1000).toISOString() },
+    { userId: 'user-a', db: session },
+  );
+  assert(once.status === 'active' && once.timezone === 'America/Los_Angeles', 'a "once" job defaults timezone from household_timezone');
+  onceJobId = once.jobId;
+
+  const daily = await registry.get('schedule_routine').handler(
+    { title: 'Morning standup', scheduleKind: 'daily', timeOfDay: '08:30' },
+    { userId: 'user-a', db: session },
+  );
+  assert(daily.scheduleKind === 'daily' && daily.timeOfDay === '08:30', 'a "daily" job stores its time_of_day');
+  dailyJobId = daily.jobId;
+
+  let threw = false;
+  try {
+    await registry.get('schedule_routine').handler(
+      { title: 'nope', scheduleKind: 'once', runAt: new Date().toISOString(), classification: 'agent_routine' },
+      { userId: 'user-a', db: session },
+    );
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'agent_routine jobs are rejected until a later stage adds the kill switch/rate cap');
+});
+
+// --- jobPoll: 'once' completes, 'daily' recomputes next_run_at forward ---
+await pollJobsTick(db);
+await db.withUserScope('user-a', async (session) => {
+  const state = await registry.get('list_temporal_state').handler({}, { userId: 'user-a', db: session });
+  const firedOnce = state.recentlyFiredAlarms.find((a) => a.jobId === onceJobId);
+  assert(firedOnce && firedOnce.status === 'completed', 'a due "once" alarm fires and completes, not recur');
+  assert(!state.upcomingAlarms.some((a) => a.jobId === onceJobId), 'a completed "once" alarm no longer appears as upcoming');
+  assert(state.upcomingAlarms.some((a) => a.jobId === dailyJobId), 'the not-yet-due "daily" alarm stays upcoming');
+});
+
+// --- schedule_routine: cancel/reactivate by jobId ---
+await db.withUserScope('user-a', async (session) => {
+  const cancelled = await registry.get('schedule_routine').handler({ jobId: dailyJobId, status: 'cancelled' }, { userId: 'user-a', db: session });
+  assert(cancelled.found === true && cancelled.status === 'cancelled', 'schedule_routine cancels an existing job by id');
+
+  const reactivated = await registry.get('schedule_routine').handler({ jobId: dailyJobId, status: 'active' }, { userId: 'user-a', db: session });
+  assert(reactivated.status === 'active', 'schedule_routine reactivates a cancelled job');
+});
+
+// --- nextDailyOccurrence: correctly adjusts across a DST transition (America/New_York, 2026-03-08) ---
+{
+  const beforeDst = nextDailyOccurrence('08:30', 'America/New_York', new Date('2026-03-07T00:00:00Z'));
+  assert(beforeDst.toISOString() === '2026-03-07T13:30:00.000Z', '8:30 AM EST (pre-DST) is 13:30 UTC');
+
+  const afterDst = nextDailyOccurrence('08:30', 'America/New_York', new Date('2026-03-09T00:00:00Z'));
+  assert(afterDst.toISOString() === '2026-03-09T12:30:00.000Z', '8:30 AM EDT (post-DST) is 12:30 UTC — the offset shifted by an hour');
+}

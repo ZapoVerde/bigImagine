@@ -243,11 +243,27 @@ export interface ActiveTimer {
   status: TimerStatus;
 }
 
+// plugins/temporal/src/scheduleRoutineTool.ts's return shape
+export type ScheduledJobStatus = 'active' | 'completed' | 'cancelled';
+
+export interface ScheduledAlarm {
+  jobId: string;
+  title: string;
+  scheduleKind: 'once' | 'daily';
+  timeOfDay: string | null;
+  timezone: string;
+  status: ScheduledJobStatus;
+  nextRunAt: string;
+  lastRunAt: string | null;
+}
+
 // plugins/temporal/src/listTemporalStateTool.ts's grouped return shape
 export interface TemporalState {
   running: ActiveTimer[];
   completed: ActiveTimer[];
   cancelled: ActiveTimer[];
+  upcomingAlarms: ScheduledAlarm[];
+  recentlyFiredAlarms: ScheduledAlarm[];
 }
 
 // orchestrator/src/server/adminServer.ts getNotionSettings()

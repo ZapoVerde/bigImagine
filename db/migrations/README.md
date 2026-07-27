@@ -92,3 +92,12 @@ Already applied by hand, not run automatically (see the file for the exact comma
   exists (the vocabulary stays closed to what's implemented). `linked_list_item_id`/
   `linked_note_id`/`linked_chat_id` are optional, set-once-at-creation pointers, same
   on-delete-set-null pattern as `calendar_events`' linked columns (`0025_calendar_links_visibility.sql`).
+- `0032_scheduled_jobs.sql` — adds `scheduled_jobs`: one-time or daily-recurring alarms
+  (`plugins/temporal`'s `schedule_routine` tool), standard `user_scoped` RLS. `classification`
+  (`'alarm' | 'agent_routine'`) already accepts `'agent_routine'` even though nothing dispatches it
+  yet (`jobPoll.ts` only fires `'alarm'` rows) — it needs a household kill switch and a per-job
+  daily run cap first, added as an application-layer gate in a later stage rather than a further
+  schema change. `schedule_kind` (`'once' | 'daily'`) is deliberately narrower than a full cron
+  expression; `'daily'` recomputes `next_run_at` after each fire via `nextOccurrence.ts`'s
+  IANA-timezone-aware arithmetic (built on `Intl.DateTimeFormat`, no new dependency), so a
+  recurring alarm stays correct across a DST transition.

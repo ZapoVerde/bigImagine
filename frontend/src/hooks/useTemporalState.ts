@@ -9,7 +9,7 @@ import type { TemporalState } from '../api/types';
 // itself ticks locally every second between polls (TimerStrip.tsx), not from this hook.
 const POLL_INTERVAL_MS = 5_000;
 
-const EMPTY_STATE: TemporalState = { running: [], completed: [], cancelled: [] };
+const EMPTY_STATE: TemporalState = { running: [], completed: [], cancelled: [], upcomingAlarms: [], recentlyFiredAlarms: [] };
 
 export function useTemporalState(apiKey: string | null) {
   const [state, setState] = useState<TemporalState>(EMPTY_STATE);
