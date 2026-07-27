@@ -189,7 +189,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
   const body = requests[0].body;
   assert(!('temperature' in body), 'Anthropic: temperature is omitted, not sent as null/undefined, when unset');
   assert(!('top_p' in body), 'Anthropic: top_p is omitted when unset');
-  assert(body.max_tokens === 1024, 'Anthropic: max_tokens falls back to the 1024 default when unset');
+  assert(body.max_tokens === 16384, 'Anthropic: max_tokens falls back to the 16384 default when unset');
 });
 
 await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
@@ -230,7 +230,7 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
   const body = requests[0].body;
   assert(!('temperature' in body), 'OpenAI-compatible: temperature is omitted when unset');
   assert(!('top_p' in body), 'OpenAI-compatible: top_p is omitted when unset');
-  assert(body.max_tokens === 1024, 'OpenAI-compatible: max_tokens falls back to the 1024 default when unset');
+  assert(body.max_tokens === 16384, 'OpenAI-compatible: max_tokens falls back to the 16384 default when unset');
 });
 
 // --- Images/vision (Stage 5) ---

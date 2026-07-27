@@ -108,12 +108,26 @@ function toOaiTools(tools: ToolDefinition[]) {
   }));
 }
 
-function fromOaiResponse(message: { content: string | null; tool_calls?: OaiToolCall[] }): LlmTurn {
-  const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc) => ({
-    id: tc.id,
-    name: tc.function.name,
-    arguments: JSON.parse(tc.function.arguments),
-  }));
+function fromOaiResponse(
+  message: { content: string | null; tool_calls?: OaiToolCall[] },
+  finishReason?: string,
+): LlmTurn {
+  const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc) => {
+    try {
+      return { id: tc.id, name: tc.function.name, arguments: JSON.parse(tc.function.arguments) };
+    } catch (err) {
+      // The most common real cause here is truncation: a tool call whose arguments carry a large
+      // payload (e.g. save_document's contentMarkdown) gets cut off mid-string once the response
+      // hits max_tokens, leaving unparseable JSON. finish_reason === 'length' confirms that's what
+      // happened instead of leaving callers to debug a bare SyntaxError.
+      const reason = err instanceof Error ? err.message : String(err);
+      const truncationHint =
+        finishReason === 'length'
+          ? ' — the response hit its max_tokens limit before the call finished; increase maxTokens or shorten the input'
+          : '';
+      throw new Error(`OpenAI-compatible API returned malformed arguments for tool call "${tc.function.name}"${truncationHint}: ${reason}`);
+    }
+  });
 
   return { message: { role: 'assistant', content: message.content ?? '' }, toolCalls };
 }
@@ -166,7 +180,7 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
         },
         body: JSON.stringify({
           model: options?.model ?? config.model,
-          max_tokens: options?.maxTokens ?? config.maxTokens ?? 1024,
+          max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
           ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
           messages: toOaiMessages(messages),
@@ -187,11 +201,11 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
       }
 
       const payload = (await response.json()) as {
-        choices: { message: { content: string | null; tool_calls?: OaiToolCall[] } }[];
+        choices: { message: { content: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
       };
       const choice = payload.choices[0];
       if (!choice) throw new Error('OpenAI-compatible API returned no choices');
-      return fromOaiResponse(choice.message);
+      return fromOaiResponse(choice.message, choice.finish_reason);
     },
     listModels: () => listOpenAiCompatibleModels(config),
   };

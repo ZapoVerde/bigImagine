@@ -77,7 +77,10 @@ export interface LlmCompleteOptions {
   model?: string;
   /** Per-call sampling overrides — how a chat session's own params (io/chatSessions.ts) take
    *  effect. Omitted fields are simply not sent (temperature/topP), or fall back to the
-   *  provider's static config then 1024 (maxTokens) — the provider's own defaults apply. */
+   *  provider's static config then 16384 (maxTokens) — the provider's own defaults apply. 16384
+   *  (not 1024) because tool arguments can carry a whole pasted document (save_document's
+   *  contentMarkdown): anything smaller truncates the model's tool-call JSON mid-string on a
+   *  real document and crashes the turn (see openaiCompatible.ts's fromOaiResponse). */
   temperature?: number;
   topP?: number;
   maxTokens?: number;

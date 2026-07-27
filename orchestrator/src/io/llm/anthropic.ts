@@ -149,7 +149,7 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
         },
         body: JSON.stringify({
           model: options?.model ?? config.model,
-          max_tokens: options?.maxTokens ?? config.maxTokens ?? 1024,
+          max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
           ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
           ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
           system,

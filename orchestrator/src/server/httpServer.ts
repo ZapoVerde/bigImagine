@@ -414,20 +414,31 @@ async function handleChatCompletions(
   // Settings takes effect on the very next turn, no restart.
   const timezone = await getHouseholdTimezone(deps.settings);
   const systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
-  const { content: reply, focusedNoteId } = await runTurn({
-    userId,
-    messages: messagesForLlm,
-    systemPrompt,
-    model,
-    sampling: {
-      temperature: sessionParams.temperature,
-      topP: sessionParams.top_p,
-      maxTokens: sessionParams.max_tokens,
-    },
-    llm: turnLlm,
-    db,
-    tools: sessionTools,
-  });
+  let reply: string;
+  let focusedNoteId: string | null | undefined;
+  try {
+    ({ content: reply, focusedNoteId } = await runTurn({
+      userId,
+      messages: messagesForLlm,
+      systemPrompt,
+      model,
+      sampling: {
+        temperature: sessionParams.temperature,
+        topP: sessionParams.top_p,
+        maxTokens: sessionParams.max_tokens,
+      },
+      llm: turnLlm,
+      db,
+      tools: sessionTools,
+    }));
+  } catch (err) {
+    // Surfaced to the client rather than falling through to startHttpServer's generic top-level
+    // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
+    // upstream response) should be diagnosable from the chat itself, not just the server log.
+    log.error(`runTurn failed for user ${userId}`, err);
+    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+    return;
+  }
   const echoedModel = model ?? turnDefaultModel;
 
   if (body.chat_id) {

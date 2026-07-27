@@ -59,7 +59,12 @@ export async function fetchUntrustedUrl(
   maxRetries = 1,
   resolveHost: ResolveHost = defaultResolveHost,
 ): Promise<Response> {
-  const parsed = new URL(url);
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`fetchUntrustedUrl: "${url}" is not a valid URL`);
+  }
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     throw new Error(`fetchUntrustedUrl: refusing non-http(s) protocol "${parsed.protocol}" for ${url}`);
   }
