@@ -1,0 +1,44 @@
+.timer-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.35rem 1rem;
+  background: var(--color-accent-subtle);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.timer-strip-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  font-size: var(--font-size-sm);
+}
+
+.timer-strip-label {
+  color: var(--color-text-secondary);
+}
+
+.timer-strip-remaining {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent);
+}
+
+.timer-strip-cancel {
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: var(--font-size-md);
+  line-height: 1;
+  padding: 0 0.15rem;
+}
+
+.timer-strip-cancel:hover {
+  color: var(--color-danger);
+}

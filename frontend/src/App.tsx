@@ -4,6 +4,7 @@ import './App.css';
 import { whoami } from './api/client';
 import Sidebar from './components/sidebar/Sidebar';
 import TabStrip from './components/TabStrip';
+import TimerStrip from './components/temporal/TimerStrip';
 import TodayAgenda from './components/TodayAgenda';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
@@ -123,6 +124,7 @@ export default function App() {
               : undefined
           }
         />
+        <TimerStrip apiKey={apiKey} />
         {tabs.map((tab) => (
           <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
             {tab.type === 'blank' && (

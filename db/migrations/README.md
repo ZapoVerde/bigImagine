@@ -84,3 +84,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   editable per §13, same restart-on-save shape as `active_llm_profile`. The one setting whose value
   is a small JSON array rather than a bare scalar — a single flag can't say "vision-capable" per
   profile name, and a chat can pick any configured profile, not just the household-wide active one.
+- `0031_active_timers.sql` — adds `active_timers`: short-duration focus-sprint countdowns
+  (`plugins/temporal`), standard `user_scoped` RLS. `end_at` is stored as an absolute timestamp
+  rather than "seconds remaining" specifically so a running timer survives an orchestrator
+  container restart with correct remaining time, no in-memory state needed. `status` is
+  `'running' | 'completed' | 'cancelled'` only — no `'paused'` yet, since no pause/resume tool
+  exists (the vocabulary stays closed to what's implemented). `linked_list_item_id`/
+  `linked_note_id`/`linked_chat_id` are optional, set-once-at-creation pointers, same
+  on-delete-set-null pattern as `calendar_events`' linked columns (`0025_calendar_links_visibility.sql`).

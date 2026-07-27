@@ -232,6 +232,24 @@ export interface CalendarSettings {
   maskWorkCalendar: boolean;
 }
 
+// plugins/temporal/src/{setTimerTool,listTemporalStateTool}.ts's return shape
+export type TimerStatus = 'running' | 'completed' | 'cancelled';
+
+export interface ActiveTimer {
+  timerId: string;
+  label: string;
+  durationSeconds: number;
+  endAt: string;
+  status: TimerStatus;
+}
+
+// plugins/temporal/src/listTemporalStateTool.ts's grouped return shape
+export interface TemporalState {
+  running: ActiveTimer[];
+  completed: ActiveTimer[];
+  cancelled: ActiveTimer[];
+}
+
 // orchestrator/src/server/adminServer.ts getNotionSettings()
 export interface NotionSettings {
   ownerUserId: string | null;
