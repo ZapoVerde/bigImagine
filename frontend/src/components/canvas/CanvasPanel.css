@@ -7,6 +7,14 @@
   border-left: 1px solid var(--color-border-subtle);
 }
 
+/* Full width, no divider needed, once it's the only pane showing (ChatView.css's mobile-canvas
+   toggle) instead of sharing the screen with chat-main. */
+@media (max-width: 768px) {
+  .canvas-panel {
+    border-left: none;
+  }
+}
+
 .canvas-panel-header {
   display: flex;
   align-items: center;
@@ -19,6 +27,23 @@
 .canvas-panel-title {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
+}
+
+.canvas-panel-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.canvas-panel-copy {
+  background: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+}
+
+.canvas-panel-copy:hover {
+  color: var(--color-text-primary);
 }
 
 .canvas-panel-close {

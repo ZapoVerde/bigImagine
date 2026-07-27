@@ -133,6 +133,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     title?: string;
   } | null>(null);
   const [allToolNames, setAllToolNames] = useState<string[]>([]);
+  // Mobile-only: chat and Canvas are full flex-1 panes side by side (ChatView.css), which is fine
+  // on desktop but leaves neither one readable on a phone-width screen. Below the breakpoint, only
+  // one of the two is shown at a time — this tracks which. Irrelevant on desktop, where both
+  // panes are always visible and this toggle is hidden.
+  const [mobileShowCanvas, setMobileShowCanvas] = useState(false);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -152,11 +157,13 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setActiveChat(null);
       setMessages([]);
       setSettingsCollapsed(true);
+      setMobileShowCanvas(false);
       setError(null);
       setEditingId(null);
       return;
     }
     if (activeChat?.chatId === chatId) return;
+    setMobileShowCanvas(false);
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
@@ -198,6 +205,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     try {
       const updated = await updateChat(activeChat.chatId, { canvas_note_id: null }, apiKey);
       setActiveChat(updated);
+      setMobileShowCanvas(false);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to close canvas');
     }
@@ -416,12 +424,29 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   }
 
   return (
-    <div className="chat-view">
+    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}>
       <div className="chat-main">
         {error && <div className="error-banner">{error}</div>}
 
         <div className="chat-header">
           <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
+          {activeChat?.canvasNoteId && (
+            <button
+              type="button"
+              className="chat-canvas-switch mobile-only"
+              onClick={() => setMobileShowCanvas((v) => !v)}
+            >
+              {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
+            </button>
+          )}
+          <button
+            type="button"
+            className="chat-settings-summon mobile-only"
+            title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+            onClick={() => setSettingsCollapsed((c) => !c)}
+          >
+            ⚙
+          </button>
         </div>
 
         <div className="chat-history" ref={historyRef}>
@@ -527,9 +552,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           />
           <button
             type="submit"
+            className="chat-send-button"
             disabled={sending || (!draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0)}
           >
-            Send
+            <span className="chat-send-label">Send</span>
+            <span className="chat-send-icon" aria-hidden="true">➤</span>
           </button>
         </form>
       </div>

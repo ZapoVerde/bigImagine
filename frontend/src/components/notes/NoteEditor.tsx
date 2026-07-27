@@ -29,13 +29,16 @@ interface NoteEditorProps {
   refreshToken?: number;
   /** Tells the caller to re-fetch anything that shows this note's title (a sidebar list). */
   onChanged?: () => void;
+  /** Fires with the current content on every load/edit — lets a caller (Canvas's panel, for its
+   *  copy-to-clipboard button) read the live text without owning a second copy of it. */
+  onContentChange?: (content: string) => void;
 }
 
 // The actual title/content editor, extracted out of NotesView so Canvas's panel (ChatView, via
 // CanvasPanel.tsx) can reuse the exact same fetch/edit/save behavior instead of a second copy of
 // it. get_note is the canonical source (bb_principles.md §1) — always fetched fresh on mount/id
 // change, never trusted from anything the caller might already have in hand.
-export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: NoteEditorProps) {
+export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged, onContentChange }: NoteEditorProps) {
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
   const [state, setStateValue] = useState<NoteState>('active');
@@ -78,6 +81,11 @@ export default function NoteEditor({ apiKey, noteId, refreshToken, onChanged }: 
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshToken]);
+
+  useEffect(() => {
+    onContentChange?.(content);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content]);
 
   async function save() {
     setError(null);

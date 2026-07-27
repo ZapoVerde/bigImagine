@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import type { TabType } from '../../hooks/useTabs';
 import ChatBrowser from './ChatBrowser';
 import ListsBrowser from './ListsBrowser';
@@ -9,6 +8,8 @@ import './Sidebar.css';
 interface SidebarProps {
   apiKey: string | null;
   activeType: TabType | undefined;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
   onOpenChat: (chatId: string, title?: string) => void;
 
   selectedListName: string | null;
@@ -37,9 +38,7 @@ const TITLES: Partial<Record<TabType, string>> = {
 // App-wide left rail. Its content is contextual to the active tab's type — a folder/history
 // browser for chat, a name picker for lists/notes/recipes — and empty for view types that are
 // already a single browsable structure (calendar, settings, meal plans, the blank picker).
-export default function Sidebar(props: SidebarProps) {
-  const [collapsed, setCollapsed] = useState(() => window.innerWidth < 768);
-
+export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: SidebarProps) {
   const title = props.activeType && TITLES[props.activeType];
 
   return (
@@ -49,7 +48,7 @@ export default function Sidebar(props: SidebarProps) {
         <button
           className="sidebar-toggle"
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={onToggleCollapsed}
         >
           {collapsed ? '»' : '«'}
         </button>

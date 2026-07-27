@@ -9,6 +9,8 @@ interface TabStripProps {
   onOpenSettings: () => void;
   /** Omitted entirely under Cloudflare Access SSO — there's no key to change. */
   onChangeKey?: () => void;
+  sidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
 }
 
 export default function TabStrip({
@@ -19,9 +21,21 @@ export default function TabStrip({
   onNew,
   onOpenSettings,
   onChangeKey,
+  sidebarCollapsed,
+  onToggleSidebar,
 }: TabStripProps) {
   return (
     <header className="tab-bar">
+      {/* Mobile-only "summoning arrow": the left rail collapses to nothing on narrow screens
+          (Sidebar.css), so this is the only way left to open it there. Hidden on desktop, where
+          the rail's own header toggle already does the job. */}
+      <button
+        className="sidebar-summon mobile-only"
+        title={sidebarCollapsed ? 'Open menu' : 'Close menu'}
+        onClick={onToggleSidebar}
+      >
+        {sidebarCollapsed ? '☰' : '«'}
+      </button>
       <h1>bigBrain</h1>
       <nav>
         {tabs.map((tab) => (

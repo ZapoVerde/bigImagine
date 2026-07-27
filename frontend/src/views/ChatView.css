@@ -3,6 +3,20 @@
   height: 100%;
 }
 
+/* Mobile: chat-main and CanvasPanel are both flex: 1 (desktop's side-by-side split), which leaves
+   neither readable at phone width. Below the breakpoint only one shows at a time, switched via
+   the .chat-canvas-switch button in chat-header (ChatView.tsx's mobileShowCanvas state) — default
+   is chat, .mobile-canvas flips to Canvas. */
+@media (max-width: 768px) {
+  .chat-view.mobile-canvas .chat-main {
+    display: none;
+  }
+
+  .chat-view:not(.mobile-canvas) .canvas-panel {
+    display: none;
+  }
+}
+
 /* --- Main pane --- */
 
 .chat-main {
@@ -23,6 +37,26 @@
 
 .chat-header .chat-title {
   flex: 1;
+}
+
+.chat-canvas-switch {
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  flex-shrink: 0;
+}
+
+.chat-settings-summon {
+  background: none;
+  border: none;
+  font-size: var(--font-size-base);
+  padding: 0.3rem 0.5rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.chat-settings-summon:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
 }
 
 .chat-title {
@@ -46,6 +80,31 @@
 
 .chat-settings-rail.collapsed {
   width: 2.6rem;
+}
+
+/* Mobile: same overlay-drawer treatment as the left Sidebar (Sidebar.css) — collapsed means gone
+   entirely (the gear icon in chat-header, .chat-settings-summon, is the summon control now), and
+   expanded floats above the conversation from the right instead of squeezing it. */
+@media (max-width: 768px) {
+  .chat-settings-rail {
+    position: fixed;
+    top: var(--topbar-height);
+    right: 0;
+    bottom: 0;
+    width: 17rem;
+    max-width: 85vw;
+    z-index: 30;
+    box-shadow: -2px 0 16px rgba(0, 0, 0, 0.3);
+  }
+
+  .chat-settings-rail.collapsed {
+    width: 0;
+    box-shadow: none;
+  }
+
+  .chat-settings-rail.collapsed .chat-settings-rail-header {
+    display: none;
+  }
 }
 
 .chat-settings-rail-header {
@@ -432,4 +491,54 @@
 .chat-input button.chat-attach-button:hover {
   background: var(--color-hover-surface);
   border-color: var(--color-border);
+}
+
+.chat-send-icon {
+  display: none;
+}
+
+/* Mobile: the clip + textarea + Send row (desktop's single line) leaves too little width for the
+   textarea to be usable. Wrapping puts the textarea alone on its own full-width line (flex-basis
+   100%) and drops attach/send to a second, compact row below it as small round icon buttons —
+   same shape as Open WebUI's own bottom action row. */
+@media (max-width: 768px) {
+  .chat-input {
+    flex-wrap: wrap;
+    row-gap: 0.5rem;
+  }
+
+  .chat-input textarea {
+    order: 1;
+    flex: 1 1 100%;
+  }
+
+  .chat-input button.chat-attach-button {
+    order: 2;
+  }
+
+  .chat-input button.chat-send-button {
+    order: 3;
+    margin-left: auto;
+  }
+
+  .chat-input button.chat-attach-button,
+  .chat-input button.chat-send-button {
+    width: 2.5rem;
+    height: 2.5rem;
+    flex: 0 0 auto;
+    padding: 0;
+    border-radius: var(--radius-pill);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size-lg);
+  }
+
+  .chat-send-label {
+    display: none;
+  }
+
+  .chat-send-icon {
+    display: inline;
+  }
 }

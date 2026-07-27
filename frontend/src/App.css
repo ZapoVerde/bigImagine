@@ -74,6 +74,40 @@ body {
   display: flex;
   flex-direction: row;
   height: 100%;
+  position: relative;
+}
+
+/* Shown only under the mobile breakpoint — the rail-toggle "summoning arrows" and other controls
+   that replace an always-on rail once it collapses to nothing on a narrow screen. */
+.mobile-only {
+  display: none;
+}
+
+.sidebar-summon {
+  background: none;
+  border: none;
+  font-size: var(--font-size-lg);
+  padding: 0.3rem 0.6rem;
+  margin-right: 0.4rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-summon:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+@media (max-width: 768px) {
+  .mobile-only {
+    display: inline-flex;
+  }
+
+  /* Reclaim top-bar space for the rail toggles now that a rail can be summoned from here — the
+     wordmark is the least useful thing in this row on a phone. */
+  .tab-bar h1 {
+    display: none;
+  }
 }
 
 .app-main {

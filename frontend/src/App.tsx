@@ -35,6 +35,12 @@ export default function App() {
   const { tabs, activeTabId, openBlank, summon, openChat, updateTab, close, focus } = useTabs();
   const { theme, toggle: toggleTheme } = useTheme();
 
+  // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
+  // the always-on rail on narrow screens) can toggle the same state the rail's own header button
+  // does — they're siblings under .app, not parent/child, same reason list/note/recipe selection
+  // is lifted above.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 768);
+
   // Sidebar/view picker state for the singleton lists/notes/recipes tabs — lifted here because
   // the sidebar's browser and the tab's detail view are siblings, not parent/child. Each "X
   // changed" callback bumps the matching refresh key so the sidebar's browser (which owns its own
@@ -82,6 +88,8 @@ export default function App() {
       <Sidebar
         apiKey={apiKey}
         activeType={activeTab?.type}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
         onOpenChat={openChat}
         selectedListName={selectedListName}
         onSelectList={setSelectedListName}
@@ -104,6 +112,8 @@ export default function App() {
           onClose={close}
           onNew={openBlank}
           onOpenSettings={() => summon('settings')}
+          sidebarCollapsed={sidebarCollapsed}
+          onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
           onChangeKey={
             auth.mode === 'key'
               ? () => {

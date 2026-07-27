@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import NoteEditor from '../notes/NoteEditor';
 import './CanvasPanel.css';
 
@@ -16,16 +17,41 @@ interface CanvasPanelProps {
 // entirely server-decided (chat_sessions.canvas_note_id, set via a tool's focusHint) — this
 // component just renders whatever note id it's handed.
 export default function CanvasPanel({ apiKey, noteId, refreshToken, onClose }: CanvasPanelProps) {
+  // Tracked here (not owned) via NoteEditor's onContentChange — this panel never edits the note
+  // itself, just needs the current text on hand for the copy button below.
+  const [content, setContent] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  async function copyContent() {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      return; // clipboard permission denied/unavailable — not worth an error banner
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1500);
+  }
+
   return (
     <div className="canvas-panel">
       <div className="canvas-panel-header">
         <span className="canvas-panel-title">Canvas</span>
-        <button className="canvas-panel-close" title="Close canvas" onClick={onClose}>
-          &times;
-        </button>
+        <div className="canvas-panel-header-actions">
+          <button
+            className="canvas-panel-copy"
+            title="Copy note content"
+            disabled={!content}
+            onClick={copyContent}
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+          <button className="canvas-panel-close" title="Close canvas" onClick={onClose}>
+            &times;
+          </button>
+        </div>
       </div>
       <div className="canvas-panel-content">
-        <NoteEditor apiKey={apiKey} noteId={noteId} refreshToken={refreshToken} />
+        <NoteEditor apiKey={apiKey} noteId={noteId} refreshToken={refreshToken} onContentChange={setContent} />
       </div>
     </div>
   );
