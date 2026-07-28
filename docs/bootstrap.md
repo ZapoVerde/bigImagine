@@ -101,4 +101,7 @@ Cloud OAuth client (see spec.md §6.7) before it can be connected even once depl
 Ingestion Gateway, the governance doc-sync (blocked on it), and Gmail parsing (spec.md §6.3).
 Drafted but not yet actioned: Open WebUI
 suggested-prompts content, registering the OpenAPI tool server inside Open WebUI's own admin panel
-(needs a human in the browser).
+(needs a human in the browser). Offsite backup (spec.md §6.6, `backup/`) is built in `bigBrain/`
+but not yet deployed — not synced to `stacks/bigbrain/`, not committed, and blocked on an R2 API
+token/lifecycle rule plus a `BIGBRAIN_BACKUP_AGE_PUBLIC_KEY` being added to `secrets.enc.env`
+(`.env.example` has the full list) before `docker compose up -d backup` can run.
