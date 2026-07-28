@@ -7,7 +7,17 @@
  * db/migrations/0031_active_timers.sql's whole point is that a running timer survives an
  * orchestrator container restart with the correct remaining time, which only works if the stored
  * deadline is absolute rather than a "seconds remaining" value that would go stale the instant
- * the process holding it restarts.
+ * the process holding it restarts. Computed in JS (`new Date(Date.now() + durationSeconds * 1000)`)
+ * and passed as its own bound timestamptz parameter, not via SQL's `make_interval` — reusing one
+ * placeholder as both the plain `duration_seconds` column value and `make_interval`'s argument hit
+ * a real bug caught live (not by verify-temporal.mjs's fake pool, which never round-trips through
+ * real Postgres): the server deduces one placeholder's type from every occurrence in the
+ * statement, and a bare `integer`-column usage next to a `double precision`-cast usage of the same
+ * `$n` is a genuine conflict, not something an explicit cast on just one side resolves — Postgres
+ * fails at parse time with "inconsistent types deduced for parameter" before assignment casts ever
+ * get a chance to run. Binding two separate parameters to the same JS value sidesteps the ambiguity
+ * entirely, and matches how every other derived timestamp in this codebase (nextOccurrence.ts,
+ * dateContext.ts) is already computed in JS rather than in SQL.
  *
  * linkedListItemId/linkedNoteId/linkedChatId are optional, set-once-at-creation pointers, same
  * shape as calendar_events' linked_list_item_id/linked_note_id (plugins/calendar) — not
@@ -75,11 +85,20 @@ export function createSetTimerTool(): RegisteredTool {
       if (!isSetTimerArgs(args)) {
         throw new Error('set_timer requires durationSeconds: number > 0; label/linkedListItemId/linkedNoteId/linkedChatId (if given) must be strings');
       }
+      const endAt = new Date(Date.now() + args.durationSeconds * 1000);
       const [row] = await ctx.db.query<SetTimerRow>(
         `insert into active_timers (user_id, label, duration_seconds, end_at, linked_list_item_id, linked_note_id, linked_chat_id)
-         values ($1, coalesce($2, 'Timer'), $3, now() + make_interval(secs => $3), $4, $5, $6)
+         values ($1, coalesce($2, 'Timer'), $3, $4, $5, $6, $7)
          returning timer_id, label, duration_seconds, end_at, status`,
-        [ctx.userId, args.label?.trim() || null, args.durationSeconds, args.linkedListItemId ?? null, args.linkedNoteId ?? null, args.linkedChatId ?? null],
+        [
+          ctx.userId,
+          args.label?.trim() || null,
+          args.durationSeconds,
+          endAt.toISOString(),
+          args.linkedListItemId ?? null,
+          args.linkedNoteId ?? null,
+          args.linkedChatId ?? null,
+        ],
       );
       return {
         timerId: row!.timer_id,
