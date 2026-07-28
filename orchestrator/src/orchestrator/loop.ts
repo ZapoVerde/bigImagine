@@ -15,6 +15,12 @@
  * request scoped to one user_id throughout (bb_principles.md §4); nothing here batches multiple
  * tool calls into one transaction, since nothing yet needs that.
  *
+ * runTurn wraps its entire body in runWithCallContext (io/llm/callContext.ts) exactly once, keyed
+ * off opts.taskId/taskKind — every llm.complete() call made during the turn, including one a tool
+ * handler triggers internally (e.g. classify_section's own forced-schema call), automatically
+ * inherits it without this file or the tool needing to pass anything extra, since they all share
+ * the one gated LlmProvider instance closed over since boot (bb_principles.md §14).
+ *
  * @api-declaration
  * runTurn(options: RunTurnOptions) — drives one user message through to a final chat reply,
  *   executing any tool calls the LLM requests along the way; throws if maxToolRounds is
@@ -33,11 +39,21 @@
 import { randomUUID } from 'node:crypto';
 import { log, runWithRequestId } from '../io/logger.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
+import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ToolRegistry } from './toolRegistry.js';
 
 export interface RunTurnOptions {
   userId: string;
+  /** What this whole turn — the main reasoning calls and any tool-triggered classification call
+   *  nested inside it — is attributed to for bb_principles.md §14's gate: a chat_id for a live
+   *  conversation, a scheduled_jobs.job_id for an unattended agent_routine dispatch. Required,
+   *  not defaulted, since a call with no real task behind it is exactly what §14 exists to
+   *  prevent. */
+  taskId: string;
+  /** Defaults 'chat' — the household's own conversation. Set 'agent_routine' for a dispatched
+   *  routine so llmGate.ts's cap/kill-switch logic applies to this turn's calls. */
+  taskKind?: LlmCallKind;
   /** The full conversation so far, ending in the latest user turn. A caller fronting a
    *  stateless HTTP API (one that resends the whole history each request, e.g. an
    *  OpenAI-shaped chat endpoint) passes it straight through; systemPrompt is a convenience
@@ -69,7 +85,8 @@ export interface RunTurnResult {
 
 export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const requestId = randomUUID();
-  return runWithRequestId(requestId, () => runTurnInner(opts));
+  const callContext = { taskId: opts.taskId, kind: opts.taskKind ?? ('chat' as LlmCallKind), userId: opts.userId };
+  return runWithRequestId(requestId, () => runWithCallContext(callContext, () => runTurnInner(opts)));
 }
 
 async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {

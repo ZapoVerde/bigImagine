@@ -12,6 +12,10 @@
  * *string*, not a raw object — that parsing lives entirely in this file so nothing downstream
  * needs to know which shape the underlying wire format used.
  *
+ * The response's own `usage.prompt_tokens`/`completion_tokens`/`total_tokens` are relayed onto
+ * LlmTurn.usage unchanged — bb_principles.md §14's gate is what actually does anything with them,
+ * this file just reports what the upstream API reported.
+ *
  * A user message carrying LlmMessage.images gets `content` reshaped from a plain string into the
  * documented OpenAI vision block array (`text` + one `image_url` per image, base64 data URI) —
  * the shape OpenRouter and vision-capable DeepSeek-compatible models converge on, same "one shape
@@ -40,6 +44,7 @@ import type {
   LlmMessage,
   LlmProvider,
   LlmTurn,
+  LlmUsage,
   ToolCall,
   ToolDefinition,
 } from './types.js';
@@ -111,6 +116,7 @@ function toOaiTools(tools: ToolDefinition[]) {
 function fromOaiResponse(
   message: { content: string | null; tool_calls?: OaiToolCall[] },
   finishReason?: string,
+  usage?: LlmUsage,
 ): LlmTurn {
   const toolCalls: ToolCall[] = (message.tool_calls ?? []).map((tc) => {
     try {
@@ -129,7 +135,7 @@ function fromOaiResponse(
     }
   });
 
-  return { message: { role: 'assistant', content: message.content ?? '' }, toolCalls };
+  return { message: { role: 'assistant', content: message.content ?? '' }, toolCalls, usage };
 }
 
 /** GET {baseUrl}/models — the live catalog behind the "dynamic model picker": whatever a
@@ -202,10 +208,18 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
 
       const payload = (await response.json()) as {
         choices: { message: { content: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
+        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
       };
       const choice = payload.choices[0];
       if (!choice) throw new Error('OpenAI-compatible API returned no choices');
-      return fromOaiResponse(choice.message, choice.finish_reason);
+      const usage = payload.usage
+        ? {
+            promptTokens: payload.usage.prompt_tokens,
+            completionTokens: payload.usage.completion_tokens,
+            totalTokens: payload.usage.total_tokens,
+          }
+        : undefined;
+      return fromOaiResponse(choice.message, choice.finish_reason, usage);
     },
     listModels: () => listOpenAiCompatibleModels(config),
   };

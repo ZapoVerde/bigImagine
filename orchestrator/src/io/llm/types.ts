@@ -9,7 +9,7 @@
  * writing a new adapter behind this interface, not touching the loop.
  *
  * @api-declaration
- * LlmMessage, ToolDefinition, ToolCall, LlmTurn, LlmProvider — see inline docs
+ * LlmMessage, ToolDefinition, ToolCall, LlmTurn, LlmUsage, LlmProvider — see inline docs
  *
  * @contract
  *   assertions:
@@ -59,10 +59,22 @@ export interface ToolCall {
   arguments: unknown;
 }
 
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface LlmTurn {
   /** The assistant's reply. content is '' when the turn is purely tool call(s). */
   message: LlmMessage;
   toolCalls: ToolCall[];
+  /** Token accounting for this one complete() call, straight from the vendor's own response —
+   *  undefined only for a provider that genuinely doesn't report it (none of the three adapters
+   *  here omit it; kept optional so a future minimal adapter isn't forced to fake one). Consumed
+   *  by io/llm/llmGate.ts (bb_principles.md §14) to log usage and enforce agent_routine caps —
+   *  never computed or estimated here, only relayed. */
+  usage?: LlmUsage;
 }
 
 export interface LlmCompleteOptions {

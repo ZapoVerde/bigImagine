@@ -31,6 +31,11 @@
  * since every IO Wrapper's outbound fetch (LLM providers, Notion, plugins/web, plugins/weather,
  * calendar ICS feeds) shares the same broken assumption.
  *
+ * llm is wrapped in io/llm/llmGate.ts's gate exactly once, right after construction, per
+ * bb_principles.md §14 — every downstream consumer (loadPlugins' deps, startHttpServer's default
+ * connection, the agent_routine dispatch loop started below) shares the one gated instance, so
+ * none of them has to remember to gate itself.
+ *
  * @api-declaration
  * (entry point — no exports)
  *
@@ -45,6 +50,8 @@ import { setDefaultAutoSelectFamily } from 'node:net';
 import { Pool } from 'pg';
 import { log } from './io/logger.js';
 import { createLlmProvider } from './io/llm/index.js';
+import { createGatedLlmProvider } from './io/llm/llmGate.js';
+import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispatch.js';
 import {
   parseLlmProfiles,
   withOverriddenApiKeys,
@@ -144,11 +151,21 @@ async function main(): Promise<void> {
   // a not-yet-active profile's "default model" should be its own static config, not whatever
   // model happens to be overridden onto a *different* (the currently active) profile.
   const llmProfiles = parseLlmProfiles(profilesJsonWithVision);
-  const llm = createLlmProvider({
-    ...process.env,
-    BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithVision, activeProfile, activeModel),
-    BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
-  });
+  // Gated exactly once, here, per bb_principles.md §14 — everything downstream (every plugin's
+  // closed-over llm, the HTTP server's default connection, this process's own agent_routine
+  // dispatcher below) shares this one instance, so nothing needs to remember to gate itself. A
+  // chat's own per-profile connection override is the one other place a *new* LlmProvider gets
+  // constructed at runtime (server/httpServer.ts) — that call site gates its own throwaway
+  // instance the same way, since this wrap can't reach something built after boot.
+  const llm = createGatedLlmProvider(
+    createLlmProvider({
+      ...process.env,
+      BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithVision, activeProfile, activeModel),
+      BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
+    }),
+    db,
+    settings,
+  );
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
   // Owner user id / data source id are non-secret (docs/bb_principles.md §12) so they're DB-backed
   // via orchestrator_settings, not provider_credentials — same restart-on-save shape as the
@@ -170,6 +187,13 @@ async function main(): Promise<void> {
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));
   const chats = createChatSessionStore(db);
+
+  // Not a plugin background job (orchestrator/src/orchestrator/agentRoutineDispatch.ts's own doc
+  // explains why: it needs the full tool registry and runTurn, neither reachable from inside
+  // pluginLoader.ts's plugin-scoped deps) — started directly here, the same composition-root tier
+  // startHttpServer is, once every piece it needs (the gated llm above, tools, chats) exists.
+  startAgentRoutineDispatchLoop({ db, llm, tools, chats, settings });
+
   // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
   // io/accessIdentity.ts.
   const accessIdentity = createAccessIdentityResolver(process.env);

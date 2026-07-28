@@ -68,6 +68,7 @@ async function runForUser(userId) {
 
   const result = await runTurn({
     userId,
+    taskId: `task-${userId}`,
     messages: [{ role: 'user', content: 'who am I?' }],
     llm,
     db,
@@ -108,6 +109,7 @@ assert(
   ]);
   const result = await runTurn({
     userId: 'x',
+    taskId: 'task-missing-tool',
     messages: [{ role: 'user', content: 'hi' }],
     llm,
     db,
@@ -135,7 +137,7 @@ assert(
     },
     { message: { role: 'assistant', content: 'done' }, toolCalls: [] },
   ]);
-  const result = await runTurn({ userId: 'x', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
   assert(result.focusedNoteId === 'note-a', 'a tool call\'s focusHint surfaces as runTurn\'s focusedNoteId');
 }
 {
@@ -156,7 +158,7 @@ assert(
     },
     { message: { role: 'assistant', content: 'done anyway' }, toolCalls: [] },
   ]);
-  const result = await runTurn({ userId: 'x', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
   assert(result.content === 'done anyway', 'a throwing focusHint never breaks the turn\'s reply');
   assert(result.focusedNoteId === undefined, 'a throwing focusHint just leaves focusedNoteId unset');
 }

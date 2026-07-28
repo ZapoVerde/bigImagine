@@ -120,6 +120,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname } from 'node:path';
 import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
+import { runWithCallContext } from '../io/llm/callContext.js';
+import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
@@ -385,7 +387,11 @@ async function handleChatCompletions(
   if (sessionParams.profile) {
     const profile = deps.llmProfiles[sessionParams.profile];
     if (profile) {
-      turnLlm = createLlmProviderForProfile(profile);
+      // A per-chat override builds its own throwaway provider (this function's own doc above) —
+      // gated the same as deps.llm (index.ts wraps that one once, at boot), since a call through
+      // an override is exactly as real a call as one through the household's active connection
+      // (bb_principles.md §14 doesn't carve out an exception for "which connection").
+      turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), db, deps.settings);
       turnDefaultModel = profile.model;
     } else {
       log.error(
@@ -426,6 +432,11 @@ async function handleChatCompletions(
   try {
     ({ content: reply, focusedNoteId } = await runTurn({
       userId,
+      // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
+      // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
+      // one per turn is fine there, since kind stays 'chat' (never capped, only metered) and
+      // nothing needs it to be stable across calls the way an agent_routine's job_id must be.
+      taskId: body.chat_id ?? randomUUID(),
       messages: messagesForLlm,
       systemPrompt,
       model,
@@ -469,7 +480,9 @@ async function handleChatCompletions(
     if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
       let title: string;
       try {
-        title = await generateChatTitle(turnLlm, latestUserMessage.content, reply);
+        title = await runWithCallContext({ taskId: body.chat_id, kind: 'system', userId }, () =>
+          generateChatTitle(turnLlm, latestUserMessage.content, reply),
+        );
       } catch (err) {
         log.error('generateChatTitle failed, falling back to a truncated title', err);
         title = latestUserMessage.content.slice(0, 60);

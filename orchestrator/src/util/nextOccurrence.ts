@@ -1,8 +1,16 @@
 /**
- * @file plugins/temporal/src/nextOccurrence.ts
- * @stamp 2026-07-27
+ * @file orchestrator/src/util/nextOccurrence.ts
+ * @stamp 2026-07-28
  * @architectural-role Pure Function — IANA-timezone-aware "next daily occurrence" arithmetic
  * @description
+ * Moved here from plugins/temporal (its original home) once orchestrator/src/orchestrator/
+ * agentRoutineDispatch.ts needed the exact same "daily" next_run_at arithmetic scheduled_jobs'
+ * alarm dispatch (plugins/temporal/src/jobPoll.ts) already relied on — a plugin can depend on
+ * @bigbrain/orchestrator but never the reverse (orchestrator/pluginLoader.ts's own doc), so core
+ * code needing this couldn't import it from the plugin. Rather than fork the DST-aware math into
+ * two copies that could silently drift, this is now the one copy; plugins/temporal imports it
+ * back via @bigbrain/orchestrator/next-occurrence like any other cross-package dependency here.
+ *
  * Unlike plugins/math-utils' date_math (deliberately abstract calendar-day arithmetic with no
  * real timezone conversion involved), a recurring "8:30 AM in America/New_York" genuinely needs
  * to know that zone's UTC offset on a given date, including across a DST transition — that's a

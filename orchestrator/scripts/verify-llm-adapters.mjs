@@ -74,6 +74,7 @@ await withMockedFetch(
 
     const result = await runTurn({
       userId: 'u1',
+      taskId: 'task-anthropic-tool-round-trip',
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
       db,
@@ -133,6 +134,7 @@ await withMockedFetch(
 
     const result = await runTurn({
       userId: 'u1',
+      taskId: 'task-openai-tool-round-trip',
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
       db,
@@ -166,6 +168,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
 
   await runTurn({
     userId: 'u1',
+    taskId: 'task-anthropic-sampling',
     messages: [{ role: 'user', content: 'hi' }],
     sampling: { temperature: 0.2, topP: 0.9, maxTokens: 256 },
     llm,
@@ -184,7 +187,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
   const db = createPostgresClient(createFakePool());
   const tools = createToolRegistry([]);
 
-  await runTurn({ userId: 'u1', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
 
   const body = requests[0].body;
   assert(!('temperature' in body), 'Anthropic: temperature is omitted, not sent as null/undefined, when unset');
@@ -203,6 +206,7 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
 
   await runTurn({
     userId: 'u1',
+    taskId: 'task-openai-sampling',
     messages: [{ role: 'user', content: 'hi' }],
     sampling: { temperature: 0.5, topP: 0.8, maxTokens: 128 },
     llm,
@@ -225,7 +229,7 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
   const db = createPostgresClient(createFakePool());
   const tools = createToolRegistry([]);
 
-  await runTurn({ userId: 'u1', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
 
   const body = requests[0].body;
   assert(!('temperature' in body), 'OpenAI-compatible: temperature is omitted when unset');
@@ -314,6 +318,37 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
     typeof userMsg.content === 'string',
     'OpenAI-compatible: content stays a plain string when a message carries no images',
   );
+});
+
+// --- Usage/token accounting (bb_principles.md §14's gate consumes this) ---
+await withMockedFetch(
+  [{ content: [{ type: 'text', text: 'ok' }], usage: { input_tokens: 12, output_tokens: 34 } }],
+  async () => {
+    const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(
+      turn.usage?.promptTokens === 12 && turn.usage?.completionTokens === 34 && turn.usage?.totalTokens === 46,
+      'Anthropic: usage.input_tokens/output_tokens relay onto LlmTurn.usage, summed for totalTokens',
+    );
+  },
+);
+
+await withMockedFetch(
+  [{ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 } }],
+  async () => {
+    const llm = createOpenAiCompatibleLlmProvider({ apiKey: 'test-key', model: 'test-model', baseUrl: 'https://example.invalid/v1' });
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(
+      turn.usage?.promptTokens === 5 && turn.usage?.completionTokens === 7 && turn.usage?.totalTokens === 12,
+      'OpenAI-compatible: usage.prompt_tokens/completion_tokens/total_tokens relay onto LlmTurn.usage unchanged',
+    );
+  },
+);
+
+await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async () => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+  assert(turn.usage === undefined, 'Anthropic: usage is undefined, not fabricated, when the response omits it');
 });
 
 if (process.exitCode) {

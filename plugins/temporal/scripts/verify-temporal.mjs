@@ -8,7 +8,7 @@ import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
 import { info, registerTools } from '../dist/index.js';
 import { pollTick } from '../dist/timerPoll.js';
 import { pollJobsTick } from '../dist/jobPoll.js';
-import { nextDailyOccurrence } from '../dist/nextOccurrence.js';
+import { nextDailyOccurrence } from '@bigbrain/orchestrator/next-occurrence';
 
 function assert(cond, message) {
   if (!cond) {
@@ -90,14 +90,14 @@ function createFakePool(users) {
           }
 
           if (sql.includes('insert into scheduled_jobs')) {
-            const [userId, title, scheduleKind, timeOfDay, timezone, nextRunAt, linkedChatId] = params;
+            const [userId, title, classification, scheduleKind, timeOfDay, timezone, nextRunAt, linkedChatId, instructions, maxRunsPerDay, maxTokensPerDay] = params;
             assert(scopedUserId === userId, 'schedule_routine inserts scoped to the requesting user');
             const job_id = `job-${++jobCounter}`;
             jobs.push({
               job_id,
               user_id: userId,
               title,
-              classification: 'alarm',
+              classification,
               schedule_kind: scheduleKind,
               time_of_day: timeOfDay,
               timezone,
@@ -105,6 +105,9 @@ function createFakePool(users) {
               last_run_at: null,
               next_run_at: nextRunAt,
               linked_chat_id: linkedChatId,
+              instructions,
+              max_runs_per_day: maxRunsPerDay,
+              max_tokens_per_day: maxTokensPerDay,
               updated_at: new Date().toISOString(),
             });
             const row = jobs[jobs.length - 1];
@@ -251,16 +254,31 @@ await db.withUserScope('user-a', async (session) => {
   assert(daily.scheduleKind === 'daily' && daily.timeOfDay === '08:30', 'a "daily" job stores its time_of_day');
   dailyJobId = daily.jobId;
 
-  let threw = false;
+  let threwMissingFields = false;
   try {
     await registry.get('schedule_routine').handler(
       { title: 'nope', scheduleKind: 'once', runAt: new Date().toISOString(), classification: 'agent_routine' },
       { userId: 'user-a', db: session },
     );
   } catch {
-    threw = true;
+    threwMissingFields = true;
   }
-  assert(threw, 'agent_routine jobs are rejected until a later stage adds the kill switch/rate cap');
+  assert(threwMissingFields, 'agent_routine still requires instructions + linkedChatId even now that dispatch exists');
+
+  const routine = await registry.get('schedule_routine').handler(
+    {
+      title: 'Morning news digest',
+      scheduleKind: 'daily',
+      timeOfDay: '07:00',
+      classification: 'agent_routine',
+      instructions: 'Summarize the morning news and send a notification.',
+      linkedChatId: 'chat-1',
+    },
+    { userId: 'user-a', db: session },
+  );
+  assert(routine.classification === 'agent_routine', 'agent_routine jobs can now be created given instructions + linkedChatId');
+  assert(routine.instructions === 'Summarize the morning news and send a notification.', 'agent_routine stores its instructions');
+  assert(routine.maxRunsPerDay === 5 && routine.maxTokensPerDay === 50000, 'agent_routine defaults its per-job caps when omitted');
 });
 
 // --- jobPoll: 'once' completes, 'daily' recomputes next_run_at forward ---

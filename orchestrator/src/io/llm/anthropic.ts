@@ -15,6 +15,10 @@
  * createLlmProviderForProfile, never inferred here; server/httpServer.ts is what actually gates a
  * turn on it before any message reaches this file.
  *
+ * The response's own `usage.input_tokens`/`output_tokens` are relayed onto LlmTurn.usage
+ * unchanged (summed for totalTokens) — bb_principles.md §14's gate is what actually does anything
+ * with them, this file just reports what Anthropic reported.
+ *
  * @api-declaration
  * createAnthropicLlmProvider(config: AnthropicConfig) — config.apiKey and config.model are
  *   required and read from env by io/llm/index.ts, never hardcoded here
@@ -32,6 +36,7 @@ import type {
   LlmMessage,
   LlmProvider,
   LlmTurn,
+  LlmUsage,
   ToolCall,
   ToolDefinition,
 } from './types.js';
@@ -113,7 +118,7 @@ function toAnthropicTools(tools: ToolDefinition[]) {
   }));
 }
 
-function fromAnthropicResponse(content: AnthropicContentBlock[]): LlmTurn {
+function fromAnthropicResponse(content: AnthropicContentBlock[], usage?: LlmUsage): LlmTurn {
   const text = content
     .filter((b) => b.type === 'text')
     .map((b) => b.text ?? '')
@@ -123,7 +128,7 @@ function fromAnthropicResponse(content: AnthropicContentBlock[]): LlmTurn {
     .filter((b) => b.type === 'tool_use')
     .map((b) => ({ id: b.id ?? '', name: b.name ?? '', arguments: b.input }));
 
-  return { message: { role: 'assistant', content: text }, toolCalls };
+  return { message: { role: 'assistant', content: text }, toolCalls, usage };
 }
 
 export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider {
@@ -164,8 +169,18 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
         throw new Error(`Anthropic API error ${response.status}: ${body}`);
       }
 
-      const payload = (await response.json()) as { content: AnthropicContentBlock[] };
-      return fromAnthropicResponse(payload.content);
+      const payload = (await response.json()) as {
+        content: AnthropicContentBlock[];
+        usage?: { input_tokens: number; output_tokens: number };
+      };
+      const usage = payload.usage
+        ? {
+            promptTokens: payload.usage.input_tokens,
+            completionTokens: payload.usage.output_tokens,
+            totalTokens: payload.usage.input_tokens + payload.usage.output_tokens,
+          }
+        : undefined;
+      return fromAnthropicResponse(payload.content, usage);
     },
   };
 }

@@ -114,3 +114,23 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `orchestrator_settings.key` with `ntfy_server_url` (a plain selector, the public hostname) and
   `notifications_enabled` (the household kill switch — read live on every
   `send_push_notification` call, unset/false until an operator opts in from the Settings tab).
+- `0035_agent_routine_dispatch.sql` — unblocks `scheduled_jobs`' `agent_routine` classification
+  (`0032_scheduled_jobs.sql` accepted the value but nothing dispatched it): adds `instructions`
+  (what the LLM does when it wakes up unattended — required for `agent_routine` via the widened
+  `scheduled_jobs_routine_fields` CHECK, alongside `linked_chat_id`, both already-nullable
+  columns), per-job `max_runs_per_day`/`max_tokens_per_day` caps (NOT NULL, default 5/50000), and
+  a `capped_reason` column paired with a widened `status` CHECK (`'capped'`, distinct from
+  `'cancelled'` — a human turning a routine off vs. it hitting its own budget). Adds `llm_calls`,
+  the universal per-call usage log `docs/bb_principles.md` §14's gate
+  (`orchestrator/src/io/llm/llmGate.ts`) writes to on every LLM call, agent_routine or not —
+  deliberately RLS-exempt (same household-wide category as `provider_credentials`/
+  `orchestrator_settings`) since the household-wide cap check needs to sum usage across every
+  user, which a forced `user_scoped` RLS policy can't do even from an unscoped system session.
+  Widens `orchestrator_settings.key` with `agent_routines_enabled` (the same switch a Settings-tab
+  "big red button" and the gate's own household-cap breach reaction both flip), the two
+  household-wide daily caps, and `agent_routines_disabled_reason`. The actual dispatch loop
+  (`orchestrator/src/orchestrator/agentRoutineDispatch.ts`) lives in core, not
+  `plugins/temporal` alongside `jobPoll.ts`'s alarm dispatch — it needs the full `ToolRegistry`
+  and `runTurn`, neither reachable from a plugin (`orchestrator/pluginLoader.ts`'s own
+  one-way-dependency doc) — so `orchestrator/src/index.ts` wires it directly, the same
+  composition-root tier as the HTTP server.

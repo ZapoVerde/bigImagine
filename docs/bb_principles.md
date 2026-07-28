@@ -128,4 +128,14 @@ Everything else — which connection is active, a shared feed's owning user, a m
 
 ---
 
+## 14. Every LLM Call Passes Through One Gate, Carrying a Task Id
+
+No module may reach the model directly. Every call — a live conversation, a scheduled routine waking unattended, a one-off classification a tool triggers along the way — passes through the same single metering seam, and every call names an explicit task id: whose behalf it's running on.
+
+This is what makes usage accountable rather than merely visible after the fact. A call with nothing attached to it is a call nothing can be budgeted against, rate-limited, or shut off when it misbehaves. The gate is where "should this call happen at all" gets decided; a path that reaches the model without passing through it is a second, ungoverned door into the exact resource every safety mechanism here — kill switches, run caps, rate limits — assumes has only one.
+
+This holds regardless of how many places in the system end up calling the model, or how deeply nested a given call is inside some other feature's own reasoning.
+
+---
+
 *Further principles will be added as they emerge from real friction, not anticipated in advance.*

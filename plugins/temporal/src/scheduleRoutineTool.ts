@@ -1,15 +1,20 @@
 /**
  * @file plugins/temporal/src/scheduleRoutineTool.ts
- * @stamp 2026-07-27
+ * @stamp 2026-07-28
  * @architectural-role IO Wrapper — the schedule_routine RegisteredTool
  * @description
  * Two shapes in one tool, distinguished by whether jobId is present: creating a new job (title +
  * scheduleKind + runAt/timeOfDay), or updating an existing one's status (active <-> cancelled) —
- * the only update this stage needs. classification defaults to 'alarm'; 'agent_routine' is
- * rejected here even though db/migrations/0032_scheduled_jobs.sql's CHECK already accepts it —
- * the schema is future-proofed for it, but nothing dispatches it yet (no kill switch, no per-job
- * run cap), so creating one now would silently produce a job that never fires. timezone defaults
- * to household_timezone (deps.settings), same pattern as plugins/calendar's
+ * the only update this stage needs. classification defaults to 'alarm'. 'agent_routine' is now
+ * dispatchable (orchestrator/src/orchestrator/agentRoutineDispatch.ts, db/migrations/
+ * 0035_agent_routine_dispatch.sql's kill switch + per-job/household caps) and requires both
+ * instructions (what the LLM should actually do when it wakes up unattended — title stays a
+ * human label) and linkedChatId (the dispatcher runs the routine inside that chat, inheriting its
+ * tool allow-list and leaving a real transcript) — enforced here at creation time even though the
+ * DB's own scheduled_jobs_routine_fields CHECK would catch it anyway, so a caller gets a clear
+ * error instead of a raw constraint-violation message. maxRunsPerDay/maxTokensPerDay default to
+ * the same conservative per-job values the column defaults use (5 / 50,000) when omitted.
+ * timezone defaults to household_timezone (deps.settings), same pattern as plugins/calendar's
  * get_calendar_schedule and math-utils' date_math.
  *
  * @api-declaration
@@ -25,7 +30,7 @@
 
 import type { PluginDeps } from '@bigbrain/orchestrator/plugin-loader';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
-import { nextDailyOccurrence } from './nextOccurrence.js';
+import { nextDailyOccurrence } from '@bigbrain/orchestrator/next-occurrence';
 
 type OrchestratorSettingsStore = PluginDeps['settings'];
 
@@ -38,6 +43,9 @@ interface JobRow {
   timezone: string;
   status: string;
   next_run_at: string;
+  instructions?: string | null;
+  max_runs_per_day?: number;
+  max_tokens_per_day?: number;
 }
 
 function shapeJob(row: JobRow) {
@@ -50,8 +58,14 @@ function shapeJob(row: JobRow) {
     timezone: row.timezone,
     status: row.status,
     nextRunAt: row.next_run_at,
+    instructions: row.instructions ?? undefined,
+    maxRunsPerDay: row.max_runs_per_day,
+    maxTokensPerDay: row.max_tokens_per_day,
   };
 }
+
+const DEFAULT_MAX_RUNS_PER_DAY = 5;
+const DEFAULT_MAX_TOKENS_PER_DAY = 50_000;
 
 interface CreateArgs {
   title: string;
@@ -61,6 +75,9 @@ interface CreateArgs {
   timezone?: string;
   classification?: 'alarm' | 'agent_routine';
   linkedChatId?: string;
+  instructions?: string;
+  maxRunsPerDay?: number;
+  maxTokensPerDay?: number;
 }
 
 interface UpdateArgs {
@@ -82,6 +99,13 @@ function isCreateArgs(value: Record<string, unknown>): boolean {
   if (value.timezone !== undefined && typeof value.timezone !== 'string') return false;
   if (value.classification !== undefined && value.classification !== 'alarm' && value.classification !== 'agent_routine') return false;
   if (value.linkedChatId !== undefined && typeof value.linkedChatId !== 'string') return false;
+  if (value.instructions !== undefined && typeof value.instructions !== 'string') return false;
+  if (value.maxRunsPerDay !== undefined && (typeof value.maxRunsPerDay !== 'number' || value.maxRunsPerDay <= 0)) return false;
+  if (value.maxTokensPerDay !== undefined && (typeof value.maxTokensPerDay !== 'number' || value.maxTokensPerDay <= 0)) return false;
+  if (value.classification === 'agent_routine') {
+    if (typeof value.instructions !== 'string' || value.instructions.trim() === '') return false;
+    if (typeof value.linkedChatId !== 'string' || value.linkedChatId === '') return false;
+  }
   return true;
 }
 
@@ -99,19 +123,31 @@ export function createScheduleRoutineTool(settings: OrchestratorSettingsStore): 
     definition: {
       name: 'schedule_routine',
       description:
-        'Create a one-time or daily-recurring alarm, or cancel/reactivate one by jobId. Only human-facing alarms are supported right now, not autonomous routines.',
+        'Create a one-time or daily-recurring alarm or agent routine, or cancel/reactivate one by jobId. ' +
+        'An "alarm" just reminds the household. An "agent_routine" wakes the LLM itself, unattended, to ' +
+        'carry out its own instructions — requires linkedChatId and instructions, and is subject to a ' +
+        'household kill switch and daily run/token caps (Settings tab).',
       parameters: {
         type: 'object',
         properties: {
           jobId: { type: 'string', description: 'Provide to update (status only) an existing job instead of creating a new one.' },
           status: { type: 'string', enum: ['active', 'cancelled'], description: 'Required when jobId is given.' },
-          title: { type: 'string', description: 'What the alarm is for, e.g. "Take medication".' },
+          title: { type: 'string', description: 'A short human label, e.g. "Take medication" or "Morning news digest".' },
           scheduleKind: { type: 'string', enum: ['once', 'daily'], description: '"once" fires a single time; "daily" recurs.' },
           runAt: { type: 'string', description: 'ISO timestamp. Required when scheduleKind is "once".' },
           timeOfDay: { type: 'string', description: '24h "HH:MM". Required when scheduleKind is "daily".' },
           timezone: { type: 'string', description: 'IANA zone, e.g. "America/New_York". Defaults to the household timezone.' },
-          classification: { type: 'string', enum: ['alarm'], description: 'Only "alarm" is supported right now.' },
-          linkedChatId: { type: 'string', description: 'Optional: the chat session this alarm relates to.' },
+          classification: { type: 'string', enum: ['alarm', 'agent_routine'], description: 'Defaults to "alarm".' },
+          linkedChatId: {
+            type: 'string',
+            description: 'The chat session this job relates to. Required for classification "agent_routine" — that chat is where the routine actually runs.',
+          },
+          instructions: {
+            type: 'string',
+            description: 'Required for classification "agent_routine": what the LLM should actually do when this routine wakes up unattended.',
+          },
+          maxRunsPerDay: { type: 'number', description: 'agent_routine only. Defaults to 5.' },
+          maxTokensPerDay: { type: 'number', description: 'agent_routine only. Defaults to 50000.' },
         },
         additionalProperties: false,
       },
@@ -133,10 +169,6 @@ export function createScheduleRoutineTool(settings: OrchestratorSettingsStore): 
         return row ? { found: true, ...shapeJob(row) } : { found: false, jobId: args.jobId };
       }
 
-      if (args.classification === 'agent_routine') {
-        throw new Error('agent_routine jobs are not dispatched yet — use classification "alarm" (the default) for now');
-      }
-
       const timezone = args.timezone ?? (await settings.get('household_timezone')) ?? 'UTC';
       let nextRunAt: Date;
       if (args.scheduleKind === 'once') {
@@ -146,18 +178,26 @@ export function createScheduleRoutineTool(settings: OrchestratorSettingsStore): 
         nextRunAt = nextDailyOccurrence(args.timeOfDay as string, timezone, new Date());
       }
 
+      const classification = args.classification ?? 'alarm';
       const [row] = await ctx.db.query<JobRow>(
-        `insert into scheduled_jobs (user_id, title, classification, schedule_kind, time_of_day, timezone, next_run_at, linked_chat_id)
-         values ($1, $2, 'alarm', $3, $4, $5, $6, $7)
-         returning job_id, title, classification, schedule_kind, time_of_day, timezone, status, next_run_at`,
+        `insert into scheduled_jobs
+           (user_id, title, classification, schedule_kind, time_of_day, timezone, next_run_at, linked_chat_id,
+            instructions, max_runs_per_day, max_tokens_per_day)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         returning job_id, title, classification, schedule_kind, time_of_day, timezone, status, next_run_at,
+           instructions, max_runs_per_day, max_tokens_per_day`,
         [
           ctx.userId,
           args.title,
+          classification,
           args.scheduleKind,
           args.scheduleKind === 'daily' ? args.timeOfDay : null,
           timezone,
           nextRunAt.toISOString(),
           args.linkedChatId ?? null,
+          classification === 'agent_routine' ? args.instructions : null,
+          args.maxRunsPerDay ?? DEFAULT_MAX_RUNS_PER_DAY,
+          args.maxTokensPerDay ?? DEFAULT_MAX_TOKENS_PER_DAY,
         ],
       );
       return shapeJob(row!);

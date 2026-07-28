@@ -30,7 +30,7 @@
 
 import { log } from '@bigbrain/orchestrator/logger';
 import type { PostgresClient } from '@bigbrain/orchestrator/postgres';
-import { nextDailyOccurrence } from './nextOccurrence.js';
+import { nextDailyOccurrence } from '@bigbrain/orchestrator/next-occurrence';
 
 const POLL_INTERVAL_MS = 5_000;
 

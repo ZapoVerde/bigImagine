@@ -248,6 +248,14 @@ function createFakePool() {
             inserts.push({ scopedUserId, params });
             return { rows: [{ note_id: 'fake-note-id-1' }] };
           }
+          // bb_principles.md §14's gate (io/llm/llmGate.ts) logs every LLM call it makes,
+          // 'chat'-kind included — every runTurn/generateChatTitle call this file drives goes
+          // through it now (httpServer.ts wraps both the boot-time llm and any per-chat profile
+          // override), so this fake pool needs to accept the log write even though nothing here
+          // asserts on its contents (that's verify-llm-gate.mjs's job).
+          if (sql.includes('insert into llm_calls')) {
+            return { rows: [] };
+          }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
         release() {},

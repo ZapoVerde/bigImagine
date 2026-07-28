@@ -56,6 +56,19 @@
  * immediately rather than needing a redeploy. Unset (falsy) by default — the tool stays quiet
  * until an operator explicitly opts in, same caution as any other best-effort plugin gate.
  *
+ * agent_routines_enabled (db/migrations/0035_agent_routine_dispatch.sql) is the household kill
+ * switch for scheduled_jobs' 'agent_routine' dispatch (orchestrator/src/orchestrator/
+ * agentRoutineDispatch.ts) — read live before every dispatch, same no-restart shape as
+ * notifications_enabled, and the literal same value both a Settings-tab manual toggle and
+ * io/llm/llmGate.ts's own household-cap breach reaction write to. Unset (falsy) by default, same
+ * caution as notifications_enabled. agent_routine_max_runs_per_day/agent_routine_max_tokens_per_day
+ * are the household-wide rolling-24h caps llmGate.ts checks alongside each job's own per-job
+ * caps (scheduled_jobs.max_runs_per_day/max_tokens_per_day); unset means "use the conservative
+ * built-in default" (llmGate.ts's own constants), not "unlimited". agent_routines_disabled_reason
+ * is set alongside agent_routines_enabled whenever the switch flips itself off, so Settings can
+ * show *why* rather than a bare toggle — same "state plus reason" shape as scheduled_jobs'
+ * capped_reason.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -87,6 +100,10 @@ export const SETTING_NAMES = [
   'llm_vision_capable_profiles',
   'ntfy_server_url',
   'notifications_enabled',
+  'agent_routines_enabled',
+  'agent_routine_max_runs_per_day',
+  'agent_routine_max_tokens_per_day',
+  'agent_routines_disabled_reason',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 
