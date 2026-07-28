@@ -257,16 +257,24 @@ function createFakePool() {
 }
 
 // --- Part 1: the loader against the real plugins/ directory ---
+// startBackgroundJobs: false — this only tests loadPlugins/registerTools discovery, not
+// background-job behavior. Without it, temporal/calendar's real setInterval pollers would run
+// against createFakePool() forever (it only recognizes a few query shapes), throwing on every
+// tick and keeping the process alive indefinitely instead of letting this script finish.
 const realPluginsDir = new URL('../../plugins', import.meta.url).pathname;
-const realTools = await loadPlugins(realPluginsDir, {
-  llm: createStubLlmProvider([]), // registerTools() itself makes no LLM calls, just wiring
-  embeddings: createStubEmbeddingProvider(8),
-  cipher: testCipher,
-  notion: undefined,
-  db: createPostgresClient(createFakePool()),
-  credentials: createFakeCredentialStore(),
-  settings: createFakeSettingsStore(),
-});
+const realTools = await loadPlugins(
+  realPluginsDir,
+  {
+    llm: createStubLlmProvider([]), // registerTools() itself makes no LLM calls, just wiring
+    embeddings: createStubEmbeddingProvider(8),
+    cipher: testCipher,
+    notion: undefined,
+    db: createPostgresClient(createFakePool()),
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+  },
+  { startBackgroundJobs: false },
+);
 assert(
   realTools.some((t) => t.definition.name === 'ingest_note'),
   'loadPlugins discovers and dynamically imports the real document-ingestion plugin from disk',

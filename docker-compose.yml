@@ -81,6 +81,9 @@ services:
       BIGBRAIN_COZI_ICS_URL: ${BIGBRAIN_COZI_ICS_URL:-}
       BIGBRAIN_OUTLOOK_ICS_URL: ${BIGBRAIN_OUTLOOK_ICS_URL:-}
       BIGBRAIN_MASK_WORK_CALENDAR: ${BIGBRAIN_MASK_WORK_CALENDAR:-false}
+      # Not a secret — just tells the frontend (GET /v1/whoami) whether the `backup` service below
+      # has real R2 credentials yet, so it can warn instead of offsite backup silently not running.
+      BIGBRAIN_BACKUP_CONFIGURED: ${BIGBRAIN_BACKUP_CONFIGURED:-false}
       BIGBRAIN_ORCHESTRATOR_PORT: 8787
       # docs/spec.md §6.6 — one local git repo per user under this directory (plugins/documents/
       # src/gitRepo.ts), on the named volume below so it survives an image rebuild. No remote, but
@@ -124,6 +127,14 @@ services:
   # see backup/README.md for the restore procedure). Provider-agnostic by construction: only the
   # BIGBRAIN_BACKUP_S3_* values below are specific to whichever provider you point it at
   # (Cloudflare R2 today) — backup.sh and this service block never name a provider.
+  #
+  # The BIGBRAIN_BACKUP_S3_*/AGE_PUBLIC_KEY vars are deliberately NOT required (:?) here — unlike
+  # every other secret in this file, leaving them unset must never block `docker compose up` for
+  # the rest of the stack (Compose validates every service's required vars for the whole file
+  # before running anything, even when targeting one service). Until they're real,
+  # entrypoint.sh notices and idles instead of crash-looping; BIGBRAIN_BACKUP_CONFIGURED (set on
+  # both this service and orchestrator, below) drives the frontend's "backup isn't configured"
+  # warning so the gap stays visible instead of silent.
   backup:
     build:
       context: ./backup
@@ -135,16 +146,17 @@ services:
       BIGBRAIN_PG_SUPERUSER: ${BIGBRAIN_PG_SUPERUSER:-bigbrain_admin}
       BIGBRAIN_PG_SUPERUSER_PASSWORD: ${BIGBRAIN_PG_SUPERUSER_PASSWORD:?set in .env}
       BIGBRAIN_PG_DATABASE: ${BIGBRAIN_PG_DATABASE:-bigbrain}
+      BIGBRAIN_BACKUP_CONFIGURED: ${BIGBRAIN_BACKUP_CONFIGURED:-false}
       BIGBRAIN_BACKUP_CRON_SCHEDULE: ${BIGBRAIN_BACKUP_CRON_SCHEDULE:-0 3 * * *}
-      BIGBRAIN_BACKUP_AGE_PUBLIC_KEY: ${BIGBRAIN_BACKUP_AGE_PUBLIC_KEY:?set in .env}
-      BIGBRAIN_BACKUP_S3_BUCKET: ${BIGBRAIN_BACKUP_S3_BUCKET:?set in .env}
+      BIGBRAIN_BACKUP_AGE_PUBLIC_KEY: ${BIGBRAIN_BACKUP_AGE_PUBLIC_KEY:-}
+      BIGBRAIN_BACKUP_S3_BUCKET: ${BIGBRAIN_BACKUP_S3_BUCKET:-}
       # rclone's generic S3 backend, remote named "backup" — swapping provider later (AWS S3,
       # Backblaze B2, Wasabi, MinIO) is changing these four values, not this file or backup.sh.
       RCLONE_CONFIG_BACKUP_TYPE: s3
       RCLONE_CONFIG_BACKUP_PROVIDER: ${BIGBRAIN_BACKUP_S3_PROVIDER:-Cloudflare}
-      RCLONE_CONFIG_BACKUP_ENDPOINT: ${BIGBRAIN_BACKUP_S3_ENDPOINT:?set in .env}
-      RCLONE_CONFIG_BACKUP_ACCESS_KEY_ID: ${BIGBRAIN_BACKUP_S3_ACCESS_KEY_ID:?set in .env}
-      RCLONE_CONFIG_BACKUP_SECRET_ACCESS_KEY: ${BIGBRAIN_BACKUP_S3_SECRET_ACCESS_KEY:?set in .env}
+      RCLONE_CONFIG_BACKUP_ENDPOINT: ${BIGBRAIN_BACKUP_S3_ENDPOINT:-}
+      RCLONE_CONFIG_BACKUP_ACCESS_KEY_ID: ${BIGBRAIN_BACKUP_S3_ACCESS_KEY_ID:-}
+      RCLONE_CONFIG_BACKUP_SECRET_ACCESS_KEY: ${BIGBRAIN_BACKUP_S3_SECRET_ACCESS_KEY:-}
       RCLONE_CONFIG_BACKUP_ACL: private
     volumes:
       - bigbrain-documents:/documents:ro

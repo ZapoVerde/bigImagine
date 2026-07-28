@@ -178,6 +178,11 @@ async function main(): Promise<void> {
   // Where other containers on traefik-net (e.g. Open WebUI) actually reach this service — see
   // docker-compose.yml's container_name. Only used to fill in the OpenAPI spec's `servers` entry.
   const publicBaseUrl = process.env.BIGBRAIN_ORCHESTRATOR_BASE_URL ?? 'http://bigbrain-orchestrator:8787';
+  // Not a secret (bb_principles.md §12) — just tells the frontend whether the backup/ sidecar
+  // (docker-compose.yml) has real credentials yet, so it can warn instead of silently having no
+  // offsite backup. Set alongside the real BIGBRAIN_BACKUP_S3_*/AGE_PUBLIC_KEY vars, never read
+  // by this process beyond this boolean (those secrets stay scoped to the backup container only).
+  const backupConfigured = process.env.BIGBRAIN_BACKUP_CONFIGURED === 'true';
 
   startHttpServer({
     llm,
@@ -193,6 +198,7 @@ async function main(): Promise<void> {
     modelName: 'bigbrain',
     port,
     publicBaseUrl,
+    backupConfigured,
   });
 }
 

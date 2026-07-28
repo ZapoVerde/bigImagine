@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import './theme/tokens.css';
 import './App.css';
 import { whoami } from './api/client';
+import BackupWarningModal from './components/BackupWarningModal';
 import Sidebar from './components/sidebar/Sidebar';
 import TabStrip from './components/TabStrip';
 import TimerStrip from './components/temporal/TimerStrip';
@@ -20,6 +21,7 @@ import RecipesView from './views/RecipesView';
 import SettingsView from './views/SettingsView';
 
 const API_KEY_STORAGE_KEY = 'bb_api_key';
+const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 
 type AuthState =
   | { mode: 'checking' }
@@ -33,6 +35,9 @@ type AuthState =
 // a browser tab — but nothing it was showing is deleted server-side.
 export default function App() {
   const [auth, setAuth] = useState<AuthState>({ mode: 'checking' });
+  // sessionStorage (not localStorage) so this reappears next session rather than being
+  // permanently silenced by one click — see BackupWarningModal's own note on why.
+  const [showBackupWarning, setShowBackupWarning] = useState(false);
   const { tabs, activeTabId, openBlank, summon, openChat, updateTab, close, focus } = useTabs();
   const { theme, toggle: toggleTheme } = useTheme();
 
@@ -54,16 +59,32 @@ export default function App() {
   const [recipesRefreshKey, setRecipesRefreshKey] = useState(0);
 
   useEffect(() => {
+    const maybeWarnAboutBackup = (result: { backupConfigured: boolean } | null) => {
+      if (result && !result.backupConfigured && !sessionStorage.getItem(BACKUP_WARNING_DISMISSED_KEY)) {
+        setShowBackupWarning(true);
+      }
+    };
+
     // Probe first: a Cloudflare Access identity (io/accessIdentity.ts) needs no key at all — only
     // fall back to a stored/manual key if Access doesn't cover this request.
     whoami()
-      .then((userId) => {
-        if (userId) {
+      .then((result) => {
+        if (result) {
           setAuth({ mode: 'sso' });
+          maybeWarnAboutBackup(result);
           return;
         }
         const stored = localStorage.getItem(API_KEY_STORAGE_KEY);
-        setAuth(stored ? { mode: 'key', apiKey: stored } : { mode: 'locked' });
+        if (!stored) {
+          setAuth({ mode: 'locked' });
+          return;
+        }
+        setAuth({ mode: 'key', apiKey: stored });
+        // The unauthenticated probe above only resolves the SSO path — fetch again with the
+        // stored key so the 'key' auth path also gets a backupConfigured reading.
+        whoami(stored)
+          .then(maybeWarnAboutBackup)
+          .catch(() => {});
       })
       .catch(() => setAuth({ mode: 'locked' }));
   }, []);
@@ -76,6 +97,11 @@ export default function App() {
         onUnlock={(key) => {
           localStorage.setItem(API_KEY_STORAGE_KEY, key);
           setAuth({ mode: 'key', apiKey: key });
+          whoami(key)
+            .then((result) => {
+              if (result && !result.backupConfigured) setShowBackupWarning(true);
+            })
+            .catch(() => {});
         }}
       />
     );
@@ -86,6 +112,14 @@ export default function App() {
 
   return (
     <div className="app">
+      {showBackupWarning && (
+        <BackupWarningModal
+          onDismiss={() => {
+            sessionStorage.setItem(BACKUP_WARNING_DISMISSED_KEY, 'true');
+            setShowBackupWarning(false);
+          }}
+        />
+      )}
       <Sidebar
         apiKey={apiKey}
         activeType={activeTab?.type}

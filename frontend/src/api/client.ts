@@ -38,17 +38,23 @@ function authHeaders(apiKey: string | null): Record<string, string> {
   return apiKey ? { authorization: `Bearer ${apiKey}` } : {};
 }
 
-/** Am I already authenticated with no key at all? True when a Cloudflare Access identity
- *  (io/accessIdentity.ts) resolves this request server-side — Access attaches its header to every
- *  request reaching the origin through bigbrain.your-domain.example regardless of what this page sends, so
- *  no Authorization header is needed here for that path to succeed. Returns null on 401 (an
- *  expected outcome, not an error) rather than throwing. */
-export async function whoami(): Promise<string | null> {
-  const res = await fetch('/v1/whoami');
+export interface WhoAmI {
+  userId: string;
+  /** docker-compose.yml's BIGBRAIN_BACKUP_CONFIGURED — false until the backup/ sidecar has real
+   *  R2 credentials. Drives App.tsx's "offsite backup isn't configured" warning modal. */
+  backupConfigured: boolean;
+}
+
+/** Am I already authenticated? With no `apiKey`, this is purely a Cloudflare Access probe
+ *  (io/accessIdentity.ts) — Access attaches its header to every request reaching the origin
+ *  through bigbrain.your-domain.example regardless of what this page sends, so no Authorization header is
+ *  needed here for that path to succeed. Pass the stored key to resolve the 'key' auth path
+ *  instead. Returns null on 401 (an expected outcome, not an error) rather than throwing. */
+export async function whoami(apiKey?: string | null): Promise<WhoAmI | null> {
+  const res = await fetch('/v1/whoami', { headers: authHeaders(apiKey ?? null) });
   if (res.status === 401) return null;
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  const body = (await res.json()) as { userId: string };
-  return body.userId;
+  return (await res.json()) as WhoAmI;
 }
 
 /** GET /v1/timezone — the household_timezone setting, same household-key auth as callTool/chat

@@ -197,6 +197,10 @@ export interface HttpServerDeps {
    *  reads the newly-saved credential at boot. Overridable so tests can prove a POST reached this
    *  point without actually killing the test process. */
   triggerRestart?: () => void;
+  /** Whether backup/'s R2 credentials are real (docker-compose.yml's BIGBRAIN_BACKUP_CONFIGURED)
+   *  — surfaced on /v1/whoami so the frontend can warn when offsite backup isn't actually running
+   *  rather than failing silently. Not a secret itself (bb_principles.md §12). */
+  backupConfigured: boolean;
 }
 
 const ALLOWED_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
@@ -1047,7 +1051,7 @@ async function handleWhoAmI(req: IncomingMessage, res: ServerResponse, deps: Htt
     sendJson(res, 401, { error: 'not authenticated' });
     return;
   }
-  sendJson(res, 200, { userId });
+  sendJson(res, 200, { userId, backupConfigured: deps.backupConfigured });
 }
 
 // household_timezone isn't a secret (bb_principles.md §12) and every household member already

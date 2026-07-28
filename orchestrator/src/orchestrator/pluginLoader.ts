@@ -36,8 +36,9 @@
  * DB/Settings-tab-editable reads process.env directly.
  *
  * @api-declaration
- * loadPlugins(pluginsDir, deps) — returns every RegisteredTool every successfully-loaded plugin
- *   contributed, in discovery order; also awaits each plugin's startBackgroundJobs if it exports one
+ * loadPlugins(pluginsDir, deps, options?) — returns every RegisteredTool every successfully-loaded
+ *   plugin contributed, in discovery order; also awaits each plugin's startBackgroundJobs if it
+ *   exports one, unless options.startBackgroundJobs is explicitly false (default true)
  *
  * @contract
  *   assertions:
@@ -106,7 +107,21 @@ function resolveEntryPoint(pluginDir: string): string | undefined {
   return existsSync(defaultEntry) ? defaultEntry : undefined;
 }
 
-export async function loadPlugins(pluginsDir: string, deps: PluginDeps): Promise<RegisteredTool[]> {
+export interface LoadPluginsOptions {
+  /** Defaults true (real runtime behavior, index.ts's only call site). Set false to load plugins
+   *  and register their tools without awaiting startBackgroundJobs at all — for a test that only
+   *  cares about the loader/registerTools contract (verify-server.mjs's Part 1) and would
+   *  otherwise leave real setInterval-based pollers (temporal, calendar) running against a fake
+   *  DB pool that can't answer their queries, for the rest of the process's life. */
+  startBackgroundJobs?: boolean;
+}
+
+export async function loadPlugins(
+  pluginsDir: string,
+  deps: PluginDeps,
+  options: LoadPluginsOptions = {},
+): Promise<RegisteredTool[]> {
+  const { startBackgroundJobs = true } = options;
   const absoluteDir = resolve(pluginsDir);
   if (!existsSync(absoluteDir)) {
     log.warn(`plugins directory does not exist, nothing to load: ${absoluteDir}`);
@@ -140,7 +155,7 @@ export async function loadPlugins(pluginsDir: string, deps: PluginDeps): Promise
       log.info(`loaded plugin "${mod.info.id}" (${pluginTools.length} tool(s))`);
       tools.push(...pluginTools);
 
-      if (typeof mod.startBackgroundJobs === 'function') {
+      if (startBackgroundJobs && typeof mod.startBackgroundJobs === 'function') {
         try {
           await mod.startBackgroundJobs(deps);
           log.info(`started background jobs for plugin "${mod.info.id}"`);
