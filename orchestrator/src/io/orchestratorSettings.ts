@@ -47,6 +47,15 @@
  * sessionParams.profile), not just the household-wide active one, so the flag has to be per
  * profile name, not per "the active choice."
  *
+ * ntfy_server_url (plugins/notifications) is the URL the orchestrator itself posts to — not a
+ * secret (§12), just a selector, same reasoning as google_calendar_id. Deliberately the internal
+ * container address (http://ntfy:80), not the public hostname the phone app uses; the orchestrator
+ * and ntfy share a Docker network, so its own sends never need to leave it. notifications_enabled is
+ * the household kill switch for send_push_notification: read live on every call, same no-restart
+ * shape as household_timezone, so turning notifications off from the Settings tab takes effect
+ * immediately rather than needing a redeploy. Unset (falsy) by default — the tool stays quiet
+ * until an operator explicitly opts in, same caution as any other best-effort plugin gate.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -76,6 +85,8 @@ export const SETTING_NAMES = [
   'google_calendar_sync_token',
   'default_recipe_servings',
   'llm_vision_capable_profiles',
+  'ntfy_server_url',
+  'notifications_enabled',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

@@ -23,6 +23,7 @@ COPY plugins/web/package.json plugins/web/package.json
 COPY plugins/weather/package.json plugins/weather/package.json
 COPY plugins/math-utils/package.json plugins/math-utils/package.json
 COPY plugins/temporal/package.json plugins/temporal/package.json
+COPY plugins/notifications/package.json plugins/notifications/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci
 
@@ -42,6 +43,7 @@ RUN npm run build --workspace=@bigbrain/orchestrator \
  && npm run build --workspace=@bigbrain/plugin-weather \
  && npm run build --workspace=@bigbrain/plugin-math-utils \
  && npm run build --workspace=@bigbrain/plugin-temporal \
+ && npm run build --workspace=@bigbrain/plugin-notifications \
  && npm run build --workspace=@bigbrain/frontend
 
 ENV NODE_ENV=production

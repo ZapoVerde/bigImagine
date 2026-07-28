@@ -142,6 +142,7 @@ import {
   getDefaultRecipeServings,
   getGoogleCalendarSettings,
   getHouseholdTimezone,
+  getNotificationSettings,
   getNotionSettings,
   listCredentials,
   listModelsForProfile,
@@ -151,6 +152,7 @@ import {
   parseSetCredentialBody,
   parseSetDefaultRecipeServingsBody,
   parseSetGoogleCalendarSettingsBody,
+  parseSetNotificationSettingsBody,
   parseSetNotionSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
@@ -159,6 +161,7 @@ import {
   setDefaultRecipeServings,
   setGoogleCalendarSettings,
   setHouseholdTimezone,
+  setNotificationSettings,
   setNotionSettings,
 } from './adminServer.js';
 import { buildOpenApiSpec, invokeTool } from './openApiToolServer.js';
@@ -693,6 +696,30 @@ async function handleRecipeSettingsSet(req: IncomingMessage, res: ServerResponse
   sendJson(res, 200, { defaultServings: value });
 }
 
+async function handleNotificationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getNotificationSettings(deps.settings));
+}
+
+async function handleNotificationSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetNotificationSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { server_url?: non-empty string, enabled?: boolean }, at least one' });
+    return;
+  }
+
+  await setNotificationSettings(deps.settings, parsed);
+  // No restart needed — the next send_push_notification call reads both fields live.
+  sendJson(res, 200, await getNotificationSettings(deps.settings));
+}
+
 async function handleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, await getCalendarSettings(deps.settings));
 }
@@ -1175,6 +1202,22 @@ async function handleRequest(
       return;
     }
     await handleRecipeSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/notification-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleNotificationSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/notification-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleNotificationSettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/calendar-settings') {

@@ -50,6 +50,14 @@
  * its legacy BIGBRAIN_*-prefixed env var when the DB has no value yet, so an existing deployment
  * keeps working unchanged until someone actually visits Settings.
  *
+ * Also backs the Settings tab's notification fields (GET/POST /v1/admin/notification-settings) —
+ * ntfy_server_url and notifications_enabled (plugins/notifications). Live-update shape like
+ * timezone/recipe-settings, not calendar/Notion's restart-on-save one: sendPushNotificationTool.ts
+ * reads both fresh on every send_push_notification call, so a Settings-tab edit (including
+ * flipping the kill switch off) takes effect on the very next call, no restart. No legacy env
+ * fallback here — this is a new feature with no pre-existing env-only deployment to stay
+ * compatible with.
+ *
  * @api-declaration
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
  * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
@@ -81,6 +89,11 @@
  *   one present; undefined on any malformed shape
  * setNotionSettings(store, body) — upserts whichever of notion_owner_user_id/
  *   notion_lists_data_source_id was given
+ * getNotificationSettings(store) — { serverUrl, enabled }, no env fallback
+ * parseSetNotificationSettingsBody(raw) — validates {server_url?, enabled?}, at least one present;
+ *   undefined on any malformed shape
+ * setNotificationSettings(store, body) — upserts whichever of ntfy_server_url/
+ *   notifications_enabled was given
  *
  * Also backs Google Calendar's OAuth connection flow (docs/spec.md §6.7): same restart-on-save
  * settings shape for GET/POST /v1/admin/google-calendar-settings (client id/owner user id/
@@ -109,8 +122,9 @@
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
- *                      isValidTimeZone/parseSetCalendarSettingsBody/parseSetNotionSettingsBody
- *                      are pure; the rest are impure (Postgres IO via the injected store, or a
+ *                      isValidTimeZone/parseSetCalendarSettingsBody/parseSetNotionSettingsBody/
+ *                      parseSetNotificationSettingsBody are pure; the rest are impure (Postgres
+ *                      IO via the injected store, or a
  *                      network call to the named provider for listModelsForProfile)
  *     state_ownership: []
  *     external_io:     [Postgres (via the stores it's given); the configured LLM provider APIs]
@@ -281,6 +295,45 @@ export function parseSetDefaultRecipeServingsBody(raw: unknown): number | undefi
 
 export function setDefaultRecipeServings(store: OrchestratorSettingsStore, value: number): Promise<void> {
   return store.set('default_recipe_servings', String(value));
+}
+
+// --- Notification settings (docs/bb_principles.md §13, §2 — neither value is reasoning, one's a
+// selector and the other a toggle) ---
+// Live-read shape, same as timezone/recipe-settings: sendPushNotificationTool.ts reads both fresh
+// on every call, so a Settings-tab edit — including turning the kill switch off — takes effect on
+// the very next send_push_notification call, no restart.
+
+export interface NotificationSettings {
+  serverUrl: string | null;
+  enabled: boolean;
+}
+
+export async function getNotificationSettings(store: OrchestratorSettingsStore): Promise<NotificationSettings> {
+  const serverUrl = (await store.get('ntfy_server_url')) ?? null;
+  const enabled = (await store.get('notifications_enabled')) === 'true';
+  return { serverUrl, enabled };
+}
+
+export interface SetNotificationSettingsBody {
+  serverUrl?: string;
+  enabled?: boolean;
+}
+
+export function parseSetNotificationSettingsBody(raw: unknown): SetNotificationSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { server_url, enabled } = raw as Record<string, unknown>;
+  if (server_url === undefined && enabled === undefined) return undefined;
+  if (server_url !== undefined && (typeof server_url !== 'string' || server_url.length === 0)) return undefined;
+  if (enabled !== undefined && typeof enabled !== 'boolean') return undefined;
+  return {
+    serverUrl: typeof server_url === 'string' ? server_url : undefined,
+    enabled: typeof enabled === 'boolean' ? enabled : undefined,
+  };
+}
+
+export async function setNotificationSettings(store: OrchestratorSettingsStore, body: SetNotificationSettingsBody): Promise<void> {
+  if (body.serverUrl !== undefined) await store.set('ntfy_server_url', body.serverUrl);
+  if (body.enabled !== undefined) await store.set('notifications_enabled', String(body.enabled));
 }
 
 // --- Calendar settings (docs/bb_principles.md §13) ---

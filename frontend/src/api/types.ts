@@ -272,6 +272,12 @@ export interface NotionSettings {
   listsDataSourceId: string | null;
 }
 
+// orchestrator/src/server/adminServer.ts getNotificationSettings()
+export interface NotificationSettings {
+  serverUrl: string | null;
+  enabled: boolean;
+}
+
 // orchestrator/src/server/adminServer.ts getGoogleCalendarSettings()
 export interface GoogleCalendarSettings {
   clientId: string | null;

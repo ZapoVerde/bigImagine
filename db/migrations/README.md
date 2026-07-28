@@ -101,3 +101,16 @@ Already applied by hand, not run automatically (see the file for the exact comma
   expression; `'daily'` recomputes `next_run_at` after each fire via `nextOccurrence.ts`'s
   IANA-timezone-aware arithmetic (built on `Intl.DateTimeFormat`, no new dependency), so a
   recurring alarm stays correct across a DST transition.
+- `0033_notification_logs.sql` — adds `notification_logs`: an audit trail of every
+  `send_push_notification` call (`plugins/notifications`), standard `user_scoped` RLS. `provider`
+  is a closed vocabulary of exactly `'ntfy'` today, widened later the same way
+  `provider_credentials.name`/`orchestrator_settings.key` are when a second driver actually gets
+  built, not speculatively included now. This is a delivery log, not the conversational record of
+  why the LLM decided to send — that reasoning stays in the chat's own messages like any other
+  tool call.
+- `0034_notifications_credentials_settings.sql` — widens `provider_credentials.name` with
+  `ntfy_topic` (a secret: the ntfy server has no Cloudflare Access gate and anonymous read-write
+  auth, so the topic name alone is what stands between "your phone" and "anyone's phone") and
+  `orchestrator_settings.key` with `ntfy_server_url` (a plain selector, the public hostname) and
+  `notifications_enabled` (the household kill switch — read live on every
+  `send_push_notification` call, unset/false until an operator opts in from the Settings tab).

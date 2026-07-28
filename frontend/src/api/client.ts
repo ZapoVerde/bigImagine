@@ -10,6 +10,7 @@ import type {
   CredentialSummary,
   Folder,
   GoogleCalendarSettings,
+  NotificationSettings,
   NotionSettings,
   ProfileModelsResult,
   StagedAttachment,
@@ -316,6 +317,27 @@ export async function adminSetDefaultRecipeServings(value: number, adminKey: str
     method: 'POST',
     headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
     body: JSON.stringify({ value }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** ntfy_server_url/notifications_enabled (plugins/notifications) — same no-restart shape as
+ *  timezone/recipe-settings: send_push_notification reads both live on every call. */
+export async function adminGetNotificationSettings(adminKey: string | null): Promise<NotificationSettings> {
+  const res = await fetch('/v1/admin/notification-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<NotificationSettings>;
+}
+
+/** Resolves once saved — no restart, no polling; the next send_push_notification call reads it live. */
+export async function adminSetNotificationSettings(
+  patch: { server_url?: string; enabled?: boolean },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch('/v1/admin/notification-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }

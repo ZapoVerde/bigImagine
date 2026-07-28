@@ -6,6 +6,7 @@ import {
   adminGetDefaultRecipeServings,
   adminGetGoogleCalendarAuthUrl,
   adminGetGoogleCalendarSettings,
+  adminGetNotificationSettings,
   adminGetNotionSettings,
   adminGetTimezone,
   adminListCredentials,
@@ -15,11 +16,19 @@ import {
   adminSetCredential,
   adminSetDefaultRecipeServings,
   adminSetGoogleCalendarSettings,
+  adminSetNotificationSettings,
   adminSetNotionSettings,
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type { CalendarSettings, CredentialSummary, GoogleCalendarSettings, NotionSettings, ProfileModelsResult } from '../api/types';
+import type {
+  CalendarSettings,
+  CredentialSummary,
+  GoogleCalendarSettings,
+  NotificationSettings,
+  NotionSettings,
+  ProfileModelsResult,
+} from '../api/types';
 import './SettingsView.css';
 
 type ModelOption = ProfileModelsResult['models'][number];
@@ -114,6 +123,12 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedDefaultServings, setSelectedDefaultServings] = useState('');
   const [defaultServingsStatus, setDefaultServingsStatus] = useState('');
 
+  const [ntfyServerUrl, setNtfyServerUrl] = useState('');
+  const [selectedNtfyServerUrl, setSelectedNtfyServerUrl] = useState('');
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [selectedNotificationsEnabled, setSelectedNotificationsEnabled] = useState(false);
+  const [notificationSettingsStatus, setNotificationSettingsStatus] = useState('');
+
   const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
   const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
   const [maskWorkCalendar, setMaskWorkCalendar] = useState(false);
@@ -152,6 +167,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedNotionDataSourceId(settings.listsDataSourceId ?? '');
   }
 
+  function applyNotificationSettings(settings: NotificationSettings) {
+    setNtfyServerUrl(settings.serverUrl ?? '');
+    setSelectedNtfyServerUrl(settings.serverUrl ?? '');
+    setNotificationsEnabled(settings.enabled);
+    setSelectedNotificationsEnabled(settings.enabled);
+  }
+
   function applyGoogleCalendarSettings(settings: GoogleCalendarSettings) {
     setGoogleClientId(settings.clientId ?? '');
     setSelectedGoogleClientId(settings.clientId ?? '');
@@ -180,7 +202,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings] =
+        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings] =
           await Promise.all([
             adminListCredentials(null),
             adminGetActiveProfile(null),
@@ -189,6 +211,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
             adminGetCalendarSettings(null),
             adminGetNotionSettings(null),
             adminGetGoogleCalendarSettings(null),
+            adminGetNotificationSettings(null),
           ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
@@ -206,6 +229,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         applyCalendarSettings(calendarSettings);
         applyNotionSettings(notionSettings);
         applyGoogleCalendarSettings(googleCalendarSettings);
+        applyNotificationSettings(notificationSettings);
         setUnlocked(true);
       } catch {
         // Not covered by Access (or Access isn't configured here) — fall back to the key form.
@@ -218,7 +242,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings] =
+      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings] =
         await Promise.all([
           adminListCredentials(adminKey),
           adminGetActiveProfile(adminKey),
@@ -227,6 +251,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           adminGetCalendarSettings(adminKey),
           adminGetNotionSettings(adminKey),
           adminGetGoogleCalendarSettings(adminKey),
+          adminGetNotificationSettings(adminKey),
         ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -244,6 +269,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyCalendarSettings(calendarSettings);
       applyNotionSettings(notionSettings);
       applyGoogleCalendarSettings(googleCalendarSettings);
+      applyNotificationSettings(notificationSettings);
       setUnlocked(true);
     } catch (err) {
       setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
@@ -275,6 +301,26 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setDefaultServings(parsed);
     setDefaultServingsStatus('Saved — takes effect on the next recipe you scale, no restart needed.');
+  }
+
+  async function saveNotificationSettings() {
+    if (selectedNtfyServerUrl === ntfyServerUrl && selectedNotificationsEnabled === notificationsEnabled) return;
+    setNotificationSettingsStatus('');
+    try {
+      await adminSetNotificationSettings(
+        {
+          ...(selectedNtfyServerUrl ? { server_url: selectedNtfyServerUrl } : {}),
+          enabled: selectedNotificationsEnabled,
+        },
+        adminKey,
+      );
+    } catch (err) {
+      setNotificationSettingsStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    if (selectedNtfyServerUrl) setNtfyServerUrl(selectedNtfyServerUrl);
+    setNotificationsEnabled(selectedNotificationsEnabled);
+    setNotificationSettingsStatus('Saved — takes effect on the next send_push_notification call, no restart needed.');
   }
 
   // Refetches the model catalog whenever a different connection is picked, so the model dropdown
@@ -637,6 +683,36 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{defaultServingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Notifications</legend>
+        <label>
+          Ntfy server URL
+          <br />
+          <input
+            value={selectedNtfyServerUrl}
+            onChange={(e) => setSelectedNtfyServerUrl(e.target.value)}
+            placeholder="e.g. http://ntfy:80 — the internal address, not the public phone-facing hostname"
+          />
+        </label>
+        <br />
+        <label>
+          <input
+            type="checkbox"
+            checked={selectedNotificationsEnabled}
+            onChange={(e) => setSelectedNotificationsEnabled(e.target.checked)}
+          />
+          Enable send_push_notification (household kill switch)
+        </label>
+        <br />
+        <button
+          onClick={saveNotificationSettings}
+          disabled={selectedNtfyServerUrl === ntfyServerUrl && selectedNotificationsEnabled === notificationsEnabled}
+        >
+          Save
+        </button>
+        <div className="status">{notificationSettingsStatus}</div>
       </fieldset>
 
       <fieldset>

@@ -5,7 +5,8 @@
  * @description
  * Backs the credentials named below (db/migrations/0008_provider_credentials.sql,
  * 0014_calendar_ics_credentials.sql, 0016_web_search_credentials.sql,
- * 0018_google_calendar_oauth.sql) with createFieldCipher (io/fieldCipher.ts) — reused as-is, no
+ * 0018_google_calendar_oauth.sql, 0034_notifications_credentials_settings.sql) with
+ * createFieldCipher (io/fieldCipher.ts) — reused as-is, no
  * crypto reimplemented here. resolve() is this codebase's first decrypt-on-read call site;
  * fieldCipher.ts's own preamble notes none existed yet, only the encrypt-on-write idiom in
  * ingestNoteTool.ts.
@@ -58,6 +59,7 @@ export const CREDENTIAL_NAMES = [
   'brave_api_key',
   'google_calendar_client_secret',
   'google_calendar_refresh_token',
+  'ntfy_topic',
 ] as const;
 export type CredentialName = (typeof CREDENTIAL_NAMES)[number];
 
