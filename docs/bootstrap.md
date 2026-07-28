@@ -52,6 +52,13 @@ docker exec -i bigbrain-postgres psql -U bigbrain_admin -d bigbrain < db/migrati
 If you edit only `stacks/bigbrain/` directly, that change is invisible to git and will be silently
 lost/overwritten by the next sync from `bigBrain/`. Always edit `bigBrain/`, verify, then sync.
 
+**`docs/` is deliberately excluded from the sync.** Nothing in the Dockerfile, `docker-compose.yml`,
+or any runtime code reads from a `docs/` path — it's reference material for a human or an agent
+session, not deployable code. `stacks/bigbrain/` has no `docs/` directory at all; read and edit docs
+only in `bigBrain/docs/`. A `docs/` copy previously drifted stale in `stacks/bigbrain/` for exactly
+this reason (a generic `cp -r` treating it like any other changed dir) and caused real confusion
+before it was caught — don't recreate it by copying `docs/` over "just in case."
+
 **Secrets**: the canonical copy of every secret in `.env` is `stacks/bigbrain/secrets.enc.env` —
 `sops`-encrypted with `age`, safe to read, back up, or even commit (it's ciphertext; individual
 values are unreadable without the private key). `.env` itself is a disposable, regeneratable
