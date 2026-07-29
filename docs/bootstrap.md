@@ -66,21 +66,56 @@ anymore — `scripts/secrets.sh` (repo root) uses `sops exec-env`, which injects
 values straight into the deploy command's environment via `exec`, never through a shell that has
 to re-parse the text:
 ```
-scripts/secrets.sh deploy [docker compose args...]   # default: up -d --build
-scripts/secrets.sh edit                               # sops's own edit mode — decrypts to a
-                                                        # secure temp file, opens $EDITOR,
-                                                        # re-encrypts and shreds on save
+scripts/secrets.sh deploy [service name(s)...]   # runs: docker compose up -d --build <args>
+scripts/secrets.sh edit                          # sops's own edit mode — decrypts to a
+                                                  # secure temp file, opens $EDITOR,
+                                                  # re-encrypts and shreds on save
 ```
+The `up -d --build` is already baked into the script — pass just a service name (e.g.
+`scripts/secrets.sh deploy orchestrator`), not a full compose invocation.
+`scripts/secrets.sh deploy up -d --build orchestrator` duplicates it into
+`docker compose up -d --build up -d --build orchestrator`, which fails with a confusing
+"no such service: up" rather than anything obviously about the args.
+
 Do **not** use `sops --decrypt ... > .env` or `source <(sops ... --decrypt ...)` — the former
 leaves real plaintext sitting on disk with cleanup dependent on someone remembering it, and the
 latter *looks* equivalent to `exec-env` but isn't: bash's own quote-removal during `source`
 silently strips the double quotes out of any JSON value (`BIGBRAIN_LLM_PROFILES` is JSON),
 corrupting it — this crashed `bigbrain-orchestrator` in a real deploy on 2026-07-28 before the
-script was fixed to use `exec-env` instead. Both scripts require `sops`/`age` on `PATH` and
-`SOPS_AGE_KEY_FILE` pointing at the private key; where that key lives is deliberately not this
-script's concern (not on this host by design — an encrypted file next to its own key on the same
-disk protects against nothing). Whoever holds the key runs these commands; there's no way to
-redeploy or change a secret without it.
+script was fixed to use `exec-env` instead.
+
+Both scripts require `sops`/`age` on `PATH` and `SOPS_AGE_KEY_FILE` pointing at the private key.
+**Neither binary is preinstalled system-wide, and neither is on `PATH` by default in a fresh
+shell** — check `/config/workspace/.tools/bin/` first (static `sops`/`age`/`age-keygen` binaries
+already fetched there, no root needed) before assuming they need reinstalling:
+```
+export PATH=/config/workspace/.tools/bin:$PATH
+sops --version && age --version   # confirms they're there and runnable
+```
+If that directory is ever actually empty (moved/rebuilt sandbox), apt only has `age` (Ubuntu's
+universe repo) — `sops` isn't packaged for apt at all — so fetch official static releases instead,
+into any directory already on `PATH`:
+```
+curl -sL -o <bindir>/sops "$(curl -s https://api.github.com/repos/getsops/sops/releases/latest \
+  | grep -oE 'https://\S+linux\.amd64"' | tr -d '"')"
+chmod +x <bindir>/sops
+
+curl -sL "$(curl -s https://api.github.com/repos/FiloSottile/age/releases/latest \
+  | grep -oE 'https://\S+linux-amd64\.tar\.gz"' | tr -d '"')" -o /tmp/age.tar.gz
+tar xzf /tmp/age.tar.gz -C /tmp
+cp /tmp/age/age /tmp/age/age-keygen <bindir>/ && chmod +x <bindir>/age*
+```
+Don't fetch a second copy into a different directory just because `which sops` came up empty in a
+new shell — check `.tools/bin` before reaching for `curl`.
+
+The active key lives at `/config/workspace/.secrets/bigbrain-age-key.txt` — sibling to `bigBrain/`
+and `stacks/`, outside both, mode 0600, not in either git repo. This is a deliberate, *temporary*
+convenience for low-friction dev in this sandbox (the user's call, made 2026-07-28), not a
+permanent home — it may move to Vaultwarden or similar later, so check `.secrets/` still exists
+before trusting this path. A retired key sits alongside it
+(`bigbrain-age-key-RETIRED-2026-07-28.txt`), kept only for reference. Set
+`SOPS_AGE_KEY_FILE=/config/workspace/.secrets/bigbrain-age-key.txt` before running either
+`scripts/secrets.sh` command.
 
 **Live testing**: two real API keys exist — `jeremy` (real account) and `bb-test` (dedicated test
 account). Use `bb-test` for anything experimental; only `jeremy`'s writes reach the real Notion
