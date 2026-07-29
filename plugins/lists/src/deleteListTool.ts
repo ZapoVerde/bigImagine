@@ -5,28 +5,33 @@
  * @description
  * list_items.list_id has no cascade (db/migrations/0004_lists.sql), so deleting a list with items
  * still on it would otherwise fail at the DB level with an FK violation. This tool deletes the
- * items first — each one going through the same Notion cleanup as delete_list_item, so no item
- * is left mirrored in Notion once its list is gone (bb_principles.md §1) — then the list row
- * itself, all within this one handler call (already one transaction via withUserScope).
+ * items first — then the list row itself, all within this one handler call (already one
+ * transaction via withUserScope). Each item's Notion cleanup (same as delete_list_item) fires in
+ * the background, not awaited — deleting a list with many Notion-synced items would otherwise
+ * block the response for one Notion round trip per item; notion_sync_map has no FK to list_items
+ * (db/migrations/0002_schema.sql), so cleaning it up after the list's rows are already gone is
+ * safe.
  *
  * Addressed by name, not list_id, matching add_list_item/complete_list_item — the frontend's
  * ListsBrowser only ever has list names (list_id is never surfaced to it).
  *
  * @api-declaration
- * createDeleteListTool(notion) — returns the delete_list RegisteredTool
+ * createDeleteListTool(notion, db) — returns the delete_list RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session; Notion API IO when
- *                      notion is configured)
+ *     purity:          impure (Postgres IO via the injected session; best-effort background
+ *                      Notion API IO when notion is configured)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given), Notion API (via NotionClient)]
+ *     external_io:     [Postgres (via the DbSession it's given, and independently via db for the
+ *                      background Notion cleanup), Notion API (via NotionClient)]
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
+import type { PostgresClient } from '@bigbrain/orchestrator/postgres';
 import { findListByName } from './listLookup.js';
-import { cleanupListItemNotionPage } from './notionSync.js';
+import { cleanupListItemNotionPageInBackground } from './notionSync.js';
 
 function isDeleteListArgs(value: unknown): value is { list_name: string } {
   if (typeof value !== 'object' || value === null) return false;
@@ -34,7 +39,7 @@ function isDeleteListArgs(value: unknown): value is { list_name: string } {
   return typeof v.list_name === 'string' && v.list_name !== '';
 }
 
-export function createDeleteListTool(notion: NotionClient | undefined): RegisteredTool {
+export function createDeleteListTool(notion: NotionClient | undefined, db: PostgresClient): RegisteredTool {
   return {
     definition: {
       name: 'delete_list',
@@ -63,7 +68,7 @@ export function createDeleteListTool(notion: NotionClient | undefined): Register
         ctx.userId,
       ]);
       for (const item of items) {
-        await cleanupListItemNotionPage(ctx.db, notion, ctx.userId, item.item_id);
+        cleanupListItemNotionPageInBackground(db, notion, ctx.userId, item.item_id);
       }
 
       await ctx.db.query('delete from list_items where list_id = $1 and user_id = $2', [list.listId, ctx.userId]);

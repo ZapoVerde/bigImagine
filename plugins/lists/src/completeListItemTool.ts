@@ -14,29 +14,34 @@
  * failing or asking the model to disambiguate by item_id for what should be a low-stakes,
  * common action.
  *
- * After a successful completion, best-effort syncs the change to Notion (notionSync.ts) — never
- * fails this tool call if that sync fails.
+ * After a successful completion, best-effort syncs the change to Notion (notionSync.ts) in the
+ * background — never awaited, so a slow or failing Notion API never adds latency to checking an
+ * item off (caught live 2026-07-29: a Notion outage made this feel unresponsive on mobile, see
+ * notionSync.ts's header for the full story).
  *
  * @api-declaration
- * createCompleteListItemTool(notion) — returns the complete_list_item RegisteredTool
+ * createCompleteListItemTool(notion, db) — returns the complete_list_item RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session, best-effort Notion IO)
+ *     purity:          impure (Postgres IO via the injected session, best-effort background
+ *                      Notion IO)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given), Notion API]
+ *     external_io:     [Postgres (via the DbSession it's given, and independently via db for the
+ *                      background Notion sync), Notion API]
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
-import { syncListItemToNotion } from './notionSync.js';
+import type { PostgresClient } from '@bigbrain/orchestrator/postgres';
+import { syncListItemToNotionInBackground } from './notionSync.js';
 
 function isCompleteListItemArgs(value: unknown): value is { item_name: string; list_name?: string } {
   const v = value as Record<string, unknown>;
   return typeof value === 'object' && value !== null && typeof v.item_name === 'string' && v.item_name !== '';
 }
 
-export function createCompleteListItemTool(notion: NotionClient | undefined): RegisteredTool {
+export function createCompleteListItemTool(notion: NotionClient | undefined, db: PostgresClient): RegisteredTool {
   return {
     definition: {
       name: 'complete_list_item',
@@ -82,7 +87,7 @@ export function createCompleteListItemTool(notion: NotionClient | undefined): Re
       }
       const item = rows[0];
 
-      await syncListItemToNotion(ctx.db, notion, ctx.userId, {
+      syncListItemToNotionInBackground(db, notion, ctx.userId, {
         itemId: item.item_id,
         itemName: args.item_name,
         listName: item.list_name,

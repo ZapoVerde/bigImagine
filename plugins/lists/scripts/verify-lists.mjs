@@ -17,6 +17,14 @@ function assert(cond, message) {
   }
 }
 
+// Notion sync/cleanup now runs detached (notionSync.ts's *InBackground wrappers) — not awaited by
+// the handler that triggered it. setImmediate defers past every pending microtask (BEGIN/query/
+// COMMIT/release, all plain promises with no real timers in the fake pool), so one flush reliably
+// lets a detached call finish before a test asserts on its effects.
+function flush() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 function createFakePool() {
   const lists = [];
   const items = [];
@@ -247,7 +255,9 @@ assert(
 );
 
 const notion = createFakeNotionClient();
-const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion });
+const pool = createFakePool();
+const db = createPostgresClient(pool);
+const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion, db });
 assert(pluginTools.length === 10, 'registerTools returns exactly ten tools');
 
 const registry = createToolRegistry(pluginTools);
@@ -266,15 +276,21 @@ for (const name of [
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
-const pool = createFakePool();
-const db = createPostgresClient(pool);
 const userId = '11111111-1111-1111-1111-111111111111';
-const withUser = (fn) => db.withUserScope(userId, (session) => fn({ userId, db: session }));
+// Auto-flushes after every call so a detached Notion sync/cleanup this handler triggered always
+// finishes before the next line runs — without this, an un-flushed call's effects can land in the
+// middle of a *later* flush and throw off any assertion counting notion.calls between two points.
+const withUser = async (fn) => {
+  const result = await db.withUserScope(userId, (session) => fn({ userId, db: session }));
+  await flush();
+  return result;
+};
 
 // --- add_list_item creates the list on first use, and syncs the new item to Notion ---
 const addMilk = await withUser((ctx) => registry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'milk' }, ctx));
 assert(addMilk.listWasCreated === true, 'adding an item to a new list creates it');
-assert(notion.calls.length === 1 && notion.calls[0].itemName === 'milk', 'add_list_item synced the new item to Notion');
+await flush();
+assert(notion.calls.length === 1 && notion.calls[0].itemName === 'milk', 'add_list_item synced the new item to Notion (in the background)');
 assert(pool.syncMap.length === 1 && pool.syncMap[0].source_row_id === addMilk.itemId, 'a notion_sync_map row was minted for the new item');
 
 // --- a second add to the same list (different case) reuses it, does not duplicate ---
@@ -303,7 +319,8 @@ const complete = await withUser((ctx) => registry.get('complete_list_item').hand
 assert(complete.completed === true && complete.itemId === addMilk2.itemId, 'completing "milk" resolves to the most recently added matching item');
 const remainingMilk = pool.items.find((i) => i.item_name === 'milk' && i.status === 'pending');
 assert(remainingMilk && remainingMilk.item_id === addMilk.itemId, 'the earlier milk item is untouched and still pending');
-assert(notion.calls.length === syncCallsBeforeComplete + 1, 'completing the item triggered exactly one more Notion sync call');
+await flush();
+assert(notion.calls.length === syncCallsBeforeComplete + 1, 'completing the item triggered exactly one more Notion sync call (in the background)');
 const completeSyncCall = notion.calls[notion.calls.length - 1];
 assert(completeSyncCall.done === true, 'the Notion sync call for completion carries done: true');
 assert(
@@ -363,14 +380,15 @@ try {
   const failingNotion = createFakeNotionClient({ shouldThrow: true, ownerUserId: failUserId });
   const failPool = createFakePool();
   const failDb = createPostgresClient(failPool);
-  const failTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: failingNotion });
+  const failTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: failingNotion, db: failDb });
   const failRegistry = createToolRegistry(failTools);
 
   const result = await failDb.withUserScope(failUserId, (session) =>
     failRegistry.get('add_list_item').handler({ list_name: 'Errand List', item_name: 'stamps' }, { userId: failUserId, db: session }),
   );
   assert(result.itemId !== undefined, 'add_list_item still succeeds even when the Notion sync call throws');
-  assert(failingNotion.calls.length === 1, 'the failing Notion call was still attempted');
+  await flush();
+  assert(failingNotion.calls.length === 1, 'the failing Notion call was still attempted (in the background)');
   assert(failPool.syncMap.length === 0, 'no notion_sync_map row is left behind when the Notion call itself failed');
 }
 
@@ -378,7 +396,7 @@ try {
 {
   const noNotionPool = createFakePool();
   const noNotionDb = createPostgresClient(noNotionPool);
-  const noNotionTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined });
+  const noNotionTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined, db: noNotionDb });
   const noNotionRegistry = createToolRegistry(noNotionTools);
   const noNotionUserId = '33333333-3333-3333-3333-333333333333';
 
@@ -396,7 +414,7 @@ try {
   const nonOwnerNotion = createFakeNotionClient(); // ownerUserId defaults to OWNER_USER_ID
   const nonOwnerPool = createFakePool();
   const nonOwnerDb = createPostgresClient(nonOwnerPool);
-  const nonOwnerTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: nonOwnerNotion });
+  const nonOwnerTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: nonOwnerNotion, db: nonOwnerDb });
   const nonOwnerRegistry = createToolRegistry(nonOwnerTools);
   const nonOwnerUserId = '44444444-4444-4444-4444-444444444444'; // deliberately not OWNER_USER_ID
 
@@ -404,6 +422,7 @@ try {
     nonOwnerRegistry.get('add_list_item').handler({ list_name: 'Errand List', item_name: 'stamps' }, { userId: nonOwnerUserId, db: session }),
   );
   assert(result.itemId !== undefined, "add_list_item still succeeds for a non-owner user (Postgres write is unaffected)");
+  await flush();
   assert(nonOwnerNotion.calls.length === 0, "a non-owner user's add_list_item never calls the Notion API at all");
   assert(nonOwnerPool.syncMap.length === 0, 'no notion_sync_map row is created for a non-owner user');
 }
@@ -413,20 +432,26 @@ try {
   const delNotion = createFakeNotionClient();
   const delPool = createFakePool();
   const delDb = createPostgresClient(delPool);
-  const delTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: delNotion });
+  const delTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: delNotion, db: delDb });
   const delRegistry = createToolRegistry(delTools);
   const delUserId = OWNER_USER_ID;
-  const withDelUser = (fn) => delDb.withUserScope(delUserId, (session) => fn({ userId: delUserId, db: session }));
+  const withDelUser = async (fn) => {
+    const result = await delDb.withUserScope(delUserId, (session) => fn({ userId: delUserId, db: session }));
+    await flush();
+    return result;
+  };
 
   const milk = await withDelUser((ctx) => delRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'milk' }, ctx));
   const eggs = await withDelUser((ctx) => delRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'eggs' }, ctx));
-  assert(delPool.syncMap.length === 2, 'both new items were synced to Notion, minting two sync-map rows');
+  await flush();
+  assert(delPool.syncMap.length === 2, 'both new items were synced to Notion, minting two sync-map rows (in the background)');
   const milkPageId = delPool.syncMap.find((m) => m.source_row_id === milk.itemId).notion_page_id;
 
   const deletedMilk = await withDelUser((ctx) => delRegistry.get('delete_list_item').handler({ item_id: milk.itemId }, ctx));
   assert(deletedMilk.deleted === true, 'delete_list_item deletes an existing item');
   assert(delPool.items.find((i) => i.item_id === milk.itemId) === undefined, 'the deleted item is gone from list_items');
-  assert(delPool.syncMap.find((m) => m.source_row_id === milk.itemId) === undefined, 'the deleted item\'s notion_sync_map row is gone too');
+  await flush();
+  assert(delPool.syncMap.find((m) => m.source_row_id === milk.itemId) === undefined, 'the deleted item\'s notion_sync_map row is gone too (in the background)');
   assert(delNotion.archivedPageIds.includes(milkPageId), 'the deleted item\'s Notion page was archived');
 
   const deletedMissing = await withDelUser((ctx) => delRegistry.get('delete_list_item').handler({ item_id: 'no-such-item' }, ctx));
@@ -450,7 +475,8 @@ try {
   assert(deletedList.deleted === true && deletedList.itemsDeleted === 1, 'delete_list (case-insensitive) removes the list and reports its one remaining item');
   assert(delPool.lists.length === 0, 'the list row itself is gone');
   assert(delPool.items.length === 0, 'no items remain after delete_list');
-  assert(delPool.syncMap.length === 0, 'delete_list cleaned up every item\'s notion_sync_map row');
+  await flush();
+  assert(delPool.syncMap.length === 0, 'delete_list cleaned up every item\'s notion_sync_map row (in the background)');
   assert(delNotion.archivedPageIds.includes(eggsPageId), 'delete_list archived the remaining item\'s Notion page too');
 }
 
@@ -474,7 +500,7 @@ function createFakeLlm(sectionFor) {
   const db = createPostgresClient(pool);
   const userId = '66666666-6666-6666-6666-666666666666';
   const llm = createFakeLlm((item) => (item.toLowerCase().includes('milk') ? 'dairy' : item.toLowerCase().includes('lettuce') ? 'veggies' : undefined));
-  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined });
+  const tools = await registerTools({ llm, embeddings: null, cipher: null, notion: undefined, db });
   const registry = createToolRegistry(tools);
   const withUser = (fn) => db.withUserScope(userId, (session) => fn({ userId, db: session }));
 
@@ -503,7 +529,7 @@ function createFakeLlm(sectionFor) {
   const throwingLlm = createFakeLlm(() => {
     throw new Error('llm should not be called for a list with no section_order');
   });
-  const noOrderTools = await registerTools({ llm: throwingLlm, embeddings: null, cipher: null, notion: undefined });
+  const noOrderTools = await registerTools({ llm: throwingLlm, embeddings: null, cipher: null, notion: undefined, db });
   const noOrderRegistry = createToolRegistry(noOrderTools);
   const noOrderResult = await withUser((ctx) =>
     noOrderRegistry.get('add_list_item').handler({ list_name: 'Books to Read', item_name: 'a novel' }, ctx),
@@ -513,7 +539,7 @@ function createFakeLlm(sectionFor) {
 
   // a classification failure never blocks the item from being added
   const failingLlm = createFakeLlm(() => undefined); // always throws inside createFakeLlm
-  const failTools = await registerTools({ llm: failingLlm, embeddings: null, cipher: null, notion: undefined });
+  const failTools = await registerTools({ llm: failingLlm, embeddings: null, cipher: null, notion: undefined, db });
   const failRegistry = createToolRegistry(failTools);
   const failResult = await withUser((ctx) =>
     failRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'mystery item' }, ctx),
@@ -530,7 +556,7 @@ function createFakeLlm(sectionFor) {
   const settingsPool = createFakePool();
   const settingsDb = createPostgresClient(settingsPool);
   const settingsUserId = '88888888-8888-8888-8888-888888888888';
-  const settingsTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined });
+  const settingsTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined, db: settingsDb });
   const settingsRegistry = createToolRegistry(settingsTools);
   const withSettingsUser = (fn) => settingsDb.withUserScope(settingsUserId, (session) => fn({ userId: settingsUserId, db: session }));
 

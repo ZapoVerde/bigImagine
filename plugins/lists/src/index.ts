@@ -6,10 +6,14 @@
  * The contract orchestrator/pluginLoader.ts expects (same as document-ingestion and
  * shopping-analytics): an `info` object and an async `registerTools`. None of these tools need
  * the LLM/embeddings/cipher providers — they only need ctx.db/ctx.userId, supplied per-call.
- * add_list_item and complete_list_item do use deps.notion (best-effort outbound Notion sync,
- * notionSync.ts) — deps.notion is undefined when Notion isn't configured, and both tools work
- * fully without it either way. add_list_item also uses deps.llm, best-effort, to classify a new
- * item into its list's section_order when one is defined (classifySection.ts).
+ * add_list_item, complete_list_item, delete_list_item, and delete_list all use deps.notion
+ * (best-effort outbound Notion sync, notionSync.ts) — deps.notion is undefined when Notion isn't
+ * configured, and all four work fully without it either way. Those same four also take deps.db
+ * directly (not just ctx.db): their Notion sync/cleanup runs in the background, not awaited, so
+ * it needs its own connection via the top-level PostgresClient rather than the request's own
+ * DbSession, which is back in the pool by the time a background call would use it — see
+ * notionSync.ts's header for why. add_list_item also uses deps.llm, best-effort, to classify a
+ * new item into its list's section_order when one is defined (classifySection.ts).
  *
  * registerTools is also where the inbound half starts: if deps.notion is set, it starts a
  * background poll loop (notionReconcile.ts) using deps.db directly — not through any tool call.
@@ -61,13 +65,13 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
 
   return [
     createCreateListTool(),
-    createAddListItemTool(deps.llm, deps.notion),
-    createCompleteListItemTool(deps.notion),
+    createAddListItemTool(deps.llm, deps.notion, deps.db),
+    createCompleteListItemTool(deps.notion, deps.db),
     createGetListItemsTool(),
     createUpdateListItemTool(),
     createSetListSectionOrderTool(),
-    createDeleteListItemTool(deps.notion),
-    createDeleteListTool(deps.notion),
+    createDeleteListItemTool(deps.notion, deps.db),
+    createDeleteListTool(deps.notion, deps.db),
     createGetListsTool(),
     createUpdateListSettingsTool(),
   ];

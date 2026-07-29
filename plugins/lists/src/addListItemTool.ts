@@ -18,23 +18,30 @@
  * explicitly here, never inferred — bb_principles.md §3: once set, a priority isn't second-guessed
  * by anything downstream. Either can also be set later via update_list_item.
  *
+ * Notion sync (syncListItemToNotion, notionSync.ts) runs in the background, not awaited — a slow
+ * or failing Notion API must never add latency to adding an item (see notionSync.ts's header for
+ * why this matters).
+ *
  * @api-declaration
- * createAddListItemTool(llm, notion) — returns the add_list_item RegisteredTool
+ * createAddListItemTool(llm, notion, db) — returns the add_list_item RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session, best-effort LLM call)
+ *     purity:          impure (Postgres IO via the injected session, best-effort LLM call,
+ *                      best-effort background Notion IO)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given), LLM]
+ *     external_io:     [Postgres (via the DbSession it's given, and independently via db for the
+ *                      background Notion sync), LLM]
  */
 
 import { log } from '@bigbrain/orchestrator/logger';
 import type { LlmProvider } from '@bigbrain/orchestrator/llm-types';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { NotionClient } from '@bigbrain/orchestrator/notion';
+import type { PostgresClient } from '@bigbrain/orchestrator/postgres';
 import { classifySection } from './classifySection.js';
 import { findOrCreateList } from './listLookup.js';
-import { syncListItemToNotion } from './notionSync.js';
+import { syncListItemToNotionInBackground } from './notionSync.js';
 
 const VALID_PRIORITIES = ['P1', 'P2', 'P3'];
 
@@ -57,7 +64,7 @@ function isAddListItemArgs(
   return true;
 }
 
-export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | undefined): RegisteredTool {
+export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | undefined, db: PostgresClient): RegisteredTool {
   return {
     definition: {
       name: 'add_list_item',
@@ -99,7 +106,7 @@ export function createAddListItemTool(llm: LlmProvider, notion: NotionClient | u
       );
       const itemId = rows[0]!.item_id;
 
-      await syncListItemToNotion(ctx.db, notion, ctx.userId, {
+      syncListItemToNotionInBackground(db, notion, ctx.userId, {
         itemId,
         itemName: args.item_name,
         listName: args.list_name,
