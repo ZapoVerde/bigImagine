@@ -69,6 +69,17 @@
  * show *why* rather than a bare toggle — same "state plus reason" shape as scheduled_jobs'
  * capped_reason.
  *
+ * chat_memory_profile/chat_memory_live_window_pairs/chat_memory_sync_every_pairs/
+ * chat_memory_chunk_summary_prompt/chat_memory_distill_prompt/chat_memory_household_memory_prompt
+ * (docs/chat-memory.md, orchestrator/src/orchestrator/chatMemorySync.ts) are read live on every
+ * sync tick, same no-restart shape as household_timezone — mirrors SillyTavern-Canonize's own
+ * "Connections & Prompts" settings panel: a household connection override for the sync pipeline's
+ * classification calls (unset = the active connection, same fallback a chat's own params.profile
+ * uses), two timing knobs in turn-pairs (Canonize's own unit), and a "default + bespoke" override
+ * per prompt — unset or empty means "use the built-in default" (each io/chatMemory/*.ts module
+ * exports its own DEFAULT_* constant), a non-empty value overrides it entirely. There is no
+ * separate "reset" operation: writing '' is how Settings clears an override back to the default.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -104,6 +115,12 @@ export const SETTING_NAMES = [
   'agent_routine_max_runs_per_day',
   'agent_routine_max_tokens_per_day',
   'agent_routines_disabled_reason',
+  'chat_memory_profile',
+  'chat_memory_live_window_pairs',
+  'chat_memory_sync_every_pairs',
+  'chat_memory_chunk_summary_prompt',
+  'chat_memory_distill_prompt',
+  'chat_memory_household_memory_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

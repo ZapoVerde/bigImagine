@@ -256,6 +256,12 @@ function createFakePool() {
           if (sql.includes('insert into llm_calls')) {
             return { rows: [] };
           }
+          // docs/chat-memory.md: handleChatCompletions' buildChatMemorySystemPrompt reads both of
+          // these on every persisted-session turn now — empty is a legitimate, common answer (no
+          // household memory or per-chat digest yet), nothing here asserts on their contents.
+          if (sql.includes('select content from household_memory') || sql.includes('select content from chat_memory_entries')) {
+            return { rows: [] };
+          }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
         release() {},

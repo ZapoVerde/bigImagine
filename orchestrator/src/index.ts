@@ -52,6 +52,7 @@ import { log } from './io/logger.js';
 import { createLlmProvider } from './io/llm/index.js';
 import { createGatedLlmProvider } from './io/llm/llmGate.js';
 import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispatch.js';
+import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
 import {
   parseLlmProfiles,
   withOverriddenApiKeys,
@@ -194,6 +195,13 @@ async function main(): Promise<void> {
   // startHttpServer is, once every piece it needs (the gated llm above, tools, chats) exists.
   startAgentRoutineDispatchLoop({ db, llm, tools, chats, settings });
 
+  // Rolling chat summarization/RAG (docs/chat-memory.md) — same composition-root tier as the
+  // dispatch loop above and for the same reason (needs io/llm/callContext.ts's runWithCallContext,
+  // not reachable from a plugin). llmProfiles lets it build its own throwaway connection when
+  // chat_memory_profile names one, the same per-call construction httpServer.ts's own per-chat
+  // profile override uses.
+  startChatMemorySyncLoop({ db, llm, embeddings, settings, llmProfiles });
+
   // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
   // io/accessIdentity.ts.
   const accessIdentity = createAccessIdentityResolver(process.env);
@@ -211,6 +219,7 @@ async function main(): Promise<void> {
   startHttpServer({
     llm,
     db,
+    embeddings,
     tools,
     apiKeys,
     accessIdentity,

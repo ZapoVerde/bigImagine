@@ -174,6 +174,7 @@ export default function App() {
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onSwitchView={summon}
+                onOpenChat={openChat}
               />
             )}
             {tab.type === 'lists' && (

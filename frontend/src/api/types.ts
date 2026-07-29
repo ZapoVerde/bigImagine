@@ -369,8 +369,29 @@ export interface ChatSessionRow {
   toolNames: string[] | null;
   /** Canvas: the note this chat's document panel is focused on, if any. */
   canvasNoteId: string | null;
+  /** Set only on a forked chat — the chat it branched from. */
+  parentChatId: string | null;
+  /** Set only on a forked chat — the parent's message id it branched from. */
+  forkMessageId: string | null;
+  /** Set once, explicitly, via the Archive action — null means still ongoing. */
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+// orchestrator/src/server/adminServer.ts getChatMemorySettings() + httpServer.ts's route handler
+// (which attaches profileNames from deps.llmProfiles, same split as ActiveProfileSetting).
+export interface ChatMemorySettings {
+  profile: string | null;
+  profileNames: string[];
+  liveWindowPairs: number | null;
+  syncEveryPairs: number | null;
+  chunkSummaryPrompt: string;
+  chunkSummaryPromptIsDefault: boolean;
+  distillPrompt: string;
+  distillPromptIsDefault: boolean;
+  householdMemoryPrompt: string;
+  householdMemoryPromptIsDefault: boolean;
 }
 
 export interface StoredChatMessage {

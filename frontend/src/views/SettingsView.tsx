@@ -3,6 +3,7 @@ import {
   ApiError,
   adminGetActiveProfile,
   adminGetCalendarSettings,
+  adminGetChatMemorySettings,
   adminGetDefaultRecipeServings,
   adminGetGoogleCalendarAuthUrl,
   adminGetGoogleCalendarSettings,
@@ -13,6 +14,7 @@ import {
   adminListModelsForProfile,
   adminSetActiveProfile,
   adminSetCalendarSettings,
+  adminSetChatMemorySettings,
   adminSetCredential,
   adminSetDefaultRecipeServings,
   adminSetGoogleCalendarSettings,
@@ -23,6 +25,7 @@ import {
 import { formatPricePerMillion } from '../api/pricing';
 import type {
   CalendarSettings,
+  ChatMemorySettings,
   CredentialSummary,
   GoogleCalendarSettings,
   NotificationSettings,
@@ -129,6 +132,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedNotificationsEnabled, setSelectedNotificationsEnabled] = useState(false);
   const [notificationSettingsStatus, setNotificationSettingsStatus] = useState('');
 
+  // docs/chat-memory.md — mirrors SillyTavern-Canonize's own "Connections & Prompts" panel.
+  const [chatMemorySettings, setChatMemorySettingsState] = useState<ChatMemorySettings | null>(null);
+  const [selectedChatMemoryProfile, setSelectedChatMemoryProfile] = useState('');
+  const [selectedLiveWindowPairs, setSelectedLiveWindowPairs] = useState('');
+  const [selectedSyncEveryPairs, setSelectedSyncEveryPairs] = useState('');
+  const [selectedChunkSummaryPrompt, setSelectedChunkSummaryPrompt] = useState('');
+  const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
+  const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
+  const [chatMemoryStatus, setChatMemoryStatus] = useState('');
+
   const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
   const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
   const [maskWorkCalendar, setMaskWorkCalendar] = useState(false);
@@ -174,6 +187,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedNotificationsEnabled(settings.enabled);
   }
 
+  function applyChatMemorySettings(settings: ChatMemorySettings) {
+    setChatMemorySettingsState(settings);
+    setSelectedChatMemoryProfile(settings.profile ?? '');
+    setSelectedLiveWindowPairs(settings.liveWindowPairs === null ? '' : String(settings.liveWindowPairs));
+    setSelectedSyncEveryPairs(settings.syncEveryPairs === null ? '' : String(settings.syncEveryPairs));
+    setSelectedChunkSummaryPrompt(settings.chunkSummaryPrompt);
+    setSelectedDistillPrompt(settings.distillPrompt);
+    setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
+  }
+
   function applyGoogleCalendarSettings(settings: GoogleCalendarSettings) {
     setGoogleClientId(settings.clientId ?? '');
     setSelectedGoogleClientId(settings.clientId ?? '');
@@ -202,7 +225,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings] =
+        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings, chatMemorySettingsResult] =
           await Promise.all([
             adminListCredentials(null),
             adminGetActiveProfile(null),
@@ -212,6 +235,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
             adminGetNotionSettings(null),
             adminGetGoogleCalendarSettings(null),
             adminGetNotificationSettings(null),
+            adminGetChatMemorySettings(null),
           ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
@@ -230,6 +254,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         applyNotionSettings(notionSettings);
         applyGoogleCalendarSettings(googleCalendarSettings);
         applyNotificationSettings(notificationSettings);
+        applyChatMemorySettings(chatMemorySettingsResult);
         setUnlocked(true);
       } catch {
         // Not covered by Access (or Access isn't configured here) — fall back to the key form.
@@ -242,7 +267,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings] =
+      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings, chatMemorySettingsResult] =
         await Promise.all([
           adminListCredentials(adminKey),
           adminGetActiveProfile(adminKey),
@@ -252,6 +277,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           adminGetNotionSettings(adminKey),
           adminGetGoogleCalendarSettings(adminKey),
           adminGetNotificationSettings(adminKey),
+          adminGetChatMemorySettings(adminKey),
         ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -270,6 +296,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyNotionSettings(notionSettings);
       applyGoogleCalendarSettings(googleCalendarSettings);
       applyNotificationSettings(notificationSettings);
+      applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
     } catch (err) {
       setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
@@ -321,6 +348,40 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     if (selectedNtfyServerUrl) setNtfyServerUrl(selectedNtfyServerUrl);
     setNotificationsEnabled(selectedNotificationsEnabled);
     setNotificationSettingsStatus('Saved — takes effect on the next send_push_notification call, no restart needed.');
+  }
+
+  // Only the fields that actually changed are sent — an untouched prompt textarea stays exactly
+  // what it was (default or a prior override), it isn't silently re-saved as an override.
+  async function saveChatMemorySettings() {
+    if (!chatMemorySettings) return;
+    const patch: Parameters<typeof adminSetChatMemorySettings>[0] = {};
+    if (selectedChatMemoryProfile !== (chatMemorySettings.profile ?? '')) patch.profile = selectedChatMemoryProfile;
+    const liveWindowPairs = Number(selectedLiveWindowPairs);
+    if (selectedLiveWindowPairs && liveWindowPairs !== chatMemorySettings.liveWindowPairs) patch.live_window_pairs = liveWindowPairs;
+    const syncEveryPairs = Number(selectedSyncEveryPairs);
+    if (selectedSyncEveryPairs && syncEveryPairs !== chatMemorySettings.syncEveryPairs) patch.sync_every_pairs = syncEveryPairs;
+    if (selectedChunkSummaryPrompt !== chatMemorySettings.chunkSummaryPrompt) patch.chunk_summary_prompt = selectedChunkSummaryPrompt;
+    if (selectedDistillPrompt !== chatMemorySettings.distillPrompt) patch.distill_prompt = selectedDistillPrompt;
+    if (selectedHouseholdMemoryPrompt !== chatMemorySettings.householdMemoryPrompt) {
+      patch.household_memory_prompt = selectedHouseholdMemoryPrompt;
+    }
+    if (Object.keys(patch).length === 0) return;
+
+    setChatMemoryStatus('');
+    try {
+      const updated = await adminSetChatMemorySettings(patch, adminKey);
+      applyChatMemorySettings(updated);
+    } catch (err) {
+      setChatMemoryStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setChatMemoryStatus('Saved — takes effect on the next sync tick, no restart needed.');
+  }
+
+  function resetChatMemoryPrompt(field: 'chunkSummaryPrompt' | 'distillPrompt' | 'householdMemoryPrompt') {
+    if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
+    if (field === 'distillPrompt') setSelectedDistillPrompt('');
+    if (field === 'householdMemoryPrompt') setSelectedHouseholdMemoryPrompt('');
   }
 
   // Refetches the model catalog whenever a different connection is picked, so the model dropdown
@@ -713,6 +774,77 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{notificationSettingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Chat Memory</legend>
+        <label>
+          Connection
+          <br />
+          <select value={selectedChatMemoryProfile} onChange={(e) => setSelectedChatMemoryProfile(e.target.value)}>
+            <option value="">(household default{activeProfile ? ` — ${activeProfile}` : ''})</option>
+            {(chatMemorySettings?.profileNames ?? []).map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+          <span className="model-connection-note">Which connection runs the rolling summarize/recall pipeline's calls — leave blank to use the active connection.</span>
+        </label>
+        <br />
+        <div className="settings-row">
+          <label>
+            Live window (turn pairs)
+            <input
+              type="number"
+              min="1"
+              value={selectedLiveWindowPairs}
+              onChange={(e) => setSelectedLiveWindowPairs(e.target.value)}
+              placeholder="8"
+            />
+          </label>
+          <label>
+            Sync every (turn pairs)
+            <input
+              type="number"
+              min="1"
+              value={selectedSyncEveryPairs}
+              onChange={(e) => setSelectedSyncEveryPairs(e.target.value)}
+              placeholder="8"
+            />
+          </label>
+        </div>
+        <div className="status">
+          Live window: how many of the most recent turn pairs stay in full view. Sync every: how many pairs accumulate past
+          that before the next chunk/summarize/distill pass runs.
+        </div>
+        <br />
+        <label>
+          Chunk summary prompt {chatMemorySettings?.chunkSummaryPromptIsDefault && <em>(default)</em>}
+          <textarea value={selectedChunkSummaryPrompt} onChange={(e) => setSelectedChunkSummaryPrompt(e.target.value)} rows={3} />
+        </label>
+        <button type="button" onClick={() => resetChatMemoryPrompt('chunkSummaryPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Key-ideas digest prompt {chatMemorySettings?.distillPromptIsDefault && <em>(default)</em>}
+          <textarea value={selectedDistillPrompt} onChange={(e) => setSelectedDistillPrompt(e.target.value)} rows={3} />
+        </label>
+        <button type="button" onClick={() => resetChatMemoryPrompt('distillPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Long-term memory prompt {chatMemorySettings?.householdMemoryPromptIsDefault && <em>(default)</em>}
+          <textarea value={selectedHouseholdMemoryPrompt} onChange={(e) => setSelectedHouseholdMemoryPrompt(e.target.value)} rows={3} />
+        </label>
+        <button type="button" onClick={() => resetChatMemoryPrompt('householdMemoryPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <button onClick={saveChatMemorySettings}>Save</button>
+        <div className="status">{chatMemoryStatus}</div>
       </fieldset>
 
       <fieldset>

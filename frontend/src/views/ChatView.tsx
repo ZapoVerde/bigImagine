@@ -6,10 +6,12 @@ import {
   ApiError,
   adminGetActiveProfile,
   adminListModelsForProfile,
+  archiveChat,
   callTool,
   chatCompletion,
   createChat,
   deleteMessage,
+  forkChat,
   getChat,
   listFolders,
   listToolNames,
@@ -55,6 +57,9 @@ interface ChatViewProps {
    *  draft tab into a specialist view. Only offered before anything's been sent — see the
    *  chat-empty-landing branch below. */
   onSwitchView?: (type: SummonableType) => void;
+  /** Focuses (or opens) a chat tab by id — used by the "Fork from here" action to jump straight
+   *  to the new branch once it's created (useTabs.ts's openChat). */
+  onOpenChat?: (chatId: string, title?: string) => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -98,7 +103,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView, onOpenChat }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
@@ -392,6 +397,31 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
+  /** Branches a new chat from this one at messageId (inclusive) and jumps straight to it —
+   *  docs/chat-memory.md. Leaves the current chat completely untouched. */
+  async function forkFrom(messageId: string) {
+    if (!activeChat) return;
+    try {
+      const forked = await forkChat(activeChat.chatId, messageId, apiKey);
+      onOpenChat?.(forked.chatId, forked.title);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to fork chat');
+    }
+  }
+
+  /** Marks this chat done — the explicit signal (docs/bb_principles.md §3) that triggers its
+   *  end-of-chat long-term-memory extraction server-side. Once archived, a chat stops rolling
+   *  into ongoing sync (chatMemorySync.ts), though it's still fully readable/searchable. */
+  async function archiveCurrentChat() {
+    if (!activeChat || activeChat.archivedAt) return;
+    try {
+      const archived = await archiveChat(activeChat.chatId, apiKey);
+      setActiveChat(archived);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to archive chat');
+    }
+  }
+
   async function copyMessage(content: string, messageId?: string) {
     try {
       await navigator.clipboard.writeText(content);
@@ -430,6 +460,12 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
         <div className="chat-header">
           <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
+          {activeChat && !activeChat.archivedAt && (
+            <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
+              Archive
+            </button>
+          )}
+          {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
           {activeChat?.canvasNoteId && (
             <button
               type="button"
@@ -497,6 +533,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                             Rerun
                           </button>
                         )}
+                        <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
+                          Fork from here
+                        </button>
                         <button onClick={() => removeMessage(m.messageId!)}>Delete</button>
                       </div>
                     )}

@@ -31,6 +31,30 @@ tar -C "$work" -cf - postgres.dump documents.tar.gz secrets.enc.env \
 
 dest="backup:${BIGBRAIN_BACKUP_S3_BUCKET}/bigbrain/${ts}.tar.age"
 log "uploading to $dest"
-rclone copyto "$work/bundle.tar.age" "$dest"
+# --s3-no-check-bucket: rclone's default preflight HeadBucket/list-style existence check needs
+# broader (account-level) permission than an R2 API token scoped to just this one bucket grants
+# (bb_principles.md's least-privilege instinct — no reason to give this token account-wide list
+# access it never otherwise needs). Without this flag the actual upload never even gets attempted:
+# rclone fails the preflight with AccessDenied first. Confirmed 2026-07-29: the same credentials
+# succeed via aws-cli's single put-object call (no preflight) and via rclone once this flag skips
+# rclone's own check.
+rclone copyto "$work/bundle.tar.age" "$dest" --s3-no-check-bucket
+
+# Prune to the newest BIGBRAIN_BACKUP_RETAIN_COUNT backups, oldest first — only runs after a
+# confirmed-successful upload above (set -e would already have aborted the script otherwise), and
+# only ever removes from the *old* end of the sorted list, so the backup just uploaded can never
+# be among the ones deleted as long as retain >= 1.
+retain="${BIGBRAIN_BACKUP_RETAIN_COUNT:-5}"
+log "pruning to newest $retain backup(s)"
+mapfile -t all_backups < <(rclone lsf "backup:${BIGBRAIN_BACKUP_S3_BUCKET}/bigbrain/" --s3-no-check-bucket | sort)
+total="${#all_backups[@]}"
+if [ "$total" -gt "$retain" ]; then
+  to_remove=$((total - retain))
+  for ((i = 0; i < to_remove; i++)); do
+    old="${all_backups[$i]}"
+    log "deleting old backup: $old"
+    rclone deletefile "backup:${BIGBRAIN_BACKUP_S3_BUCKET}/bigbrain/${old}" --s3-no-check-bucket
+  done
+fi
 
 log "done"

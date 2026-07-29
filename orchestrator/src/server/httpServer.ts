@@ -124,11 +124,13 @@ import { runWithCallContext } from '../io/llm/callContext.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
+import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
@@ -141,6 +143,7 @@ import {
   consumeGoogleOauthState,
   getActiveProfileSetting,
   getCalendarSettings,
+  getChatMemorySettings,
   getDefaultRecipeServings,
   getGoogleCalendarSettings,
   getHouseholdTimezone,
@@ -151,6 +154,7 @@ import {
   mintGoogleOauthState,
   parseSetActiveProfileBody,
   parseSetCalendarSettingsBody,
+  parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
   parseSetDefaultRecipeServingsBody,
   parseSetGoogleCalendarSettingsBody,
@@ -159,6 +163,7 @@ import {
   parseSetTimezoneBody,
   setActiveProfile,
   setCalendarSettings,
+  setChatMemorySettings,
   setCredential,
   setDefaultRecipeServings,
   setGoogleCalendarSettings,
@@ -177,6 +182,10 @@ import {
 export interface HttpServerDeps {
   llm: LlmProvider;
   db: PostgresClient;
+  /** Only used by the archive_chat route (chatMemorySync.ts's archiveChatMemory) — the end-of-chat
+   *  long-term-memory extraction needs to embed nothing itself, but chatMemorySync's shared
+   *  ChatMemorySyncDeps shape expects it, same reasoning as its own module preamble. */
+  embeddings: EmbeddingProvider;
   tools: ToolRegistry;
   apiKeys: ApiKeyStore;
   accessIdentity: AccessIdentityResolver;
@@ -297,6 +306,48 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
 };
+
+// docs/chat-memory.md: the always-injected half of chat memory (small, unconditional — see
+// recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead).
+// household_memory is every user's own row (RLS already scopes it); chat_memory_entries is this
+// one chat's distilled digest of whatever's rolled off the live window below.
+async function buildChatMemorySystemPrompt(db: PostgresClient, userId: string, chatId: string): Promise<string> {
+  return db.withUserScope(userId, async (session) => {
+    const [household, entries] = await Promise.all([
+      session.query<{ content: string }>(
+        'select content from household_memory where user_id = $1 order by updated_at desc',
+        [userId],
+      ),
+      session.query<{ content: string }>(
+        'select content from chat_memory_entries where chat_id = $1 order by updated_at',
+        [chatId],
+      ),
+    ]);
+    const parts: string[] = [];
+    if (household.length) {
+      parts.push(`What you remember about this household:\n${household.map((r) => `- ${r.content}`).join('\n')}`);
+    }
+    if (entries.length) {
+      parts.push(
+        `Key ideas from earlier in this conversation (no longer in view — call recall_chat_history for exact wording):\n${entries
+          .map((r) => `- ${r.content}`)
+          .join('\n')}`,
+      );
+    }
+    return parts.join('\n\n');
+  });
+}
+
+// The other half: raw history older than the live window is never sent at all — only reachable via
+// recall_chat_history. Same knob (chat_memory_live_window_pairs) orchestrator/src/orchestrator/
+// chatMemorySync.ts's own sync pipeline uses for where the live window ends, read live so the two
+// stay in agreement without coordinating a restart.
+async function trimToLiveWindow(messages: LlmMessage[], settings: OrchestratorSettingsStore): Promise<LlmMessage[]> {
+  const raw = await settings.get('chat_memory_live_window_pairs');
+  const pairs = raw ? Number(raw) : NaN;
+  const liveMessages = (Number.isInteger(pairs) && pairs > 0 ? pairs : 8) * 2;
+  return messages.length > liveMessages ? messages.slice(-liveMessages) : messages;
+}
 
 async function serveStaticFile(res: ServerResponse, filePath: string): Promise<void> {
   try {
@@ -426,7 +477,21 @@ async function handleChatCompletions(
   // traffic gets it too). household_timezone is read live, not cached at boot, so changing it in
   // Settings takes effect on the very next turn, no restart.
   const timezone = await getHouseholdTimezone(deps.settings);
-  const systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
+  let systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
+
+  // docs/chat-memory.md: only the persisted-session path (bigBrain's own frontend, which the
+  // rolling-sync pipeline actually maintains derived state for) gets server-side history trimming
+  // and memory injection — a stateless caller (Open WebUI) gets exactly what it sent, unchanged,
+  // same as before this feature existed.
+  if (body.chat_id) {
+    const [memoryContext, trimmed] = await Promise.all([
+      buildChatMemorySystemPrompt(db, userId, body.chat_id),
+      trimToLiveWindow(messagesForLlm, deps.settings),
+    ]);
+    systemPrompt = [systemPrompt, memoryContext].filter(Boolean).join('\n\n');
+    messagesForLlm = trimmed;
+  }
+
   let reply: string;
   let focusedNoteId: string | null | undefined;
   try {
@@ -713,6 +778,39 @@ async function handleRecipeSettingsSet(req: IncomingMessage, res: ServerResponse
   sendJson(res, 200, { defaultServings: value });
 }
 
+// docs/chat-memory.md — profileNames comes from deps.llmProfiles (a boot-time set, same as
+// GET /v1/admin/settings' ActiveProfileSetting), everything else is live-read via adminServer.ts.
+async function handleChatMemorySettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const settings = await getChatMemorySettings(deps.settings);
+  sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
+}
+
+async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetChatMemorySettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error:
+        'expected at least one of { profile?, live_window_pairs?: positive number, sync_every_pairs?: positive number, ' +
+        'chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
+    });
+    return;
+  }
+
+  await setChatMemorySettings(deps.settings, parsed);
+  // No restart needed — the next sync tick (orchestrator/src/orchestrator/chatMemorySync.ts) reads
+  // every one of these live.
+  const settings = await getChatMemorySettings(deps.settings);
+  sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
+}
+
 async function handleNotificationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, await getNotificationSettings(deps.settings));
 }
@@ -987,6 +1085,45 @@ async function handleChatRoutes(
     return;
   }
 
+  if (segments[1] === 'fork' && segments.length === 2 && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const fromMessageId = typeof (body as Record<string, unknown>)?.from_message_id === 'string'
+      ? (body as { from_message_id: string }).from_message_id
+      : undefined;
+    const title = typeof (body as Record<string, unknown>)?.title === 'string' ? (body as { title: string }).title : undefined;
+    if (!fromMessageId) {
+      sendJson(res, 400, { error: 'expected { from_message_id: string, title?: string }' });
+      return;
+    }
+    const forked = await deps.chats.forkChat(userId, chatId, fromMessageId, title);
+    if (!forked) {
+      sendJson(res, 404, { error: 'not found — chatId or from_message_id does not exist in this chat' });
+      return;
+    }
+    sendJson(res, 201, forked);
+    return;
+  }
+
+  if (segments[1] === 'archive' && segments.length === 2 && req.method === 'POST') {
+    const archived = await deps.chats.archiveChat(userId, chatId);
+    if (!archived) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    // Fire-and-forget: the end-of-chat memory judgment call can take a few seconds and the archive
+    // action itself has already fully succeeded (archived_at is stamped) — a failure here is
+    // logged, not surfaced as a failed archive (bb_principles.md §11: a discarded path is logged
+    // with why, not silently swallowed, but it doesn't need to block the caller either).
+    archiveChatMemory(
+      { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmProfiles: deps.llmProfiles },
+      userId,
+      chatId,
+      archived.title,
+    ).catch((err) => log.error('archive_chat: long-term-memory extraction failed', { chatId, err }));
+    sendJson(res, 200, archived);
+    return;
+  }
+
   if (segments[1] === 'messages' && segments.length >= 3) {
     const messageId = decodeURIComponent(segments[2]!);
 
@@ -1085,7 +1222,11 @@ async function handleRequest(
   res: ServerResponse,
   deps: HttpServerDeps,
 ): Promise<void> {
-  if (req.method === 'GET' && req.url === '/') {
+  // Split off the query string before comparing — the Google Calendar OAuth callback (and denied/
+  // error cases) redirect here as `/?google_calendar=connected` etc. for the frontend to read and
+  // clear (SettingsView.tsx), so an exact `req.url === '/'` match would silently 404 on every one
+  // of those redirects.
+  if (req.method === 'GET' && req.url?.split('?')[0] === '/') {
     await serveStaticFile(res, `${FRONTEND_DIST_DIR}/index.html`);
     return;
   }
@@ -1235,6 +1376,22 @@ async function handleRequest(
       return;
     }
     await handleNotificationSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatMemorySettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/chat-memory-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatMemorySettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/calendar-settings') {

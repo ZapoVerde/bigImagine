@@ -26,6 +26,20 @@
  * panel is focused on, if any — written by httpServer.ts from runTurn's focusedNoteId, or cleared
  * by the frontend's own close action; this store just persists whatever it's given.
  *
+ * forkChat/archiveChat (db/migrations/0040_chat_branching.sql, docs/chat-memory.md): a fork is a
+ * new chat_sessions row, constructed correct from birth rather than detected-and-healed —
+ * messages up to and including forkFromMessageId are copied under fresh message_ids (message_id
+ * is a global PK, so the parent's own rows can't be reused), and only the chat_sync_points/
+ * chat_chunks/chat_memory_entries rows whose sync point falls at-or-before the fork point come
+ * along too, so the new branch never inherits a "key idea" digest describing something that
+ * happened after the point it branched from. (One known imprecision, accepted for simplicity, same
+ * spirit as Canonize's own wholesale-snapshot-restore: chat_memory_entries stores current content
+ * per topic_key, not a full version history, so an entry last touched by a post-fork-point sync is
+ * skipped entirely rather than copied in its pre-fork-point form.) archiveChat only stamps
+ * archived_at — orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory (triggered by
+ * server/httpServer.ts right after) is what actually runs the end-of-chat long-term-memory
+ * extraction; this store has no LLM/embeddings access to do that itself.
+ *
  * @api-declaration
  * createChatSessionStore(db) -> ChatSessionStore
  *   .listChats(userId, {search?, folderId?}) — summaries, updated_at desc
@@ -37,6 +51,9 @@
  *   .deleteMessage(userId, chatId, messageId) — removes exactly one message, false if not found
  *   .truncateMessagesFrom(userId, chatId, messageId) — removes that message and everything
  *     chronologically after it (edit/rerun's shared primitive), false if not found
+ *   .forkChat(userId, chatId, forkFromMessageId, title?) — new session row branched from this
+ *     chat at that message, or undefined if forkFromMessageId doesn't belong to it
+ *   .archiveChat(userId, chatId) — stamps archived_at (now), or undefined if not found
  *   .listFolders / .createFolder / .updateFolder / .deleteFolder — folder CRUD; deleting a
  *     folder cascades to child folders, chats fall back to no-folder (on delete set null)
  *
@@ -70,6 +87,17 @@ export interface ChatSessionRow {
    *  httpServer.ts at the end of a turn whose tool call(s) surfaced one via focusHint
    *  (toolRegistry.ts), or cleared by the frontend's own close action. */
   canvasNoteId: string | null;
+  /** Set only on a forked chat — the chat it branched from (docs/chat-memory.md). Null for an
+   *  ordinary chat and for a fork whose parent has since been deleted (on delete set null). */
+  parentChatId: string | null;
+  /** Set only on a forked chat — the parent's own message_id the fork branched from, kept for
+   *  provenance/display ("forked from {parent title} at this point"). Never one of this chat's
+   *  own message ids (those are freshly generated at fork time). */
+  forkMessageId: string | null;
+  /** Set once, explicitly, via archiveChat — the "this chat is done" signal
+   *  (docs/bb_principles.md §3) that triggers chatMemorySync.ts's end-of-chat long-term-memory
+   *  extraction. Null means still ongoing (eligible for rolling sync). */
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -126,6 +154,14 @@ export interface ChatSessionStore {
    *  "rerun" (truncate at the assistant reply being regenerated, then resend unchanged). Returns
    *  false if messageId doesn't exist in this chat (nothing to truncate from). */
   truncateMessagesFrom(userId: string, chatId: string, messageId: string): Promise<boolean>;
+  /** Branches a new chat from this one at forkFromMessageId (inclusive) — see this file's own
+   *  preamble for exactly what does and doesn't come along. Undefined if forkFromMessageId isn't a
+   *  message in this chat. */
+  forkChat(userId: string, chatId: string, forkFromMessageId: string, title?: string): Promise<ChatSessionRow | undefined>;
+  /** Stamps archived_at (now) — the explicit end-of-chat signal. Undefined if not found. Does not
+   *  itself run the long-term-memory extraction; the caller (server/httpServer.ts) does that via
+   *  orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory once this returns. */
+  archiveChat(userId: string, chatId: string): Promise<ChatSessionRow | undefined>;
   listFolders(userId: string): Promise<FolderRow[]>;
   createFolder(userId: string, init: { name: string; parentId?: string }): Promise<FolderRow>;
   updateFolder(userId: string, folderId: string, patch: { name?: string; parentId?: string | null }): Promise<FolderRow | undefined>;
@@ -139,6 +175,9 @@ interface SessionDbRow {
   params: ChatParams;
   tool_names: string[] | null;
   canvas_note_id: string | null;
+  parent_chat_id: string | null;
+  fork_message_id: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -151,12 +190,16 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     params: row.params ?? {},
     toolNames: row.tool_names,
     canvasNoteId: row.canvas_note_id,
+    parentChatId: row.parent_chat_id,
+    forkMessageId: row.fork_message_id,
+    archivedAt: row.archived_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const SESSION_COLUMNS = 'chat_id, title, folder_id, params, tool_names, canvas_note_id, created_at, updated_at';
+const SESSION_COLUMNS =
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, created_at, updated_at';
 
 export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
   return {
@@ -305,6 +348,117 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         if (rows.length === 0) return false;
         await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
         return true;
+      });
+    },
+
+    async forkChat(userId, chatId, forkFromMessageId, title) {
+      return db.withUserScope(userId, async (session) => {
+        const parentRows = await session.query<SessionDbRow>(
+          `select ${SESSION_COLUMNS} from chat_sessions where chat_id = $1`,
+          [chatId],
+        );
+        if (!parentRows[0]) return undefined;
+        const parent = toSessionRow(parentRows[0]);
+
+        const messages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string; created_at: string }>(
+          'select message_id, role, content, created_at from chat_messages where chat_id = $1 order by created_at, message_id',
+          [chatId],
+        );
+        const forkIdx = messages.findIndex((m) => m.message_id === forkFromMessageId);
+        if (forkIdx === -1) return undefined;
+        const toCopy = messages.slice(0, forkIdx + 1);
+
+        const newRows = await session.query<SessionDbRow>(
+          `insert into chat_sessions (user_id, title, params, tool_names, parent_chat_id, fork_message_id)
+           values ($1, $2, $3, $4, $5, $6)
+           returning ${SESSION_COLUMNS}`,
+          [
+            userId,
+            title ?? `Fork of ${parent.title}`,
+            JSON.stringify(parent.params),
+            parent.toolNames,
+            chatId,
+            forkFromMessageId,
+          ],
+        );
+        const newChatId = newRows[0]!.chat_id;
+
+        // Fresh message_ids under the new chat_id (message_id is a global PK — the parent's own
+        // rows can't be reused) — original created_at is preserved for provenance/ordering.
+        const idMap = new Map<string, string>();
+        for (const m of toCopy) {
+          const [inserted] = await session.query<{ message_id: string }>(
+            `insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, $5)
+             returning message_id`,
+            [newChatId, userId, m.role, m.content, m.created_at],
+          );
+          idMap.set(m.message_id, inserted!.message_id);
+        }
+
+        // Only sync points whose restore-point message was actually copied come along — this is
+        // what keeps the new branch from inheriting a "key idea" digest describing something that
+        // happened after the point it branched from.
+        const copiedIds = new Set(toCopy.map((m) => m.message_id));
+        const syncPoints = await session.query<{ sync_id: string; ordinal: number; last_message_id: string }>(
+          'select sync_id, ordinal, last_message_id from chat_sync_points where chat_id = $1 order by ordinal',
+          [chatId],
+        );
+        const eligible = syncPoints.filter((sp) => copiedIds.has(sp.last_message_id));
+
+        const syncIdMap = new Map<string, string>();
+        for (const sp of eligible) {
+          const [inserted] = await session.query<{ sync_id: string }>(
+            `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id) values ($1, $2, $3, $4)
+             returning sync_id`,
+            [newChatId, userId, sp.ordinal, idMap.get(sp.last_message_id)],
+          );
+          syncIdMap.set(sp.sync_id, inserted!.sync_id);
+        }
+
+        if (eligible.length > 0) {
+          const oldSyncIds = eligible.map((sp) => sp.sync_id);
+          const chunks = await session.query<{
+            sync_id: string;
+            ordinal: number;
+            content: string;
+            summary: string;
+            vector_embed: string | null;
+          }>(
+            'select sync_id, ordinal, content, summary, vector_embed::text as vector_embed from chat_chunks where sync_id = any($1)',
+            [oldSyncIds],
+          );
+          for (const c of chunks) {
+            await session.query(
+              `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed)
+               values ($1, $2, $3, $4, $5, $6, $7)`,
+              [newChatId, syncIdMap.get(c.sync_id), userId, c.ordinal, c.content, c.summary, c.vector_embed],
+            );
+          }
+
+          const entries = await session.query<{ sync_id: string; topic_key: string; content: string }>(
+            'select sync_id, topic_key, content from chat_memory_entries where chat_id = $1 and sync_id = any($2)',
+            [chatId, oldSyncIds],
+          );
+          for (const e of entries) {
+            await session.query(
+              `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content) values ($1, $2, $3, $4, $5)`,
+              [newChatId, syncIdMap.get(e.sync_id), userId, e.topic_key, e.content],
+            );
+          }
+        }
+
+        return toSessionRow(newRows[0]!);
+      });
+    },
+
+    async archiveChat(userId, chatId) {
+      return db.withUserScope(userId, async (session) => {
+        const rows = await session.query<SessionDbRow>(
+          `update chat_sessions set archived_at = now(), updated_at = now() where chat_id = $1
+           returning ${SESSION_COLUMNS}`,
+          [chatId],
+        );
+        return rows[0] ? toSessionRow(rows[0]) : undefined;
       });
     },
 

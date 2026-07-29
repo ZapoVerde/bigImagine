@@ -3,6 +3,7 @@ import type {
   CalendarSettings,
   ChatCompletionResponse,
   ChatDetail,
+  ChatMemorySettings,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -209,6 +210,27 @@ export function truncateMessagesFrom(
   );
 }
 
+/** Branches a new chat from this one at fromMessageId (inclusive) — docs/chat-memory.md. Returns
+ *  the new chat's session row; the caller is responsible for switching a tab/view to it. */
+export function forkChat(
+  chatId: string,
+  fromMessageId: string,
+  apiKey: string | null,
+  title?: string,
+): Promise<ChatSessionRow> {
+  return jsonRequest<ChatSessionRow>(`/v1/chats/${encodeURIComponent(chatId)}/fork`, apiKey, {
+    method: 'POST',
+    body: { from_message_id: fromMessageId, ...(title ? { title } : {}) },
+  });
+}
+
+/** Marks a chat as done — the explicit signal that triggers its end-of-chat long-term-memory
+ *  extraction (docs/chat-memory.md, docs/bb_principles.md §3). The extraction itself runs
+ *  server-side after this returns; there's nothing further for the caller to await. */
+export function archiveChat(chatId: string, apiKey: string | null): Promise<ChatSessionRow> {
+  return jsonRequest<ChatSessionRow>(`/v1/chats/${encodeURIComponent(chatId)}/archive`, apiKey, { method: 'POST' });
+}
+
 export async function listFolders(apiKey: string | null): Promise<Folder[]> {
   const body = await jsonRequest<{ folders: Folder[] }>('/v1/folders', apiKey);
   return body.folders;
@@ -385,6 +407,36 @@ export async function adminSetNotionSettings(
     body: JSON.stringify(patch),
   });
   if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** docs/chat-memory.md — mirrors SillyTavern-Canonize's own "Connections & Prompts" panel: a
+ *  connection override for the rolling-sync pipeline plus a "default + bespoke" prompt per stage.
+ *  Same no-restart shape as timezone/recipe-settings: chatMemorySync.ts reads all of this live on
+ *  every tick. */
+export async function adminGetChatMemorySettings(adminKey: string | null): Promise<ChatMemorySettings> {
+  const res = await fetch('/v1/admin/chat-memory-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ChatMemorySettings>;
+}
+
+export async function adminSetChatMemorySettings(
+  patch: {
+    profile?: string;
+    live_window_pairs?: number;
+    sync_every_pairs?: number;
+    chunk_summary_prompt?: string;
+    distill_prompt?: string;
+    household_memory_prompt?: string;
+  },
+  adminKey: string | null,
+): Promise<ChatMemorySettings> {
+  const res = await fetch('/v1/admin/chat-memory-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ChatMemorySettings>;
 }
 
 export async function adminGetGoogleCalendarSettings(adminKey: string | null): Promise<GoogleCalendarSettings> {

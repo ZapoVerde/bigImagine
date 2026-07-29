@@ -1,0 +1,17 @@
+{
+  "name": "@bigbrain/plugin-chat-memory",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@bigbrain/orchestrator": "*"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}

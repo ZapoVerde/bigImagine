@@ -136,6 +136,9 @@ import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
 import { exchangeAuthCode } from '../io/googleCalendar.js';
+import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
+import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
+import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
 
 export interface SetCredentialBody {
   name: CredentialName;
@@ -334,6 +337,102 @@ export function parseSetNotificationSettingsBody(raw: unknown): SetNotificationS
 export async function setNotificationSettings(store: OrchestratorSettingsStore, body: SetNotificationSettingsBody): Promise<void> {
   if (body.serverUrl !== undefined) await store.set('ntfy_server_url', body.serverUrl);
   if (body.enabled !== undefined) await store.set('notifications_enabled', String(body.enabled));
+}
+
+// --- Chat memory settings (docs/chat-memory.md) ---
+// Mirrors SillyTavern-Canonize's own "Connections & Prompts" settings panel: a connection override
+// for the rolling-sync pipeline's classification calls (unset = the household's active connection,
+// same fallback shape as a chat's own params.profile), two timing knobs in turn-pairs, and a
+// "default + bespoke" override per prompt. Read live on every sync tick
+// (orchestrator/src/orchestrator/chatMemorySync.ts) — a save here takes effect on the next tick,
+// no restart, same shape as notification/recipe settings above. profileNames isn't included here —
+// httpServer.ts's route handler attaches it from deps.llmProfiles, same split as
+// getActiveProfileSetting/ActiveProfileSetting.
+
+export interface ChatMemorySettings {
+  profile: string | null;
+  liveWindowPairs: number | null;
+  syncEveryPairs: number | null;
+  chunkSummaryPrompt: string;
+  chunkSummaryPromptIsDefault: boolean;
+  distillPrompt: string;
+  distillPromptIsDefault: boolean;
+  householdMemoryPrompt: string;
+  householdMemoryPromptIsDefault: boolean;
+}
+
+export async function getChatMemorySettings(store: OrchestratorSettingsStore): Promise<ChatMemorySettings> {
+  const [profile, liveRaw, syncRaw, chunkSummaryPrompt, distillPrompt, householdMemoryPrompt] = await Promise.all([
+    store.get('chat_memory_profile'),
+    store.get('chat_memory_live_window_pairs'),
+    store.get('chat_memory_sync_every_pairs'),
+    store.get('chat_memory_chunk_summary_prompt'),
+    store.get('chat_memory_distill_prompt'),
+    store.get('chat_memory_household_memory_prompt'),
+  ]);
+  return {
+    profile: profile || null,
+    liveWindowPairs: liveRaw ? Number(liveRaw) : null,
+    syncEveryPairs: syncRaw ? Number(syncRaw) : null,
+    chunkSummaryPrompt: chunkSummaryPrompt || DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT,
+    chunkSummaryPromptIsDefault: !chunkSummaryPrompt,
+    distillPrompt: distillPrompt || DEFAULT_DISTILL_CHAT_MEMORY_PROMPT,
+    distillPromptIsDefault: !distillPrompt,
+    householdMemoryPrompt: householdMemoryPrompt || DEFAULT_HOUSEHOLD_MEMORY_PROMPT,
+    householdMemoryPromptIsDefault: !householdMemoryPrompt,
+  };
+}
+
+export interface SetChatMemorySettingsBody {
+  profile?: string;
+  liveWindowPairs?: number;
+  syncEveryPairs?: number;
+  chunkSummaryPrompt?: string;
+  distillPrompt?: string;
+  householdMemoryPrompt?: string;
+}
+
+// Every field is optional and independently settable; an empty string on any prompt field clears
+// the override back to its built-in default (there is no separate "reset" endpoint — see
+// io/orchestratorSettings.ts's own doc on this). Wire keys are snake_case, same convention as
+// every other parseSet*Body in this file (server_url, mask_work_calendar, ...).
+export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { profile, live_window_pairs, sync_every_pairs, chunk_summary_prompt, distill_prompt, household_memory_prompt } =
+    raw as Record<string, unknown>;
+  if (
+    profile === undefined &&
+    live_window_pairs === undefined &&
+    sync_every_pairs === undefined &&
+    chunk_summary_prompt === undefined &&
+    distill_prompt === undefined &&
+    household_memory_prompt === undefined
+  ) {
+    return undefined;
+  }
+  if (profile !== undefined && typeof profile !== 'string') return undefined;
+  if (live_window_pairs !== undefined && (typeof live_window_pairs !== 'number' || live_window_pairs <= 0)) return undefined;
+  if (sync_every_pairs !== undefined && (typeof sync_every_pairs !== 'number' || sync_every_pairs <= 0)) return undefined;
+  if (chunk_summary_prompt !== undefined && typeof chunk_summary_prompt !== 'string') return undefined;
+  if (distill_prompt !== undefined && typeof distill_prompt !== 'string') return undefined;
+  if (household_memory_prompt !== undefined && typeof household_memory_prompt !== 'string') return undefined;
+  return {
+    profile: profile as string | undefined,
+    liveWindowPairs: live_window_pairs as number | undefined,
+    syncEveryPairs: sync_every_pairs as number | undefined,
+    chunkSummaryPrompt: chunk_summary_prompt as string | undefined,
+    distillPrompt: distill_prompt as string | undefined,
+    householdMemoryPrompt: household_memory_prompt as string | undefined,
+  };
+}
+
+export async function setChatMemorySettings(store: OrchestratorSettingsStore, body: SetChatMemorySettingsBody): Promise<void> {
+  if (body.profile !== undefined) await store.set('chat_memory_profile', body.profile);
+  if (body.liveWindowPairs !== undefined) await store.set('chat_memory_live_window_pairs', String(body.liveWindowPairs));
+  if (body.syncEveryPairs !== undefined) await store.set('chat_memory_sync_every_pairs', String(body.syncEveryPairs));
+  if (body.chunkSummaryPrompt !== undefined) await store.set('chat_memory_chunk_summary_prompt', body.chunkSummaryPrompt);
+  if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
+  if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);
 }
 
 // --- Calendar settings (docs/bb_principles.md §13) ---

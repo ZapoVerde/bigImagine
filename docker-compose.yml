@@ -63,10 +63,10 @@ services:
       BIGBRAIN_PG_APP_USER: bigbrain_app
       BIGBRAIN_APP_PASSWORD: ${BIGBRAIN_APP_PASSWORD:?set in .env}
       BIGBRAIN_LLM_PROFILES: ${BIGBRAIN_LLM_PROFILES:?set in .env}
-      BIGBRAIN_LLM_ACTIVE_PROFILE: ${BIGBRAIN_LLM_ACTIVE_PROFILE:?set in .env}
+      BIGBRAIN_LLM_ACTIVE_PROFILE: ${BIGBRAIN_LLM_ACTIVE_PROFILE:-}
       BIGBRAIN_EMBEDDINGS_PROVIDER: ${BIGBRAIN_EMBEDDINGS_PROVIDER:?set in .env}
       BIGBRAIN_EMBEDDINGS_MODEL: ${BIGBRAIN_EMBEDDINGS_MODEL:?set in .env}
-      BIGBRAIN_EMBEDDINGS_API_KEY: ${BIGBRAIN_EMBEDDINGS_API_KEY:?set in .env}
+      BIGBRAIN_EMBEDDINGS_API_KEY: ${BIGBRAIN_EMBEDDINGS_API_KEY:-}
       BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION: ${BIGBRAIN_EMBEDDINGS_OUTPUT_DIMENSION:?set in .env}
       BIGBRAIN_API_KEYS: ${BIGBRAIN_API_KEYS:?set in .env}
       BIGBRAIN_ACCESS_TEAM_DOMAIN: ${BIGBRAIN_ACCESS_TEAM_DOMAIN:-}
@@ -85,6 +85,10 @@ services:
       # has real R2 credentials yet, so it can warn instead of offsite backup silently not running.
       BIGBRAIN_BACKUP_CONFIGURED: ${BIGBRAIN_BACKUP_CONFIGURED:-false}
       BIGBRAIN_ORCHESTRATOR_PORT: 8787
+      # Public hostname (Traefik/Cloudflare Tunnel route below) — used to build Google Calendar's
+      # OAuth redirect URI (io/googleCalendar.ts, server/httpServer.ts) and the OpenAPI tool
+      # spec's `servers` entry. Falls back to the compose-internal DNS name if unset.
+      BIGBRAIN_ORCHESTRATOR_BASE_URL: ${BIGBRAIN_ORCHESTRATOR_BASE_URL:-}
       # docs/spec.md §6.6 — one local git repo per user under this directory (plugins/documents/
       # src/gitRepo.ts), on the named volume below so it survives an image rebuild. No remote, but
       # the `backup` service below now covers offsite durability for this volume nightly.
@@ -148,6 +152,9 @@ services:
       BIGBRAIN_PG_DATABASE: ${BIGBRAIN_PG_DATABASE:-bigbrain}
       BIGBRAIN_BACKUP_CONFIGURED: ${BIGBRAIN_BACKUP_CONFIGURED:-false}
       BIGBRAIN_BACKUP_CRON_SCHEDULE: ${BIGBRAIN_BACKUP_CRON_SCHEDULE:-0 3 * * *}
+      # How many backups backup.sh keeps in R2 before pruning the oldest (see backup.sh) — not a
+      # secret, just a knob, same category as the cron schedule above.
+      BIGBRAIN_BACKUP_RETAIN_COUNT: ${BIGBRAIN_BACKUP_RETAIN_COUNT:-5}
       BIGBRAIN_BACKUP_AGE_PUBLIC_KEY: ${BIGBRAIN_BACKUP_AGE_PUBLIC_KEY:-}
       BIGBRAIN_BACKUP_S3_BUCKET: ${BIGBRAIN_BACKUP_S3_BUCKET:-}
       # rclone's generic S3 backend, remote named "backup" — swapping provider later (AWS S3,
@@ -160,7 +167,16 @@ services:
       RCLONE_CONFIG_BACKUP_ACL: private
     volumes:
       - bigbrain-documents:/documents:ro
-      - ./secrets.enc.env:/secrets/secrets.enc.env:ro
+      # Absolute path, not `./secrets.enc.env` — this stack's canonical location on the deploy
+      # host is /opt/stacks/bigbrain. A relative path resolves against whatever directory the
+      # `docker compose` client's own cwd maps to, which silently differs from the daemon's view
+      # in some environments (a sandbox mounting the same underlying data at a different path than
+      # the host it talks to over the Docker socket) — bind mounts are resolved by the daemon
+      # against its own filesystem, unlike build context which the client tars and streams. A
+      # relative path there produced a phantom empty directory instead of the real file (Docker
+      # auto-creates a directory for a bind source that doesn't exist rather than erroring),
+      # caught 2026-07-29 when `backup.sh` failed on `cp: omitting directory`.
+      - /opt/stacks/bigbrain/secrets.enc.env:/secrets/secrets.enc.env:ro
     networks:
       - default
 

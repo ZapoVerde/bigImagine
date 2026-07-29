@@ -134,3 +134,18 @@ Already applied by hand, not run automatically (see the file for the exact comma
   and `runTurn`, neither reachable from a plugin (`orchestrator/pluginLoader.ts`'s own
   one-way-dependency doc) — so `orchestrator/src/index.ts` wires it directly, the same
   composition-root tier as the HTTP server.
+- `0036_chat_sync_points.sql` / `0037_chat_chunks.sql` / `0038_chat_memory_entries.sql` /
+  `0039_household_memory.sql` / `0040_chat_branching.sql` — rolling chat summarization, chunked
+  RAG recall, and branching for long chat sessions, all owned by `plugins/chat-memory` (see
+  `docs/chat-memory.md` for the full design). `chat_sync_points` is the restore-point bookkeeping
+  table (`last_message_id` cascades from `chat_messages`, so an edit/rerun's existing
+  `truncateMessagesFrom` delete self-heals every derived row for free — no divergence detection
+  needed). `chat_chunks` is the chat-lane RAG table (`document_chunks`' exact shape, `chat_id`/
+  `sync_id` in place of `doc_id`). `chat_memory_entries` is the per-chat "key ideas" digest,
+  bounded via upsert on `(chat_id, topic_key)` since it's injected into every turn's prompt, unlike
+  `chat_chunks` which is only reached on demand. `household_memory` is the cross-chat "worth
+  keeping" memory, populated once at explicit chat-archive time (`0040`'s `archived_at`), `on
+  delete set null` rather than cascade since it must outlive its source chat. `0040` also adds
+  `parent_chat_id`/`fork_message_id` for branching — a fork is a new `chat_sessions` row
+  constructed correct from birth (parent's messages + derived state copied at creation), not a
+  message tree within one row.

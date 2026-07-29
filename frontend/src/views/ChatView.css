@@ -45,6 +45,18 @@
   flex-shrink: 0;
 }
 
+.chat-archive-button {
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  flex-shrink: 0;
+}
+
+.chat-archived-badge {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
 .chat-settings-summon {
   background: none;
   border: none;

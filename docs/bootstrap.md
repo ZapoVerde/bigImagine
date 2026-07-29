@@ -61,17 +61,26 @@ before it was caught — don't recreate it by copying `docs/` over "just in case
 
 **Secrets**: the canonical copy of every secret in `.env` is `stacks/bigbrain/secrets.enc.env` —
 `sops`-encrypted with `age`, safe to read, back up, or even commit (it's ciphertext; individual
-values are unreadable without the private key). `.env` itself is a disposable, regeneratable
-artifact decrypted from it before each deploy, not the source of truth anymore:
+values are unreadable without the private key). Nothing decrypts to a plaintext file on disk
+anymore — `scripts/secrets.sh` (repo root) uses `sops exec-env`, which injects the decrypted
+values straight into the deploy command's environment via `exec`, never through a shell that has
+to re-parse the text:
 ```
-sops --input-type dotenv --output-type dotenv --decrypt secrets.enc.env > .env
-docker compose up -d --build orchestrator
+scripts/secrets.sh deploy [docker compose args...]   # default: up -d --build
+scripts/secrets.sh edit                               # sops's own edit mode — decrypts to a
+                                                        # secure temp file, opens $EDITOR,
+                                                        # re-encrypts and shreds on save
 ```
-The `age` private key that decrypts it is **not** on this host (deliberately — an encrypted file
-next to its own key on the same disk protects against nothing). Whoever holds that key runs the
-decrypt step; there's no way to redeploy without it. To change a secret: decrypt, edit `.env`,
-re-encrypt with `sops --input-type dotenv --output-type dotenv --encrypt --age <public-key>
-.env > secrets.enc.env`, then delete the plaintext `.env` if it shouldn't linger.
+Do **not** use `sops --decrypt ... > .env` or `source <(sops ... --decrypt ...)` — the former
+leaves real plaintext sitting on disk with cleanup dependent on someone remembering it, and the
+latter *looks* equivalent to `exec-env` but isn't: bash's own quote-removal during `source`
+silently strips the double quotes out of any JSON value (`BIGBRAIN_LLM_PROFILES` is JSON),
+corrupting it — this crashed `bigbrain-orchestrator` in a real deploy on 2026-07-28 before the
+script was fixed to use `exec-env` instead. Both scripts require `sops`/`age` on `PATH` and
+`SOPS_AGE_KEY_FILE` pointing at the private key; where that key lives is deliberately not this
+script's concern (not on this host by design — an encrypted file next to its own key on the same
+disk protects against nothing). Whoever holds the key runs these commands; there's no way to
+redeploy or change a secret without it.
 
 **Live testing**: two real API keys exist — `jeremy` (real account) and `bb-test` (dedicated test
 account). Use `bb-test` for anything experimental; only `jeremy`'s writes reach the real Notion
