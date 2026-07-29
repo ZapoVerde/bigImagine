@@ -7,7 +7,9 @@ import type {
   DeleteListItemResult,
   ListItem,
   ListItemPriority,
+  ListSummary,
   UpdateListItemResult,
+  UpdateListSettingsResult,
 } from '../api/types';
 import './ListsView.css';
 
@@ -42,6 +44,7 @@ function groupBySection(items: ListItem[]): Map<string, ListItem[]> {
 
 export default function ListsView({ apiKey, selectedListName, onSelectList, onChanged }: ListsViewProps) {
   const [items, setItems] = useState<ListItem[]>([]);
+  const [listSettings, setListSettings] = useState<ListSummary[]>([]);
   const [includeDone, setIncludeDone] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,8 +60,12 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
     setLoading(true);
     setError(null);
     try {
-      const result = await callTool<ListItem[]>('get_list_items', { include_done: includeDone }, apiKey);
-      setItems(result);
+      const [itemsResult, listsResult] = await Promise.all([
+        callTool<ListItem[]>('get_list_items', { include_done: includeDone }, apiKey),
+        callTool<ListSummary[]>('get_lists', {}, apiKey),
+      ]);
+      setItems(itemsResult);
+      setListSettings(listsResult);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to load lists');
     } finally {
@@ -70,6 +77,25 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
     reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [includeDone]);
+
+  // Off by default (db/migrations/0041_list_display_flags.sql): a list this view hasn't seen a
+  // get_lists row for yet (e.g. right after typing a brand-new name, before its first item lands)
+  // behaves the same as one explicitly toggled off.
+  const selectedListSettings = selectedListName
+    ? listSettings.find((l) => l.name.toLowerCase() === selectedListName.toLowerCase())
+    : undefined;
+  const showPriority = selectedListSettings?.showPriority ?? false;
+  const showDueDates = selectedListSettings?.showDueDates ?? false;
+
+  async function updateListSettings(patch: { show_priority?: boolean; show_due_dates?: boolean }) {
+    if (!selectedListName) return;
+    try {
+      await callTool<UpdateListSettingsResult>('update_list_settings', { list_name: selectedListName, ...patch }, apiKey);
+      await reload();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update list settings');
+    }
+  }
 
   async function addItem() {
     const listName = (newListName || selectedListName || '').trim();
@@ -168,6 +194,26 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
           <input type="checkbox" checked={includeDone} onChange={(e) => setIncludeDone(e.target.checked)} />
           show completed
         </label>
+        {selectedListName && (
+          <>
+            <label>
+              <input
+                type="checkbox"
+                checked={showPriority}
+                onChange={(e) => updateListSettings({ show_priority: e.target.checked })}
+              />
+              priorities
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={showDueDates}
+                onChange={(e) => updateListSettings({ show_due_dates: e.target.checked })}
+              />
+              due dates
+            </label>
+          </>
+        )}
       </div>
 
       {loading && items.length === 0 && <div className="empty-state">Loading…</div>}
@@ -205,25 +251,29 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
                       <button type="button" className="sidebar-row-delete" title="Delete item" onClick={() => removeItem(item)}>
                         &times;
                       </button>
-                      {item.status === 'pending' && (
+                      {item.status === 'pending' && (showPriority || showDueDates) && (
                         <div className="item-controls">
-                          <select
-                            value={item.priority ?? ''}
-                            onChange={(e) => updateItem(item, { priority: e.target.value || 'P2' })}
-                          >
-                            <option value="">Priority…</option>
-                            {PRIORITIES.map((p) => (
-                              <option key={p} value={p}>
-                                {p}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="date"
-                            value={toDateInputValue(item.dueAt)}
-                            onChange={(e) => e.target.value && updateItem(item, { due_at: e.target.value })}
-                          />
-                          {item.dueAt && (
+                          {showPriority && (
+                            <select
+                              value={item.priority ?? ''}
+                              onChange={(e) => updateItem(item, { priority: e.target.value || 'P2' })}
+                            >
+                              <option value="">Priority…</option>
+                              {PRIORITIES.map((p) => (
+                                <option key={p} value={p}>
+                                  {p}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                          {showDueDates && (
+                            <input
+                              type="date"
+                              value={toDateInputValue(item.dueAt)}
+                              onChange={(e) => e.target.value && updateItem(item, { due_at: e.target.value })}
+                            />
+                          )}
+                          {showDueDates && item.dueAt && (
                             <button type="button" onClick={() => addToCalendar(item)}>
                               {calendarStatusItemId === item.itemId
                                 ? calendarStatus === 'added'
@@ -271,15 +321,17 @@ export default function ListsView({ apiKey, selectedListName, onSelectList, onCh
           onChange={(e) => setNewItemName(e.target.value)}
           placeholder="Item name"
         />
-        <select value={newItemPriority} onChange={(e) => setNewItemPriority(e.target.value)}>
-          <option value="">Priority…</option>
-          {PRIORITIES.map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-        <input type="date" value={newItemDueAt} onChange={(e) => setNewItemDueAt(e.target.value)} />
+        {showPriority && (
+          <select value={newItemPriority} onChange={(e) => setNewItemPriority(e.target.value)}>
+            <option value="">Priority…</option>
+            {PRIORITIES.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        )}
+        {showDueDates && <input type="date" value={newItemDueAt} onChange={(e) => setNewItemDueAt(e.target.value)} />}
         <button type="submit">Add</button>
       </form>
     </div>

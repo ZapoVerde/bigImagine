@@ -21,7 +21,8 @@
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [create_list, add_list_item, complete_list_item, get_list_items,
- *   update_list_item, set_list_section_order, delete_list_item, delete_list]
+ *   update_list_item, set_list_section_order, delete_list_item, delete_list, get_lists,
+ *   update_list_settings]
  *
  * @contract
  *   assertions:
@@ -41,6 +42,8 @@ import { createUpdateListItemTool } from './updateListItemTool.js';
 import { createSetListSectionOrderTool } from './setListSectionOrderTool.js';
 import { createDeleteListItemTool } from './deleteListItemTool.js';
 import { createDeleteListTool } from './deleteListTool.js';
+import { createGetListsTool } from './getListsTool.js';
+import { createUpdateListSettingsTool } from './updateListSettingsTool.js';
 import { startNotionReconcileLoop } from './notionReconcile.js';
 
 const NOTION_POLL_INTERVAL_MS = 30_000; // imperceptible delay at household scale; see notionReconcile.ts
@@ -65,5 +68,7 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createSetListSectionOrderTool(),
     createDeleteListItemTool(deps.notion),
     createDeleteListTool(deps.notion),
+    createGetListsTool(),
+    createUpdateListSettingsTool(),
   ];
 }

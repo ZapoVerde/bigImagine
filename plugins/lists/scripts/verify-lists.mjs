@@ -49,6 +49,29 @@ function createFakePool() {
             if (list) list.section_order = sectionOrder;
             return { rows: [] };
           }
+          if (sql.startsWith('update lists set') && (sql.includes('show_priority') || sql.includes('show_due_dates'))) {
+            const [listId, ...values] = params;
+            const list = lists.find((l) => l.list_id === listId);
+            let idx = 0;
+            if (sql.includes('show_priority = $')) list.show_priority = values[idx++];
+            if (sql.includes('show_due_dates = $')) list.show_due_dates = values[idx++];
+            return { rows: list ? [{ show_priority: list.show_priority, show_due_dates: list.show_due_dates }] : [] };
+          }
+          if (sql.includes('select list_id, name, tags, show_priority, show_due_dates from lists')) {
+            const [userId] = params;
+            const rows = lists
+              .filter((l) => l.user_id === userId)
+              .slice()
+              .sort((a, b) => a.name.localeCompare(b.name))
+              .map((l) => ({
+                list_id: l.list_id,
+                name: l.name,
+                tags: l.tags,
+                show_priority: l.show_priority,
+                show_due_dates: l.show_due_dates,
+              }));
+            return { rows };
+          }
           if (sql.includes('select list_id from lists where')) {
             const [userId, name] = params;
             const match = lists.find((l) => l.user_id === userId && l.name.toLowerCase() === name.toLowerCase());
@@ -58,7 +81,7 @@ function createFakePool() {
           if (sql.includes('insert into lists')) {
             const [userId, name, tags] = params;
             const list_id = `list-${++listCounter}`;
-            lists.push({ list_id, user_id: userId, name, tags, section_order: [] });
+            lists.push({ list_id, user_id: userId, name, tags, section_order: [], show_priority: false, show_due_dates: false });
             return { rows: [{ list_id }] };
           }
           if (sql.includes('insert into list_items')) {
@@ -225,7 +248,7 @@ assert(
 
 const notion = createFakeNotionClient();
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion });
-assert(pluginTools.length === 8, 'registerTools returns exactly eight tools');
+assert(pluginTools.length === 10, 'registerTools returns exactly ten tools');
 
 const registry = createToolRegistry(pluginTools);
 for (const name of [
@@ -237,6 +260,8 @@ for (const name of [
   'set_list_section_order',
   'delete_list_item',
   'delete_list',
+  'get_lists',
+  'update_list_settings',
 ]) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
@@ -498,6 +523,62 @@ function createFakeLlm(sectionFor) {
     pool.items.find((i) => i.item_name === 'mystery item').section === null,
     'an item is left unsectioned (not crashed) when classification fails',
   );
+}
+
+// --- get_lists / update_list_settings: per-list display flags, off by default ---
+{
+  const settingsPool = createFakePool();
+  const settingsDb = createPostgresClient(settingsPool);
+  const settingsUserId = '88888888-8888-8888-8888-888888888888';
+  const settingsTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined });
+  const settingsRegistry = createToolRegistry(settingsTools);
+  const withSettingsUser = (fn) => settingsDb.withUserScope(settingsUserId, (session) => fn({ userId: settingsUserId, db: session }));
+
+  await withSettingsUser((ctx) => settingsRegistry.get('create_list').handler({ name: 'Errand List' }, ctx));
+  const listsAfterCreate = await withSettingsUser((ctx) => settingsRegistry.get('get_lists').handler({}, ctx));
+  assert(listsAfterCreate.length === 1, 'get_lists returns the one list that exists');
+  assert(
+    listsAfterCreate[0].showPriority === false && listsAfterCreate[0].showDueDates === false,
+    'a new list defaults to both display flags off',
+  );
+
+  const toggledPriority = await withSettingsUser((ctx) =>
+    settingsRegistry.get('update_list_settings').handler({ list_name: 'Errand List', show_priority: true }, ctx),
+  );
+  assert(toggledPriority.showPriority === true, 'update_list_settings turns show_priority on');
+  assert(
+    toggledPriority.showDueDates === false,
+    'update_list_settings left show_due_dates untouched when only show_priority was given',
+  );
+
+  const afterToggle = await withSettingsUser((ctx) => settingsRegistry.get('get_lists').handler({}, ctx));
+  assert(
+    afterToggle[0].showPriority === true && afterToggle[0].showDueDates === false,
+    'get_lists reflects the toggled state',
+  );
+
+  const toggledBoth = await withSettingsUser((ctx) =>
+    settingsRegistry
+      .get('update_list_settings')
+      .handler({ list_name: 'Errand List', show_priority: false, show_due_dates: true }, ctx),
+  );
+  assert(
+    toggledBoth.showPriority === false && toggledBoth.showDueDates === true,
+    'update_list_settings can flip both flags in one call',
+  );
+
+  const onNewList = await withSettingsUser((ctx) =>
+    settingsRegistry.get('update_list_settings').handler({ list_name: 'Brand New List', show_due_dates: true }, ctx),
+  );
+  assert(onNewList.showDueDates === true, 'update_list_settings creates the list first if it does not already exist');
+  assert(settingsPool.lists.some((l) => l.name === 'Brand New List'), 'the new list was actually created');
+
+  try {
+    await withSettingsUser((ctx) => settingsRegistry.get('update_list_settings').handler({ list_name: 'Errand List' }, ctx));
+    assert(false, 'update_list_settings with neither flag given is rejected');
+  } catch {
+    assert(true, 'update_list_settings with neither flag given is rejected');
+  }
 }
 
 if (process.exitCode) {

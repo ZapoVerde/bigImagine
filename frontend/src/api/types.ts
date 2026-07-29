@@ -61,6 +61,23 @@ export type DeleteListResult =
   | { deleted: false; reason: string }
   | { deleted: true; listId: string; name: string; itemsDeleted: number };
 
+// plugins/lists/src/getListsTool.ts
+export interface ListSummary {
+  listId: string;
+  name: string;
+  tags: string[];
+  showPriority: boolean;
+  showDueDates: boolean;
+}
+
+// plugins/lists/src/updateListSettingsTool.ts
+export interface UpdateListSettingsResult {
+  listId: string;
+  name: string;
+  showPriority: boolean;
+  showDueDates: boolean;
+}
+
 // plugins/recipes/src/recipeIngredientSchema.ts
 export interface RecipeIngredient {
   raw: string;
