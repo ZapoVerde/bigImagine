@@ -1,13 +1,19 @@
 /**
- * @file plugins/notifications/src/ntfyProvider.ts
- * @stamp 2026-07-27
+ * @file orchestrator/src/io/ntfyProvider.ts
+ * @stamp 2026-07-29
  * @architectural-role IO Wrapper — Ntfy publish API access
  * @description
  * A thin NotificationProvider interface in front of ntfy's JSON publish endpoint, deliberately not
- * baked into sendPushNotificationTool.ts directly: adding a Home Assistant or Telegram driver
- * later means writing a new adapter behind NotificationProvider, not touching the tool definition
- * or its dedup/rate-limit/logging logic — same seam shape as plugins/web's SearchProvider
- * (bb_principles.md §6).
+ * baked into plugins/notifications' sendPushNotificationTool.ts directly: adding a Home Assistant
+ * or Telegram driver later means writing a new adapter behind NotificationProvider, not touching
+ * the tool definition or its dedup/rate-limit/logging logic — same seam shape as plugins/web's
+ * SearchProvider (bb_principles.md §6).
+ *
+ * Lives in orchestrator rather than plugins/notifications because plugins/temporal's jobPoll.ts
+ * needs the same client to actually deliver a fired 'alarm' job (a plugin may depend on
+ * @bigbrain/orchestrator, never on another plugin — orchestrator/pluginLoader.ts's own doc) — the
+ * same reasoning that already put next-occurrence and http-retry here instead of in a single
+ * plugin.
  *
  * Always publishes to the single household-wide topic baked into this provider at construction —
  * there is exactly one Ntfy topic per deployment (provider_credentials' ntfy_topic), not a
@@ -35,8 +41,8 @@
  *     external_io:     [the configured ntfy server]
  */
 
-import { fetchWithRetry } from '@bigbrain/orchestrator/http-retry';
-import { log } from '@bigbrain/orchestrator/logger';
+import { fetchWithRetry } from './httpRetry.js';
+import { log } from './logger.js';
 
 export type NotificationPriority = 'low' | 'default' | 'high' | 'urgent';
 

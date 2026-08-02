@@ -33,7 +33,7 @@
 import type { PluginDeps } from '@bigbrain/orchestrator/plugin-loader';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { log } from '@bigbrain/orchestrator/logger';
-import { createNtfyProvider } from './ntfyProvider.js';
+import { createNtfyProvider } from '@bigbrain/orchestrator/ntfy-provider';
 import { createSendPushNotificationTool } from './sendPushNotificationTool.js';
 
 export const info = {

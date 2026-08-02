@@ -1,7 +1,10 @@
 // Proves all four tools end to end through info/registerTools (the real loader contract), plus
 // timerPoll.ts's pollTick and jobPoll.ts's pollJobsTick directly (rather than waiting on real
 // wall-clock setInterval ticks) — same small stateful fake Postgres pool style as plugins/lists'
-// verify-lists.mjs, since these tools genuinely depend on prior state.
+// verify-lists.mjs, since these tools genuinely depend on prior state. Also proves a fired 'alarm'
+// job actually delivers through the NotificationProvider it's given (this is the bug: jobPoll.ts
+// used to only flip scheduled_jobs' status, never deliver anything), and that a fired alarm with
+// no provider configured just advances state without erroring.
 
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
 import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
@@ -22,12 +25,14 @@ function assert(cond, message) {
 function createFakePool(users) {
   const timers = [];
   const jobs = [];
+  const notificationLogs = [];
   let timerCounter = 0;
   let jobCounter = 0;
 
   return {
     timers,
     jobs,
+    notificationLogs,
     async connect() {
       let scopedUserId;
       return {
@@ -123,12 +128,12 @@ function createFakePool(users) {
             return { rows: [job] };
           }
 
-          if (sql.includes("select job_id, schedule_kind, time_of_day, timezone, next_run_at from scheduled_jobs")) {
+          if (sql.includes("select job_id, title, schedule_kind, time_of_day, timezone, next_run_at from scheduled_jobs")) {
             const now = Date.now();
             const due = jobs.filter(
               (j) => j.user_id === scopedUserId && j.status === 'active' && j.classification === 'alarm' && new Date(j.next_run_at).getTime() <= now,
             );
-            return { rows: due.map((j) => ({ job_id: j.job_id, schedule_kind: j.schedule_kind, time_of_day: j.time_of_day, timezone: j.timezone, next_run_at: j.next_run_at })) };
+            return { rows: due.map((j) => ({ job_id: j.job_id, title: j.title, schedule_kind: j.schedule_kind, time_of_day: j.time_of_day, timezone: j.timezone, next_run_at: j.next_run_at })) };
           }
 
           if (sql.includes('update scheduled_jobs set last_run_at = $2, next_run_at = $3')) {
@@ -169,6 +174,19 @@ function createFakePool(users) {
                 last_run_at: j.last_run_at,
               })),
             };
+          }
+
+          if (sql.includes('insert into notification_logs')) {
+            const [userId, title, body, priority, status, error] = params;
+            assert(scopedUserId === userId, 'alarm notification_logs insert is scoped to the requesting user');
+            notificationLogs.push({ user_id: userId, title, body, priority, status, error });
+            return { rows: [] };
+          }
+
+          if (sql.includes('select count(*)::text as count from notification_logs')) {
+            const [userId] = params;
+            const count = notificationLogs.filter((l) => l.user_id === userId && l.status === 'sent').length;
+            return { rows: [{ count: String(count) }] };
           }
 
           throw new Error(`fake pool: unhandled query: ${sql}`);
@@ -281,8 +299,10 @@ await db.withUserScope('user-a', async (session) => {
   assert(routine.maxRunsPerDay === 5 && routine.maxTokensPerDay === 50000, 'agent_routine defaults its per-job caps when omitted');
 });
 
-// --- jobPoll: 'once' completes, 'daily' recomputes next_run_at forward ---
-await pollJobsTick(db);
+// --- jobPoll: 'once' completes, 'daily' recomputes next_run_at forward, no provider configured
+// (the pre-fix state: state still advances, nothing errors, nothing is delivered) ---
+const noNotificationSettings = { get: async () => undefined };
+await pollJobsTick(db, undefined, noNotificationSettings);
 await db.withUserScope('user-a', async (session) => {
   const state = await registry.get('list_temporal_state').handler({}, { userId: 'user-a', db: session });
   const firedOnce = state.recentlyFiredAlarms.find((a) => a.jobId === onceJobId);
@@ -290,6 +310,42 @@ await db.withUserScope('user-a', async (session) => {
   assert(!state.upcomingAlarms.some((a) => a.jobId === onceJobId), 'a completed "once" alarm no longer appears as upcoming');
   assert(state.upcomingAlarms.some((a) => a.jobId === dailyJobId), 'the not-yet-due "daily" alarm stays upcoming');
 });
+assert(fakePool.notificationLogs.length === 0, 'firing an alarm with no NotificationProvider configured delivers nothing (and does not throw)');
+
+// --- jobPoll: a due alarm WITH a NotificationProvider configured actually delivers (the bug this
+// stage fixes — jobPoll.ts used to only flip scheduled_jobs' status and never call the provider) ---
+{
+  const sent = [];
+  const stubProvider = { async send(serverUrl, params) { sent.push({ serverUrl, ...params }); return { ok: true }; } };
+  const notifyEnabledSettings = {
+    async get(key) {
+      if (key === 'notifications_enabled') return 'true';
+      if (key === 'ntfy_server_url') return 'https://ntfy.example.com';
+      return 'America/Los_Angeles';
+    },
+  };
+
+  let deliveredJobId;
+  await db.withUserScope('user-a', async (session) => {
+    const job = await registry.get('schedule_routine').handler(
+      { title: 'The current time is 12:25', scheduleKind: 'once', runAt: new Date(Date.now() - 1000).toISOString() },
+      { userId: 'user-a', db: session },
+    );
+    deliveredJobId = job.jobId;
+  });
+
+  await pollJobsTick(db, stubProvider, notifyEnabledSettings);
+
+  assert(sent.length === 1, 'a fired alarm calls the configured NotificationProvider exactly once');
+  assert(sent[0]?.title === 'The current time is 12:25', "the alarm's title becomes the notification title");
+  assert(fakePool.notificationLogs.some((l) => l.status === 'sent' && l.title === 'The current time is 12:25'), 'the delivery is written to notification_logs with status "sent"');
+
+  await db.withUserScope('user-a', async (session) => {
+    const state = await registry.get('list_temporal_state').handler({}, { userId: 'user-a', db: session });
+    const fired = state.recentlyFiredAlarms.find((a) => a.jobId === deliveredJobId);
+    assert(fired && fired.status === 'completed', "the alarm's own status still advances alongside delivery");
+  });
+}
 
 // --- schedule_routine: cancel/reactivate by jobId ---
 await db.withUserScope('user-a', async (session) => {

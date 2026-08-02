@@ -7,7 +7,7 @@
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
 import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
 import { info, registerTools } from '../dist/index.js';
-import { createNtfyProvider } from '../dist/ntfyProvider.js';
+import { createNtfyProvider } from '@bigbrain/orchestrator/ntfy-provider';
 import { createSendPushNotificationTool } from '../dist/sendPushNotificationTool.js';
 
 function assert(cond, message) {
