@@ -91,7 +91,7 @@ export function createGetListItemsTool(): RegisteredTool {
       rows.sort((a, b) => {
         if (a.list_name !== b.list_name) return a.list_name.localeCompare(b.list_name);
         const rankDiff = sectionRank(a) - sectionRank(b);
-        return rankDiff !== 0 ? rankDiff : a.created_at.localeCompare(b.created_at);
+        return rankDiff !== 0 ? rankDiff : +a.created_at - +b.created_at;
       });
 
       return rows.map((r) => ({

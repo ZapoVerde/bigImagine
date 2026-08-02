@@ -90,7 +90,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
 }
 
 async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
-  const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 5 } = opts;
+  const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 10 } = opts;
 
   const messages: LlmMessage[] = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });

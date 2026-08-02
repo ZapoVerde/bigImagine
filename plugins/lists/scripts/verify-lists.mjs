@@ -136,6 +136,22 @@ function createFakePool() {
             target.completed_at = '2026-07-23T01:00:00Z';
             return { rows: [{ item_id: target.item_id, list_id: target.list_id }] };
           }
+          if (sql.includes('select li.item_id\n') && sql.includes('limit 1')) {
+            // shared by delete_list_item/update_list_item's name->id lookup (no status filter,
+            // unlike complete_list_item's — see those tools' handlers)
+            const [userId, itemName, listName] = params;
+            const candidates = items
+              .filter((it) => it.user_id === userId)
+              .filter((it) => it.item_name.toLowerCase() === itemName.toLowerCase())
+              .filter((it) => {
+                if (!listName) return true;
+                const list = lists.find((l) => l.list_id === it.list_id);
+                return list && list.name.toLowerCase() === listName.toLowerCase();
+              })
+              .sort((a, b) => b.created_at.localeCompare(a.created_at));
+            const target = candidates[0];
+            return { rows: target ? [{ item_id: target.item_id }] : [] };
+          }
           if (sql.includes('select li.item_id, l.name as list_name')) {
             const [userId, listName, includeDone] = params;
             const rows = items
@@ -364,6 +380,24 @@ assert(booksOnly.length === 0, 'a list with no items returns an empty array, not
 
   const missingUpdate = await withUser((ctx) => registry.get('update_list_item').handler({ item_id: 'no-such-item', priority: 'P1' }, ctx));
   assert(missingUpdate.found === false, 'update_list_item on a nonexistent item returns found: false rather than throwing');
+
+  // --- update_list_item can also be addressed by current_item_name, without a prior lookup ---
+  const secondUrgent = await withUser((ctx) =>
+    registry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'urgent thing' }, ctx),
+  );
+  const updatedByName = await withUser((ctx) =>
+    registry.get('update_list_item').handler({ current_item_name: 'urgent thing', list_name: 'Grocery List', priority: 'P2' }, ctx),
+  );
+  assert(
+    updatedByName.found === true && updatedByName.itemId === secondUrgent.itemId,
+    'update_list_item by current_item_name resolves to the most recently created matching item, not the older one',
+  );
+  assert(updatedByName.priority === 'P2', 'update_list_item by name still applies the given fields');
+
+  const missingUpdateByName = await withUser((ctx) =>
+    registry.get('update_list_item').handler({ current_item_name: 'no such item anywhere' }, ctx),
+  );
+  assert(missingUpdateByName.found === false, 'update_list_item with an unmatched current_item_name returns found: false rather than throwing');
 }
 
 // --- empty-string args are rejected, not silently accepted ---
@@ -456,6 +490,19 @@ try {
 
   const deletedMissing = await withDelUser((ctx) => delRegistry.get('delete_list_item').handler({ item_id: 'no-such-item' }, ctx));
   assert(deletedMissing.deleted === false, 'delete_list_item on a nonexistent id returns deleted: false rather than throwing');
+
+  // --- delete_list_item can also be addressed by item_name, without a prior lookup ---
+  const bacon = await withDelUser((ctx) => delRegistry.get('add_list_item').handler({ list_name: 'Grocery List', item_name: 'bacon' }, ctx));
+  const deletedByName = await withDelUser((ctx) =>
+    delRegistry.get('delete_list_item').handler({ item_name: 'bacon', list_name: 'Grocery List' }, ctx),
+  );
+  assert(deletedByName.deleted === true, 'delete_list_item resolves item_name (+ list_name) to the matching item and deletes it');
+  assert(delPool.items.find((i) => i.item_id === bacon.itemId) === undefined, 'the item deleted by name is gone from list_items');
+
+  const deletedMissingByName = await withDelUser((ctx) =>
+    delRegistry.get('delete_list_item').handler({ item_name: 'no such item anywhere' }, ctx),
+  );
+  assert(deletedMissingByName.deleted === false, 'delete_list_item with an unmatched item_name returns deleted: false rather than throwing');
 
   const otherUserId = '55555555-5555-5555-5555-555555555555';
   const deletedWrongUser = await delDb.withUserScope(otherUserId, (session) =>
