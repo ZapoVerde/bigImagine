@@ -14,6 +14,7 @@ interface RecipesBrowserProps {
 export default function RecipesBrowser({ apiKey, selectedRecipeName, onSelect, onDeselect, refreshKey }: RecipesBrowserProps) {
   const [recipes, setRecipes] = useState<RecipeSummary[]>([]);
   const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [tagsExpanded, setTagsExpanded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function reload() {
@@ -62,19 +63,27 @@ export default function RecipesBrowser({ apiKey, selectedRecipeName, onSelect, o
     <div className="sidebar-browser">
       {error && <div className="error-banner">{error}</div>}
       {allTags.length > 0 && (
-        <div className="sidebar-tag-pills">
-          <button className={`pill${selectedTag === null ? ' active' : ''}`} onClick={() => setSelectedTag(null)}>
-            all
+        <div className="sidebar-tag-section">
+          <button className="sidebar-tag-toggle" onClick={() => setTagsExpanded((v) => !v)}>
+            <span>Tags{selectedTag ? `: ${selectedTag}` : ''}</span>
+            <span>{tagsExpanded ? '▾' : '▸'}</span>
           </button>
-          {allTags.map((tag) => (
-            <button
-              key={tag}
-              className={`pill${selectedTag === tag ? ' active' : ''}`}
-              onClick={() => setSelectedTag(tag)}
-            >
-              {tag}
-            </button>
-          ))}
+          {tagsExpanded && (
+            <div className="sidebar-tag-pills">
+              <button className={`pill${selectedTag === null ? ' active' : ''}`} onClick={() => setSelectedTag(null)}>
+                all
+              </button>
+              {allTags.map((tag) => (
+                <button
+                  key={tag}
+                  className={`pill${selectedTag === tag ? ' active' : ''}`}
+                  onClick={() => setSelectedTag(tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
       <div className="sidebar-list">

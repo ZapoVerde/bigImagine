@@ -120,11 +120,33 @@
   color: var(--color-secondary-contrast);
 }
 
+.sidebar-tag-section {
+  margin-bottom: 0.5rem;
+}
+
+.sidebar-tag-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.3rem 0.1rem;
+  font: inherit;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.sidebar-tag-toggle:hover {
+  color: var(--color-text-primary);
+}
+
 .sidebar-tag-pills {
   display: flex;
   flex-wrap: wrap;
   gap: 0.3rem;
-  margin-bottom: 0.5rem;
+  margin-top: 0.4rem;
 }
 
 .sidebar-list {
