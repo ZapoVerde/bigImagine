@@ -124,6 +124,7 @@ import { runWithCallContext } from '../io/llm/callContext.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { runTurn } from '../orchestrator/loop.js';
+import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -1217,6 +1218,22 @@ async function handleHouseholdTimezoneGet(req: IncomingMessage, res: ServerRespo
   sendJson(res, 200, { timezone: await getHouseholdTimezone(deps.settings) });
 }
 
+// A lightweight side channel for a chat still mid-flight (docs/bootstrap.md: /v1/chat/completions
+// is a single blocking POST, not a stream) — the frontend polls this while waiting, to show which
+// tool loop.ts's runTurn is currently running (orchestrator/turnStatus.ts). taskId for a
+// persisted-session turn is always its chat_id (httpServer.ts's own handleChatCompletions), so
+// that's what this keys on; no status ever existing (not yet started, already finished, or a
+// stateless Open WebUI turn with no chat_id) is a normal, empty response, not an error.
+async function handleChatTurnStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
+  sendJson(res, 200, { status: chatId ? (getTurnStatus(chatId) ?? null) : null });
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -1253,6 +1270,10 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url === '/v1/timezone') {
     await handleHouseholdTimezoneGet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/chat/status')) {
+    await handleChatTurnStatus(req, res, deps);
     return;
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {

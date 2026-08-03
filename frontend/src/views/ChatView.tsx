@@ -13,6 +13,7 @@ import {
   deleteMessage,
   forkChat,
   getChat,
+  getChatTurnStatus,
   listFolders,
   listToolNames,
   truncateMessagesFrom,
@@ -109,6 +110,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
+  // What runTurn's currently running tool is doing, polled from GET /v1/chat/status while
+  // `sending` is true (client.ts's getChatTurnStatus) — null renders as the old plain "…" bubble.
+  const [turnStatus, setTurnStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
@@ -318,7 +322,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         }
         setActiveChat(session);
       }
-      await chatCompletion(toWireMessages(nextMessages), apiKey, session.chatId, attachments, images);
+      const chatId = session.chatId;
+      const statusTimer = window.setInterval(async () => {
+        setTurnStatus(await getChatTurnStatus(chatId, apiKey));
+      }, 1000);
+      try {
+        await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
+      } finally {
+        window.clearInterval(statusTimer);
+        setTurnStatus(null);
+      }
       await refreshActiveMessages(session.chatId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to reach bigBrain');
@@ -544,7 +557,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               </div>
             );
           })}
-          {sending && <div className="chat-bubble assistant pending">…</div>}
+          {sending && <div className="chat-bubble assistant pending">{turnStatus ?? '…'}</div>}
         </div>
 
         <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />

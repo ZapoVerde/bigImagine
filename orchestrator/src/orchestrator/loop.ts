@@ -42,6 +42,8 @@ import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ToolRegistry } from './toolRegistry.js';
+import { describeToolCall } from './describeToolCall.js';
+import { setTurnStatus, clearTurnStatus } from './turnStatus.js';
 
 export interface RunTurnOptions {
   userId: string;
@@ -86,7 +88,11 @@ export interface RunTurnResult {
 export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const requestId = randomUUID();
   const callContext = { taskId: opts.taskId, kind: opts.taskKind ?? ('chat' as LlmCallKind), userId: opts.userId };
-  return runWithRequestId(requestId, () => runWithCallContext(callContext, () => runTurnInner(opts)));
+  try {
+    return await runWithRequestId(requestId, () => runWithCallContext(callContext, () => runTurnInner(opts)));
+  } finally {
+    clearTurnStatus(opts.taskId);
+  }
 }
 
 async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
@@ -114,6 +120,7 @@ async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
 
     for (const call of turn.toolCalls) {
       log.info(`tool call: ${call.name}`, { userId, toolCallId: call.id });
+      setTurnStatus(opts.taskId, describeToolCall(call.name, call.arguments));
       const tool = tools.get(call.name);
 
       const resultPayload = await db.withUserScope(userId, async (session) => {

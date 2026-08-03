@@ -142,6 +142,17 @@ export async function chatCompletion(
   return res.json() as Promise<ChatCompletionResponse>;
 }
 
+/** GET /v1/chat/status — polled by ChatView while `sending` is true, alongside the still-in-flight
+ *  chatCompletion POST above (not a replacement for it — see that function's own note on why this
+ *  is a separate call at all). null means no tool call is currently running: not started yet, the
+ *  turn already finished, or the reply needed no tools this round. */
+export async function getChatTurnStatus(chatId: string, apiKey: string | null): Promise<string | null> {
+  const res = await fetch(`/v1/chat/status?chat_id=${encodeURIComponent(chatId)}`, { headers: authHeaders(apiKey) });
+  if (!res.ok) return null;
+  const body = (await res.json()) as { status: string | null };
+  return body.status;
+}
+
 async function jsonRequest<T>(path: string, apiKey: string | null, init?: { method?: string; body?: unknown }): Promise<T> {
   const res = await fetch(path, {
     method: init?.method ?? 'GET',
