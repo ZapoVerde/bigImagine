@@ -1,4 +1,4 @@
-# bigBrain — Bootstrap
+# BigImagine — Bootstrap
 
 *Orientation for a new session with no prior context. Points into the real docs rather than
 re-deriving them — read those for actual detail, this is just the map.*
@@ -7,64 +7,60 @@ re-deriving them — read those for actual detail, this is just the map.*
 
 ## What it is
 
-A self-hosted, multi-user "Second Brain" — Postgres+pgvector canonical store, an LLM-agnostic
-orchestrator that owns all reasoning/tool-calling, and plugin microservices (notes, shopping
-analytics, generic lists w/ Notion sync, recipes & meal planning).
+A self-hosted, single-user interactive fiction and roleplay platform, forked from the bigBrain
+core engine and re-pointed at narrative instead of household data. See the root `README.md` for
+the full picture — it's explicit about what's actually running (bigBrain's inherited chat/notes/
+documents/timers infrastructure) versus what's designed but not yet built (the narrative engine
+itself: Canonize/Vistalyze/Triggeryze, the Director Pass, single-user conversion). Don't assume
+`docs/spec.md` describes live behavior — its own header says it's a target, not a build log.
 
 ## Start here, in order
 
-1. `bb_principles.md` — the foundational rules (e.g. §4 user-scoping, §8 the four kinds of code,
-   §11 observable-not-silent failures). These override intuition.
-2. `spec.md` — the living architecture spec. Structured as original design + inline
-   "Correction"/"Addition" entries documenting every real deviation from it (e.g. the
-   field-encryption scope, the Notion `ownerUserId` cross-account bug and fix, the OpenAPI tool
-   server, grocery section-ordering). This is the actual source of truth for current state, not
-   this file.
+1. `bi_principles.md` — the foundational rules (e.g. §4 scene-not-content scoping, §8 the four
+   kinds of code, §11 observable-not-silent failures, §15 canon requires approval). These override
+   intuition.
+2. `spec.md` — the target architecture for the narrative engine. Status-tagged throughout
+   (**(built)**/**(designed)**/**(parked)**) — as of this writing almost everything in it is
+   **(designed)**, not built. This is the plan, not the current state.
 3. `conventions.md` and `verification.md` — code style and the verify-script testing philosophy
    (no unit-test framework; purpose-built `.mjs` scripts with fake pools/LLMs, chained via each
    package's `npm run verify`).
 
-**GitHub**: private repo at `github.com/ZapoVerde/bigbrain`, main branch, clean history.
+**GitHub**: this repo still points at `github.com/ZapoVerde/bigbrain` (the bigBrain remote it was
+forked from) — not yet repointed at a BigImagine repo of its own. Don't assume a push here lands
+anywhere BigImagine-specific until that's done.
 
 ---
 
 ## The workspace/stacks split (not written down anywhere else — read this carefully)
 
-Two separate directory trees, **not symlinked**:
+BigImagine is dev-only right now — there is no deployed BigImagine stack, and no
+`stacks/bigimagine/` directory. What exists:
 
-- **`/config/workspace/bigBrain/`** — the git repo, source of truth, what gets pushed to GitHub.
-  Edit and verify (`npm run verify`) here.
-- **`/config/workspace/stacks/bigbrain/`** — the *deployed* copy. Not a git repo. This is what
-  Dockge/`docker compose` actually builds the running containers from. Holds the real `.env`
-  (secrets, gitignored, never in `bigBrain/` — see **Secrets** below) and is where migrations get
-  hand-applied.
+- **`/config/workspace/BigImagine/`** — this repo, source of truth for BigImagine. Edit and verify
+  (`npm run verify`) here. Separate directory tree from bigBrain's own, **not symlinked** — it's a
+  fork, not a shared checkout.
+- **`/config/workspace/bigBrain/`** — the original bigBrain repo. Unrelated to BigImagine work;
+  don't edit it expecting it to affect this project.
+- **`/config/workspace/stacks/bigbrain/`** — bigBrain's real *deployed* stack (its own running
+  containers, its own `.env`). BigImagine has no equivalent yet.
 
-**Nothing syncs automatically.** The workflow after any change in `bigBrain/`:
-```
-cp -r bigBrain/<changed dirs> stacks/bigbrain/<same paths>
-cd stacks/bigbrain && docker compose up -d --build orchestrator
-```
-Migrations don't auto-run either (`docker-entrypoint-initdb.d` only fires against an empty volume,
-and this one has data) — apply by hand:
-```
-docker exec -i bigbrain-postgres psql -U bigbrain_admin -d bigbrain < db/migrations/000N_whatever.sql
-```
-If you edit only `stacks/bigbrain/` directly, that change is invisible to git and will be silently
-lost/overwritten by the next sync from `bigBrain/`. Always edit `bigBrain/`, verify, then sync.
+Per the project owner's call (2026-08-03): for now, BigImagine piggybacks on bigBrain's existing
+secrets rather than standing up its own — see **Secrets** below. When BigImagine actually gets
+deployed, this section needs a real update: either a new `stacks/bigimagine/` tree with its own
+`.env`/`secrets.enc.env`, or a documented decision to keep sharing bigBrain's. Until then, treat
+the sync workflow and hand-applied migrations bigBrain's own `docs/bootstrap.md` describes as
+not-yet-applicable here — there's nothing deployed to sync to.
 
-**`docs/` is deliberately excluded from the sync.** Nothing in the Dockerfile, `docker-compose.yml`,
-or any runtime code reads from a `docs/` path — it's reference material for a human or an agent
-session, not deployable code. `stacks/bigbrain/` has no `docs/` directory at all; read and edit docs
-only in `bigBrain/docs/`. A `docs/` copy previously drifted stale in `stacks/bigbrain/` for exactly
-this reason (a generic `cp -r` treating it like any other changed dir) and caused real confusion
-before it was caught — don't recreate it by copying `docs/` over "just in case."
-
-**Secrets**: the canonical copy of every secret in `.env` is `stacks/bigbrain/secrets.enc.env` —
-`sops`-encrypted with `age`, safe to read, back up, or even commit (it's ciphertext; individual
-values are unreadable without the private key). Nothing decrypts to a plaintext file on disk
-anymore — `scripts/secrets.sh` (repo root) uses `sops exec-env`, which injects the decrypted
-values straight into the deploy command's environment via `exec`, never through a shell that has
-to re-parse the text:
+**Secrets**: BigImagine deliberately reuses bigBrain's — there's no separate BigImagine secrets
+store yet, and `scripts/secrets.sh` in this repo is a straight copy of bigBrain's own, still
+hardcoded to operate against `stacks/bigbrain/secrets.enc.env`. This is the literal mechanism
+behind "piggyback on BB's secrets": running it from `BigImagine/` deploys/edits *bigBrain's*
+running stack, not a BigImagine one, because that's the only stack that exists. That canonical
+`secrets.enc.env` is `sops`-encrypted with `age`, safe to read, back up, or even commit (it's
+ciphertext; individual values are unreadable without the private key). Nothing decrypts to a
+plaintext file on disk — `sops exec-env` injects the decrypted values straight into the deploy
+command's environment via `exec`, never through a shell that has to re-parse the text:
 ```
 scripts/secrets.sh deploy [service name(s)...]   # runs: docker compose up -d --build <args>
 scripts/secrets.sh edit                          # sops's own edit mode — decrypts to a
@@ -117,42 +113,33 @@ before trusting this path. A retired key sits alongside it
 `SOPS_AGE_KEY_FILE=/config/workspace/.secrets/bigbrain-age-key.txt` before running either
 `scripts/secrets.sh` command.
 
-**Live testing**: two real API keys exist — `jeremy` (real account) and `bb-test` (dedicated test
-account). Use `bb-test` for anything experimental; only `jeremy`'s writes reach the real Notion
-workspace (`notion.ownerUserId` gate). No `gh` CLI in this environment — GitHub API calls go
-through a cached OAuth token in `~/.config/gh/hosts.yml` / `~/.git-credentials` instead. The
-orchestrator has no published port; reach it via
-`docker run --network traefik-net curlimages/curl ...` or from another container already on that
-network.
+**Live testing**: there's nothing to test live yet — BigImagine has no deployed stack of its own
+(see the split above). Two general notes for whenever that changes: no `gh` CLI in this
+environment, GitHub API calls go through a cached OAuth token in `~/.config/gh/hosts.yml` /
+`~/.git-credentials` instead; and bigBrain's own deployed orchestrator has no published port,
+reached only via `docker run --network traefik-net curlimages/curl ...` or from another container
+already on that network — BigImagine's, once deployed, will likely follow the same pattern.
 
 ---
 
 ## Current state
 
-*Verify against `spec.md`/git log before trusting this — it will go stale.*
+*Verify against the root `README.md` (which carries the same **(built)**/**(designed)** split as
+`spec.md`) or git log before trusting this — it will go stale.*
 
-Live and deployed: data layer, orchestrator, document ingestion, shopping analytics, generic lists
-+ Notion sync, recipes & meal planning, an OpenAPI tool-server surface
-(`/v1/tools/openapi.json`), grocery-list section ordering, a native frontend (`frontend/`, spec.md
-§5 Correction 7) with chat history/folders, freeform notes, prompt presets, household-wide
-orchestrator settings (active LLM profile/model, timezone), a household calendar (spec.md §6.7,
-Cozi/Outlook read-only ICS + native events, live; bidirectional Google Calendar OAuth sync built
-but not yet deployed or committed — see below), web search (spec.md §6.8, `plugins/web`, Brave
-Search API), and
-weather (spec.md §6.9, `plugins/weather`, Open-Meteo, no API key) — see spec.md §3's
-`provider_credentials` / `folders`+`chat_sessions`+`chat_messages` /
-`orchestrator_settings` / `notes` / `prompt_presets` additions. Most of this (frontend/,
-plugins/notes, plugins/prompt-presets, chat sessions, access identity, date context, migrations
-0009-0012) is deployed but **not yet committed** to this repo — check `git status` before assuming
-the working tree matches HEAD. The bidirectional Google Calendar OAuth sync (spec.md §6.7,
-migrations 0017-0018, `orchestrator/src/io/googleCalendar.ts`, `plugins/calendar/src/{googleSync,
-googleOutboundSync}.ts`) is a step further behind still — built in `bigBrain/` but neither synced
-to `stacks/bigbrain/` nor migration-applied, so it isn't running anywhere yet; requires a Google
-Cloud OAuth client (see spec.md §6.7) before it can be connected even once deployed. Parked: GitHub
-Ingestion Gateway, the governance doc-sync (blocked on it), and Gmail parsing (spec.md §6.3).
-Drafted but not yet actioned: Open WebUI
-suggested-prompts content, registering the OpenAPI tool server inside Open WebUI's own admin panel
-(needs a human in the browser). Offsite backup (spec.md §6.6, `backup/`) is built in `bigBrain/`
-but not yet deployed — not synced to `stacks/bigbrain/`, not committed, and blocked on an R2 API
-token/lifecycle rule plus a `BIGBRAIN_BACKUP_AGE_PUBLIC_KEY` being added to `secrets.enc.env`
-(`.env.example` has the full list) before `docker compose up -d backup` can run.
+This is a fork of bigBrain with the household-specific plugins removed (recipes, meal planning,
+shopping lists/analytics, calendar, Notion sync, weather — all deleted, not coming back). What's
+running is bigBrain's other infrastructure, inherited as-is: chat with folders/branching/Canvas/
+prompt presets, chat memory (rolling summarization + RAG), notes, documents (git-backed clip/save
+with semantic search), web search, timers/scheduled-job dispatch, push notifications, math/date
+utilities, LLM-agnostic orchestration with DB-backed runtime settings. The database schema is still
+bigBrain's original multi-user/RLS design — single-user conversion (`spec.md` §3) hasn't happened.
+
+The actual narrative engine — `characters`/`scenes`/`canon_facts`/`locations`/`rules`/
+`status_effects` tables, the Canonize/Vistalyze/Triggeryze plugins, the Director Pass, the
+Character Roster, the Inspector Canvas — is fully **(designed)** in `spec.md` and has no code
+behind it yet. There's no migration past `0040_chat_branching.sql` that touches any of it. This is
+the actual next body of work, not a someday item.
+
+The rest of bigBrain's old "Current state" detail (below this line, in bigBrain's own
+`docs/bootstrap.md`) doesn't apply here — it describes household features this fork removed.

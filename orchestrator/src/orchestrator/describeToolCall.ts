@@ -8,8 +8,8 @@
  * Everywhere else (loop.ts, the status route, the frontend) just relays whatever it returns.
  *
  * @api-declaration
- * describeToolCall(name, args) — e.g. "Updating a list item: milk" or, for an unrecognized tool
- *   with no nameable argument, a humanized fallback like "Log purchase"
+ * describeToolCall(name, args) — e.g. "Searching the web: dragons" or, for an unrecognized tool
+ *   with no nameable argument, a humanized fallback like "Cancel timer"
  *
  * @contract
  *   assertions:
@@ -19,25 +19,14 @@
  */
 
 const LABELS: Record<string, string> = {
-  get_recipes: 'Checking your recipes',
-  get_recipe: 'Checking a recipe',
-  update_recipe: 'Updating a recipe',
-  delete_recipe: 'Deleting a recipe',
-  get_lists: 'Checking your lists',
-  get_list_items: 'Checking a list',
-  add_list_item: 'Adding to a list',
-  update_list_item: 'Updating a list item',
-  delete_list_item: 'Removing a list item',
-  complete_list_item: 'Checking off a list item',
   web_search: 'Searching the web',
   ingest_url: 'Reading a page',
-  get_weather: 'Checking the weather',
   send_push_notification: 'Sending a notification',
 };
 
-// Argument keys worth naming, in priority order — the "what" behind the "what am I doing" (a
-// list/recipe/URL/etc.), not the tool's own plumbing (ids, flags).
-const DETAIL_KEYS = ['item_name', 'list_name', 'mealName', 'query', 'url', 'title', 'name'];
+// Argument keys worth naming, in priority order — the "what" behind the "what am I doing",
+// not the tool's own plumbing (ids, flags).
+const DETAIL_KEYS = ['query', 'url', 'title', 'name'];
 
 export function describeToolCall(name: string, args: unknown): string {
   const base = LABELS[name] ?? humanizeToolName(name);

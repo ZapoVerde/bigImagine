@@ -4,31 +4,27 @@
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
- * for a client like Open WebUI's "OpenAI API" connection type to treat bigBrain as a model
- * (Phase 4 decision: bigBrain drives, the chat UI only displays). Every request is authenticated
- * to a user_id via authenticate() — that resolved value, never anything the request body says, is
- * what gets passed to runTurn's userId, per bb_principles.md §4. authenticate() tries two paths:
- * a Cloudflare Access identity (io/accessIdentity.ts) first, since it's only ever present when a
- * request actually transited the Cloudflare-Access-gated bigbrain.your-domain.example hostname; then falls
- * back to a BIGBRAIN_API_KEYS bearer token (apiKeyStore.ts) — the only path Open WebUI's traffic
- * ever uses, since it reaches this container directly over traefik-net, never through that
- * hostname. GET /v1/whoami exposes this same resolution unauthenticated-by-default (no key
- * required) so the frontend SPA can silently probe whether Access already covers it.
+ * for the native frontend SPA to drive a turn (the shape was already OpenAI-compatible from
+ * bigBrain's own history; nothing forces keeping it, but there's no reason to change it either).
+ * Every request is authenticated to a user_id via authenticate() — that resolved value, never
+ * anything the request body says, is what gets passed to runTurn's userId, per bb_principles.md
+ * §4. authenticate() tries two paths: a Cloudflare Access identity (io/accessIdentity.ts) first,
+ * since it's only ever present when a request actually transited the Cloudflare-Access-gated
+ * hostname; then falls back to a BIGBRAIN_API_KEYS bearer token (apiKeyStore.ts). GET /v1/whoami
+ * exposes this same resolution unauthenticated-by-default (no key required) so the frontend SPA
+ * can silently probe whether Access already covers it.
  *
  * Streaming responses are not real token-level streaming: runTurn resolves the full reply
  * before this module has anything to send, so a stream:true request gets its answer as one SSE
  * chunk followed immediately by the terminator, not a token at a time. Good enough for a chat UI
  * to render correctly; true streaming would need runTurn itself to support it.
  *
- * Also serves a second, additive surface (openApiToolServer.ts): GET /v1/tools/openapi.json and
- * POST /v1/tools/:name let an external OpenAPI-aware caller (Open WebUI's "OpenAPI tool server"
- * connection type) invoke one registered tool directly, bypassing runTurn — the caller's own
- * model already decided which tool and with what arguments, so there's no reasoning left for
- * bigBrain to do. Same Bearer-key auth as /v1/chat/completions; same RLS scoping regardless of
- * which front door a call came through.
+ * Also serves a second, additive surface (toolInvoke.ts): POST /v1/tools/:name lets the
+ * native frontend invoke one registered tool directly, bypassing runTurn — used for UI actions
+ * that call a tool without going through a conversational turn. Same Bearer-key auth as
+ * /v1/chat/completions; same RLS scoping regardless of which front door a call came through.
  *
- * GET / and GET /assets/* serve the built frontend/ SPA (Vite + React) — the tab bar (Chat /
- * Lists / Recipes / Meal Plans / Settings) that is bigbrain.your-domain.example's whole UI now. Static
+ * GET / and GET /assets/* serve the built frontend/ SPA (Vite + React). Static
  * files are read from FRONTEND_DIST_DIR (frontend/dist, produced at Docker build time) and served
  * unauthenticated at the app layer, same as before (Cloudflare Access gates the whole hostname;
  * the SPA's own JS is what calls the authenticated JSON endpoints below). This replaced the old
@@ -54,7 +50,7 @@
  * handleChatCompletions also always prepends a current-date/time system message
  * (util/dateContext.ts, using the household_timezone admin setting) ahead of a chat's own custom
  * system prompt, for every turn regardless of chat_id — an LLM has no reliable sense of "today"
- * on its own, and date-taking tools (recipes plugin's add_meal_plan_entry/get_meal_plan) need it.
+ * on its own, and date-taking tools need it.
  *
  * A third, admin-only surface (adminServer.ts): GET/POST /v1/admin/credentials read/write
  * provider_credentials (io/providerCredentials.ts), called by the SPA's Settings tab. Gated by
@@ -80,16 +76,6 @@
  * Same admin gate, but no restart, for GET/POST /v1/admin/timezone — the household_timezone
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
  * into anything at boot, so a POST here just writes the value and responds 200 immediately.
- *
- * Same admin gate, same no-restart shape, for GET/POST /v1/admin/recipe-settings — the household's
- * default recipe scale (plugins/recipes/src/scaleRecipeTool.ts reads it live on every scale_recipe
- * call that omits an explicit target_servings).
- *
- * Same admin gate, same restart-on-save shape as credentials/settings, for GET/POST
- * /v1/admin/calendar-settings and GET/POST /v1/admin/notion-settings (docs/bb_principles.md
- * §13 — non-secret runtime config belongs in the database, not .env). Each is read once at boot
- * (plugins/calendar's ICS poll; io/notion.ts's client construction), so a live update with no
- * restart would silently do nothing until the next one anyway — unlike timezone.
  *
  * POST /v1/attachments/extract (handleUploadAttachment.ts's extractAttachmentUpload) turns a
  * staged file into Markdown ahead of a chat turn — same Bearer/Access auth as chat completions,
@@ -139,40 +125,24 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
-  buildGoogleAuthUrl,
-  completeGoogleCalendarOauth,
-  consumeGoogleOauthState,
   getActiveProfileSetting,
-  getCalendarSettings,
   getChatMemorySettings,
-  getDefaultRecipeServings,
-  getGoogleCalendarSettings,
   getHouseholdTimezone,
   getNotificationSettings,
-  getNotionSettings,
   listCredentials,
   listModelsForProfile,
-  mintGoogleOauthState,
   parseSetActiveProfileBody,
-  parseSetCalendarSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
-  parseSetDefaultRecipeServingsBody,
-  parseSetGoogleCalendarSettingsBody,
   parseSetNotificationSettingsBody,
-  parseSetNotionSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
-  setCalendarSettings,
   setChatMemorySettings,
   setCredential,
-  setDefaultRecipeServings,
-  setGoogleCalendarSettings,
   setHouseholdTimezone,
   setNotificationSettings,
-  setNotionSettings,
 } from './adminServer.js';
-import { buildOpenApiSpec, invokeTool } from './openApiToolServer.js';
+import { invokeTool } from './toolInvoke.js';
 import {
   buildChatCompletion,
   buildChatCompletionChunk,
@@ -200,11 +170,6 @@ export interface HttpServerDeps {
   llmProfiles: Record<string, LlmProfile>;
   modelName: string;
   port: number;
-  /** Where this server is externally reachable from — used only to fill in the OpenAPI spec's
-   *  `servers` entry (openApiToolServer.ts). Defaults to http://localhost:<port> when unset,
-   *  which is fine for local verification but wrong for a real deployment behind Docker/Traefik —
-   *  set this to the real reachable URL there (see .env.example). */
-  publicBaseUrl?: string;
   /** Defaults to a real process.exit(0) — restart: unless-stopped relaunches the container, which
    *  reads the newly-saved credential at boot. Overridable so tests can prove a POST reached this
    *  point without actually killing the test process. */
@@ -582,11 +547,6 @@ async function handleChatCompletions(
   sendJson(res, 200, buildChatCompletion(echoedModel, reply));
 }
 
-async function handleOpenApiSpec(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const baseUrl = `${deps.publicBaseUrl ?? `http://localhost:${deps.port}`}/v1/tools`;
-  sendJson(res, 200, buildOpenApiSpec(deps.tools.definitions(), baseUrl));
-}
-
 async function handleToolInvoke(
   req: IncomingMessage,
   res: ServerResponse,
@@ -754,31 +714,6 @@ async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps
   sendJson(res, 200, { timezone: value });
 }
 
-async function handleRecipeSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const defaultServings = await getDefaultRecipeServings(deps.settings);
-  sendJson(res, 200, { defaultServings });
-}
-
-async function handleRecipeSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const value = parseSetDefaultRecipeServingsBody(raw);
-  if (value === undefined) {
-    sendJson(res, 400, { error: 'expected { value: a positive number }' });
-    return;
-  }
-
-  await setDefaultRecipeServings(deps.settings, value);
-  // No restart needed — the next scale_recipe call reads it live.
-  sendJson(res, 200, { defaultServings: value });
-}
-
 // docs/chat-memory.md — profileNames comes from deps.llmProfiles (a boot-time set, same as
 // GET /v1/admin/settings' ActiveProfileSetting), everything else is live-read via adminServer.ts.
 async function handleChatMemorySettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -834,144 +769,6 @@ async function handleNotificationSettingsSet(req: IncomingMessage, res: ServerRe
   await setNotificationSettings(deps.settings, parsed);
   // No restart needed — the next send_push_notification call reads both fields live.
   sendJson(res, 200, await getNotificationSettings(deps.settings));
-}
-
-async function handleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getCalendarSettings(deps.settings));
-}
-
-async function handleCalendarSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetCalendarSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, { error: 'expected { owner_user_id?: non-empty string, mask_work_calendar?: boolean }, at least one' });
-    return;
-  }
-
-  await setCalendarSettings(deps.settings, parsed);
-
-  const payload = JSON.stringify({ status: 'restarting' });
-  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
-  res.end(payload, () => {
-    const restart = deps.triggerRestart ?? (() => process.exit(0));
-    setTimeout(restart, 100);
-  });
-}
-
-async function handleNotionSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getNotionSettings(deps.settings));
-}
-
-async function handleNotionSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetNotionSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, { error: 'expected { owner_user_id?: non-empty string, lists_data_source_id?: non-empty string }, at least one' });
-    return;
-  }
-
-  await setNotionSettings(deps.settings, parsed);
-
-  const payload = JSON.stringify({ status: 'restarting' });
-  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
-  res.end(payload, () => {
-    const restart = deps.triggerRestart ?? (() => process.exit(0));
-    setTimeout(restart, 100);
-  });
-}
-
-async function handleGoogleCalendarSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getGoogleCalendarSettings(deps.settings));
-}
-
-async function handleGoogleCalendarSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetGoogleCalendarSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error: 'expected { client_id?: non-empty string, owner_user_id?: non-empty string, calendar_id?: non-empty string }, at least one',
-    });
-    return;
-  }
-
-  await setGoogleCalendarSettings(deps.settings, parsed);
-
-  const payload = JSON.stringify({ status: 'restarting' });
-  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
-  res.end(payload, () => {
-    const restart = deps.triggerRestart ?? (() => process.exit(0));
-    setTimeout(restart, 100);
-  });
-}
-
-function googleCalendarRedirectUri(deps: HttpServerDeps): string {
-  return `${deps.publicBaseUrl ?? `http://localhost:${deps.port}`}/v1/admin/google-calendar/callback`;
-}
-
-async function handleGoogleCalendarAuthUrl(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const { clientId } = await getGoogleCalendarSettings(deps.settings);
-  if (!clientId) {
-    sendJson(res, 400, { error: 'google_calendar_client_id is not configured yet — set it in Settings first' });
-    return;
-  }
-  const state = mintGoogleOauthState();
-  sendJson(res, 200, { url: buildGoogleAuthUrl(clientId, googleCalendarRedirectUri(deps), state) });
-}
-
-// Deliberately not gated by isAdminAuthorized, unlike every other /v1/admin/* route — see the
-// preamble and the call site in handleRequest for why this is still safe.
-async function handleGoogleCalendarCallback(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const url = new URL(req.url ?? '', 'http://placeholder');
-  const code = url.searchParams.get('code') ?? undefined;
-  const state = url.searchParams.get('state') ?? undefined;
-
-  if (!consumeGoogleOauthState(state)) {
-    sendJson(res, 400, { error: 'missing or expired oauth state — restart the connection flow from Settings' });
-    return;
-  }
-  if (!code) {
-    res.writeHead(302, { location: '/?google_calendar=denied' });
-    res.end();
-    return;
-  }
-
-  try {
-    await completeGoogleCalendarOauth(deps.credentials, deps.settings, code, googleCalendarRedirectUri(deps));
-  } catch (err) {
-    log.error('Google Calendar OAuth exchange failed', err);
-    res.writeHead(302, { location: '/?google_calendar=error' });
-    res.end();
-    return;
-  }
-
-  res.writeHead(302, { location: '/?google_calendar=connected' });
-  // The refresh token was just written to provider_credentials — same restart-on-save shape as
-  // any other credential rotation (index.ts only ever reads it at boot).
-  res.end(() => {
-    const restart = deps.triggerRestart ?? (() => process.exit(0));
-    setTimeout(restart, 100);
-  });
 }
 
 async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -1207,8 +1004,8 @@ async function handleWhoAmI(req: IncomingMessage, res: ServerResponse, deps: Htt
 
 // household_timezone isn't a secret (bb_principles.md §12) and every household member already
 // receives it indirectly on every chat turn via formatCurrentDateContext's system message — this
-// just gives the frontend itself (CalendarView/TodayAgenda, computing "today" client-side) the
-// same value directly, gated the same way as /v1/chats rather than requiring the admin key.
+// just gives the frontend itself (computing "today" client-side) the same value directly, gated
+// the same way as /v1/chats rather than requiring the admin key.
 async function handleHouseholdTimezoneGet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
   if (!userId) {
@@ -1239,11 +1036,7 @@ async function handleRequest(
   res: ServerResponse,
   deps: HttpServerDeps,
 ): Promise<void> {
-  // Split off the query string before comparing — the Google Calendar OAuth callback (and denied/
-  // error cases) redirect here as `/?google_calendar=connected` etc. for the frontend to read and
-  // clear (SettingsView.tsx), so an exact `req.url === '/'` match would silently 404 on every one
-  // of those redirects.
-  if (req.method === 'GET' && req.url?.split('?')[0] === '/') {
+  if (req.method === 'GET' && req.url === '/') {
     await serveStaticFile(res, `${FRONTEND_DIST_DIR}/index.html`);
     return;
   }
@@ -1302,8 +1095,13 @@ async function handleRequest(
     await handleFolderRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
     return;
   }
-  if (req.method === 'GET' && req.url === '/v1/tools/openapi.json') {
-    await handleOpenApiSpec(res, deps);
+  if (req.method === 'GET' && req.url === '/v1/tools') {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    sendJson(res, 200, { names: deps.tools.definitions().map((def) => def.name) });
     return;
   }
   if (req.method === 'POST' && req.url?.startsWith('/v1/tools/')) {
@@ -1367,22 +1165,6 @@ async function handleRequest(
     await handleTimezoneSet(req, res, deps);
     return;
   }
-  if (req.method === 'GET' && req.url === '/v1/admin/recipe-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleRecipeSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/recipe-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleRecipeSettingsSet(req, res, deps);
-    return;
-  }
   if (req.method === 'GET' && req.url === '/v1/admin/notification-settings') {
     if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
       sendJson(res, 401, { error: 'missing or incorrect admin key' });
@@ -1413,71 +1195,6 @@ async function handleRequest(
       return;
     }
     await handleChatMemorySettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/calendar-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCalendarSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/calendar-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCalendarSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/notion-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleNotionSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/notion-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleNotionSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/google-calendar-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleGoogleCalendarSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/google-calendar-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleGoogleCalendarSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/google-calendar/auth-url') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleGoogleCalendarAuthUrl(res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/admin/google-calendar/callback')) {
-    // Deliberately not gated by isAdminAuthorized (docs/spec.md §6.7): Google's redirect is a
-    // plain browser GET with no way to attach a bearer token or Access header of its own. Instead
-    // it's protected by the single-use `state` nonce minted only for an already-admin-authorized
-    // auth-url request above — this route can only ever complete a flow this server itself
-    // started, it can't accept an arbitrary inbound payload the way a real webhook would.
-    await handleGoogleCalendarCallback(req, res, deps);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

@@ -3,12 +3,11 @@
  * @stamp 2026-07-26
  * @architectural-role Pure Function — HTML page -> readable, "pretty" Markdown
  * @description
- * The real web-clipper conversion docs/spec.md §6.6 calls for, distinct from
- * plugins/recipes/src/htmlToText.ts's crude plaintext stripper (built only as LLM-extraction
- * fallback text, never meant to be read by a person). `@mozilla/readability` first strips
+ * The real web-clipper conversion docs/spec.md §6.6 calls for — a proper reader-view extraction,
+ * never a crude plaintext stripper. `@mozilla/readability` first strips
  * nav/ads/footer/related-posts boilerplate and keeps just the article — the same library
  * Firefox's own reader view uses — then `turndown` converts what's left to real Markdown:
- * headings, links, lists, bold/italic survive, instead of htmlToText's flattened plain text.
+ * headings, links, lists, bold/italic all survive.
  * `linkedom` supplies the DOM Readability needs without pulling in jsdom's much heavier footprint.
  * The actual HTML->Markdown conversion (Turndown config + heading normalization) now lives in
  * @bigbrain/orchestrator/html-to-markdown, shared with the rich-document attachment track

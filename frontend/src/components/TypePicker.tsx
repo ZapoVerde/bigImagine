@@ -9,11 +9,7 @@ interface TypePickerProps {
 
 const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'chat', label: 'New Chat' },
-  { type: 'lists', label: 'Lists' },
-  { type: 'recipes', label: 'Recipes' },
-  { type: 'mealplan', label: 'Meal Plans' },
   { type: 'notes', label: 'Notes' },
-  { type: 'calendar', label: 'Calendar' },
   { type: 'documents', label: 'Documents' },
   { type: 'settings', label: 'Settings' },
 ];

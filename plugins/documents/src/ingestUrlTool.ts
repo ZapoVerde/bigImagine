@@ -4,13 +4,12 @@
  * @architectural-role IO Wrapper — the web clipper
  * @description
  * docs/spec.md §6.6's first real caller of the write path: fetch a page, turn it into readable
- * Markdown (htmlToMarkdown.ts — Readability + Turndown, not plugins/recipes' crude htmlToText.ts),
- * then save it exactly like save_document would (saveDocument.ts — same underlying sequence, not
- * a second copy of it). `url` is LLM/chat-supplied, so it goes through fetchUntrustedUrl
- * (orchestrator/src/io/fetchUntrusted.ts) exactly like import_recipe's `url` path (§6.5) — a
- * prompt-injected page could otherwise steer this tool at an internal address on the same Docker
- * network. Same browser-shaped User-Agent as import_recipe, for the same reason: at least one real
- * site's response differs based on it.
+ * Markdown (htmlToMarkdown.ts — Readability + Turndown), then save it exactly like save_document
+ * would (saveDocument.ts — same underlying sequence, not a second copy of it). `url` is
+ * LLM/chat-supplied, so it goes through fetchUntrustedUrl (orchestrator/src/io/fetchUntrusted.ts) —
+ * a prompt-injected page could otherwise steer this tool at an internal address on the same Docker
+ * network. Sends a browser-shaped User-Agent: at least one real site's response differs based on
+ * it.
  *
  * htmlToMarkdown.ts's extracted siteName/author/publishedAt are passed through as saveDocument's
  * `metadata` — this is the only caller that ever sets it, since save_document's manual path has no

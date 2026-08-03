@@ -2,34 +2,22 @@ import { useEffect, useRef, useState } from 'react';
 import {
   ApiError,
   adminGetActiveProfile,
-  adminGetCalendarSettings,
   adminGetChatMemorySettings,
-  adminGetDefaultRecipeServings,
-  adminGetGoogleCalendarAuthUrl,
-  adminGetGoogleCalendarSettings,
   adminGetNotificationSettings,
-  adminGetNotionSettings,
   adminGetTimezone,
   adminListCredentials,
   adminListModelsForProfile,
   adminSetActiveProfile,
-  adminSetCalendarSettings,
   adminSetChatMemorySettings,
   adminSetCredential,
-  adminSetDefaultRecipeServings,
-  adminSetGoogleCalendarSettings,
   adminSetNotificationSettings,
-  adminSetNotionSettings,
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
 import type {
-  CalendarSettings,
   ChatMemorySettings,
   CredentialSummary,
-  GoogleCalendarSettings,
   NotificationSettings,
-  NotionSettings,
   ProfileModelsResult,
 } from '../api/types';
 import './SettingsView.css';
@@ -122,10 +110,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const timezoneOptions = listTimezoneOptions();
   const deviceTimezone = browserTimezone();
 
-  const [defaultServings, setDefaultServings] = useState<number | null>(null);
-  const [selectedDefaultServings, setSelectedDefaultServings] = useState('');
-  const [defaultServingsStatus, setDefaultServingsStatus] = useState('');
-
   const [ntfyServerUrl, setNtfyServerUrl] = useState('');
   const [selectedNtfyServerUrl, setSelectedNtfyServerUrl] = useState('');
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
@@ -141,44 +125,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
   const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
-
-  const [calendarOwnerUserId, setCalendarOwnerUserId] = useState('');
-  const [selectedCalendarOwnerUserId, setSelectedCalendarOwnerUserId] = useState('');
-  const [maskWorkCalendar, setMaskWorkCalendar] = useState(false);
-  const [selectedMaskWorkCalendar, setSelectedMaskWorkCalendar] = useState(false);
-  const [calendarStatus, setCalendarStatus] = useState('');
-  const calendarPollRef = useRef<number | null>(null);
-
-  const [notionOwnerUserId, setNotionOwnerUserId] = useState('');
-  const [selectedNotionOwnerUserId, setSelectedNotionOwnerUserId] = useState('');
-  const [notionDataSourceId, setNotionDataSourceId] = useState('');
-  const [selectedNotionDataSourceId, setSelectedNotionDataSourceId] = useState('');
-  const [notionStatus, setNotionStatus] = useState('');
-  const notionPollRef = useRef<number | null>(null);
-
-  const [googleClientId, setGoogleClientId] = useState('');
-  const [selectedGoogleClientId, setSelectedGoogleClientId] = useState('');
-  const [googleOwnerUserId, setGoogleOwnerUserId] = useState('');
-  const [selectedGoogleOwnerUserId, setSelectedGoogleOwnerUserId] = useState('');
-  const [googleCalendarId, setGoogleCalendarId] = useState('');
-  const [selectedGoogleCalendarId, setSelectedGoogleCalendarId] = useState('');
-  const [googleStatus, setGoogleStatus] = useState('');
-  const [googleConnecting, setGoogleConnecting] = useState(false);
-  const googlePollRef = useRef<number | null>(null);
-
-  function applyCalendarSettings(settings: CalendarSettings) {
-    setCalendarOwnerUserId(settings.ownerUserId ?? '');
-    setSelectedCalendarOwnerUserId(settings.ownerUserId ?? '');
-    setMaskWorkCalendar(settings.maskWorkCalendar);
-    setSelectedMaskWorkCalendar(settings.maskWorkCalendar);
-  }
-
-  function applyNotionSettings(settings: NotionSettings) {
-    setNotionOwnerUserId(settings.ownerUserId ?? '');
-    setSelectedNotionOwnerUserId(settings.ownerUserId ?? '');
-    setNotionDataSourceId(settings.listsDataSourceId ?? '');
-    setSelectedNotionDataSourceId(settings.listsDataSourceId ?? '');
-  }
 
   function applyNotificationSettings(settings: NotificationSettings) {
     setNtfyServerUrl(settings.serverUrl ?? '');
@@ -197,46 +143,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
   }
 
-  function applyGoogleCalendarSettings(settings: GoogleCalendarSettings) {
-    setGoogleClientId(settings.clientId ?? '');
-    setSelectedGoogleClientId(settings.clientId ?? '');
-    setGoogleOwnerUserId(settings.ownerUserId ?? '');
-    setSelectedGoogleOwnerUserId(settings.ownerUserId ?? '');
-    setGoogleCalendarId(settings.calendarId);
-    setSelectedGoogleCalendarId(settings.calendarId);
-  }
-
-  // The OAuth callback (server/adminServer.ts) redirects the browser back here with a status
-  // query param rather than an in-page response, since the whole point of that redirect is that
-  // this page wasn't the one making the request — Google was. Read it once on mount, then strip
-  // it so a reload doesn't keep re-showing a stale status.
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const status = params.get('google_calendar');
-    if (!status) return;
-    if (status === 'connected') setGoogleStatus('Connected — the orchestrator restarted to pick up the new refresh token.');
-    else if (status === 'denied') setGoogleStatus('Connection cancelled — consent was not granted.');
-    else setGoogleStatus('Connection failed — check the orchestrator logs.');
-    params.delete('google_calendar');
-    const query = params.toString();
-    window.history.replaceState({}, '', query ? `?${query}` : window.location.pathname);
-  }, []);
-
   useEffect(() => {
     (async () => {
       try {
-        const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings, chatMemorySettingsResult] =
-          await Promise.all([
-            adminListCredentials(null),
-            adminGetActiveProfile(null),
-            adminGetTimezone(null),
-            adminGetDefaultRecipeServings(null),
-            adminGetCalendarSettings(null),
-            adminGetNotionSettings(null),
-            adminGetGoogleCalendarSettings(null),
-            adminGetNotificationSettings(null),
-            adminGetChatMemorySettings(null),
-          ]);
+        const [creds, connection, tz, notificationSettings, chatMemorySettingsResult] = await Promise.all([
+          adminListCredentials(null),
+          adminGetActiveProfile(null),
+          adminGetTimezone(null),
+          adminGetNotificationSettings(null),
+          adminGetChatMemorySettings(null),
+        ]);
         setCredentials(creds);
         setSelectedName(creds[0]?.name ?? '');
         setProfileNames(connection.profileNames);
@@ -248,11 +164,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
         setTimezone(tz);
         setSelectedTimezone(tz);
-        setDefaultServings(defaultRecipeServings);
-        setSelectedDefaultServings(defaultRecipeServings === null ? '' : String(defaultRecipeServings));
-        applyCalendarSettings(calendarSettings);
-        applyNotionSettings(notionSettings);
-        applyGoogleCalendarSettings(googleCalendarSettings);
         applyNotificationSettings(notificationSettings);
         applyChatMemorySettings(chatMemorySettingsResult);
         setUnlocked(true);
@@ -267,18 +178,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   async function load() {
     setLoadError(null);
     try {
-      const [creds, connection, tz, defaultRecipeServings, calendarSettings, notionSettings, googleCalendarSettings, notificationSettings, chatMemorySettingsResult] =
-        await Promise.all([
-          adminListCredentials(adminKey),
-          adminGetActiveProfile(adminKey),
-          adminGetTimezone(adminKey),
-          adminGetDefaultRecipeServings(adminKey),
-          adminGetCalendarSettings(adminKey),
-          adminGetNotionSettings(adminKey),
-          adminGetGoogleCalendarSettings(adminKey),
-          adminGetNotificationSettings(adminKey),
-          adminGetChatMemorySettings(adminKey),
-        ]);
+      const [creds, connection, tz, notificationSettings, chatMemorySettingsResult] = await Promise.all([
+        adminListCredentials(adminKey),
+        adminGetActiveProfile(adminKey),
+        adminGetTimezone(adminKey),
+        adminGetNotificationSettings(adminKey),
+        adminGetChatMemorySettings(adminKey),
+      ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
       setProfileNames(connection.profileNames);
@@ -290,11 +196,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
       setTimezone(tz);
       setSelectedTimezone(tz);
-      setDefaultServings(defaultRecipeServings);
-      setSelectedDefaultServings(defaultRecipeServings === null ? '' : String(defaultRecipeServings));
-      applyCalendarSettings(calendarSettings);
-      applyNotionSettings(notionSettings);
-      applyGoogleCalendarSettings(googleCalendarSettings);
       applyNotificationSettings(notificationSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
@@ -314,20 +215,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setTimezone(selectedTimezone);
     setTimezoneStatus('Saved — takes effect on the next message, no restart needed.');
-  }
-
-  async function saveDefaultServings() {
-    const parsed = Number(selectedDefaultServings);
-    if (!selectedDefaultServings || !Number.isFinite(parsed) || parsed <= 0 || parsed === defaultServings) return;
-    setDefaultServingsStatus('');
-    try {
-      await adminSetDefaultRecipeServings(parsed, adminKey);
-    } catch (err) {
-      setDefaultServingsStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-      return;
-    }
-    setDefaultServings(parsed);
-    setDefaultServingsStatus('Saved — takes effect on the next recipe you scale, no restart needed.');
   }
 
   async function saveNotificationSettings() {
@@ -446,133 +333,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         // still restarting, keep polling
       }
     }, 2000);
-  }
-
-  // Boot-time settings (docs/bb_principles.md §13) — restart-on-save, same shape as saveConnection
-  // above, since each is only read once when the thing it configures is constructed.
-  async function saveCalendarSettings() {
-    if (
-      !selectedCalendarOwnerUserId ||
-      (selectedCalendarOwnerUserId === calendarOwnerUserId && selectedMaskWorkCalendar === maskWorkCalendar)
-    ) {
-      return;
-    }
-    setCalendarStatus('');
-    try {
-      await adminSetCalendarSettings(
-        { owner_user_id: selectedCalendarOwnerUserId, mask_work_calendar: selectedMaskWorkCalendar },
-        adminKey,
-      );
-    } catch (err) {
-      setCalendarStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-      return;
-    }
-    setCalendarStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
-
-    calendarPollRef.current = window.setInterval(async () => {
-      try {
-        const res = await fetch('/healthz');
-        if (res.ok) {
-          if (calendarPollRef.current) clearInterval(calendarPollRef.current);
-          setCalendarOwnerUserId(selectedCalendarOwnerUserId);
-          setMaskWorkCalendar(selectedMaskWorkCalendar);
-          setCalendarStatus('Back up — reload to confirm.');
-        }
-      } catch {
-        // still restarting, keep polling
-      }
-    }, 2000);
-  }
-
-  async function saveNotionSettings() {
-    if (
-      !selectedNotionOwnerUserId ||
-      !selectedNotionDataSourceId ||
-      (selectedNotionOwnerUserId === notionOwnerUserId && selectedNotionDataSourceId === notionDataSourceId)
-    ) {
-      return;
-    }
-    setNotionStatus('');
-    try {
-      await adminSetNotionSettings(
-        { owner_user_id: selectedNotionOwnerUserId, lists_data_source_id: selectedNotionDataSourceId },
-        adminKey,
-      );
-    } catch (err) {
-      setNotionStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-      return;
-    }
-    setNotionStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
-
-    notionPollRef.current = window.setInterval(async () => {
-      try {
-        const res = await fetch('/healthz');
-        if (res.ok) {
-          if (notionPollRef.current) clearInterval(notionPollRef.current);
-          setNotionOwnerUserId(selectedNotionOwnerUserId);
-          setNotionDataSourceId(selectedNotionDataSourceId);
-          setNotionStatus('Back up — reload to confirm.');
-        }
-      } catch {
-        // still restarting, keep polling
-      }
-    }, 2000);
-  }
-
-  async function saveGoogleCalendarSettings() {
-    if (
-      selectedGoogleClientId === googleClientId &&
-      selectedGoogleOwnerUserId === googleOwnerUserId &&
-      selectedGoogleCalendarId === googleCalendarId
-    ) {
-      return;
-    }
-    setGoogleStatus('');
-    try {
-      await adminSetGoogleCalendarSettings(
-        {
-          client_id: selectedGoogleClientId || undefined,
-          owner_user_id: selectedGoogleOwnerUserId || undefined,
-          calendar_id: selectedGoogleCalendarId || undefined,
-        },
-        adminKey,
-      );
-    } catch (err) {
-      setGoogleStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-      return;
-    }
-    setGoogleStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
-
-    googlePollRef.current = window.setInterval(async () => {
-      try {
-        const res = await fetch('/healthz');
-        if (res.ok) {
-          if (googlePollRef.current) clearInterval(googlePollRef.current);
-          setGoogleClientId(selectedGoogleClientId);
-          setGoogleOwnerUserId(selectedGoogleOwnerUserId);
-          setGoogleCalendarId(selectedGoogleCalendarId);
-          setGoogleStatus('Back up — reload to confirm.');
-        }
-      } catch {
-        // still restarting, keep polling
-      }
-    }, 2000);
-  }
-
-  // Opens Google's consent screen in a new tab rather than navigating this one away — the callback
-  // route redirects *that* tab back to / with a status param (read by the effect above); this tab
-  // just needs the admin to come back and reload once it's done.
-  async function connectGoogleCalendar() {
-    setGoogleStatus('');
-    setGoogleConnecting(true);
-    try {
-      const url = await adminGetGoogleCalendarAuthUrl(adminKey);
-      window.open(url, '_blank', 'noopener');
-    } catch (err) {
-      setGoogleStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to start the connection flow');
-    } finally {
-      setGoogleConnecting(false);
-    }
   }
 
   async function save() {
@@ -724,29 +484,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       </fieldset>
 
       <fieldset>
-        <legend>Recipe scaling</legend>
-        <label>
-          Default scale (servings)
-          <br />
-          <input
-            type="number"
-            min="1"
-            value={selectedDefaultServings}
-            onChange={(e) => setSelectedDefaultServings(e.target.value)}
-            placeholder="e.g. 6 — leave blank to use each recipe as written"
-          />
-        </label>
-        <br />
-        <button
-          onClick={saveDefaultServings}
-          disabled={!selectedDefaultServings || Number(selectedDefaultServings) === defaultServings}
-        >
-          Save
-        </button>
-        <div className="status">{defaultServingsStatus}</div>
-      </fieldset>
-
-      <fieldset>
         <legend>Notifications</legend>
         <label>
           Ntfy server URL
@@ -845,128 +582,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         <br />
         <button onClick={saveChatMemorySettings}>Save</button>
         <div className="status">{chatMemoryStatus}</div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Calendar</legend>
-        <label>
-          Owning user id
-          <br />
-          <input
-            value={selectedCalendarOwnerUserId}
-            onChange={(e) => setSelectedCalendarOwnerUserId(e.target.value)}
-            placeholder="the bigBrain user Cozi/Outlook feed rows are attributed to"
-          />
-        </label>
-        <br />
-        <label>
-          <input
-            type="checkbox"
-            checked={selectedMaskWorkCalendar}
-            onChange={(e) => setSelectedMaskWorkCalendar(e.target.checked)}
-          />
-          Mask Outlook event titles/descriptions/locations
-        </label>
-        <br />
-        <button
-          onClick={saveCalendarSettings}
-          disabled={
-            !selectedCalendarOwnerUserId ||
-            (selectedCalendarOwnerUserId === calendarOwnerUserId && selectedMaskWorkCalendar === maskWorkCalendar)
-          }
-        >
-          Save &amp; Restart
-        </button>
-        <div className="status">{calendarStatus}</div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Notion Sync</legend>
-        <label>
-          Owning user id
-          <br />
-          <input
-            value={selectedNotionOwnerUserId}
-            onChange={(e) => setSelectedNotionOwnerUserId(e.target.value)}
-            placeholder="the bigBrain user items typed directly into Notion get attributed to"
-          />
-        </label>
-        <br />
-        <label>
-          Lists data source id
-          <br />
-          <input
-            value={selectedNotionDataSourceId}
-            onChange={(e) => setSelectedNotionDataSourceId(e.target.value)}
-            placeholder="the 'bigBrain Lists' database's data_source_id"
-          />
-        </label>
-        <br />
-        <button
-          onClick={saveNotionSettings}
-          disabled={
-            !selectedNotionOwnerUserId ||
-            !selectedNotionDataSourceId ||
-            (selectedNotionOwnerUserId === notionOwnerUserId && selectedNotionDataSourceId === notionDataSourceId)
-          }
-        >
-          Save &amp; Restart
-        </button>
-        <div className="status">{notionStatus}</div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Google Calendar</legend>
-        <label>
-          OAuth client id
-          <br />
-          <input
-            value={selectedGoogleClientId}
-            onChange={(e) => setSelectedGoogleClientId(e.target.value)}
-            placeholder="from the Google Cloud OAuth client you created"
-          />
-        </label>
-        <br />
-        <label>
-          Owning user id
-          <br />
-          <input
-            value={selectedGoogleOwnerUserId}
-            onChange={(e) => setSelectedGoogleOwnerUserId(e.target.value)}
-            placeholder="the bigBrain user Google Calendar events sync to/from"
-          />
-        </label>
-        <br />
-        <label>
-          Calendar id
-          <br />
-          <input
-            value={selectedGoogleCalendarId}
-            onChange={(e) => setSelectedGoogleCalendarId(e.target.value)}
-            placeholder="primary"
-          />
-        </label>
-        <br />
-        <button
-          onClick={saveGoogleCalendarSettings}
-          disabled={
-            selectedGoogleClientId === googleClientId &&
-            selectedGoogleOwnerUserId === googleOwnerUserId &&
-            selectedGoogleCalendarId === googleCalendarId
-          }
-        >
-          Save &amp; Restart
-        </button>{' '}
-        <button onClick={connectGoogleCalendar} disabled={googleConnecting || !googleClientId}>
-          Connect Google Calendar
-        </button>
-        {!googleClientId && <div className="status">Set and save an OAuth client id first, then connect.</div>}
-        <div className="status">{googleStatus}</div>
-        <div className="status">
-          The client secret and refresh token are set via the credentials table below
-          (google_calendar_client_secret is entered manually from your Google Cloud OAuth client;
-          google_calendar_refresh_token is written automatically by the Connect button above).
-        </div>
       </fieldset>
 
       <table>

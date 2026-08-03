@@ -15,7 +15,7 @@ interface PinnedNotesDrawerProps {
 // chat_sessions.canvas_note_id column), and NoteEditor is already the shared component built
 // specifically so any surface can read/edit a note identically (components/notes/NoteEditor.tsx's
 // own docstring), so reusing it here needed no new machinery at all. Renders nothing if there are
-// no pinned notes — same "never block the picker, just disappear" spirit as TodayAgenda.
+// no pinned notes — never blocks the picker, just disappears.
 export default function PinnedNotesDrawer({ apiKey }: PinnedNotesDrawerProps) {
   const [notes, setNotes] = useState<NoteSummary[] | null>(null);
   const [expanded, setExpanded] = useState(false);

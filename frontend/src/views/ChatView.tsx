@@ -25,7 +25,6 @@ import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResu
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
-import TodayAgenda from '../components/TodayAgenda';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
@@ -34,11 +33,7 @@ import './ChatView.css';
 // instead (always available, not just from this empty-chat landing state), so it isn't one of
 // these.
 const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }[] = [
-  { type: 'lists', label: 'Lists', icon: '📋' },
-  { type: 'recipes', label: 'Recipes', icon: '🍳' },
-  { type: 'mealplan', label: 'Meal Plans', icon: '🍽' },
   { type: 'notes', label: 'Notes', icon: '📝' },
-  { type: 'calendar', label: 'Calendar', icon: '📅' },
   { type: 'documents', label: 'Documents', icon: '📄' },
 ];
 
@@ -512,7 +507,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   ))}
                 </div>
               )}
-              <TodayAgenda apiKey={apiKey} />
               <PinnedNotesDrawer apiKey={apiKey} />
             </div>
           )}

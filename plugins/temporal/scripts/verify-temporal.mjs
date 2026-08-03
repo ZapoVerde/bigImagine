@@ -48,7 +48,7 @@ function createFakePool(users) {
           }
 
           if (sql.includes('insert into active_timers')) {
-            const [userId, label, durationSeconds, endAt, linkedListItemId, linkedNoteId, linkedChatId] = params;
+            const [userId, label, durationSeconds, endAt, linkedNoteId, linkedChatId] = params;
             assert(scopedUserId === userId, 'set_timer inserts scoped to the requesting user');
             const timer_id = `timer-${++timerCounter}`;
             timers.push({
@@ -58,7 +58,6 @@ function createFakePool(users) {
               duration_seconds: durationSeconds,
               end_at: endAt,
               status: 'running',
-              linked_list_item_id: linkedListItemId,
               linked_note_id: linkedNoteId,
               linked_chat_id: linkedChatId,
               updated_at: new Date().toISOString(),

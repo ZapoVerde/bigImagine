@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export type TabType = 'blank' | 'chat' | 'lists' | 'recipes' | 'mealplan' | 'notes' | 'calendar' | 'documents' | 'settings';
+export type TabType = 'blank' | 'chat' | 'notes' | 'documents' | 'settings';
 export type SummonableType = Exclude<TabType, 'blank' | 'chat'>;
 
 export interface TabInstance {
@@ -14,11 +14,7 @@ export interface TabInstance {
 const STORAGE_KEY = 'bb_tabs';
 
 const SUMMON_LABELS: Record<SummonableType, string> = {
-  lists: 'Lists',
-  recipes: 'Recipes',
-  mealplan: 'Meal Plans',
   notes: 'Notes',
-  calendar: 'Calendar',
   documents: 'Documents',
   settings: 'Settings',
 };

@@ -19,10 +19,9 @@
  * entirely, and matches how every other derived timestamp in this codebase (nextOccurrence.ts,
  * dateContext.ts) is already computed in JS rather than in SQL.
  *
- * linkedListItemId/linkedNoteId/linkedChatId are optional, set-once-at-creation pointers, same
- * shape as calendar_events' linked_list_item_id/linked_note_id (plugins/calendar) — not
- * validated against their target table here (a bad id just fails the FK constraint and the
- * insert throws, same as any other FK column in this codebase).
+ * linkedNoteId/linkedChatId are optional, set-once-at-creation pointers — not validated against
+ * their target table here (a bad id just fails the FK constraint and the insert throws, same as
+ * any other FK column in this codebase).
  *
  * @api-declaration
  * createSetTimerTool() — returns the set_timer RegisteredTool
@@ -47,7 +46,6 @@ interface SetTimerRow {
 interface SetTimerArgs {
   durationSeconds: number;
   label?: string;
-  linkedListItemId?: string;
   linkedNoteId?: string;
   linkedChatId?: string;
 }
@@ -57,7 +55,7 @@ function isSetTimerArgs(value: unknown): value is SetTimerArgs {
   const v = value as Record<string, unknown>;
   if (typeof v.durationSeconds !== 'number' || !Number.isFinite(v.durationSeconds) || v.durationSeconds <= 0) return false;
   if (v.label !== undefined && typeof v.label !== 'string') return false;
-  for (const key of ['linkedListItemId', 'linkedNoteId', 'linkedChatId'] as const) {
+  for (const key of ['linkedNoteId', 'linkedChatId'] as const) {
     if (v[key] !== undefined && typeof v[key] !== 'string') return false;
   }
   return true;
@@ -73,7 +71,6 @@ export function createSetTimerTool(): RegisteredTool {
         properties: {
           durationSeconds: { type: 'number', description: 'How long the timer runs, in seconds (e.g. 600 for 10 minutes).' },
           label: { type: 'string', description: 'What the timer is for, e.g. "Focus sprint" or "Break". Defaults to "Timer".' },
-          linkedListItemId: { type: 'string', description: 'Optional: a list item this timer relates to.' },
           linkedNoteId: { type: 'string', description: 'Optional: a note this timer relates to.' },
           linkedChatId: { type: 'string', description: 'Optional: the chat session this timer relates to.' },
         },
@@ -83,19 +80,18 @@ export function createSetTimerTool(): RegisteredTool {
     },
     handler: async (args, ctx) => {
       if (!isSetTimerArgs(args)) {
-        throw new Error('set_timer requires durationSeconds: number > 0; label/linkedListItemId/linkedNoteId/linkedChatId (if given) must be strings');
+        throw new Error('set_timer requires durationSeconds: number > 0; label/linkedNoteId/linkedChatId (if given) must be strings');
       }
       const endAt = new Date(Date.now() + args.durationSeconds * 1000);
       const [row] = await ctx.db.query<SetTimerRow>(
-        `insert into active_timers (user_id, label, duration_seconds, end_at, linked_list_item_id, linked_note_id, linked_chat_id)
-         values ($1, coalesce($2, 'Timer'), $3, $4, $5, $6, $7)
+        `insert into active_timers (user_id, label, duration_seconds, end_at, linked_note_id, linked_chat_id)
+         values ($1, coalesce($2, 'Timer'), $3, $4, $5, $6)
          returning timer_id, label, duration_seconds, end_at, status`,
         [
           ctx.userId,
           args.label?.trim() || null,
           args.durationSeconds,
           endAt.toISOString(),
-          args.linkedListItemId ?? null,
           args.linkedNoteId ?? null,
           args.linkedChatId ?? null,
         ],

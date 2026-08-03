@@ -3,12 +3,12 @@
  * @stamp 2026-07-27
  * @architectural-role IO Wrapper — plugin package entry point
  * @description
- * The contract orchestrator/pluginLoader.ts expects (same as weather/web): an `info` object and
+ * The contract orchestrator/pluginLoader.ts expects (same as web): an `info` object and
  * an async `registerTools`. No startBackgroundJobs — every tool here is a per-call calculation,
- * nothing to poll. calculate/convert_units/money_math need no dependencies at all (same as
- * get_weather); date_math closes over deps.settings to resolve household_timezone, the same
- * pattern plugins/calendar's get_calendar_schedule uses, so its "today" default agrees with what
- * the LLM was already told "today" is (orchestrator/src/util/dateContext.ts).
+ * nothing to poll. calculate/convert_units/money_math need no dependencies at all; date_math
+ * closes over deps.settings to resolve household_timezone, the same pattern plugins/temporal's
+ * scheduleRoutineTool.ts uses, so its "today" default agrees with what the LLM was already told
+ * "today" is (orchestrator/src/util/dateContext.ts).
  *
  * @api-declaration
  * info — plugin identity

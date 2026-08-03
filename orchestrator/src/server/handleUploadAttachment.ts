@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — parses a multipart file upload and runs it through extraction
  * @description
  * The business logic behind POST /v1/attachments/extract, split out from httpServer.ts the same
- * way openApiToolServer.ts's invokeTool is: this module never touches the raw ServerResponse or
+ * way toolInvoke.ts's invokeTool is: this module never touches the raw ServerResponse or
  * calls authenticate() itself (both stay private to httpServer.ts, per its own convention) — it
  * takes the already-authenticated request, does the actual work, and returns a plain {status,
  * body} pair for httpServer.ts's own thin route handler to send, same shape invokeTool returns.

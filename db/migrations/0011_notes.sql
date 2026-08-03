@@ -1,12 +1,12 @@
--- Freeform notes (Notes tab prerequisite) — applied by hand, same as 0004/0009:
+-- Freeform notes (Notes tab prerequisite) — applied by hand, same as 0009:
 --   docker exec -i bigbrain-postgres psql -U bigbrain_admin -d bigbrain < db/migrations/0011_notes.sql
 -- (bigbrain_admin, not bigbrain_app — CREATE TABLE needs owner/superuser privileges bigbrain_app
 -- was deliberately never granted.)
 --
 -- One row per note: a title and a freeform content blob, nothing structured. Deliberately not
--- reusing chat_messages/list_items' shape — a note isn't a sequence of anything, it's a single
--- piece of text a user or the LLM wrote and may come back to edit. tags is informational only,
--- same non-triggering role as lists.tags.
+-- reusing chat_messages' shape — a note isn't a sequence of anything, it's a single piece of text
+-- a user or the LLM wrote and may come back to edit. tags is informational only, never triggers
+-- a side effect.
 
 create table notes (
   note_id    uuid primary key default gen_random_uuid(),

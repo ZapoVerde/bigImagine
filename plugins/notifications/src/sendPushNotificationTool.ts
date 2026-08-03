@@ -18,8 +18,8 @@
  * instead of a broken tool the LLM can't tell is broken.
  *
  * A disabled or rate-limited call returns a soft {sent: false, reason} object rather than
- * throwing, same shape as get_weather's {found: false} — an expected, reasoned-about outcome, not
- * an error. A genuine provider failure (network/ntfy misconfigured) is different in kind: still
+ * throwing — an expected, reasoned-about outcome, not an error. A genuine provider failure
+ * (network/ntfy misconfigured) is different in kind: still
  * logged, but then thrown, same as plugins/web's webSearchTool surfacing braveSearchProvider's own
  * thrown error — the LLM needs to see a real failure to tell the user it didn't go through, not
  * silently swallow it.

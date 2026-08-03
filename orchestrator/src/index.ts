@@ -10,12 +10,11 @@
  * HTTP server. Nothing else imports this file — it's wiring, not a reusable module; the reusable
  * surface is everything under io/ and orchestrator/ that this file assembles.
  *
- * The Postgres pool is constructed before the LLM/embeddings/Notion clients now (previously the
+ * The Postgres pool is constructed before the LLM/embeddings clients now (previously the
  * reverse), because their config may come from the database rather than directly from env —
  * secrets from provider_credentials (io/providerCredentials.ts: deepseek/openrouter's apiKey,
- * BIGBRAIN_EMBEDDINGS_API_KEY, BIGBRAIN_NOTION_TOKEN), non-secret identifiers from
- * orchestrator_settings (io/orchestratorSettings.ts: Notion's owner user id / data source id —
- * docs/bb_principles.md §§12-13 draw that line). Both are rotated far more often than the rest of
+ * BIGBRAIN_EMBEDDINGS_API_KEY), non-secret identifiers from orchestrator_settings
+ * (io/orchestratorSettings.ts — docs/bi_principles.md §§12-13 draw that line). Both are rotated far more often than the rest of
  * this config, and doing so now only requires a value change + restart (restart: unless-stopped in
  * docker-compose.yml), not a rebuild — see orchestrator/src/server/adminServer.ts. The legacy env
  * vars remain the fallback used until an operator sets the DB-backed value via the Settings tab;
@@ -28,11 +27,11 @@
  * before anything else runs — this container has no working IPv6 route, and any outbound host
  * that happens to publish an AAAA record (confirmed live against Open-Meteo's geocoding API)
  * hangs until timeout instead of falling back to IPv4 promptly. Process-wide, not per-call,
- * since every IO Wrapper's outbound fetch (LLM providers, Notion, plugins/web, plugins/weather,
- * calendar ICS feeds) shares the same broken assumption.
+ * since every IO Wrapper's outbound fetch (LLM providers, plugins/web) shares the same broken
+ * assumption.
  *
  * llm is wrapped in io/llm/llmGate.ts's gate exactly once, right after construction, per
- * bb_principles.md §14 — every downstream consumer (loadPlugins' deps, startHttpServer's default
+ * bi_principles.md §14 — every downstream consumer (loadPlugins' deps, startHttpServer's default
  * connection, the agent_routine dispatch loop started below) shares the one gated instance, so
  * none of them has to remember to gate itself.
  *
@@ -61,7 +60,6 @@ import {
 } from './io/llm/profiles.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createFieldCipher } from './io/fieldCipher.js';
-import { createNotionClient } from './io/notion.js';
 import { createAccessIdentityResolver } from './io/accessIdentity.js';
 import { createChatSessionStore } from './io/chatSessions.js';
 import { createPostgresClient } from './io/postgres.js';
@@ -106,18 +104,16 @@ async function main(): Promise<void> {
 
   const rawProfilesJson = requireEnv('BIGBRAIN_LLM_PROFILES');
   const legacyProfiles = parseLlmProfiles(rawProfilesJson);
-  const [deepseekKey, openrouterKey, voyageKey, notionToken] = await Promise.all([
+  const [deepseekKey, openrouterKey, voyageKey] = await Promise.all([
     credentials.resolve('deepseek_api_key', legacyProfiles.deepseek?.apiKey),
     credentials.resolve('openrouter_api_key', legacyProfiles.openrouter?.apiKey),
     credentials.resolve('voyage_api_key', process.env.BIGBRAIN_EMBEDDINGS_API_KEY),
-    credentials.resolve('notion_token', process.env.BIGBRAIN_NOTION_TOKEN),
   ]);
 
   // Fail closed explicitly for the LLM keys — validateProfile would otherwise happily accept the
   // post-cutover UNMANAGED_SENTINEL string as "a valid non-empty apiKey" and boot with a dead key
-  // that only fails later, at the first real LLM call. Voyage/Notion don't need this:
-  // createEmbeddingProvider already throws on an empty apiKey, and an absent Notion token is a
-  // legitimately supported "sync disabled" state (io/notion.ts), not a failure.
+  // that only fails later, at the first real LLM call. Voyage doesn't need this:
+  // createEmbeddingProvider already throws on an empty apiKey.
   if (legacyProfiles.deepseek && !deepseekKey) {
     throw new Error('deepseek_api_key has no provider_credentials row and no usable env fallback');
   }
@@ -168,22 +164,10 @@ async function main(): Promise<void> {
     settings,
   );
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
-  // Owner user id / data source id are non-secret (docs/bb_principles.md §12) so they're DB-backed
-  // via orchestrator_settings, not provider_credentials — same restart-on-save shape as the
-  // connection picker, with the legacy env var as fallback until someone visits Settings (§13).
-  const notionOwnerUserId = (await settings.get('notion_owner_user_id')) ?? process.env.BIGBRAIN_NOTION_OWNER_USER_ID;
-  const notionListsDataSourceId =
-    (await settings.get('notion_lists_data_source_id')) ?? process.env.BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID;
-  const notion = createNotionClient({
-    ...process.env,
-    BIGBRAIN_NOTION_TOKEN: notionToken ?? '',
-    BIGBRAIN_NOTION_OWNER_USER_ID: notionOwnerUserId ?? '',
-    BIGBRAIN_NOTION_LISTS_DATA_SOURCE_ID: notionListsDataSourceId ?? '',
-  });
 
   // Default matches the Docker image layout: /app/orchestrator/dist/index.js -> /app/plugins.
   const pluginsDir = process.env.BIGBRAIN_PLUGINS_DIR ?? new URL('../../plugins', import.meta.url).pathname;
-  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, notion, db, credentials, settings });
+  const pluginTools = await loadPlugins(pluginsDir, { llm, embeddings, cipher, db, credentials, settings });
   const tools = createToolRegistry(pluginTools);
 
   const apiKeys = createApiKeyStore(requireEnv('BIGBRAIN_API_KEYS'));
@@ -207,9 +191,6 @@ async function main(): Promise<void> {
   const accessIdentity = createAccessIdentityResolver(process.env);
   const adminApiKey = requireEnv('BIGBRAIN_ADMIN_API_KEY');
   const port = Number(process.env.BIGBRAIN_ORCHESTRATOR_PORT ?? 8787);
-  // Where other containers on traefik-net (e.g. Open WebUI) actually reach this service — see
-  // docker-compose.yml's container_name. Only used to fill in the OpenAPI spec's `servers` entry.
-  const publicBaseUrl = process.env.BIGBRAIN_ORCHESTRATOR_BASE_URL ?? 'http://bigbrain-orchestrator:8787';
   // Not a secret (bb_principles.md §12) — just tells the frontend whether the backup/ sidecar
   // (docker-compose.yml) has real credentials yet, so it can warn instead of silently having no
   // offsite backup. Set alongside the real BIGBRAIN_BACKUP_S3_*/AGE_PUBLIC_KEY vars, never read
@@ -230,7 +211,6 @@ async function main(): Promise<void> {
     llmProfiles,
     modelName: 'bigbrain',
     port,
-    publicBaseUrl,
     backupConfigured,
   });
 }

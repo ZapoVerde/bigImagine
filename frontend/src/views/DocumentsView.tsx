@@ -13,8 +13,8 @@ interface DocumentsViewProps {
 // Read-only by design (docs/spec.md §5/§6.6): the file in the user's own local git repo is
 // canonical, not this view — there's no edit surface here, only browsing, reading, clipping new
 // pages in via ingest_url, and now searching/filtering. Self-contained (owns its own list +
-// detail state), same shape as CalendarView/MealPlanView rather than routed through Sidebar,
-// since documents have no sidebar browser of their own.
+// detail state) rather than routed through Sidebar, since documents have no sidebar browser of
+// their own.
 //
 // search is list_documents' lexical full-text search (docs/spec.md §6.6) — a search box gets a
 // short, deliberately-typed query, debounced here rather than fired on every keystroke. Tag

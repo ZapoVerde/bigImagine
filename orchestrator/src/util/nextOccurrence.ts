@@ -16,7 +16,7 @@
  * to know that zone's UTC offset on a given date, including across a DST transition — that's a
  * real timezone-database lookup, not just day counting. No library dependency for it, though:
  * Intl.DateTimeFormat already carries the IANA tz database (the same guarantee
- * orchestrator/src/util/dateContext.ts and plugins/calendar rely on), so zonedTimeToUtc below
+ * orchestrator/src/util/dateContext.ts relies on), so zonedTimeToUtc below
  * uses the standard "guess as UTC, see what wall-clock time that guess actually shows in the
  * target zone, correct by the difference" technique — the same approach date-fns-tz/luxon use
  * internally, just inlined here since the corrected guess converges in at most two iterations

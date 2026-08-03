@@ -1,6 +1,6 @@
 -- Encrypted, DB-backed home for the provider API keys that get rotated far more often than the
--- rest of bigBrain's config (deepseek/openrouter LLM keys, the Voyage embeddings key, the Notion
--- token) — see orchestrator/src/io/providerCredentials.ts for how it's read/written. Applied by
+-- rest of bigBrain's config (deepseek/openrouter LLM keys, the Voyage embeddings key) — see
+-- orchestrator/src/io/providerCredentials.ts for how it's read/written. Applied by
 -- hand, same as 0003-0007, since docker-entrypoint-initdb.d only runs against an empty volume:
 --   psql -U bigbrain_admin -d bigbrain -f /docker-entrypoint-initdb.d/0008_provider_credentials.sql
 
@@ -18,8 +18,7 @@ create table provider_credentials (
   name        text primary key check (name in (
                 'deepseek_api_key',
                 'openrouter_api_key',
-                'voyage_api_key',
-                'notion_token'
+                'voyage_api_key'
               )),
   ciphertext  text not null,
   updated_at  timestamptz not null default now()

@@ -9,11 +9,11 @@
  * orchestrator wiring — same seam shape as io/llm/types.ts's LlmProvider (bb_principles.md §6).
  *
  * Returns only title/url/snippet — no page content. This is deliberately a search tool, not a
- * fetch tool: fetching an arbitrary URL the LLM picks would need its own SSRF guard (the
- * orchestrator shares a docker network with Postgres and other internal services), which is a
- * separate, not-yet-built capability. plugins/recipes/src/importRecipeTool.ts already owns the
- * one case that needs full-page fetching (a known recipe URL); this module only ever calls
- * Brave's own API host, never a URL the LLM supplies, so it carries no SSRF surface itself.
+ * fetch tool: fetching an arbitrary URL the LLM picks needs its own SSRF guard (the orchestrator
+ * shares a docker network with Postgres and other internal services) — ingest_url
+ * (plugins/documents/src/ingestUrlTool.ts) already owns that case via
+ * orchestrator/src/io/fetchUntrusted.ts; this module only ever calls Brave's own API host, never a
+ * URL the LLM supplies, so it carries no SSRF surface itself.
  *
  * @api-declaration
  * SearchResult — { title, url, snippet }

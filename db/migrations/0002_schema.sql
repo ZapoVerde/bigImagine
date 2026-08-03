@@ -28,33 +28,6 @@ create table unstructured_notes (
   created_at   timestamptz not null default now()
 );
 
-create table recipes_meals (
-  recipe_id  uuid primary key default gen_random_uuid(),
-  user_id    uuid not null references users(user_id),
-  meal_name  text not null,
-  created_at timestamptz not null default now()
-);
-
-create table shopping_logs (
-  log_id     uuid primary key default gen_random_uuid(),
-  user_id    uuid not null references users(user_id),
-  recipe_id  uuid references recipes_meals(recipe_id),
-  "timestamp" timestamptz not null default now(),
-  item_name  text not null,
-  is_staple  boolean not null default false
-);
-
-create table notion_sync_map (
-  sync_id           uuid primary key default gen_random_uuid(),
-  user_id           uuid not null references users(user_id),
-  source_table      text not null,
-  source_row_id     uuid not null,
-  notion_database_id text not null,
-  notion_page_id    text not null,
-  last_synced_at    timestamptz,
-  unique (source_table, source_row_id)
-);
-
 -- Not canonical for its own content (docs/spec.md §3) — the file at file_path, in git, is.
 -- This row exists purely so the LLM can find/summarize it via chat.
 create table documents (
@@ -77,7 +50,7 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['unstructured_notes', 'recipes_meals', 'shopping_logs', 'notion_sync_map', 'documents']
+  foreach t in array array['unstructured_notes', 'documents']
   loop
     execute format('alter table %I enable row level security', t);
     execute format('alter table %I force row level security', t);

@@ -5,7 +5,7 @@ the entire history, cost and latency grow without bound, and the model's attenti
 messages that stopped being relevant hundreds of turns ago. This is bigBrain's answer — adapted from
 the pattern in [SillyTavern-Canonize](https://github.com/ZapoVerde/SillyTavern-Canonize), a rolling
 summarization/RAG extension for a different kind of chat app, reshaped around the two things bigBrain
-has that Canonize doesn't: a real relational store as the canonical record (`docs/bb_principles.md`
+has that Canonize doesn't: a real relational store as the canonical record (`docs/bi_principles.md`
 §1), and no roleplay "world" to model — a household's actual facts already live in `notes`,
 `documents`, `list_items`, `recipes`, and `calendar_events`.
 
@@ -41,7 +41,7 @@ oldest                                                                          
 Household memory and the key-ideas digest are small and unconditional — they're closer to "the
 model's own working notes" than a retrieval decision, so they're just always there, the same way
 the live window itself always is. Full-turn recall is different: pulling a specific archived
-exchange back into view is a real reach into the past, and per `docs/bb_principles.md` §2 (the LLM
+exchange back into view is a real reach into the past, and per `docs/bi_principles.md` §2 (the LLM
 reasons, nothing else does), that's a decision the model makes explicitly by calling a tool — not
 something silently injected on the server's own judgment about what's relevant. This is a deliberate
 departure from Canonize, which re-runs its full retrieval pipeline unprompted on every turn; bigBrain
@@ -108,7 +108,7 @@ turns out to matter in practice.
 It's populated exactly once per chat, when a household member explicitly archives it
 (`POST /v1/chats/:chatId/archive` → `chatSessions.ts`'s `archiveChat` stamps `archived_at`, which
 triggers `chatMemorySync.ts`'s `archiveChatMemory`) — never inferred from an idle timeout. That's a
-direct application of `docs/bb_principles.md` §3 (explicit user signal outranks inferred): deciding
+direct application of `docs/bi_principles.md` §3 (explicit user signal outranks inferred): deciding
 a conversation is "done" is the household's call, not a heuristic's.
 
 Every `household_memory` row also carries a `source` (`'inferred'` by default, flipped to `'user'`

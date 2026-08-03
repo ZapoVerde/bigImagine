@@ -5,12 +5,12 @@
  * @description
  * Two forced-schema LLM steps for a saved document. summarizeDocument is the §6.1-style
  * one-sentence summary (mirrors plugins/document-ingestion/src/classifyNote.ts's pattern exactly;
- * duplicated rather than imported across the plugin boundary, same precedent plugins/recipes'
- * meal-plan shopping-list tool already set — plugins are siblings with no exports map for
- * cross-plugin imports today). tagChunks is chunk-level, not document-level — search_documents/
- * list_documents rank and filter at chunk granularity, so a tag has to say which chunk it applies
- * to. Fed the user's existing tag vocabulary as a strong nudge toward reuse rather than inventing
- * near-duplicates ("cooking" vs "recipes") — a nudge, not a guarantee: tags are inexact by nature,
+ * duplicated rather than imported across the plugin boundary — plugins are siblings with no
+ * exports map for cross-plugin imports today). tagChunks is chunk-level, not document-level —
+ * search_documents/list_documents rank and filter at chunk granularity, so a tag has to say which
+ * chunk it applies to. Fed the user's existing tag vocabulary as a strong nudge toward reuse
+ * rather than inventing near-duplicates ("cooking" vs "food") — a nudge, not a guarantee: tags
+ * are inexact by nature,
  * same tolerance already extended to unstructured_notes' auto_tags, which has run with zero
  * vocabulary awareness at all. Validation is lenient on coverage (a chunk the model skips just
  * gets no tags) since tagging is supplementary, unlike the summary a document row actually needs.

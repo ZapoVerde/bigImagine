@@ -3,10 +3,10 @@
  * @stamp 2026-07-25
  * @architectural-role Pure Function — private/reserved network address classification
  * @description
- * import_recipe (plugins/recipes/src/importRecipeTool.ts) fetches a URL the LLM or a chat message
+ * ingest_url (plugins/documents/src/ingestUrlTool.ts) fetches a URL the LLM or a chat message
  * supplied — the one outbound HTTP destination in the platform that isn't admin-configured
- * (contrast Notion, Google Calendar, and the LLM provider base URL, all set from the Settings tab
- * by the person running the deployment). io/fetchUntrusted.ts is the IO Wrapper that resolves the
+ * (contrast the LLM provider base URL, set from the Settings tab by the person running the
+ * deployment). io/fetchUntrusted.ts is the IO Wrapper that resolves the
  * target hostname and calls this to decide whether a resolved address is safe to fetch at all.
  *
  * Hand-rolled rather than a dependency: the ranges that matter here (loopback, RFC1918 private

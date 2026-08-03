@@ -3,17 +3,16 @@
  * @stamp 2026-07-26
  * @architectural-role Pure Function module — OpenAI Chat Completions request/response shapes
  * @description
- * The minimal subset of the OpenAI API shape a client like Open WebUI needs from a custom
- * "OpenAI-compatible" connection: chat completions (streaming and non-streaming) and a models
- * list. bigBrain never calls a real OpenAI endpoint — this is only the shape bigBrain's own HTTP
- * server produces so an unmodified OpenAI-shaped client can treat it as a model (the Phase 4
- * decision: bigBrain drives, the chat UI only displays).
+ * The minimal subset of the OpenAI Chat Completions shape the native frontend needs: chat
+ * completions (streaming and non-streaming) and a models list. bigBrain never calls a real OpenAI
+ * endpoint — this is only the shape bigBrain's own HTTP server produces for its own frontend to
+ * consume; the shape happens to be OpenAI-compatible because that's how it was originally built,
+ * not because an external OpenAI-shaped client is a target consumer.
  *
  * `attachments` is a bigBrain extension, not part of the OpenAI shape: bigBrain's own frontend
  * calls POST /v1/attachments/extract first to turn a staged file into Markdown, then sends the
  * result here alongside `messages` — httpServer.ts splices it onto the latest user message for
- * this turn only (util/attachmentContext.ts), never persisting it. Clients that never send it
- * (Open WebUI) are completely unaffected.
+ * this turn only (util/attachmentContext.ts), never persisting it.
  *
  * `images` is a second, separate bigBrain extension: unlike `attachments`, an image never goes
  * through POST /v1/attachments/extract at all (there's nothing to extract — bb_principles.md §2

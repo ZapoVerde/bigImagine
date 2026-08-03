@@ -15,24 +15,22 @@
  * plugins, per bb_principles.md §11 (observable failures, not silent or fatal ones).
  *
  * A plugin may optionally export `startBackgroundJobs(deps)` alongside `registerTools` — for
- * work that isn't triggered by a tool call at all, like plugins/lists' Notion reconciliation
- * poll (docs/spec.md §6.4's inbound half) or plugins/calendar's ICS poll (§6.7). Purely additive
- * and optional, the same capability-flag shape as LlmProvider.listModels: most plugins have no
- * need for it and just don't export it. deps.db is the raw PostgresClient (not a pre-scoped
- * DbSession) specifically so a background job can open its own withUserScope session on its own
- * schedule, independent of any request. Awaited (not fire-and-forget) so a plugin needing async
- * setup — e.g. resolving its own named secrets via deps.credentials.resolve() before deciding
- * whether to start a poll timer at all — is caught by the same try/catch as a synchronous one; a
- * plugin that just starts a timer and returns (lists' shape) is unaffected, since awaiting a
+ * work that isn't triggered by a tool call at all, like plugins/temporal's timer poll. Purely
+ * additive and optional, the same capability-flag shape as LlmProvider.listModels: most plugins
+ * have no need for it and just don't export it. deps.db is the raw PostgresClient (not a
+ * pre-scoped DbSession) specifically so a background job can open its own withUserScope session
+ * on its own schedule, independent of any request. Awaited (not fire-and-forget) so a plugin
+ * needing async setup — e.g. resolving its own named secrets via deps.credentials.resolve()
+ * before deciding whether to start a poll timer at all — is caught by the same try/catch as a
+ * synchronous one; a plugin that just starts a timer and returns is unaffected, since awaiting a
  * non-Promise return value resolves immediately.
  *
  * deps.credentials is the same encrypted, write-only secret store index.ts uses to resolve its
- * own provider keys (docs/bb_principles.md §12) — any plugin with its own named secret (e.g.
- * calendar's cozi_ics_url/outlook_ics_url) resolves it the same way, rather than reading
- * process.env directly for anything capability-shaped. deps.settings is the plaintext counterpart
- * (docs/bb_principles.md §13) for a plugin's own non-secret boot-time config (e.g. calendar's
- * calendar_owner_user_id/mask_work_calendar) — DB value if set, its legacy BIGBRAIN_*-prefixed env
- * var as the fallback otherwise. Only a plugin whose config genuinely has no reason to be
+ * own provider keys (docs/bb_principles.md §12) — any plugin with its own named secret resolves
+ * it the same way, rather than reading process.env directly for anything capability-shaped.
+ * deps.settings is the plaintext counterpart (docs/bb_principles.md §13) for a plugin's own
+ * non-secret boot-time config — DB value if set, its legacy BIGBRAIN_*-prefixed env var as the
+ * fallback otherwise. Only a plugin whose config genuinely has no reason to be
  * DB/Settings-tab-editable reads process.env directly.
  *
  * @api-declaration
@@ -54,7 +52,6 @@ import { log } from '../io/logger.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { FieldCipher } from '../io/fieldCipher.js';
 import type { LlmProvider } from '../io/llm/types.js';
-import type { NotionClient } from '../io/notion.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
@@ -64,7 +61,6 @@ export interface PluginDeps {
   llm: LlmProvider;
   embeddings: EmbeddingProvider;
   cipher: FieldCipher;
-  notion: NotionClient | undefined;
   db: PostgresClient;
   credentials: ProviderCredentialStore;
   settings: OrchestratorSettingsStore;
@@ -111,8 +107,8 @@ export interface LoadPluginsOptions {
   /** Defaults true (real runtime behavior, index.ts's only call site). Set false to load plugins
    *  and register their tools without awaiting startBackgroundJobs at all — for a test that only
    *  cares about the loader/registerTools contract (verify-server.mjs's Part 1) and would
-   *  otherwise leave real setInterval-based pollers (temporal, calendar) running against a fake
-   *  DB pool that can't answer their queries, for the rest of the process's life. */
+   *  otherwise leave real setInterval-based pollers (e.g. plugins/temporal) running against a
+   *  fake DB pool that can't answer their queries, for the rest of the process's life. */
   startBackgroundJobs?: boolean;
 }
 

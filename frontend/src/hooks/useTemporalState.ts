@@ -3,10 +3,10 @@ import { callTool } from '../api/client';
 import type { TemporalState } from '../api/types';
 
 // bigBrain has no server->client push channel (the only SSE is for an in-flight chat completion),
-// so this polls list_temporal_state the same way TodayAgenda.tsx polls get_calendar_schedule —
-// via the existing generic POST /v1/tools/:name route, not a bespoke endpoint. 5s is frequent
-// enough that a timer finishing feels prompt without hammering the server; the visible countdown
-// itself ticks locally every second between polls (TimerStrip.tsx), not from this hook.
+// so this polls list_temporal_state via the existing generic POST /v1/tools/:name route, not a
+// bespoke endpoint. 5s is frequent enough that a timer finishing feels prompt without hammering
+// the server; the visible countdown itself ticks locally every second between polls
+// (TimerStrip.tsx), not from this hook.
 const POLL_INTERVAL_MS = 5_000;
 
 const EMPTY_STATE: TemporalState = { running: [], completed: [], cancelled: [], upcomingAlarms: [], recentlyFiredAlarms: [] };

@@ -3,21 +3,20 @@
  * @stamp 2026-07-25
  * @architectural-role IO Wrapper — SSRF-guarded fetch for URLs that did not come from admin config
  * @description
- * Wraps httpRetry.ts's fetchWithRetry for the one fetch target in the platform that isn't
- * something the deployer configured (an admin-set Notion token, calendar feed, or LLM provider
- * base URL) but something a chat turn supplied — import_recipe's `url` argument, reachable from
- * the LLM's own tool call and therefore from a prompt-injected page as easily as from the
- * household member who started the conversation. Resolves the hostname via DNS itself and checks
- * every resolved address against util/ssrfGuard.ts before the real fetch runs, so a hostname that
- * resolves to a container on the same Docker network, a loopback service, or a cloud metadata
- * endpoint (169.254.169.254) is rejected before any request reaches it — the URL's string form
- * alone can't be trusted, since DNS decides where a hostname actually points.
+ * Wraps httpRetry.ts's fetchWithRetry for fetch targets in the platform that aren't something the
+ * deployer configured (an admin-set LLM provider base URL) but something a chat turn supplied —
+ * ingest_url's `url` argument (plugins/documents/src/ingestUrlTool.ts), reachable from the LLM's
+ * own tool call and therefore from a prompt-injected page as easily as from the household member
+ * who started the conversation. Resolves the hostname via DNS itself and checks every resolved
+ * address against util/ssrfGuard.ts before the real fetch runs, so a hostname that resolves to a
+ * container on the same Docker network, a loopback service, or a cloud metadata endpoint
+ * (169.254.169.254) is rejected before any request reaches it — the URL's string form alone can't
+ * be trusted, since DNS decides where a hostname actually points.
  *
- * Every other fetchWithRetry caller (Notion, Google Calendar, the LLM providers, ICS calendar
- * feeds, weather/search) stays unguarded on purpose: those destinations are admin-configured, and
- * some homelab deployments legitimately point an LLM provider or calendar feed at another
- * container on the same private network — this guard would break a deliberate setup, not stop an
- * attacker, if applied there.
+ * Every other fetchWithRetry caller (the LLM providers, search) stays unguarded on
+ * purpose: those destinations are admin-configured, and some homelab deployments legitimately
+ * point an LLM provider at another container on the same private network — this guard would break
+ * a deliberate setup, not stop an attacker, if applied there.
  *
  * Does not pin the fetch to the resolved address (no Host-header rewriting): fetch() re-resolves
  * the hostname itself, so in principle DNS could answer differently the second time (rebinding).

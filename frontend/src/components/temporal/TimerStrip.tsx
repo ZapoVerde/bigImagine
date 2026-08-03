@@ -20,8 +20,8 @@ function formatRemaining(endAt: string, nowMs: number): string {
 
 // Minimal, always-visible countdown banner — no push channel exists (useTemporalState.ts polls
 // every 5s), so the displayed time ticks locally every second between polls rather than jumping
-// in 5s increments. Renders nothing when no timer is running, same "don't take up space when
-// there's nothing to show" convention as TodayAgenda.tsx.
+// in 5s increments. Renders nothing when no timer is running — doesn't take up space when
+// there's nothing to show.
 export default function TimerStrip({ apiKey }: TimerStripProps) {
   const { state, refresh } = useTemporalState(apiKey);
   const [nowMs, setNowMs] = useState(() => Date.now());

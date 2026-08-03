@@ -1,123 +1,104 @@
-# bigBrain
+# BigImagine
 
-Self-hosted, multi-user "Second Brain" platform: Postgres+pgvector canonical store, a server-side
-LLM reasoning/orchestration layer, a replaceable interface layer (Open WebUI plus a native
-frontend), and a set of microservice plugins covering notes, lists, recipes, calendar, documents,
-and more.
+A self-hosted, single-user interactive fiction and roleplay platform, forked from the bigBrain
+core engine and re-pointed at narrative instead of household data. It is meant to fully replace a
+personal SillyTavern installation — native relational storage and `pgvector` semantic recall
+standing in for ST's flat JSON files, regex keyword lorebooks, and DOM-injected extensions — once
+it earns that replacement on its own merits.
+
+Three previously separate SillyTavern extensions become native, relational features rather than
+bolted-on extensions:
+
+- **Canonize** → approved canon facts, with human-in-the-loop proposal review.
+- **Vistalyze** → locations, with cached generated background imagery.
+- **Triggeryze** → rules and status effects, with conditional context injection.
 
 Read before touching code:
-- `docs/bb_principles.md` — design intent, read first
-- `docs/spec.md` — architecture spec (principles win where they disagree)
+- `docs/bi_principles.md` — design intent, read first
+- `docs/spec.md` — the target architecture for the narrative engine (status-tagged: **(built)**,
+  **(designed)**, **(parked)** — see the note on status below)
 - `docs/conventions.md` — module preamble format and file-organization rules
 - `docs/verification.md` — the verify-script testing philosophy (no unit-test framework)
-- `docs/bootstrap.md` — orientation for a new session, the workspace/stacks split, secrets
+- `docs/bootstrap.md` — orientation for a new session; still bigBrain's own workspace/stacks/
+  secrets setup, largely reusable as-is (see below)
+
+## Status: fork in progress, narrative engine not yet built
+
+This repo is a fork of bigBrain, not yet a working roleplay platform. What's happened so far is
+subtraction, not addition: the household-specific plugins (recipes, meal planning, shopping lists/
+analytics, calendar, Notion sync, weather) have been removed, but the narrative-specific schema and
+plugins `docs/spec.md` describes — `characters`, `scenes`, `scene_presence`, `canon_facts`,
+`locations`, `rules`, `status_effects`, and the Canonize/Vistalyze/Triggeryze plugins themselves —
+do not exist yet. Neither does the single-user conversion: the database schema underneath is still
+bigBrain's original multi-user, Row-Level-Security-enforced design (`docs/spec.md` §3 describes
+pruning this, but that pruning hasn't happened yet).
+
+In other words: `docs/spec.md` is a target, not a build log — its own header says so. Everything
+below marked **(inherited)** is real, running code carried over unmodified from bigBrain. Everything
+marked **(designed)** is `docs/spec.md`'s plan and has no code behind it yet.
 
 ## Layout
 
 - `orchestrator/` — the reasoning/orchestration layer (tool manifest, LLM client, agentic loop)
+  **(inherited)**
 - `plugins/*` — microservice plugins, one per domain, registered as orchestrator tools
-- `frontend/` — the native tabbed UI (Chat, Lists, Recipes, Calendar, Notes, Documents, Settings)
-- `backup/` — offsite backup sidecar (nightly DB + documents + secrets, `age`-encrypted, pushed to R2)
-- `db/migrations/` — Postgres+pgvector schema
-- `docker-compose.yml` — the Dockge-managed stack definition
+  **(inherited)**
+- `frontend/` — the native tabbed UI **(inherited)**
+- `backup/` — offsite backup sidecar, still shaped for bigBrain's household scale **(inherited,
+  unreviewed for single-user)**
+- `db/migrations/` — Postgres+pgvector schema, still bigBrain's multi-user/RLS design
+  **(inherited)**
+- `docker-compose.yml` — the Dockge-managed stack definition **(inherited)**
 
-## Features
+## What's actually running today (inherited from bigBrain)
 
-Status tags: **(built)** is live today, **(designed)** is spec'd but not implemented,
-**(parked)** was scoped and deliberately shelved. Full detail for anything below is in
-`docs/spec.md`, section numbers noted where useful.
+Everything here is household/multi-user infrastructure that happens to also be useful for a
+narrative platform, kept because ripping it out wasn't necessary to start narrative work:
 
-### Chat & interaction
-- Conversational chat via Open WebUI, plus a parallel native frontend tab strip that talks to
-  the same tool surface directly, never through Open WebUI (§5, Correction 7).
-- Persisted chat history, folders, and reusable prompt presets (§3 additions).
-- Per-chat model and connection override, no restart needed (§3, "per-chat connection override").
-- Canvas: a split-screen note panel that opens automatically in Chat when a tool call touches a
-  note, so the LLM's edits are visible live (§3, "Canvas").
-- Landing Deck: a pinned-notes reference drawer and today's calendar shown above the chat bar
-  before the first message of a new chat (§5).
-  - Reference Drawer, pinned notes **(built)**.
-  - Tier 1 active-focus view (overdue/due-today tasks ranked into one queue) **(designed)**.
-- Write-time hint and read-time render tick to steer classification/presentation without
-  forcing a rigid menu-driven flow (§4).
-- Tag-browse fallback: a direct Postgres query on `pinned_tags` when semantic search misses (§4).
+- **Chat** — persisted chat history, folders, branching, prompt presets, per-chat model override,
+  Canvas (a split-screen panel that opens when a tool call touches something canvas-worthy — the
+  same mechanism the Inspector Canvas below is meant to generalize).
+- **Chat memory** — rolling summarization, RAG recall, session sync (`plugins/chat-memory`) —
+  adapted from Canonize once already; needs its own BigImagine-framed pass (`docs/spec.md` §4.1,
+  §8).
+- **Notes** — freeform notes with pin/archive lifecycle, semantic ingestion.
+- **Documents** — save/clip content into a per-user git repo, chunked embeddings, semantic search
+  (`plugins/documents`, `plugins/document-ingestion`).
+- **Web search** — Brave Search-backed tool (`plugins/web`).
+- **Timers & scheduled routines** — `set_timer`/`cancel_timer`, background job dispatch
+  (`plugins/temporal`) — infrastructure the narrative engine's own background passes (fact
+  extraction, rule evaluation) are expected to reuse, not infrastructure specific to households.
+- **Push notifications** — ntfy-backed (`plugins/notifications`).
+- **Math/date utilities** — calculation and date-math tools (`plugins/math-utils`).
+- **LLM-agnostic orchestration** — named connection profiles, swappable per chat, no vendor-specific
+  logic in prompts or tools.
+- **Runtime settings in Postgres** — active LLM profile/model, timezone; no redeploy needed to
+  change (`bi_principles.md` §13).
 
-### Notes
-- Semantic ingestion (`ingest_note`): auto-tagged, categorized, summarized, vector-embedded for
-  hybrid search (§6.1).
-- Freeform notes (separate from the above, for content a user edits directly): pin/archive
-  lifecycle, optional reminder timestamps, Canvas editing (§3 additions).
+## What's designed but not built (`docs/spec.md`)
 
-### Lists
-- Generic list/list-item primitive covering groceries, errands, or any todo list, not a
-  shopping-specific schema (§3, "lists/list_items").
-- Store-layout aware section ordering: a list can define its own aisle order and items get
-  auto-classified into it (§3, "section_order").
-- Due dates and priority (P1/P2/P3) on individual items (§3, "action dates & priority").
-- Two-way Notion sync for one household's Notion workspace (§6.4).
+The actual roleplay engine — the part that makes this BigImagine rather than a renamed bigBrain:
 
-### Recipes & meal planning
-- Import a recipe from a URL (reads `schema.org/Recipe` structured data first, falls back to LLM
-  extraction) or from pasted text (§6.5).
-- Conversational authoring: build or edit a recipe turn by turn without a re-extraction call
-  (`create_recipe`/`update_recipe`).
-- Meal plan entries by date, with a free-text label so an unusual day (e.g. a holiday with three
-  meals) isn't forced into a fixed breakfast/lunch/dinner slot.
-- Auto-generate a shopping list from a date range's planned meals, deduped and merged into the
-  Lists primitive above.
+- **Canonize** — `propose_canon_fact`/`approve_canon_fact`/`reject_canon_fact`/`recall_canon_facts`;
+  semantic-search canon replacing keyword lorebooks entirely.
+- **Vistalyze** — `set_active_location`/`generate_location_image`; cache-first image generation
+  against a configurable backend (local ComfyUI/Automatic1111 or a cloud API).
+- **Triggeryze** — `apply_status_effect`/`clear_status_effect`/`evaluate_rules`; conditional context
+  injection with mandatory expiry.
+- **The Director Pass** — LLM-driven speaker selection for multi-character scenes, never a
+  round-robin.
+- **Character Roster** — drag-and-drop V2/V3 PNG/JSON import and lossless export, URL/text import
+  with LLM-fallback extraction.
+- **Inspector Canvas** — on-scene character cards, active location metadata, active rules/statuses,
+  and the canon-approval queue.
+- **Single-user conversion** — dropping RLS/multi-tenancy and field-level encryption, since there's
+  no household member to scope against or protect data from (`docs/spec.md` §3).
 
-### Household calendar
-- Aggregates read-only Cozi and Outlook ICS feeds alongside native, user-created events in one
-  calendar (§6.7).
-- Bidirectional Google Calendar sync via OAuth: create, edit, and delete propagate both ways,
-  with last-write-wins conflict resolution.
-- Per-event visibility (`private`/`shared`) gating whether it reaches the shared Google calendar.
-- A task or note deadline can be explicitly promoted to a real calendar event, linked back to its
-  source row.
-- Optional work-calendar privacy masking (`BIGBRAIN_MASK_WORK_CALENDAR`) replaces Outlook event
-  details with a placeholder before they ever reach the database.
+Full detail, including the schema and the agentic loop's exact sequencing, is in `docs/spec.md`.
 
-### Documents & web clipping
-- Save authored content or clip a web page (`save_document`/`ingest_url`) into a per-user,
-  local git repository, no shared repo, no remote credential to leak (§6.6).
-- Web clips go through Readability + Turndown for clean Markdown, with metadata extraction
-  (author, site, published date) and normalized heading levels.
-- Chunked embeddings per document (heading-aware) for semantic `search_documents`, plus ranked
-  full-text search and tag filtering for the in-app search box.
-- Read-only in-app viewer; the git repo itself is the edit surface.
+## What was pruned from bigBrain
 
-### Shopping analytics
-- Purchase logging (`log_purchase`) feeding a chronological analytics query: average days
-  between purchases per item, for restock timing (§6.2).
-
-### Integrations
-- **Notion** — two-way sync for Lists, one owning household user, polling reconciliation rather
-  than webhooks (§6.4).
-- **Google Calendar** — OAuth-based two-way sync (§6.7). Needs `BIGBRAIN_ORCHESTRATOR_BASE_URL`
-  set to the real public hostname and a matching redirect URI registered on the OAuth client.
-- **Web search** — a single Brave Search-backed tool covering recipe discovery, documentation
-  lookup, and general facts (§6.8).
-- **Weather** — Open-Meteo backed, no API key required (§6.9).
-- **Gmail email parsing** (LLM-based structured extraction of order confirmations etc.)
-  **(parked)** — split out from the original calendar sketch, no live driver yet (§6.3).
-
-### Platform & admin
-- Multi-user with Postgres Row-Level Security enforced at the database layer, not just the app
-  (§3, Correction 2).
-- At-rest field encryption for note content (AES-256-GCM), protecting against a stolen disk or
-  leaked backup; not admin-blind, whoever holds the encryption key can decrypt everything (§3,
-  Correction 4).
-- LLM-agnostic orchestration: named connection profiles, swappable per household or per chat,
-  no vendor-specific logic in prompts or tools.
-- Provider credential vault (Settings tab): rotate LLM/Notion/Calendar/Brave keys without a
-  redeploy (`provider_credentials`, §3).
-- Offsite backup **(built)**: nightly `pg_dump` plus every user's document repo plus
-  `secrets.enc.env`, `age`-encrypted before leaving the host, pushed to an S3-compatible bucket
-  (Cloudflare R2 today, provider-agnostic mechanism). See `backup/README.md` for restore.
-- Cloudflare Access SSO (Google login) on the one public hostname; every route underneath still
-  enforces its own bearer token regardless (§7, Correction 6).
-
-### Not yet built
-- Landing Deck Tier 1 active-focus queue (overdue/due-today tasks, ranked) **(designed)**.
-- Composite task sort: time bucket first, priority second **(designed)**.
-- Gmail email parsing gateway **(parked)**.
+Removed already, not just planned: `plugins/recipes` (recipes & meal planning),
+`plugins/shopping-analytics`, `plugins/calendar` (Cozi/Outlook/Google Calendar sync), Notion
+two-way list sync, `plugins/weather`. None of this is narrative-relevant, and none of it is coming
+back.

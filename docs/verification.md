@@ -167,5 +167,5 @@ each wire behave as documented. It cannot tell you whether a specific cheap mode
 whether its classification quality is actually good enough for `docs/spec.md` §6.1's auto-tagging
 — those are live-model judgment calls that need a real request against a real deployment, not
 something a mock can ever settle. Nor does anything here check cross-file consistency or
-adherence to `docs/bb_principles.md`'s architecture rules — that's `code-review`'s job, not this
+adherence to `docs/bi_principles.md`'s architecture rules — that's `code-review`'s job, not this
 doc's.

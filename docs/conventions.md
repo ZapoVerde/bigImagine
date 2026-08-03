@@ -1,12 +1,12 @@
 # bigBrain — Module Conventions
 
-*Companion to `bb_principles.md`. Principles say why; this says how.*
+*Companion to `bi_principles.md`. Principles say why; this says how.*
 
 ---
 
 ## Module Preamble
 
-Every source file opens with this block, per `bb_principles.md` §9 (Every Module is Self-Describing):
+Every source file opens with this block, per `bi_principles.md` §9 (Every Module is Self-Describing):
 
 ```ts
 /**
@@ -32,7 +32,7 @@ Every source file opens with this block, per `bb_principles.md` §9 (Every Modul
 
 ## The Four Kinds of Code
 
-Per `bb_principles.md` §8. Every file is exactly one:
+Per `bi_principles.md` §8. Every file is exactly one:
 
 1. **Pure Functions** — input in, derived output out. No IO.
 2. **Stateful Owners** — the one place a given piece of runtime memory lives.
@@ -43,4 +43,4 @@ If a file's `@architectural-role` can't be stated in one line, it's not designed
 
 ## File Size
 
-300-line budget per `bb_principles.md` §10. Split along the fault line the preamble already implies.
+300-line budget per `bi_principles.md` §10. Split along the fault line the preamble already implies.

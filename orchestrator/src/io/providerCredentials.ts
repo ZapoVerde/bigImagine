@@ -4,8 +4,7 @@
  * @architectural-role IO Wrapper — encrypted, DB-backed secret storage
  * @description
  * Backs the credentials named below (db/migrations/0008_provider_credentials.sql,
- * 0014_calendar_ics_credentials.sql, 0016_web_search_credentials.sql,
- * 0018_google_calendar_oauth.sql, 0034_notifications_credentials_settings.sql) with
+ * 0016_web_search_credentials.sql, 0034_notifications_credentials_settings.sql) with
  * createFieldCipher (io/fieldCipher.ts) — reused as-is, no
  * crypto reimplemented here. resolve() is this codebase's first decrypt-on-read call site;
  * fieldCipher.ts's own preamble notes none existed yet, only the encrypt-on-write idiom in
@@ -15,8 +14,8 @@
  * vocabulary, encrypted at rest, never returned in plaintext or ciphertext once set — a new secret
  * is a new name added to CREDENTIAL_NAMES plus a migration widening the CHECK constraint, not a
  * new parallel mechanism. Non-secret config that merely selects or configures behavior (a user id,
- * a feature flag) never belongs in this vocabulary — see BIGBRAIN_NOTION_OWNER_USER_ID and
- * BIGBRAIN_CALENDAR_OWNER_USER_ID, both deliberately plain env instead.
+ * a feature flag) never belongs in this vocabulary — orchestratorSettings.ts is where that lives
+ * instead.
  *
  * resolve()'s env-fallback-and-seed behavior is what lets this ship against an existing,
  * non-empty deployment without a manual DB write on cutover day: if no row exists yet, it uses
@@ -53,12 +52,7 @@ export const CREDENTIAL_NAMES = [
   'deepseek_api_key',
   'openrouter_api_key',
   'voyage_api_key',
-  'notion_token',
-  'cozi_ics_url',
-  'outlook_ics_url',
   'brave_api_key',
-  'google_calendar_client_secret',
-  'google_calendar_refresh_token',
   'ntfy_topic',
 ] as const;
 export type CredentialName = (typeof CREDENTIAL_NAMES)[number];

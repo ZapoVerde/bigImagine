@@ -46,9 +46,9 @@ export function createWebSearchTool(provider: SearchProvider): RegisteredTool {
     definition: {
       name: 'web_search',
       description:
-        'Search the web and return matching pages (title, url, snippet). Use for finding recipes, code ' +
+        'Search the web and return matching pages (title, url, snippet). Use for finding code ' +
         'patterns/documentation (e.g. include "site:github.com" in the query), or general facts. Does not ' +
-        'fetch full page content — for a recipe URL found this way, pass it to import_recipe to fetch and parse it. ' +
+        'fetch full page content — for a document worth ingesting, pass its url to ingest_url. ' +
         'When answering from these results, always include the source url(s) you drew on, not just a prose summary.',
       parameters: {
         type: 'object',

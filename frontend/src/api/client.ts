@@ -1,6 +1,5 @@
 import type {
   ActiveProfileSetting,
-  CalendarSettings,
   ChatCompletionResponse,
   ChatDetail,
   ChatMemorySettings,
@@ -10,9 +9,7 @@ import type {
   ChatSummary,
   CredentialSummary,
   Folder,
-  GoogleCalendarSettings,
   NotificationSettings,
-  NotionSettings,
   ProfileModelsResult,
   StagedAttachment,
 } from './types';
@@ -71,9 +68,8 @@ export async function getTimezone(apiKey: string | null): Promise<string> {
 
 /** Invokes one registered tool by name — POST /v1/tools/:name, same auth and RLS scoping as chat.
  *  apiKey is null under Cloudflare Access SSO (see whoami()) — the Authorization header is simply
- *  omitted in that case. Response shapes aren't discoverable from the server (openapi.json always
- *  reports `{}`); callers supply the expected shape via the type parameter, backed by the
- *  hand-written interfaces in ./types.ts. */
+ *  omitted in that case. Response shapes aren't discoverable from the server; callers supply the
+ *  expected shape via the type parameter, backed by the hand-written interfaces in ./types.ts. */
 export async function callTool<T>(name: string, args: unknown, apiKey: string | null): Promise<T> {
   const res = await fetch(`/v1/tools/${encodeURIComponent(name)}`, {
     method: 'POST',
@@ -255,11 +251,10 @@ export function deleteFolder(folderId: string, apiKey: string | null): Promise<{
   return jsonRequest<{ deleted: boolean }>(`/v1/folders/${encodeURIComponent(folderId)}`, apiKey, { method: 'DELETE' });
 }
 
-/** Registered tool names, from the OpenAPI spec's paths — the only place the server enumerates
- *  its tools. Used by the per-chat tool checklist. */
+/** Registered tool names — used by the per-chat tool checklist. */
 export async function listToolNames(apiKey: string | null): Promise<string[]> {
-  const body = await jsonRequest<{ paths: Record<string, unknown> }>('/v1/tools/openapi.json', apiKey);
-  return Object.keys(body.paths).map((p) => p.replace(/^\//, ''));
+  const body = await jsonRequest<{ names: string[] }>('/v1/tools', apiKey);
+  return body.names;
 }
 
 /** adminKey is null under Cloudflare Access SSO — httpServer.ts's isAdminAuthorized trusts any
@@ -340,28 +335,8 @@ export async function adminSetTimezone(timezone: string, adminKey: string | null
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
-/** The household's default recipe scale ("always show recipes scaled for 6") — null until ever
- *  set, in which case scale_recipe falls back further to each recipe's own base_servings. Same
- *  no-restart shape as timezone: scale_recipe reads it live on every call. */
-export async function adminGetDefaultRecipeServings(adminKey: string | null): Promise<number | null> {
-  const res = await fetch('/v1/admin/recipe-settings', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  const body = (await res.json()) as { defaultServings: number | null };
-  return body.defaultServings;
-}
-
-/** Resolves once saved — no restart, no polling; the next scale_recipe call reads it live. */
-export async function adminSetDefaultRecipeServings(value: number, adminKey: string | null): Promise<void> {
-  const res = await fetch('/v1/admin/recipe-settings', {
-    method: 'POST',
-    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify({ value }),
-  });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-}
-
 /** ntfy_server_url/notifications_enabled (plugins/notifications) — same no-restart shape as
- *  timezone/recipe-settings: send_push_notification reads both live on every call. */
+ *  timezone: send_push_notification reads both live on every call. */
 export async function adminGetNotificationSettings(adminKey: string | null): Promise<NotificationSettings> {
   const res = await fetch('/v1/admin/notification-settings', { headers: authHeaders(adminKey) });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
@@ -381,49 +356,9 @@ export async function adminSetNotificationSettings(
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
-/** docs/bb_principles.md §13: non-secret runtime config, DB-backed and Settings-tab-editable
- *  rather than .env-only. Both calendar and Notion settings are read once at boot, so a save
- *  restarts the orchestrator (202/restarting), same UX as the connection picker. */
-export async function adminGetCalendarSettings(adminKey: string | null): Promise<CalendarSettings> {
-  const res = await fetch('/v1/admin/calendar-settings', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<CalendarSettings>;
-}
-
-export async function adminSetCalendarSettings(
-  patch: { owner_user_id?: string; mask_work_calendar?: boolean },
-  adminKey: string | null,
-): Promise<void> {
-  const res = await fetch('/v1/admin/calendar-settings', {
-    method: 'POST',
-    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
-}
-
-export async function adminGetNotionSettings(adminKey: string | null): Promise<NotionSettings> {
-  const res = await fetch('/v1/admin/notion-settings', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<NotionSettings>;
-}
-
-export async function adminSetNotionSettings(
-  patch: { owner_user_id?: string; lists_data_source_id?: string },
-  adminKey: string | null,
-): Promise<void> {
-  const res = await fetch('/v1/admin/notion-settings', {
-    method: 'POST',
-    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
-}
-
 /** docs/chat-memory.md — mirrors SillyTavern-Canonize's own "Connections & Prompts" panel: a
  *  connection override for the rolling-sync pipeline plus a "default + bespoke" prompt per stage.
- *  Same no-restart shape as timezone/recipe-settings: chatMemorySync.ts reads all of this live on
- *  every tick. */
+ *  Same no-restart shape as timezone: chatMemorySync.ts reads all of this live on every tick. */
 export async function adminGetChatMemorySettings(adminKey: string | null): Promise<ChatMemorySettings> {
   const res = await fetch('/v1/admin/chat-memory-settings', { headers: authHeaders(adminKey) });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
@@ -448,32 +383,4 @@ export async function adminSetChatMemorySettings(
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<ChatMemorySettings>;
-}
-
-export async function adminGetGoogleCalendarSettings(adminKey: string | null): Promise<GoogleCalendarSettings> {
-  const res = await fetch('/v1/admin/google-calendar-settings', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<GoogleCalendarSettings>;
-}
-
-export async function adminSetGoogleCalendarSettings(
-  patch: { client_id?: string; owner_user_id?: string; calendar_id?: string },
-  adminKey: string | null,
-): Promise<void> {
-  const res = await fetch('/v1/admin/google-calendar-settings', {
-    method: 'POST',
-    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
-  });
-  if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
-}
-
-// Returns Google's consent URL to open in a new tab — the Settings tab never handles the OAuth
-// code/state itself, that's server/adminServer.ts's callback route (redirects the browser back to
-// / with a ?google_calendar= status query param this page can read once on load).
-export async function adminGetGoogleCalendarAuthUrl(adminKey: string | null): Promise<string> {
-  const res = await fetch('/v1/admin/google-calendar/auth-url', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  const body = (await res.json()) as { url: string };
-  return body.url;
 }
