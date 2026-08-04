@@ -1,0 +1,146 @@
+.canon-queue-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+  gap: 12px;
+  overflow-y: auto;
+}
+
+.canon-queue-view.loading {
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary, #888);
+}
+
+.canon-queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.canon-refresh {
+  padding: 4px 12px;
+  border: 1px solid var(--border, #444);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.canon-refresh:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+}
+
+.canon-proposals {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.canon-proposal {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #444);
+  border-radius: 8px;
+  background: var(--surface, rgba(255, 255, 255, 0.03));
+}
+
+.canon-proposal-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.canon-proposal-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
+}
+
+.canon-category {
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-hover, rgba(255, 255, 255, 0.08));
+}
+
+.canon-arc {
+  font-family: monospace;
+}
+
+.canon-summary {
+  font-size: 1rem;
+}
+
+.canon-detail {
+  font-size: 0.9rem;
+  color: var(--text-secondary, #888);
+  white-space: pre-wrap;
+}
+
+.canon-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.canon-actions button {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.canon-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.canon-approve {
+  color: #fff;
+  background: #2f8f4e;
+}
+
+.canon-approve:hover:not(:disabled) {
+  background: #3aa35b;
+}
+
+.canon-reject {
+  color: #fff;
+  background: #b3413d;
+}
+
+.canon-reject:hover:not(:disabled) {
+  background: #c74d49;
+}
+
+.canon-queue-view .empty-state {
+  margin: auto;
+  color: var(--text-secondary, #888);
+  text-align: center;
+}
+
+.error-banner {
+  color: #f48b88;
+  background: rgba(179, 65, 61, 0.12);
+  border: 1px solid rgba(179, 65, 61, 0.4);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}

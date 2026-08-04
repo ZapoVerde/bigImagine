@@ -25,7 +25,8 @@
   margin: 0.2rem 0;
 }
 
-.settings-view input[type='password'] {
+.settings-view input[type='password'],
+.settings-view textarea {
   width: 100%;
   box-sizing: border-box;
 }

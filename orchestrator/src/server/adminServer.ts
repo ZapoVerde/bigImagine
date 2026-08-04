@@ -82,6 +82,7 @@ import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
+import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 
 export interface SetCredentialBody {
   name: CredentialName;
@@ -368,5 +369,61 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.chunkSummaryPrompt !== undefined) await store.set('chat_memory_chunk_summary_prompt', body.chunkSummaryPrompt);
   if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
   if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);
+}
+
+// --- Canon settings (docs/canonize-plan.md §6, bi_principles.md §13/§18) ---
+// The Canonize feature's two knobs: canon_recall_top_k (integer-as-text, default '8' — how many
+// canon facts recall_canon_facts returns, read live on every recall call, no restart) and
+// canon_extraction_prompt (the background extraction call's prompt template — "default + bespoke"
+// override per bi_principles.md §18, empty clears back to the built-in, same shape as the
+// chat_memory_* prompts above). The extraction pass that consumes the prompt is Director Pass
+// work (canonize-plan.md §2) — not wired yet; the setting is still surfaced now so it exists
+// before the pass does.
+
+export interface CanonSettings {
+  recallTopK: number;
+  extractionPrompt: string;
+  extractionPromptIsDefault: boolean;
+}
+
+export async function getCanonSettings(store: OrchestratorSettingsStore): Promise<CanonSettings> {
+  const [topKRaw, extractionPrompt] = await Promise.all([
+    store.get('canon_recall_top_k'),
+    store.get('canon_extraction_prompt'),
+  ]);
+  const parsedTopK = topKRaw ? Number(topKRaw) : NaN;
+  return {
+    recallTopK: Number.isInteger(parsedTopK) && parsedTopK > 0 ? parsedTopK : 8,
+    extractionPrompt: extractionPrompt || DEFAULT_CANON_EXTRACTION_PROMPT,
+    extractionPromptIsDefault: !extractionPrompt,
+  };
+}
+
+export interface SetCanonSettingsBody {
+  recallTopK?: number;
+  extractionPrompt?: string;
+}
+
+// Both fields optional and independently settable; an empty string on the prompt field clears the
+// override back to its built-in default (there is no separate "reset" endpoint — see
+// io/orchestratorSettings.ts's own doc on this). Wire keys are snake_case, same convention as
+// every other parseSet*Body in this file.
+export function parseSetCanonSettingsBody(raw: unknown): SetCanonSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { recall_top_k, extraction_prompt } = raw as Record<string, unknown>;
+  if (recall_top_k === undefined && extraction_prompt === undefined) return undefined;
+  if (recall_top_k !== undefined && (typeof recall_top_k !== 'number' || !Number.isInteger(recall_top_k) || recall_top_k <= 0)) {
+    return undefined;
+  }
+  if (extraction_prompt !== undefined && typeof extraction_prompt !== 'string') return undefined;
+  return {
+    recallTopK: recall_top_k as number | undefined,
+    extractionPrompt: extraction_prompt as string | undefined,
+  };
+}
+
+export async function setCanonSettings(store: OrchestratorSettingsStore, body: SetCanonSettingsBody): Promise<void> {
+  if (body.recallTopK !== undefined) await store.set('canon_recall_top_k', String(body.recallTopK));
+  if (body.extractionPrompt !== undefined) await store.set('canon_extraction_prompt', body.extractionPrompt);
 }
 

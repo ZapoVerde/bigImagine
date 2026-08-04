@@ -540,38 +540,41 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           <span className="model-connection-note">Which connection runs the rolling summarize/recall pipeline's calls — leave blank to use the active connection.</span>
         </label>
         <br />
-        <div className="settings-row">
-          <label>
-            Live window (turn pairs)
-            <input
-              type="number"
-              min="1"
-              value={selectedLiveWindowPairs}
-              onChange={(e) => setSelectedLiveWindowPairs(e.target.value)}
-              placeholder="8"
-            />
-          </label>
-          <label>
-            Sync every (turn pairs)
-            <input
-              type="number"
-              min="1"
-              value={selectedSyncEveryPairs}
-              onChange={(e) => setSelectedSyncEveryPairs(e.target.value)}
-              placeholder="8"
-            />
-          </label>
-          <label>
-            Digest horizon (turn pairs)
-            <input
-              type="number"
-              min="1"
-              value={selectedDigestHorizonPairs}
-              onChange={(e) => setSelectedDigestHorizonPairs(e.target.value)}
-              placeholder="24"
-            />
-          </label>
-        </div>
+        <label>
+          Live window (turn pairs)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedLiveWindowPairs}
+            onChange={(e) => setSelectedLiveWindowPairs(e.target.value)}
+            placeholder="8"
+          />
+        </label>
+        <br />
+        <label>
+          Sync every (turn pairs)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedSyncEveryPairs}
+            onChange={(e) => setSelectedSyncEveryPairs(e.target.value)}
+            placeholder="8"
+          />
+        </label>
+        <br />
+        <label>
+          Digest horizon (turn pairs)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedDigestHorizonPairs}
+            onChange={(e) => setSelectedDigestHorizonPairs(e.target.value)}
+            placeholder="24"
+          />
+        </label>
         <div className="status">
           Live window: how many of the most recent turn pairs stay in full view. Sync every: how many pairs accumulate past
           that before the next chunk/summarize/distill pass runs. Digest horizon: how far back the key-ideas digest re-reads
@@ -580,24 +583,30 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         <br />
         <label>
           Chunk summary prompt {chatMemorySettings?.chunkSummaryPromptIsDefault && <em>(default)</em>}
+          <br />
           <textarea value={selectedChunkSummaryPrompt} onChange={(e) => setSelectedChunkSummaryPrompt(e.target.value)} rows={3} />
         </label>
+        <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('chunkSummaryPrompt')}>
           Reset to default
         </button>
         <br />
         <label>
           Key-ideas digest prompt {chatMemorySettings?.distillPromptIsDefault && <em>(default)</em>}
+          <br />
           <textarea value={selectedDistillPrompt} onChange={(e) => setSelectedDistillPrompt(e.target.value)} rows={3} />
         </label>
+        <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('distillPrompt')}>
           Reset to default
         </button>
         <br />
         <label>
           Long-term memory prompt {chatMemorySettings?.householdMemoryPromptIsDefault && <em>(default)</em>}
+          <br />
           <textarea value={selectedHouseholdMemoryPrompt} onChange={(e) => setSelectedHouseholdMemoryPrompt(e.target.value)} rows={3} />
         </label>
+        <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('householdMemoryPrompt')}>
           Reset to default
         </button>

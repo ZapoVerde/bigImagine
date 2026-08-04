@@ -127,17 +127,20 @@ import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegis
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
   getActiveProfileSetting,
+  getCanonSettings,
   getChatMemorySettings,
   getHouseholdTimezone,
   getNotificationSettings,
   listCredentials,
   listModelsForProfile,
   parseSetActiveProfileBody,
+  parseSetCanonSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
   parseSetNotificationSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
+  setCanonSettings,
   setChatMemorySettings,
   setCredential,
   setHouseholdTimezone,
@@ -777,6 +780,35 @@ async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResp
   sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
 }
 
+// docs/canonize-plan.md §6 — canon settings are live-read (recall_canon_facts reads
+// canon_recall_top_k on every call), so a save here takes effect immediately, no restart, same
+// shape as notification settings above.
+async function handleCanonSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getCanonSettings(deps.settings));
+}
+
+async function handleCanonSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetCanonSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected at least one of { recall_top_k?: positive integer, extraction_prompt?: string }',
+    });
+    return;
+  }
+
+  await setCanonSettings(deps.settings, parsed);
+  // No restart needed — recall_canon_facts reads canon_recall_top_k live on every call.
+  sendJson(res, 200, await getCanonSettings(deps.settings));
+}
+
 async function handleNotificationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, await getNotificationSettings(deps.settings));
 }
@@ -1229,6 +1261,22 @@ async function handleRequest(
       return;
     }
     await handleChatMemorySettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/canon-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCanonSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/canon-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCanonSettingsSet(req, res, deps);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

@@ -40,7 +40,7 @@ The central design commitment, carried over unchanged from bigBrain: **all reaso
 
 Removed wholesale from the forked codebase before any narrative feature work began:
 
-- **Security & multi-tenancy** — Row-Level Security policies, session user-scoping functions, Cloudflare Access SSO. BigImagine is single-user; every table that carried a `user_id` for RLS loses that column entirely rather than keeping it unused.
+- **Security & multi-tenancy (aspirational, not yet done)** — the eventual single-user conversion would drop Row-Level Security policies, session user-scoping functions, and Cloudflare Access SSO, with every `user_id` column removed rather than kept unused. **This has not happened and is not scheduled** — every table added since the fork (`characters`, `locations`, `scenes`, `scene_presence`, `canon_facts`, and everything before them) still carries `user_id` under the same `user_scoped` RLS policy bigBrain used, and per `docs/canonize-plan.md` §3.1 this is a deliberate standing deviation, not an oversight. Single-user conversion is a distinct, separately-decided future step — not bundled into "what gets pruned" — and should not be assumed by new schema work.
 - **Field-level encryption** — `unstructured_notes`-style AES-256-GCM wrapping. All narrative text stays plaintext and searchable; there is no household member to protect it from.
 - **Household plugins** — recipes, meal planning, shopping lists/analytics, calendar, Notion sync, Google Calendar OAuth, ntfy push.
 - **Admin overhead** — the encrypted credential vault's multi-user surface, the offsite backup pipeline's household-scale retention logic (a simpler single-user backup, if wanted, is a later decision, not carried over by default).
@@ -103,13 +103,17 @@ What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the
 +----------------------+          +----------------------+
 | PK | fact_id            |          | PK | rule_id           |
 | FK | scene_id (nullable)   |          | FK | scene_id (nullable, null = global) |
-|    | summary                 |          |    | trigger_condition  |
-|    | detail                    |          |    | description         |
-|    | vector_embed (Vector)       |          |    | active (boolean)     |
-|    | status                        |          +----------------------+
+|    | category ('place'|'thing'| |          |    | trigger_condition  |
+|    |   'concept'|'person'|'plot') |          |    | description         |
+|    | arc_tag (nullable, required |          |    | active (boolean)     |
+|    |   iff category='plot')      |          +----------------------+
+|    | summary                 |
+|    | detail                    |
+|    | vector_embed (Vector)       |
+|    | status                        |
 |    |   ('proposed'|'approved'|       |
 |    |    'rejected')                    |
-|    | linked_character_ids (int[])        |
+|    | linked_character_ids (uuid[])        |
 |    | linked_location_id (FK, nullable)     |
 |    | proposed_at, approved_at                |
 +----------------------+
@@ -128,7 +132,7 @@ What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the
 +----------------------+
 ```
 
-**Canon Facts (Canonize, native).** `status` is the human-in-the-loop gate (`bi_principles.md` §15): a background extraction step writes `'proposed'` rows after a turn; only an `'approved'` row is ever selected into a prompt or a vector-similarity query. `'rejected'` rows are kept (not deleted) as a record of what was proposed and turned down, so the extraction step's own behavior stays auditable. `vector_embed` enables semantic recall scoped to present characters/location, replacing keyword lorebooks entirely — there is no keyword-match fallback anywhere in this schema.
+**Canon Facts (Canonize, native).** `status` is the human-in-the-loop gate (`bi_principles.md` §15): a background extraction step writes `'proposed'` rows after a turn; only an `'approved'` row is ever selected into a prompt or a vector-similarity query. `'rejected'` rows are kept (not deleted) as a record of what was proposed and turned down, so the extraction step's own behavior stays auditable. `vector_embed` enables semantic recall scoped to present characters/location, replacing keyword lorebooks entirely — there is no keyword-match fallback anywhere in this schema. `category` is a MECE curator tag; `arc_tag` (required only for `category = 'plot'`) keeps a continuing plot thread's successive proposals linked without an in-place `UPDATE` — every proposal for the same `arc_tag` gets its own row, kept forever, and `recall_canon_facts` selects only the most-recently-approved row per `arc_tag` at read time (`docs/canonize-plan.md` §3.2).
 
 **Rules & Status Effects (Triggeryze, native).** A `rules` row with `scene_id = null` is a global world rule; a scoped one applies only within its scene. `status_effects` is polymorphic over `target_type`/`target_id` (a character or a location can carry one) rather than two near-identical tables, since the shape — label, description, an optional expiry, an optional event payload — is identical either way. `expires_at` is what keeps `bi_principles.md` §16 (injected context is bounded) mechanically true: an expired status stops being selected into the prompt stack without any cleanup job needing to delete the row.
 
@@ -215,6 +219,7 @@ Every LLM call in this loop — director, character generation, fact extraction,
 
 - `propose_canon_fact` — background tool, called after a turn; writes a `'proposed'` row, never selectable into a prompt.
 - `approve_canon_fact` / `reject_canon_fact` — human-in-the-loop, called from the Inspector Canvas's approval queue.
+- `get_canon_fact_proposals` — lists `status = 'proposed'` rows for the approval queue (§9); never selectable into a prompt.
 - `recall_canon_facts` — semantic search scoped to present characters/location, `status = 'approved'` only. This is the platform's entire lorebook-replacement mechanism; there is no keyword-triggered fallback.
 
 #### 7.2 Vistalyze (native)

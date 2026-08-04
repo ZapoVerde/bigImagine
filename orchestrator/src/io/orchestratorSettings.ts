@@ -63,6 +63,14 @@
  * back to the default. Every one of these six chat_memory_* keys was missing from 0010's CHECK
  * constraint until 0043 added them — see db/migrations/README.md's 0043 entry.
  *
+ * canon_recall_top_k/canon_extraction_prompt (docs/canonize-plan.md §6, plugins/canonize,
+ * migration 0048) are the Canonize feature's two settings: canon_recall_top_k (integer-as-text,
+ * default '8' — how many facts recall_canon_facts returns) is read live by the recall tool on
+ * every call; canon_extraction_prompt is the background extraction call's prompt template
+ * (bi_principles.md §18 — empty override means "use the built-in default"), read by the future
+ * Director Pass wiring. Both were added to 0010's CHECK constraint together in 0048, the same
+ * widen-both-sides shape 0043's own entry documents.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -96,6 +104,8 @@ export const SETTING_NAMES = [
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
   'chat_memory_household_memory_prompt',
+  'canon_recall_top_k',
+  'canon_extraction_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

@@ -12,6 +12,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'notes', label: 'Notes' },
   { type: 'documents', label: 'Documents' },
   { type: 'settings', label: 'Settings' },
+  { type: 'canon', label: 'Canon' },
 ];
 
 // What a legacy 'blank' tab shows until the user picks what it's for. The tab strip's (+) button

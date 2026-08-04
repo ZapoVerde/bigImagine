@@ -168,4 +168,12 @@ A prompt that only lives in source is a prompt only a rebuild can change. The pe
 
 ---
 
+## 19. The Platform is Mobile-First, Not Mobile-Tolerated
+
+A screen you check a story on is as likely to be a phone as a desktop. Every surface — the cinematic chat view, the Settings surface, the Inspector Canvas — must remain fully usable at phone width: legible without zooming, operable without a mouse-precision tap target, and readable without horizontal scrolling.
+
+Concretely, this rules out layouts that only hold together at desktop width: multi-column rows that silently become vertical dividers slicing through wrapped content on a narrow screen. A row of fields stacks top-to-bottom before it breaks. If a layout choice makes sense in a wide flex/grid row but turns into a cramped or overlapping mess at phone width, the narrow case wins — pick the layout that degrades gracefully, not the one that looks best on the widest screen in the room.
+
+---
+
 *Further principles will be added as they emerge from real friction, not anticipated in advance.*

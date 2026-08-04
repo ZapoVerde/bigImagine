@@ -12,6 +12,7 @@
     "./llm-stub": "./dist/io/llm/stub.js",
     "./embeddings": "./dist/io/embeddings/index.js",
     "./embeddings-stub": "./dist/io/embeddings/stub.js",
+    "./settings": "./dist/io/orchestratorSettings.js",
     "./postgres": "./dist/io/postgres.js",
     "./field-cipher": "./dist/io/fieldCipher.js",
     "./logger": "./dist/io/logger.js",

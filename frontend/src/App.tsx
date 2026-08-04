@@ -11,6 +11,7 @@ import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
 import { useTheme } from './hooks/useTheme';
+import CanonQueueView from './views/CanonQueueView';
 import ChatView from './views/ChatView';
 import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
@@ -167,6 +168,7 @@ export default function App() {
               />
             )}
             {tab.type === 'documents' && <DocumentsView apiKey={apiKey} />}
+            {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
           </div>
         ))}
