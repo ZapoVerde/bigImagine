@@ -1,0 +1,434 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ApiError, callTool } from '../api/client';
+import type { ContextStackPreset, ContextStackSlot } from '../api/types';
+import './PromptStacksView.css';
+
+interface PromptStacksViewProps {
+  apiKey: string | null;
+}
+
+// plugins/context-stack-presets' marker vocabulary (docs/spec.md §7.4) — deliberately mirrors the
+// V2/V3 character-card field names plus BI's narrative additions, in the same order the shipped
+// "Standard" builtin assembles them.
+const MARKER_LABELS: Record<string, string> = {
+  system: 'System Prompt',
+  global_rules: 'Global Rules',
+  description: 'Description',
+  personality: 'Personality',
+  scenario: 'Scenario',
+  location: 'Active Location',
+  canon_facts: 'Canon Facts',
+  mes_example: 'Example Messages',
+  memory_recall: 'Memory Recall',
+  recent_history: 'Recent History',
+  post_history_instructions: 'Post-History Instructions',
+};
+const MARKER_KEYS = Object.keys(MARKER_LABELS);
+
+function markerLabel(key: string): string {
+  return MARKER_LABELS[key] ?? key;
+}
+
+function slotLabel(slot: ContextStackSlot): string {
+  return slot.slotType === 'marker' ? markerLabel(slot.markerKey ?? '') : `Custom block (${slot.customRole ?? 'system'})`;
+}
+
+function newMarkerSlot(markerKey: string): ContextStackSlot {
+  return { slotType: 'marker', markerKey, enabled: true };
+}
+
+function newCustomSlot(): ContextStackSlot {
+  return { slotType: 'custom', enabled: true, customRole: 'system', customContent: '' };
+}
+
+// A SillyTavern Prompt-Manager-style editor for plugins/context-stack-presets: a left list of
+// saved presets (plus the shipped read-only builtins), a right pane with the selected preset's
+// ordered, reorderable, individually-toggleable slot list. There is deliberately no "apply to this
+// chat" control here — docs/spec.md §7.4 flags assignment (scenes/characters) as not yet wired,
+// since those tables don't exist yet (docs/bootstrap.md); this is purely the preset library the
+// backend already has and the frontend never surfaced.
+//
+// Edits are staged in local draft state and committed in one `update_context_stack_preset` call on
+// Save — same "edit locally, commit on Save" shape as ChatView's own ChatSettings panel — rather
+// than a network round-trip per checkbox toggle or drag.
+export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
+  const [presets, setPresets] = useState<ContextStackPreset[] | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
+  // Mobile master-detail: list and editor are both full-width panes below the breakpoint, only one
+  // shown at a time (same shape ChatView's chat-canvas-switch uses for chat vs Canvas).
+  const [mobileShowEditor, setMobileShowEditor] = useState(false);
+
+  const [draftName, setDraftName] = useState('');
+  const [draftSlots, setDraftSlots] = useState<ContextStackSlot[]>([]);
+
+  const dragIndexRef = useRef<number | null>(null);
+
+  const refresh = useCallback(
+    async (selectAfter?: string) => {
+      try {
+        const result = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
+        setPresets(result);
+        setError(null);
+        if (selectAfter) setSelectedId(selectAfter);
+      } catch (err) {
+        setError(err instanceof ApiError ? err.message : 'failed to load prompt stacks');
+      }
+    },
+    [apiKey],
+  );
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const selected = presets?.find((p) => p.presetId === selectedId) ?? null;
+  const isBuiltin = selected?.isBuiltin ?? false;
+
+  useEffect(() => {
+    setDraftName(selected?.name ?? '');
+    setDraftSlots(selected?.slots ?? []);
+    setExpandedIndex(null);
+    // Resync the draft whenever a different preset is picked, or this one's own updatedAt moves
+    // (a save just landed and refresh() brought back the canonical row) — not on every unrelated
+    // presets refetch, which would otherwise clobber an in-progress unsaved edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, selected?.updatedAt]);
+
+  function selectPreset(id: string) {
+    setSelectedId(id);
+    setMobileShowEditor(true);
+  }
+
+  async function createNew() {
+    const name = window.prompt('Name this prompt stack');
+    if (!name?.trim()) return;
+    try {
+      const created = await callTool<ContextStackPreset>(
+        'create_context_stack_preset',
+        { name: name.trim(), slots: [newMarkerSlot('system')] },
+        apiKey,
+      );
+      await refresh(created.presetId);
+      setMobileShowEditor(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to create prompt stack');
+    }
+  }
+
+  async function duplicate(preset: ContextStackPreset) {
+    const name = window.prompt('Name this prompt stack', `${preset.name} copy`);
+    if (!name?.trim()) return;
+    try {
+      const created = await callTool<ContextStackPreset>(
+        'create_context_stack_preset',
+        { name: name.trim(), slots: preset.slots },
+        apiKey,
+      );
+      await refresh(created.presetId);
+      setMobileShowEditor(true);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to duplicate prompt stack');
+    }
+  }
+
+  async function removePreset(preset: ContextStackPreset) {
+    if (!window.confirm(`Delete "${preset.name}"? This can't be undone.`)) return;
+    try {
+      await callTool('delete_context_stack_preset', { presetId: preset.presetId }, apiKey);
+      if (selectedId === preset.presetId) {
+        setSelectedId(null);
+        setMobileShowEditor(false);
+      }
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to delete prompt stack');
+    }
+  }
+
+  function updateSlot(index: number, patch: Partial<ContextStackSlot>) {
+    setDraftSlots((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+  }
+
+  function toggleEnabled(index: number) {
+    setDraftSlots((prev) => prev.map((s, i) => (i === index ? { ...s, enabled: !(s.enabled ?? true) } : s)));
+  }
+
+  function removeSlot(index: number) {
+    setDraftSlots((prev) => prev.filter((_, i) => i !== index));
+    setExpandedIndex(null);
+  }
+
+  function moveSlot(index: number, dir: -1 | 1) {
+    setDraftSlots((prev) => {
+      const target = index + dir;
+      if (target < 0 || target >= prev.length) return prev;
+      const next = [...prev];
+      [next[index], next[target]] = [next[target]!, next[index]!];
+      return next;
+    });
+    setExpandedIndex((prev) => (prev === index ? index + dir : prev));
+  }
+
+  function handleDrop(targetIndex: number) {
+    const from = dragIndexRef.current;
+    dragIndexRef.current = null;
+    if (from === null || from === targetIndex) return;
+    setDraftSlots((prev) => {
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(targetIndex, 0, moved!);
+      return next;
+    });
+    setExpandedIndex(null);
+  }
+
+  function addMarkerSlot(key: string) {
+    if (!key) return;
+    setDraftSlots((prev) => [...prev, newMarkerSlot(key)]);
+  }
+
+  function addCustomSlot() {
+    setDraftSlots((prev) => {
+      const next = [...prev, newCustomSlot()];
+      setExpandedIndex(next.length - 1);
+      return next;
+    });
+  }
+
+  const dirty =
+    selected != null &&
+    !isBuiltin &&
+    (draftName.trim() !== selected.name || JSON.stringify(draftSlots) !== JSON.stringify(selected.slots));
+
+  async function save() {
+    if (!selected || isBuiltin) return;
+    if (draftSlots.length === 0) {
+      setError('A prompt stack needs at least one slot.');
+      return;
+    }
+    for (const slot of draftSlots) {
+      if (slot.slotType === 'custom' && !slot.customContent?.trim()) {
+        setError('Every custom block needs content — fill it in or remove the slot.');
+        return;
+      }
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const patch: { presetId: string; name?: string; slots: ContextStackSlot[] } = {
+        presetId: selected.presetId,
+        slots: draftSlots,
+      };
+      if (draftName.trim() && draftName.trim() !== selected.name) patch.name = draftName.trim();
+      await callTool('update_context_stack_preset', patch, apiKey);
+      await refresh(selected.presetId);
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2000);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to save prompt stack');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (presets === null) {
+    return <div className="promptstacks-view loading">Loading prompt stacks&hellip;</div>;
+  }
+
+  return (
+    <div className={`promptstacks-view${mobileShowEditor ? ' mobile-editor' : ''}`}>
+      <div className="promptstacks-list">
+        <div className="promptstacks-list-header">
+          <span>Prompt Stacks</span>
+          <button type="button" className="promptstacks-new-btn" onClick={createNew}>
+            + New
+          </button>
+        </div>
+        {presets.length === 0 && <div className="empty-state">No prompt stacks yet.</div>}
+        {presets.map((preset) => (
+          <div
+            key={preset.presetId}
+            className={`promptstacks-row${preset.presetId === selectedId ? ' selected' : ''}`}
+            onClick={() => selectPreset(preset.presetId)}
+          >
+            <span className="promptstacks-row-name">{preset.name}</span>
+            {preset.isBuiltin && <span className="promptstacks-row-badge">built-in</span>}
+          </div>
+        ))}
+      </div>
+
+      <div className="promptstacks-editor">
+        <button type="button" className="promptstacks-back" onClick={() => setMobileShowEditor(false)}>
+          &larr; Prompt Stacks
+        </button>
+
+        {error && <div className="error-banner">{error}</div>}
+
+        {!selected && <div className="empty-state">Pick a prompt stack, or create a new one.</div>}
+
+        {selected && (
+          <>
+            <div className="promptstacks-editor-header">
+              <input
+                className="promptstacks-name-input"
+                value={draftName}
+                disabled={isBuiltin}
+                onChange={(e) => setDraftName(e.target.value)}
+                placeholder="Prompt stack name"
+              />
+              {isBuiltin ? (
+                <button type="button" onClick={() => duplicate(selected)}>
+                  Duplicate to customize
+                </button>
+              ) : (
+                <button type="button" className="promptstacks-delete-btn" onClick={() => removePreset(selected)}>
+                  Delete
+                </button>
+              )}
+            </div>
+            {isBuiltin && (
+              <div className="status">Built-in prompt stacks are read-only &mdash; duplicate one to customize it.</div>
+            )}
+
+            <div className="stack-slot-list">
+              {draftSlots.map((slot, idx) => (
+                <div
+                  key={idx}
+                  className={`stack-slot-row${slot.enabled === false ? ' disabled' : ''}${expandedIndex === idx ? ' expanded' : ''}`}
+                  draggable={!isBuiltin}
+                  onDragStart={() => {
+                    dragIndexRef.current = idx;
+                  }}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => handleDrop(idx)}
+                >
+                  <div className="stack-slot-main">
+                    <span className="stack-slot-grip" aria-hidden="true">
+                      &#8942;&#8942;
+                    </span>
+                    <div className="stack-slot-reorder">
+                      <button
+                        type="button"
+                        disabled={isBuiltin || idx === 0}
+                        onClick={() => moveSlot(idx, -1)}
+                        aria-label="Move slot up"
+                      >
+                        &#9650;
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isBuiltin || idx === draftSlots.length - 1}
+                        onClick={() => moveSlot(idx, 1)}
+                        aria-label="Move slot down"
+                      >
+                        &#9660;
+                      </button>
+                    </div>
+                    <label className="stack-slot-toggle">
+                      <input
+                        type="checkbox"
+                        checked={slot.enabled ?? true}
+                        disabled={isBuiltin}
+                        onChange={() => toggleEnabled(idx)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="stack-slot-label"
+                      onClick={() => setExpandedIndex(expandedIndex === idx ? null : idx)}
+                    >
+                      {slotLabel(slot)}
+                    </button>
+                    {!isBuiltin && (
+                      <button
+                        type="button"
+                        className="stack-slot-delete"
+                        onClick={() => removeSlot(idx)}
+                        aria-label="Remove slot"
+                      >
+                        &times;
+                      </button>
+                    )}
+                  </div>
+                  {expandedIndex === idx && (
+                    <div className="stack-slot-editor">
+                      {slot.slotType === 'marker' ? (
+                        <label>
+                          Field
+                          <select
+                            value={slot.markerKey ?? ''}
+                            disabled={isBuiltin}
+                            onChange={(e) => updateSlot(idx, { markerKey: e.target.value })}
+                          >
+                            {MARKER_KEYS.map((key) => (
+                              <option key={key} value={key}>
+                                {markerLabel(key)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : (
+                        <>
+                          <label>
+                            Role
+                            <select
+                              value={slot.customRole ?? 'system'}
+                              disabled={isBuiltin}
+                              onChange={(e) => updateSlot(idx, { customRole: e.target.value as ContextStackSlot['customRole'] })}
+                            >
+                              <option value="system">system</option>
+                              <option value="user">user</option>
+                              <option value="assistant">assistant</option>
+                            </select>
+                          </label>
+                          <label>
+                            Content
+                            <textarea
+                              rows={4}
+                              value={slot.customContent ?? ''}
+                              disabled={isBuiltin}
+                              onChange={(e) => updateSlot(idx, { customContent: e.target.value })}
+                            />
+                          </label>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {!isBuiltin && (
+              <div className="stack-slot-add-row">
+                <select value="" onChange={(e) => addMarkerSlot(e.target.value)}>
+                  <option value="">+ Add marker slot&hellip;</option>
+                  {MARKER_KEYS.map((key) => (
+                    <option key={key} value={key}>
+                      {markerLabel(key)}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={addCustomSlot}>
+                  + Add custom block
+                </button>
+              </div>
+            )}
+
+            {!isBuiltin && (
+              <div className="promptstacks-actions">
+                <button onClick={save} disabled={!dirty || saving}>
+                  {saving ? 'Saving…' : 'Save changes'}
+                </button>
+                {saved && <span className="saved-note">Saved.</span>}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export type TabType = 'blank' | 'chat' | 'notes' | 'documents' | 'settings' | 'canon';
+export type TabType = 'blank' | 'chat' | 'notes' | 'documents' | 'settings' | 'canon' | 'promptstacks';
 export type SummonableType = Exclude<TabType, 'blank' | 'chat'>;
 
 export interface TabInstance {
@@ -18,6 +18,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   documents: 'Documents',
   settings: 'Settings',
   canon: 'Canon',
+  promptstacks: 'Prompt Stacks',
 };
 
 function newChatTab(): TabInstance {

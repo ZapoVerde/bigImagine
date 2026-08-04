@@ -1,0 +1,331 @@
+.promptstacks-view {
+  display: flex;
+  height: 100%;
+}
+
+.promptstacks-view.loading {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+}
+
+.promptstacks-list {
+  width: 18rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--color-border-subtle);
+}
+
+.promptstacks-editor {
+  flex: 1;
+  min-width: 0;
+  padding: 1.2rem 1.6rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.promptstacks-back {
+  display: none;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 0.2rem 0;
+  cursor: pointer;
+}
+
+/* Mobile: list and editor are both full-width panes (desktop's side-by-side split doesn't fit at
+   phone width) — below the breakpoint only one shows at a time, switched via the row click /
+   promptstacks-back button (PromptStacksView.tsx's mobileShowEditor state), same shape ChatView's
+   own chat-canvas-switch uses for chat vs Canvas. */
+@media (max-width: 768px) {
+  .promptstacks-view.mobile-editor .promptstacks-list {
+    display: none;
+  }
+
+  .promptstacks-view:not(.mobile-editor) .promptstacks-editor {
+    display: none;
+  }
+
+  .promptstacks-view.mobile-editor .promptstacks-back {
+    display: inline-block;
+  }
+}
+
+.promptstacks-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1rem 0.6rem;
+  font-weight: var(--font-weight-semibold);
+}
+
+.promptstacks-new-btn {
+  font-size: var(--font-size-sm);
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  cursor: pointer;
+}
+
+.promptstacks-new-btn:hover {
+  background: var(--color-secondary-hover);
+}
+
+.promptstacks-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  cursor: pointer;
+}
+
+.promptstacks-row:hover {
+  background: var(--color-hover-surface);
+}
+
+.promptstacks-row.selected {
+  background: var(--color-active-surface);
+}
+
+.promptstacks-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+}
+
+.promptstacks-row-badge {
+  flex-shrink: 0;
+  font-size: var(--font-size-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--label-letter-spacing);
+  color: var(--color-text-faint);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  padding: 0.05rem 0.5rem;
+}
+
+.promptstacks-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.promptstacks-name-input {
+  flex: 1;
+  min-width: 10rem;
+  font: inherit;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  padding: 0.3rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+.promptstacks-name-input:hover:not(:disabled),
+.promptstacks-name-input:focus:not(:disabled) {
+  border-color: var(--color-border-subtle);
+  background: var(--color-bg-surface);
+}
+
+.promptstacks-delete-btn {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+  cursor: pointer;
+}
+
+.promptstacks-delete-btn:hover {
+  background: var(--color-danger-bg);
+}
+
+.status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.stack-slot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.stack-slot-row {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+}
+
+.stack-slot-row.disabled {
+  opacity: 0.55;
+}
+
+.stack-slot-main {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.stack-slot-grip {
+  cursor: grab;
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.stack-slot-reorder {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.stack-slot-reorder button {
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 0.55rem;
+  line-height: 1;
+  padding: 0.15rem 0.25rem;
+  cursor: pointer;
+}
+
+.stack-slot-reorder button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.stack-slot-toggle {
+  flex-shrink: 0;
+  display: flex;
+}
+
+.stack-slot-label {
+  flex: 1;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.2rem;
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stack-slot-row.expanded .stack-slot-label {
+  font-weight: var(--font-weight-semibold);
+}
+
+.stack-slot-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-faint);
+  font-size: var(--font-size-md);
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+}
+
+.stack-slot-delete:hover {
+  color: var(--color-danger);
+}
+
+.stack-slot-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0 0.7rem 0.7rem 2.5rem;
+}
+
+.stack-slot-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.stack-slot-editor select,
+.stack-slot-editor textarea {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+}
+
+.stack-slot-add-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.stack-slot-add-row select,
+.stack-slot-add-row button {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.stack-slot-add-row select:hover,
+.stack-slot-add-row button:hover {
+  background: var(--color-hover-surface);
+}
+
+.promptstacks-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.promptstacks-actions button {
+  padding: 0.4rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.promptstacks-actions button:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.promptstacks-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.saved-note {
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+}

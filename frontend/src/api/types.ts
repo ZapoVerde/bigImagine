@@ -256,3 +256,24 @@ export interface PromptPreset {
   content: string;
   updatedAt: string;
 }
+
+// plugins/context-stack-presets/src/slotRows.ts's SlotInput — the wire shape a preset's ordered
+// slots array takes both ways (get/create/update all return this same shape). Not yet assignable
+// to any scene/character (docs/spec.md §7.4 "Deferred (not yet wired)") — this is a standalone
+// preset library today.
+export interface ContextStackSlot {
+  slotType: 'marker' | 'custom';
+  markerKey?: string;
+  enabled?: boolean;
+  customRole?: 'system' | 'user' | 'assistant';
+  customContent?: string;
+}
+
+// plugins/context-stack-presets/src/getContextStackPresetsTool.ts
+export interface ContextStackPreset {
+  presetId: string;
+  name: string;
+  isBuiltin: boolean;
+  slots: ContextStackSlot[];
+  updatedAt: string;
+}

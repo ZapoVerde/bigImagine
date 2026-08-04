@@ -11,6 +11,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'chat', label: 'New Chat' },
   { type: 'notes', label: 'Notes' },
   { type: 'documents', label: 'Documents' },
+  { type: 'promptstacks', label: 'Prompt Stacks' },
   { type: 'settings', label: 'Settings' },
   { type: 'canon', label: 'Canon' },
 ];
