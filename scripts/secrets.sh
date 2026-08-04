@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# bigBrain/scripts/secrets.sh — deploy or edit stacks/bigbrain/secrets.enc.env without ever
-# writing the decrypted plaintext to disk. See docs/bootstrap.md's Secrets section.
+# BigImagine/scripts/secrets.sh — deploy or edit stacks/bigimagine/secrets.enc.env without ever
+# writing the decrypted plaintext to disk. Mirrors bigBrain/scripts/secrets.sh (see that file's
+# docs/bootstrap.md Secrets section) for BigImagine's own dedicated stack
+# (docs/dedicated-infra-plan.md).
 #
 # Requires `sops`/`age` on PATH and SOPS_AGE_KEY_FILE pointing at the age private key — this
 # script doesn't know or care where that key actually lives (sandbox file today, Vaultwarden
@@ -14,14 +16,14 @@
 set -euo pipefail
 
 WORKSPACE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-STACKS_BIGBRAIN="$WORKSPACE_ROOT/stacks/bigbrain"
+STACKS_BIGIMAGINE="$WORKSPACE_ROOT/stacks/bigimagine"
 
 cmd="${1:-}"
 shift || true
 
 case "$cmd" in
   deploy)
-    cd "$STACKS_BIGBRAIN"
+    cd "$STACKS_BIGIMAGINE"
     # exec-env sets vars via exec's envp directly, not by re-parsing decrypted text through a
     # shell — `source <(sops ... --decrypt)` looked equivalent but silently corrupts any value
     # containing embedded double quotes (BIGBRAIN_LLM_PROFILES is JSON): bash's own quote-removal
@@ -31,7 +33,7 @@ case "$cmd" in
       "docker compose up -d --build $*"
     ;;
   edit)
-    cd "$STACKS_BIGBRAIN"
+    cd "$STACKS_BIGIMAGINE"
     sops secrets.enc.env
     ;;
   *)

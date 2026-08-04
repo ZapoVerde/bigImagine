@@ -11,19 +11,20 @@ RUN apk add --no-cache git
 
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY orchestrator/package.json orchestrator/package.json
+COPY plugins/canonize/package.json plugins/canonize/package.json
+COPY plugins/characters/package.json plugins/characters/package.json
+COPY plugins/chat-memory/package.json plugins/chat-memory/package.json
+COPY plugins/context-stack-presets/package.json plugins/context-stack-presets/package.json
 COPY plugins/document-ingestion/package.json plugins/document-ingestion/package.json
 COPY plugins/documents/package.json plugins/documents/package.json
-COPY plugins/shopping-analytics/package.json plugins/shopping-analytics/package.json
-COPY plugins/lists/package.json plugins/lists/package.json
-COPY plugins/recipes/package.json plugins/recipes/package.json
-COPY plugins/notes/package.json plugins/notes/package.json
-COPY plugins/prompt-presets/package.json plugins/prompt-presets/package.json
-COPY plugins/calendar/package.json plugins/calendar/package.json
-COPY plugins/web/package.json plugins/web/package.json
-COPY plugins/weather/package.json plugins/weather/package.json
+COPY plugins/locations/package.json plugins/locations/package.json
 COPY plugins/math-utils/package.json plugins/math-utils/package.json
-COPY plugins/temporal/package.json plugins/temporal/package.json
+COPY plugins/notes/package.json plugins/notes/package.json
 COPY plugins/notifications/package.json plugins/notifications/package.json
+COPY plugins/prompt-presets/package.json plugins/prompt-presets/package.json
+COPY plugins/scenes/package.json plugins/scenes/package.json
+COPY plugins/temporal/package.json plugins/temporal/package.json
+COPY plugins/web/package.json plugins/web/package.json
 COPY frontend/package.json frontend/package.json
 RUN npm ci
 
@@ -31,19 +32,20 @@ COPY orchestrator orchestrator
 COPY plugins plugins
 COPY frontend frontend
 RUN npm run build --workspace=@bigbrain/orchestrator \
+ && npm run build --workspace=@bigbrain/plugin-canonize \
+ && npm run build --workspace=@bigbrain/plugin-characters \
+ && npm run build --workspace=@bigbrain/plugin-chat-memory \
+ && npm run build --workspace=@bigbrain/plugin-context-stack-presets \
  && npm run build --workspace=@bigbrain/plugin-document-ingestion \
  && npm run build --workspace=@bigbrain/plugin-documents \
- && npm run build --workspace=@bigbrain/plugin-shopping-analytics \
- && npm run build --workspace=@bigbrain/plugin-lists \
- && npm run build --workspace=@bigbrain/plugin-recipes \
- && npm run build --workspace=@bigbrain/plugin-notes \
- && npm run build --workspace=@bigbrain/plugin-prompt-presets \
- && npm run build --workspace=@bigbrain/plugin-calendar \
- && npm run build --workspace=@bigbrain/plugin-web \
- && npm run build --workspace=@bigbrain/plugin-weather \
+ && npm run build --workspace=@bigbrain/plugin-locations \
  && npm run build --workspace=@bigbrain/plugin-math-utils \
- && npm run build --workspace=@bigbrain/plugin-temporal \
+ && npm run build --workspace=@bigbrain/plugin-notes \
  && npm run build --workspace=@bigbrain/plugin-notifications \
+ && npm run build --workspace=@bigbrain/plugin-prompt-presets \
+ && npm run build --workspace=@bigbrain/plugin-scenes \
+ && npm run build --workspace=@bigbrain/plugin-temporal \
+ && npm run build --workspace=@bigbrain/plugin-web \
  && npm run build --workspace=@bigbrain/frontend
 
 ENV NODE_ENV=production
