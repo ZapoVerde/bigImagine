@@ -62,10 +62,13 @@ chat, in one transaction:
    embedded (single-lane — content only, unlike Canonize's content+summary two-lane retrieval; a
    second lane is a real refinement but not one this scale needs yet).
 3. The chat's key-ideas digest is updated (`io/chatMemory/distillChatMemory.ts`): given the current
-   digest and the new chunk summaries, the model returns only entries that are new or changed,
-   reusing an existing `topic_key` for a continuing thread and coining a new one only for a
+   digest and the trailing `chat_memory_digest_horizon_pairs` worth of `chat_chunks` summaries — not
+   just the ones this tick freshly produced — the model returns only entries that are new or
+   changed, reusing an existing `topic_key` for a continuing thread and coining a new one only for a
    genuinely new idea — the same "arc tag" discipline Canonize's plot lorebook uses to stay append-
-   bounded instead of growing one row per sync forever.
+   bounded instead of growing one row per sync forever. The horizon re-read (oldest-first) is this
+   platform's analogue of Canonize's own bridge-summary horizon — see Settings below for why it can
+   default smaller than Canonize's.
 4. One new `chat_sync_points` row records the restore point; the chunks and updated digest entries
    are tied to it.
 
@@ -124,18 +127,31 @@ section exposes:
 - **Connection** — which configured LLM profile runs this pipeline's calls, independent of the
   household's main conversational connection (unset = the active one, same fallback a chat's own
   `params.profile` uses).
-- **Live window / sync-every** (turn pairs) — the same two timing knobs Canonize calls "live context
-  buffer" and "pairs between updates."
+- **Live window / sync-every / digest horizon** (turn pairs) — three timing knobs. Live window and
+  sync-every are what Canonize calls "live context buffer" and "pairs between updates." Digest
+  horizon is Canonize's "summary horizon" — how many trailing turn pairs the digest re-reads on
+  each sync, not just what's brand new. It defaults to 24, smaller than Canonize's own default of
+  40, because the key-ideas digest already persists its own state forward as `chat_memory_entries`
+  rows across syncs; the horizon here is a revision window layered on top of that persistence, not
+  the sole source of continuity the way Canonize's wholesale bridge re-read is.
 - **Three prompts** (chunk summary, key-ideas digest, long-term memory), each **default + bespoke**:
   every prompt ships a sensible built-in (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`,
   `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`, `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, each exported from its
   own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
-  the default rather than needing a separate reset action.
+  the default rather than needing a separate reset action. `docs/bi_principles.md` §18 makes this
+  default-plus-bespoke shape a platform-wide requirement, not a one-off pattern local to this
+  feature: any prompt driving an internal LLM call must be surfaced here or somewhere else in
+  Settings.
 
-All six settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
-`chat_memory_sync_every_pairs`, `chat_memory_chunk_summary_prompt`, `chat_memory_distill_prompt`,
-`chat_memory_household_memory_prompt`) are read live on every sync tick — a save takes effect on the
-next tick, no restart, same shape as `household_timezone`.
+All seven settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
+`chat_memory_sync_every_pairs`, `chat_memory_digest_horizon_pairs`, `chat_memory_chunk_summary_prompt`,
+`chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`) are read live on every sync
+tick — a save takes effect on the next tick, no restart, same shape as `household_timezone`.
+
+These seven keys all needed `orchestrator_settings.key`'s CHECK constraint widened before any of
+them could actually be saved; the first six were added to application code in `0036`-`0041` but the
+constraint itself was never widened to match until `0043` closed that gap alongside adding the
+seventh (`chat_memory_digest_horizon_pairs`) fresh — see `db/migrations/README.md`'s `0043` entry.
 
 ## Tables
 
@@ -154,3 +170,4 @@ next tick, no restart, same shape as `household_timezone`.
 | Silent RAG injection every turn | `recall_chat_history` is an explicit tool call | The LLM reasons, nothing else does (§2) |
 | Hash-linked anchor chain + branch detection | FK cascade (`on delete cascade`) + fork-as-new-row | bigBrain owns its own mutations; no need to detect what it caused itself |
 | Wholesale lorebook/scene snapshot restore | Same idea, narrower: entries dropped rather than reconstructed pre-fork | Accepted simplicity trade, not a correctness gap in the common case |
+| Bridge-summary horizon defaults to 40 pairs, a full wholesale re-read every sync | Digest horizon defaults to 24 pairs, a revision window on top of persisted state | The key-ideas digest already carries state forward as `chat_memory_entries` rows across syncs; Canonize's bridge summary has no equivalent persistent entries of its own, so its horizon has to do all the continuity work alone |

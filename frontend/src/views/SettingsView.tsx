@@ -121,6 +121,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedChatMemoryProfile, setSelectedChatMemoryProfile] = useState('');
   const [selectedLiveWindowPairs, setSelectedLiveWindowPairs] = useState('');
   const [selectedSyncEveryPairs, setSelectedSyncEveryPairs] = useState('');
+  const [selectedDigestHorizonPairs, setSelectedDigestHorizonPairs] = useState('');
   const [selectedChunkSummaryPrompt, setSelectedChunkSummaryPrompt] = useState('');
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
   const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
@@ -138,6 +139,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedChatMemoryProfile(settings.profile ?? '');
     setSelectedLiveWindowPairs(settings.liveWindowPairs === null ? '' : String(settings.liveWindowPairs));
     setSelectedSyncEveryPairs(settings.syncEveryPairs === null ? '' : String(settings.syncEveryPairs));
+    setSelectedDigestHorizonPairs(settings.digestHorizonPairs === null ? '' : String(settings.digestHorizonPairs));
     setSelectedChunkSummaryPrompt(settings.chunkSummaryPrompt);
     setSelectedDistillPrompt(settings.distillPrompt);
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
@@ -247,6 +249,10 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     if (selectedLiveWindowPairs && liveWindowPairs !== chatMemorySettings.liveWindowPairs) patch.live_window_pairs = liveWindowPairs;
     const syncEveryPairs = Number(selectedSyncEveryPairs);
     if (selectedSyncEveryPairs && syncEveryPairs !== chatMemorySettings.syncEveryPairs) patch.sync_every_pairs = syncEveryPairs;
+    const digestHorizonPairs = Number(selectedDigestHorizonPairs);
+    if (selectedDigestHorizonPairs && digestHorizonPairs !== chatMemorySettings.digestHorizonPairs) {
+      patch.digest_horizon_pairs = digestHorizonPairs;
+    }
     if (selectedChunkSummaryPrompt !== chatMemorySettings.chunkSummaryPrompt) patch.chunk_summary_prompt = selectedChunkSummaryPrompt;
     if (selectedDistillPrompt !== chatMemorySettings.distillPrompt) patch.distill_prompt = selectedDistillPrompt;
     if (selectedHouseholdMemoryPrompt !== chatMemorySettings.householdMemoryPrompt) {
@@ -550,10 +556,21 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
               placeholder="8"
             />
           </label>
+          <label>
+            Digest horizon (turn pairs)
+            <input
+              type="number"
+              min="1"
+              value={selectedDigestHorizonPairs}
+              onChange={(e) => setSelectedDigestHorizonPairs(e.target.value)}
+              placeholder="24"
+            />
+          </label>
         </div>
         <div className="status">
           Live window: how many of the most recent turn pairs stay in full view. Sync every: how many pairs accumulate past
-          that before the next chunk/summarize/distill pass runs.
+          that before the next chunk/summarize/distill pass runs. Digest horizon: how far back the key-ideas digest re-reads
+          chunk summaries on each sync, not just what's brand new since the last one.
         </div>
         <br />
         <label>

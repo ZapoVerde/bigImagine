@@ -135,3 +135,38 @@ Already applied by hand, not run automatically (see the file for the exact comma
   still gets a row (`outcome = 'error'`, populated `error_reason`) so the rounds it did complete
   before dying stay visible. Also widens `llm_calls` with `duration_ms`, an independent,
   complementary addition at the per-call level.
+- `0042_context_stack_presets.sql` — adds `context_stack_presets` and its ordered child table
+  `context_stack_slots` (`plugins/context-stack-presets`, `docs/spec.md` §7.4): user-savable
+  presets for which prompt-stack slots an assembled turn includes, and in what order. Each slot is
+  either a `marker` (references one of the fixed marker keys — `system`, `description`,
+  `personality`, `scenario`, `mes_example`, `post_history_instructions`, `global_rules`,
+  `location`, `canon_facts`, `memory_recall`, `recent_history`) or a `custom` static block with its
+  own role; `context_stack_slots_marker_shape` CHECKs that a `marker` slot carries a `marker_key`
+  and no `custom_role`/`custom_content`, and vice versa for `custom`. Seeds two builtin presets
+  (`Standard`, `Minimal`) owned by a fixed `system_user_id` of all-zeroes, `is_builtin = true`.
+  Diverges from the standard single `user_scoped` policy every other table in this file uses:
+  builtins need to be readable by every user but writable by none of them, and a `USING`-only
+  widening (this migration's first draft) would have also permitted `DELETE` on builtin rows,
+  since `DELETE` has no `WITH CHECK` to catch what a widened `USING` lets through. Both tables
+  instead get four command-scoped policies each (`select`/`insert`/`update`/`delete`) — only the
+  `select` policy's `USING` clause includes the `is_builtin = true` bypass, so builtins are listable
+  by anyone but editing or deleting one, regardless of caller, matches zero rows. `context_stack_
+  slots` has no `user_id` of its own; its policies join back to its parent preset's owner instead.
+  `on delete cascade` on `context_stack_slots.preset_id` cleans up slots when a preset is deleted —
+  Postgres runs `ON DELETE CASCADE` as a referential-integrity action that bypasses RLS entirely,
+  so this holds regardless of which policy would otherwise apply to the child rows.
+- `0043_chat_memory_digest_horizon.sql` — widens `orchestrator_settings.key` with
+  `chat_memory_digest_horizon_pairs`, and in the same statement closes a real gap: the six
+  `chat_memory_*` keys `0036`-`0041` already had application code reading and writing
+  (`orchestrator/src/io/orchestratorSettings.ts`'s `SETTING_NAMES`, `adminServer.ts`'s
+  `getChatMemorySettings`/`setChatMemorySettings`) were never actually added to this CHECK
+  constraint — every one of those settings would have failed a check-constraint violation the
+  first time anyone saved it, undetected because nobody had exercised that path yet.
+  `chat_memory_digest_horizon_pairs` (default 24) is BigImagine's analogue of
+  SillyTavern-Canonize's bridge-summary horizon: how many trailing turn pairs' worth of
+  `chat_chunks` summaries `distillChatMemory` re-reads on each sync, not just the chunks the
+  current tick freshly produced. It can start smaller than Canonize's own default of 40 because
+  the key-ideas digest already persists its own state forward as `chat_memory_entries` rows across
+  syncs — the horizon here is a revision window layered on top of that persistence, not the sole
+  source of continuity. See `docs/chat-memory.md` and `docs/bi_principles.md` §18 (every prompt,
+  and prompt-adjacent behavior knob, surfaced in Settings for manual tuning).

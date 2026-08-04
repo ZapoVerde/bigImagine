@@ -160,4 +160,12 @@ This isn't just Principle 8's Pure Functions category applied generically — it
 
 ---
 
+## 18. Every Prompt is Surfaced for Manual Tuning
+
+Any prompt string that drives an internal LLM call — a classification pass, a rolling summary, a digest, a director-pass decision — ships with a sensible built-in default, but that default is never the only copy that matters. It is always readable and overridable from the Settings surface, in full, as plain text.
+
+A prompt that only lives in source is a prompt only a rebuild can change. The person running the platform is the one who notices when a summary is too verbose or a digest keeps missing the point — they must be able to fix it themselves, immediately, the same way any other DB-backed runtime config changes under Principle 13. An empty override means "use the built-in default"; there is no separate reset action, because clearing a text field is already the obvious way to ask for that.
+
+---
+
 *Further principles will be added as they emerge from real friction, not anticipated in advance.*

@@ -272,7 +272,7 @@ function createFakePool() {
 
 // --- Part 1: the loader against the real plugins/ directory ---
 // startBackgroundJobs: false — this only tests loadPlugins/registerTools discovery, not
-// background-job behavior. Without it, temporal/calendar's real setInterval pollers would run
+// background-job behavior. Without it, plugins/temporal's real setInterval poller would run
 // against createFakePool() forever (it only recognizes a few query shapes), throwing on every
 // tick and keeping the process alive indefinitely instead of letting this script finish.
 const realPluginsDir = new URL('../../plugins', import.meta.url).pathname;
@@ -282,7 +282,6 @@ const realTools = await loadPlugins(
     llm: createStubLlmProvider([]), // registerTools() itself makes no LLM calls, just wiring
     embeddings: createStubEmbeddingProvider(8),
     cipher: testCipher,
-    notion: undefined,
     db: createPostgresClient(createFakePool()),
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
@@ -309,7 +308,7 @@ assert(
       'export async function registerTools() { return [{ definition: { name: "noop", description: "x", parameters: {} }, handler: async () => ({}) }]; }\n',
   );
 
-  const tools = await loadPlugins(scratchDir, { llm: null, embeddings: null, cipher: null, notion: undefined });
+  const tools = await loadPlugins(scratchDir, { llm: null, embeddings: null, cipher: null });
   assert(
     tools.some((t) => t.definition.name === 'noop'),
     'a broken sibling plugin does not prevent a good plugin from loading',
@@ -661,190 +660,6 @@ const settingsSetBadVisionRes = await fetch(`${base}/v1/admin/settings`, {
   body: JSON.stringify({ value: 'openrouter', supportsVision: 'yes' }),
 });
 assert(settingsSetBadVisionRes.status === 400, 'POST /v1/admin/settings rejects a non-boolean supportsVision');
-
-// --- Admin calendar-settings route (docs/bb_principles.md §13) ---
-
-const calNoAuthRes = await fetch(`${base}/v1/admin/calendar-settings`);
-assert(calNoAuthRes.status === 401, 'GET /v1/admin/calendar-settings with no auth header returns 401');
-
-const calSetNoAuthRes = await fetch(`${base}/v1/admin/calendar-settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ owner_user_id: 'nope' }),
-});
-assert(calSetNoAuthRes.status === 401, 'POST /v1/admin/calendar-settings with no auth header returns 401');
-
-const calSetEmptyRes = await fetch(`${base}/v1/admin/calendar-settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({}),
-});
-assert(calSetEmptyRes.status === 400, 'POST /v1/admin/calendar-settings with neither field given returns 400');
-
-const calSetOkRes = await fetch(`${base}/v1/admin/calendar-settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ owner_user_id: '55555555-5555-5555-5555-555555555555', mask_work_calendar: true }),
-});
-const calSetOkBody = await calSetOkRes.json();
-assert(calSetOkRes.status === 202 && calSetOkBody.status === 'restarting', 'an authenticated POST /v1/admin/calendar-settings returns 202/restarting');
-assert(
-  settings.setCalls.some((c) => c.key === 'calendar_owner_user_id' && c.value === '55555555-5555-5555-5555-555555555555') &&
-    settings.setCalls.some((c) => c.key === 'mask_work_calendar' && c.value === 'true'),
-  'the settings store recorded both the owner and mask writes',
-);
-
-const calGetAfterSaveRes = await fetch(`${base}/v1/admin/calendar-settings`, {
-  headers: { authorization: 'Bearer the-admin-key' },
-});
-const calGetAfterSaveBody = await calGetAfterSaveRes.json();
-assert(
-  calGetAfterSaveBody.ownerUserId === '55555555-5555-5555-5555-555555555555' && calGetAfterSaveBody.maskWorkCalendar === true,
-  'GET /v1/admin/calendar-settings reflects the newly saved values, even before the restart completes',
-);
-
-await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 7, 'triggerRestart fired again after the calendar settings save flushed');
-
-// --- Admin notion-settings route (docs/bb_principles.md §13) ---
-
-const notionSettingsNoAuthRes = await fetch(`${base}/v1/admin/notion-settings`);
-assert(notionSettingsNoAuthRes.status === 401, 'GET /v1/admin/notion-settings with no auth header returns 401');
-
-const notionSetOkRes = await fetch(`${base}/v1/admin/notion-settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ owner_user_id: '66666666-6666-6666-6666-666666666666', lists_data_source_id: 'ds-123' }),
-});
-const notionSetOkBody = await notionSetOkRes.json();
-assert(notionSetOkRes.status === 202 && notionSetOkBody.status === 'restarting', 'an authenticated POST /v1/admin/notion-settings returns 202/restarting');
-assert(
-  settings.setCalls.some((c) => c.key === 'notion_owner_user_id' && c.value === '66666666-6666-6666-6666-666666666666') &&
-    settings.setCalls.some((c) => c.key === 'notion_lists_data_source_id' && c.value === 'ds-123'),
-  'the settings store recorded both the owner and data-source writes',
-);
-
-await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 8, 'triggerRestart fired again after the notion settings save flushed');
-
-// --- Admin google-calendar routes: settings, then the OAuth auth-url/callback dance ---
-
-const gcalSettingsNoAuthRes = await fetch(`${base}/v1/admin/google-calendar-settings`);
-assert(gcalSettingsNoAuthRes.status === 401, 'GET /v1/admin/google-calendar-settings with no auth header returns 401');
-
-const authUrlBeforeConfiguredRes = await fetch(`${base}/v1/admin/google-calendar/auth-url`, {
-  headers: { authorization: 'Bearer the-admin-key' },
-});
-assert(authUrlBeforeConfiguredRes.status === 400, 'GET auth-url with no google_calendar_client_id configured yet returns 400');
-
-const gcalSetOkRes = await fetch(`${base}/v1/admin/google-calendar-settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ client_id: 'test-client-id.apps.googleusercontent.com', owner_user_id: '77777777-7777-7777-7777-777777777777', calendar_id: 'primary' }),
-});
-const gcalSetOkBody = await gcalSetOkRes.json();
-assert(gcalSetOkRes.status === 202 && gcalSetOkBody.status === 'restarting', 'an authenticated POST /v1/admin/google-calendar-settings returns 202/restarting');
-assert(
-  settings.setCalls.some((c) => c.key === 'google_calendar_client_id' && c.value === 'test-client-id.apps.googleusercontent.com'),
-  'the settings store recorded the client id write',
-);
-await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 9, 'triggerRestart fired again after the google-calendar settings save flushed');
-
-// The client secret is a real secret (bb_principles.md §12) — set through the generic credentials
-// route, same as any other provider_credentials entry, not a google-calendar-specific field.
-const gcalSecretRes = await fetch(`${base}/v1/admin/credentials`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ name: 'google_calendar_client_secret', value: 'test-client-secret' }),
-});
-assert(gcalSecretRes.status === 202, 'setting google_calendar_client_secret via the generic credentials route succeeds');
-await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 10, 'triggerRestart fired again after the client secret write flushed');
-
-const authUrlRes = await fetch(`${base}/v1/admin/google-calendar/auth-url`, {
-  headers: { authorization: 'Bearer the-admin-key' },
-});
-const authUrlBody = await authUrlRes.json();
-assert(authUrlRes.status === 200, 'GET auth-url succeeds once a client id is configured');
-const consentUrl = new URL(authUrlBody.url);
-assert(consentUrl.hostname === 'accounts.google.com', 'the consent URL points at Google');
-assert(consentUrl.searchParams.get('client_id') === 'test-client-id.apps.googleusercontent.com', 'the consent URL carries the configured client id');
-assert(consentUrl.searchParams.get('scope') === 'https://www.googleapis.com/auth/calendar.events', 'the consent URL requests the events-only scope, not the broader calendar scope');
-assert(consentUrl.searchParams.get('access_type') === 'offline' && consentUrl.searchParams.get('prompt') === 'consent', 'offline access + forced consent, so a refresh token is issued even on a second connection');
-const state = consentUrl.searchParams.get('state');
-assert(typeof state === 'string' && state.length > 0, 'the consent URL carries a freshly minted state nonce');
-
-const callbackNoStateRes = await fetch(`${base}/v1/admin/google-calendar/callback?code=some-code`, { redirect: 'manual' });
-assert(callbackNoStateRes.status === 400, 'the callback route rejects a request with no state at all');
-
-const callbackWrongStateRes = await fetch(`${base}/v1/admin/google-calendar/callback?code=some-code&state=not-the-real-nonce`, { redirect: 'manual' });
-assert(callbackWrongStateRes.status === 400, 'the callback route rejects an unrecognized state');
-
-// Callback deliberately isn't gated by isAdminAuthorized (a plain browser GET from Google's own
-// redirect can't carry a bearer token) — proven here by never sending an authorization header
-// on any of these callback requests, unlike every other /v1/admin/* route in this file.
-const originalFetchForGoogleAuth = globalThis.fetch;
-const tokenCalls = [];
-globalThis.fetch = async (url, init) => {
-  if (url !== 'https://oauth2.googleapis.com/token') return originalFetchForGoogleAuth(url, init);
-  tokenCalls.push(init?.body);
-  return {
-    ok: true,
-    status: 200,
-    statusText: 'OK',
-    json: async () => ({ access_token: 'fake-access-token', refresh_token: 'fake-refresh-token', expires_in: 3600 }),
-    text: async () => '',
-  };
-};
-try {
-  const callbackOkRes = await fetch(`${base}/v1/admin/google-calendar/callback?code=real-code&state=${encodeURIComponent(state)}`, {
-    redirect: 'manual',
-  });
-  assert(callbackOkRes.status === 302 && callbackOkRes.headers.get('location') === '/?google_calendar=connected', 'a successful callback redirects back to / with a connected status');
-  assert(tokenCalls.length === 1, 'the callback exchanged the code with Google\'s real token endpoint (stubbed here)');
-  assert(
-    credentials.setCalls.some((c) => c.name === 'google_calendar_refresh_token' && c.value === 'fake-refresh-token'),
-    'the returned refresh token was written to provider_credentials',
-  );
-  await new Promise((resolve) => setTimeout(resolve, 250));
-  assert(restartCalls.length === 11, 'triggerRestart fired again after the refresh token write flushed');
-
-  const callbackReplayRes = await fetch(`${base}/v1/admin/google-calendar/callback?code=real-code&state=${encodeURIComponent(state)}`, {
-    redirect: 'manual',
-  });
-  assert(callbackReplayRes.status === 400, 'the same state cannot be replayed — single-use, regardless of outcome');
-
-  // Google not returning a refresh token (e.g. a second consent for an already-granted app) is a
-  // real, documented failure mode — the callback should redirect to an error status, not crash.
-  const authUrlAgainRes = await fetch(`${base}/v1/admin/google-calendar/auth-url`, { headers: { authorization: 'Bearer the-admin-key' } });
-  const stateNoRefresh = new URL((await authUrlAgainRes.json()).url).searchParams.get('state');
-  globalThis.fetch = async (url, init) => {
-    if (url !== 'https://oauth2.googleapis.com/token') return originalFetchForGoogleAuth(url, init);
-    return { ok: true, status: 200, statusText: 'OK', json: async () => ({ access_token: 'fake-access-token', expires_in: 3600 }), text: async () => '' };
-  };
-  const callbackNoRefreshRes = await fetch(
-    `${base}/v1/admin/google-calendar/callback?code=real-code&state=${encodeURIComponent(stateNoRefresh)}`,
-    { redirect: 'manual' },
-  );
-  assert(
-    callbackNoRefreshRes.status === 302 && callbackNoRefreshRes.headers.get('location') === '/?google_calendar=error',
-    'no refresh token in the response redirects to an error status instead of throwing past the response',
-  );
-} finally {
-  globalThis.fetch = originalFetchForGoogleAuth;
-}
-
-const callbackNoCodeStateRes = await fetch(`${base}/v1/admin/google-calendar/callback?state=irrelevant`, { redirect: 'manual' });
-assert(callbackNoCodeStateRes.status === 400, 'an unrecognized state still 400s on the state check first, even with no code param');
-
-const authUrlForDenialRes = await fetch(`${base}/v1/admin/google-calendar/auth-url`, { headers: { authorization: 'Bearer the-admin-key' } });
-const stateForDenial = new URL((await authUrlForDenialRes.json()).url).searchParams.get('state');
-const callbackDeniedRes = await fetch(`${base}/v1/admin/google-calendar/callback?state=${encodeURIComponent(stateForDenial)}`, { redirect: 'manual' });
-assert(
-  callbackDeniedRes.status === 302 && callbackDeniedRes.headers.get('location') === '/?google_calendar=denied',
-  'a valid state with no code (the user declined consent) redirects to a denied status, not an error',
-);
 
 // --- Admin settings/models route (the model dropdown within a chosen connection) ---
 

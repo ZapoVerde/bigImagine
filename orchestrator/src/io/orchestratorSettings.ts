@@ -48,15 +48,20 @@
  * capped_reason.
  *
  * chat_memory_profile/chat_memory_live_window_pairs/chat_memory_sync_every_pairs/
- * chat_memory_chunk_summary_prompt/chat_memory_distill_prompt/chat_memory_household_memory_prompt
- * (docs/chat-memory.md, orchestrator/src/orchestrator/chatMemorySync.ts) are read live on every
- * sync tick, same no-restart shape as household_timezone — mirrors SillyTavern-Canonize's own
- * "Connections & Prompts" settings panel: a household connection override for the sync pipeline's
- * classification calls (unset = the active connection, same fallback a chat's own params.profile
- * uses), two timing knobs in turn-pairs (Canonize's own unit), and a "default + bespoke" override
- * per prompt — unset or empty means "use the built-in default" (each io/chatMemory/*.ts module
- * exports its own DEFAULT_* constant), a non-empty value overrides it entirely. There is no
- * separate "reset" operation: writing '' is how Settings clears an override back to the default.
+ * chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/chat_memory_distill_prompt/
+ * chat_memory_household_memory_prompt (docs/chat-memory.md, orchestrator/src/orchestrator/
+ * chatMemorySync.ts) are read live on every sync tick, same no-restart shape as
+ * household_timezone — mirrors SillyTavern-Canonize's own "Connections & Prompts" settings panel: a
+ * household connection override for the sync pipeline's classification calls (unset = the active
+ * connection, same fallback a chat's own params.profile uses), three timing knobs in turn-pairs
+ * (Canonize's own unit — live window, sync-every, and digest-horizon, the last being this
+ * platform's analogue of Canonize's bridge-summary horizon: how far back distillChatMemory
+ * re-reads chat_chunks, not just what the current tick freshly produced), and a "default +
+ * bespoke" override per prompt — unset or empty means "use the built-in default" (each
+ * io/chatMemory/*.ts module exports its own DEFAULT_* constant), a non-empty value overrides it
+ * entirely. There is no separate "reset" operation: writing '' is how Settings clears an override
+ * back to the default. Every one of these six chat_memory_* keys was missing from 0010's CHECK
+ * constraint until 0043 added them — see db/migrations/README.md's 0043 entry.
  *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
@@ -87,6 +92,7 @@ export const SETTING_NAMES = [
   'chat_memory_profile',
   'chat_memory_live_window_pairs',
   'chat_memory_sync_every_pairs',
+  'chat_memory_digest_horizon_pairs',
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
   'chat_memory_household_memory_prompt',

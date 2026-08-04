@@ -52,7 +52,7 @@ export async function invokeTool(
     const result = await db.withUserScope(userId, (session) => tool.handler(args, { userId, db: session }));
     return { status: 200, body: result ?? {} };
   } catch (err) {
-    log.error(`OpenAPI tool invocation failed for "${name}" (user ${userId})`, err);
+    log.error(`tool invocation failed for "${name}" (user ${userId})`, err);
     return { status: 500, body: { error: err instanceof Error ? err.message : String(err) } };
   }
 }

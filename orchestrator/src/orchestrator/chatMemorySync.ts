@@ -29,10 +29,18 @@
  *
  * The connection this pipeline's calls run through, and each of the three prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
- * chat_memory_sync_every_pairs/chat_memory_chunk_summary_prompt/chat_memory_distill_prompt/
- * chat_memory_household_memory_prompt) — a Settings-tab change takes effect on the very next tick,
- * no restart, mirroring server/httpServer.ts's own per-chat profile-override construction
- * (createLlmProviderForProfile + createGatedLlmProvider) for the "which connection" half.
+ * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
+ * chat_memory_distill_prompt/chat_memory_household_memory_prompt) — a Settings-tab change takes
+ * effect on the very next tick, no restart, mirroring server/httpServer.ts's own per-chat
+ * profile-override construction (createLlmProviderForProfile + createGatedLlmProvider) for the
+ * "which connection" half.
+ *
+ * distillChatMemory's second argument is not just the chunk summaries this tick freshly produced —
+ * it's the trailing chat_memory_digest_horizon_pairs' worth of chat_chunks.summary rows, oldest
+ * first, re-read from the DB every sync (this platform's analogue of SillyTavern-Canonize's
+ * bridge-summary horizon). The digest's own chat_memory_entries rows already carry state forward
+ * across syncs, so this horizon is a revision window on top of that persistence, not the sole
+ * source of continuity — see docs/chat-memory.md.
  *
  * @api-declaration
  * startChatMemorySyncLoop(deps) — begins polling every POLL_INTERVAL_MS
@@ -66,6 +74,7 @@ import { classifyHouseholdMemory } from '../io/chatMemory/classifyHouseholdMemor
 const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation urgency — minutes-scale is fine
 const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
 const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
+const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_memory_entries already persists state across syncs
 
 export interface ChatMemorySyncDeps {
   db: PostgresClient;
@@ -90,6 +99,7 @@ interface SyncSettings {
   householdMemoryPrompt: string | undefined;
   liveWindowMessages: number;
   syncEveryMessages: number;
+  digestHorizonChunks: number;
 }
 
 function toPositiveInt(raw: string | undefined, fallback: number): number {
@@ -98,14 +108,16 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
 }
 
 async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettings> {
-  const [profileName, livePairsRaw, syncEveryPairsRaw, chunkSummaryPrompt, distillPrompt, householdMemoryPrompt] = await Promise.all([
-    deps.settings.get('chat_memory_profile'),
-    deps.settings.get('chat_memory_live_window_pairs'),
-    deps.settings.get('chat_memory_sync_every_pairs'),
-    deps.settings.get('chat_memory_chunk_summary_prompt'),
-    deps.settings.get('chat_memory_distill_prompt'),
-    deps.settings.get('chat_memory_household_memory_prompt'),
-  ]);
+  const [profileName, livePairsRaw, syncEveryPairsRaw, digestHorizonPairsRaw, chunkSummaryPrompt, distillPrompt, householdMemoryPrompt] =
+    await Promise.all([
+      deps.settings.get('chat_memory_profile'),
+      deps.settings.get('chat_memory_live_window_pairs'),
+      deps.settings.get('chat_memory_sync_every_pairs'),
+      deps.settings.get('chat_memory_digest_horizon_pairs'),
+      deps.settings.get('chat_memory_chunk_summary_prompt'),
+      deps.settings.get('chat_memory_distill_prompt'),
+      deps.settings.get('chat_memory_household_memory_prompt'),
+    ]);
 
   let llm = deps.llm;
   if (profileName) {
@@ -119,6 +131,8 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
 
   const livePairs = toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
   const syncEveryPairs = toPositiveInt(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
+  const digestHorizonPairs = toPositiveInt(digestHorizonPairsRaw, DEFAULT_DIGEST_HORIZON_PAIRS);
+  const pairsPerChunk = MESSAGES_PER_CHUNK / 2;
 
   return {
     llm,
@@ -127,6 +141,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     householdMemoryPrompt: householdMemoryPrompt || undefined,
     liveWindowMessages: livePairs * 2,
     syncEveryMessages: syncEveryPairs * 2,
+    digestHorizonChunks: Math.ceil(digestHorizonPairs / pairsPerChunk),
   };
 }
 
@@ -219,7 +234,18 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         [chatId],
       );
       const drafts: ChatMemoryEntryDraft[] = existingEntries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
-      const updates = await distillChatMemory(sync.llm, drafts, summaries, sync.distillPrompt);
+
+      // Widen beyond just this tick's brand-new chunks: re-read the trailing digest-horizon of
+      // chat_chunks.summary (oldest first), so a cross-sync-boundary idea gets more than one
+      // chunk's worth of chance to register before it ages out — this platform's analogue of
+      // Canonize's own bridge-summary horizon re-read.
+      const horizonRows = await session.query<{ summary: string }>(
+        'select summary from chat_chunks where chat_id = $1 order by ordinal desc limit $2',
+        [chatId, sync.digestHorizonChunks],
+      );
+      const horizonSummaries = horizonRows.map((r) => r.summary).reverse();
+
+      const updates = await distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt);
 
       for (const entry of updates) {
         await session.query(

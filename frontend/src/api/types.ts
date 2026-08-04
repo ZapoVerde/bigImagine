@@ -148,6 +148,7 @@ export interface ChatMemorySettings {
   profileNames: string[];
   liveWindowPairs: number | null;
   syncEveryPairs: number | null;
+  digestHorizonPairs: number | null;
   chunkSummaryPrompt: string;
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;

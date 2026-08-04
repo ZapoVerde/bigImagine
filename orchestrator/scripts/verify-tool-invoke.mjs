@@ -1,12 +1,15 @@
-// Proves the OpenAPI tool surface (openApiToolServer.ts + httpServer.ts's two new routes) against
-// a real HTTP server, same style as verify-server.mjs's Part 3 — real fetch() calls, not a
-// simulated request object, since routing/parsing/auth are exactly what's under test here.
+// Proves the direct tool-invocation surface (toolInvoke.ts + httpServer.ts's GET /v1/tools and
+// POST /v1/tools/:name) against a real HTTP server, same style as verify-server.mjs's Part 3 —
+// real fetch() calls, not a simulated request object, since routing/parsing/auth are exactly
+// what's under test here. This surface used to be OpenAPI-spec-branded (an openApiToolServer.ts
+// serving GET /v1/tools/openapi.json for an external OpenAPI-based caller); that spec-serving
+// route and its module were removed, and GET /v1/tools was simplified to a plain, auth-gated
+// {names: [...]} listing for the native frontend — see toolInvoke.ts's own doc comment.
 
 import { createToolRegistry } from '../dist/orchestrator/toolRegistry.js';
 import { createApiKeyStore } from '../dist/server/apiKeyStore.js';
 import { startHttpServer } from '../dist/server/httpServer.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
-import { buildOpenApiSpec } from '../dist/server/openApiToolServer.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -39,31 +42,6 @@ function createFakePool() {
   };
 }
 
-// --- buildOpenApiSpec: pure, no server needed ---
-{
-  const spec = buildOpenApiSpec(
-    [
-      { name: 'add_list_item', description: 'Add an item.', parameters: { type: 'object', properties: { item_name: { type: 'string' } } } },
-      { name: 'get_list_items', description: 'List items.', parameters: { type: 'object', properties: {} } },
-    ],
-    'http://bigbrain-orchestrator:8787/v1/tools',
-  );
-  assert(spec.openapi === '3.1.0', 'the spec declares OpenAPI 3.1.0');
-  assert(spec.servers[0].url === 'http://bigbrain-orchestrator:8787/v1/tools', 'the servers entry carries the given base URL');
-  assert(Object.keys(spec.paths).length === 2, 'one path was generated per tool definition');
-  assert(spec.paths['/add_list_item'].post.operationId === 'add_list_item', "a tool's operationId matches its name");
-  assert(
-    spec.paths['/add_list_item'].post.requestBody.content['application/json'].schema.properties.item_name.type === 'string',
-    "a tool's JSON-Schema parameters are carried through verbatim as the request body schema",
-  );
-  assert(
-    spec.paths['/add_list_item'].post.security[0].bearerAuth !== undefined,
-    'each operation declares the bearerAuth security requirement',
-  );
-  assert(spec.components.securitySchemes.bearerAuth.scheme === 'bearer', 'the spec declares a bearer security scheme');
-}
-
-// --- the real HTTP server, end to end ---
 const echoTool = {
   definition: {
     name: 'echo_tool',
@@ -91,21 +69,21 @@ const server = startHttpServer({
   apiKeys,
   modelName: 'bigbrain',
   port: 0,
-  publicBaseUrl: 'http://bigbrain-orchestrator:8787',
 });
 await new Promise((resolve) => server.once('listening', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 
-// --- GET /v1/tools/openapi.json ---
-const specRes = await fetch(`${base}/v1/tools/openapi.json`);
-const specBody = await specRes.json();
-assert(specRes.status === 200, 'GET /v1/tools/openapi.json returns 200');
-assert(specBody.servers[0].url === 'http://bigbrain-orchestrator:8787/v1/tools', 'the live spec uses the configured publicBaseUrl');
+// --- GET /v1/tools ---
+const listNoAuthRes = await fetch(`${base}/v1/tools`);
+assert(listNoAuthRes.status === 401, 'GET /v1/tools with no auth header returns 401');
+
+const listRes = await fetch(`${base}/v1/tools`, { headers: { authorization: 'Bearer good-key' } });
+const listBody = await listRes.json();
+assert(listRes.status === 200, 'GET /v1/tools with a valid key returns 200');
 assert(
-  Object.keys(specBody.paths).sort().join(',') === '/echo_tool,/throwing_tool',
-  'the live spec lists exactly the tools in the registry, no more and no fewer',
+  Array.isArray(listBody.names) && listBody.names.sort().join(',') === 'echo_tool,throwing_tool',
+  'the tool list carries exactly the names in the registry, no more and no fewer',
 );
-assert(specRes.status !== 401, 'the spec itself requires no authentication (a client needs to read it before it can know how to authenticate calls)');
 
 // --- POST /v1/tools/:name: auth ---
 const noAuthRes = await fetch(`${base}/v1/tools/echo_tool`, {
@@ -169,7 +147,7 @@ assert(badJsonRes.status === 400, 'a malformed JSON body returns 400, not a 500 
 server.close();
 
 if (process.exitCode) {
-  console.error('\nOpenAPI tool server verification FAILED');
+  console.error('\ntool invoke verification FAILED');
   process.exit(1);
 }
-console.log('\nOpenAPI tool server verification passed');
+console.log('\ntool invoke verification passed');

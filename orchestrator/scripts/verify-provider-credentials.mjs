@@ -98,23 +98,23 @@ const store = createProviderCredentialStore(db, cipher);
 
 // --- set() upserts, list() reflects it ---
 {
-  await store.set('notion_token', 'secret-notion-token');
+  await store.set('brave_api_key', 'secret-brave-key');
   const summaries = await store.list();
-  const notion = summaries.find((s) => s.name === 'notion_token');
-  assert(notion.configured === true, 'set() makes the credential show as configured');
-  assert(notion.updatedAt !== null, 'set() records an updatedAt timestamp');
+  const brave = summaries.find((s) => s.name === 'brave_api_key');
+  assert(brave.configured === true, 'set() makes the credential show as configured');
+  assert(brave.updatedAt !== null, 'set() records an updatedAt timestamp');
 
-  await store.set('notion_token', 'rotated-notion-token');
-  const resolved = await store.resolve('notion_token', undefined);
-  assert(resolved === 'rotated-notion-token', 'set() overwrites an existing value (on conflict do update)');
+  await store.set('brave_api_key', 'rotated-brave-key');
+  const resolved = await store.resolve('brave_api_key', undefined);
+  assert(resolved === 'rotated-brave-key', 'set() overwrites an existing value (on conflict do update)');
 }
 
 // --- list() never leaks plaintext or ciphertext ---
 {
   const summaries = await store.list();
   const serialized = JSON.stringify(summaries);
-  assert(!serialized.includes('rotated-notion-token'), 'list() output never contains a plaintext credential value');
-  assert(!serialized.includes(pool.rowsByName.get('notion_token').ciphertext), 'list() output never contains a raw ciphertext value');
+  assert(!serialized.includes('rotated-brave-key'), 'list() output never contains a plaintext credential value');
+  assert(!serialized.includes(pool.rowsByName.get('brave_api_key').ciphertext), 'list() output never contains a raw ciphertext value');
 }
 
 // --- withOverriddenApiKeys ---

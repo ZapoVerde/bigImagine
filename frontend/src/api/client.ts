@@ -370,6 +370,7 @@ export async function adminSetChatMemorySettings(
     profile?: string;
     live_window_pairs?: number;
     sync_every_pairs?: number;
+    digest_horizon_pairs?: number;
     chunk_summary_prompt?: string;
     distill_prompt?: string;
     household_memory_prompt?: string;

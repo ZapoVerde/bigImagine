@@ -229,6 +229,36 @@ Every LLM call in this loop — director, character generation, fact extraction,
 - `evaluate_rules` — background tool, checks each active rule's `trigger_condition` against current scene state after a turn; a match can apply a status effect, update a character/location field, or call `generate_location_image`.
 - Active, unexpired status effects are injected into the prompt stack (§5 step 2) as short instructions; an expired one stops being selected automatically — no separate cleanup pass needed, per `bi_principles.md` §16.
 
+#### 7.4 Context Stack Presets
+
+- `create_context_stack_preset` / `get_context_stack_presets` / `update_context_stack_preset` /
+  `delete_context_stack_preset` — full CRUD over `context_stack_presets` and their ordered
+  `context_stack_slots`. Standard `user_scoped` RLS, plus a read-only carve-out: two shipped
+  built-in presets (`Standard`, `Minimal`) are visible to every user via a `select`-only policy
+  gated on `is_builtin = true`, but not editable or deletable by anyone but the fixed system owner
+  — an edit/delete against a builtin id simply returns zero rows, the same "not found" a caller
+  gets for an id that never existed.
+- **Slot vocabulary.** A slot is either `marker` (injects one named field: `system`,
+  `description`, `personality`, `scenario`, `mes_example`, `post_history_instructions`,
+  `global_rules`, `location`, `canon_facts`, `memory_recall`, `recent_history`) or `custom` (a
+  static block with its own caller-chosen role). The marker vocabulary deliberately reuses V2/V3
+  character-card field names — a freshly imported card assembles into a coherent stack immediately,
+  with no separate mapping layer between "card field" and "prompt slot."
+- **The assembler is a pure function.** `assemblePromptStack(fields, slots)` (`plugins/
+  context-stack-presets/src/assemblePromptStack.ts`) takes a flat `fields` object (one string per
+  marker, including a pre-rendered `recent_history`) and the preset's ordered `slots`, and returns
+  the `LlmMessage[]` to send. It never queries the database itself — whatever resolves a turn's
+  active preset (an Orchestrator, once `scenes`/`characters` exist) hands it plain data. This is
+  what makes §5 step 2's fixed order into saveable, swappable data without breaking `bi_principles.
+  md` §17's purity requirement: the assembler's own determinism doesn't depend on where `fields`
+  came from.
+- **Deferred (not yet wired):** `scenes.active_context_stack_preset_id` / a per-character override
+  — both need the `scenes`/`characters` tables this plugin was built ahead of (`docs/bootstrap.md`).
+  Until those land, `assemblePromptStack` is a working, tested pure function with no caller in the
+  actual turn loop; §5 step 2's fixed order remains the literal live behavior. Resolution order
+  once wired: character override → scene default → builtin (`Standard`). The Director Pass /
+  `invoke_character` tool this eventually feeds is likewise out of scope here.
+
 ---
 
 ### 8. NOT YET DESIGNED

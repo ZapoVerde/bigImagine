@@ -765,7 +765,7 @@ async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResp
     sendJson(res, 400, {
       error:
         'expected at least one of { profile?, live_window_pairs?: positive number, sync_every_pairs?: positive number, ' +
-        'chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
+        'digest_horizon_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
     });
     return;
   }
