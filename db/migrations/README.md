@@ -123,3 +123,15 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `parent_chat_id`/`fork_message_id` for branching — a fork is a new `chat_sessions` row
   constructed correct from birth (parent's messages + derived state copied at creation), not a
   message tree within one row.
+- `0041_turn_metrics.sql` — adds `turn_metrics`: per-turn performance visibility, the BigImagine
+  analog of SillyTavern-Loggeryze's `st_turn_perf.json` (`orchestrator/src/io/turnMetrics.ts`
+  writes it, `orchestrator/src/orchestrator/loop.ts` accumulates it per round/tool-call). Standard
+  `user_scoped` RLS, deliberately diverging from `llm_calls`' RLS exemption
+  (`0035_agent_routine_dispatch.sql`) — `llm_calls` is exempt for one narrow, documented reason
+  (the household-wide `agent_routine` cap must sum usage across every user), and `turn_metrics`
+  has no equivalent need, so it gets the standard per-user policy like `chat_sessions`/`notes`
+  instead of copying that exemption as a default. `rounds` is one `jsonb` array column (write-once
+  alongside the parent row, only ever read back whole) rather than a child table. A failed turn
+  still gets a row (`outcome = 'error'`, populated `error_reason`) so the rounds it did complete
+  before dying stay visible. Also widens `llm_calls` with `duration_ms`, an independent,
+  complementary addition at the per-call level.

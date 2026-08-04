@@ -32,12 +32,37 @@ runWithRequestId('req-42', () => {
 contents = readFileSync(logFile, 'utf8');
 assert(contents.includes('[req-42]'), 'runWithRequestId tags the log line made inside it');
 
+// Dedup: consecutive identical messages collapse into one line with a ×N suffix instead of
+// repeating (still within MAX_LINES=5, so nothing here is evicted yet).
+log.error('repeated message');
+log.error('repeated message');
+log.error('repeated message');
+contents = readFileSync(logFile, 'utf8');
+let lines = contents.trim().split('\n');
+assert(
+  lines.some((l) => l.includes('repeated message') && l.endsWith('×3')),
+  'three consecutive identical messages collapse into one ×3 line',
+);
+assert(
+  !lines.some((l) => l.includes('repeated message') && l.endsWith('×2')),
+  'no intermediate ×2 line survives the final flush',
+);
+
+// Non-consecutive repeats (A, B, A) must NOT collapse — only genuinely consecutive duplicates do.
+log.error('A');
+log.error('B');
+log.error('A');
+contents = readFileSync(logFile, 'utf8');
+lines = contents.trim().split('\n');
+const aLines = lines.filter((l) => / \[ERROR\](?:\s\[[^\]]*\])? A$/.test(l));
+assert(aLines.length === 2, `non-consecutive repeats are not collapsed (found ${aLines.length} distinct 'A' lines)`);
+
 // Bounded buffer: push well past MAX_LINES, confirm the file never exceeds it and evicts oldest.
 for (let i = 0; i < 20; i++) {
   log.error(`line-${i}`);
 }
 contents = readFileSync(logFile, 'utf8');
-const lines = contents.trim().split('\n');
+lines = contents.trim().split('\n');
 assert(lines.length <= 5, `log file stays bounded at MAX_LINES (got ${lines.length} lines)`);
 assert(contents.includes('line-19'), 'most recent line survives the cap');
 assert(!lines.some((l) => l.endsWith(' line-0')), 'oldest lines are evicted once over the cap');

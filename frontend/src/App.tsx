@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import './theme/tokens.css';
 import './App.css';
+import { API_KEY_STORAGE_KEY } from './api/authStorage';
 import { whoami } from './api/client';
 import BackupWarningModal from './components/BackupWarningModal';
 import Sidebar from './components/sidebar/Sidebar';
@@ -15,7 +16,6 @@ import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
 import SettingsView from './views/SettingsView';
 
-const API_KEY_STORAGE_KEY = 'bb_api_key';
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 
 type AuthState =

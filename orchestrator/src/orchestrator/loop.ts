@@ -21,6 +21,11 @@
  * inherits it without this file or the tool needing to pass anything extra, since they all share
  * the one gated LlmProvider instance closed over since boot (bb_principles.md §14).
  *
+ * runTurn also owns a TurnMetricsAccumulator (io/turnMetrics.ts) for the turn's whole lifetime —
+ * created before runTurnInner starts, recorded as one turn_metrics row in both the success and
+ * catch paths, so a turn that dies partway through still leaves behind exactly which rounds/tool
+ * calls it completed before failing, not nothing.
+ *
  * @api-declaration
  * runTurn(options: RunTurnOptions) — drives one user message through to a final chat reply,
  *   executing any tool calls the LLM requests along the way; throws if maxToolRounds is
@@ -41,6 +46,7 @@ import { log, runWithRequestId } from '../io/logger.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
+import { createMetricsAccumulator, recordTurnMetrics, type RoundMetric, type TurnMetricsAccumulator } from '../io/turnMetrics.js';
 import type { ToolRegistry } from './toolRegistry.js';
 import { describeToolCall } from './describeToolCall.js';
 import { setTurnStatus, clearTurnStatus } from './turnStatus.js';
@@ -88,14 +94,38 @@ export interface RunTurnResult {
 export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const requestId = randomUUID();
   const callContext = { taskId: opts.taskId, kind: opts.taskKind ?? ('chat' as LlmCallKind), userId: opts.userId };
+  const metrics = createMetricsAccumulator();
+  const turnStart = Date.now();
   try {
-    return await runWithRequestId(requestId, () => runWithCallContext(callContext, () => runTurnInner(opts)));
+    const result = await runWithRequestId(requestId, () =>
+      runWithCallContext(callContext, () => runTurnInner(opts, metrics)),
+    );
+    await recordTurnMetrics(opts.db, {
+      userId: opts.userId,
+      taskId: opts.taskId,
+      kind: callContext.kind,
+      totalDurationMs: Date.now() - turnStart,
+      outcome: 'ok',
+      accumulator: metrics,
+    }).catch((err) => log.error('failed to record turn_metrics', err));
+    return result;
+  } catch (err) {
+    await recordTurnMetrics(opts.db, {
+      userId: opts.userId,
+      taskId: opts.taskId,
+      kind: callContext.kind,
+      totalDurationMs: Date.now() - turnStart,
+      outcome: 'error',
+      errorReason: err instanceof Error ? err.message : String(err),
+      accumulator: metrics,
+    }).catch((err2) => log.error('failed to record turn_metrics', err2));
+    throw err;
   } finally {
     clearTurnStatus(opts.taskId);
   }
 }
 
-async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
+async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulator): Promise<RunTurnResult> {
   const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 10 } = opts;
 
   const messages: LlmMessage[] = [];
@@ -107,7 +137,18 @@ async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
   let focusedNoteId: string | undefined;
 
   for (let round = 0; round < maxToolRounds; round++) {
+    const llmStart = Date.now();
     const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
+    const roundMetric: RoundMetric = {
+      round,
+      llmDurationMs: Date.now() - llmStart,
+      promptTokens: turn.usage?.promptTokens ?? null,
+      completionTokens: turn.usage?.completionTokens ?? null,
+      totalTokens: turn.usage?.totalTokens ?? null,
+      toolCalls: [],
+    };
+    metrics.rounds.push(roundMetric);
+
     messages.push({
       ...turn.message,
       toolCalls: turn.toolCalls.length > 0 ? turn.toolCalls : undefined,
@@ -123,6 +164,7 @@ async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
       setTurnStatus(opts.taskId, describeToolCall(call.name, call.arguments));
       const tool = tools.get(call.name);
 
+      const toolStart = Date.now();
       const resultPayload = await db.withUserScope(userId, async (session) => {
         if (!tool) return { error: `unknown tool: ${call.name}` };
         try {
@@ -131,6 +173,11 @@ async function runTurnInner(opts: RunTurnOptions): Promise<RunTurnResult> {
           log.error(`tool ${call.name} threw`, err);
           return { error: err instanceof Error ? err.message : String(err) };
         }
+      });
+      roundMetric.toolCalls.push({
+        name: call.name,
+        durationMs: Date.now() - toolStart,
+        outcome: resultPayload && typeof resultPayload === 'object' && 'error' in resultPayload ? 'error' : 'ok',
       });
 
       if (tool?.focusHint) {

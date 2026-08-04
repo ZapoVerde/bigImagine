@@ -9,6 +9,13 @@
 // against the real deployed database by db/checks/verify_rls.sql (Phase 1). Proving this same
 // wiring against the real, RLS-enforcing Postgres is the natural first thing to do once the
 // orchestrator is deployed as a real service (Phase 4).
+//
+// The fake pool also captures every `insert into turn_metrics` runTurn's own
+// io/turnMetrics.ts issues (0041_turn_metrics.sql), so this also proves the metrics
+// accumulator's wiring end to end: a normal multi-round turn produces one row with the right
+// round_count/tool_call_count/rounds shape, and a turn where the LLM itself throws mid-round
+// still produces exactly one row (outcome 'error', a populated error_reason, rounds reflecting
+// only what actually completed) rather than losing the failure's shape entirely.
 
 import { createStubLlmProvider } from '../dist/io/llm/stub.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
@@ -27,8 +34,10 @@ function assert(cond, message) {
 
 function createFakePool() {
   const setConfigCalls = [];
+  const turnMetricsInserts = [];
   return {
     setConfigCalls,
+    turnMetricsInserts,
     async connect() {
       let scopedUserId;
       return {
@@ -41,6 +50,20 @@ function createFakePool() {
           }
           if (sql.includes('app_current_user_id()')) {
             return { rows: [{ app_current_user_id: scopedUserId }] };
+          }
+          if (sql.includes('insert into turn_metrics')) {
+            turnMetricsInserts.push({
+              userId: params[0],
+              taskId: params[1],
+              kind: params[2],
+              roundCount: params[3],
+              toolCallCount: params[4],
+              totalDurationMs: params[5],
+              outcome: params[6],
+              errorReason: params[7],
+              rounds: JSON.parse(params[8]),
+            });
+            return { rows: [] };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -74,15 +97,32 @@ async function runForUser(userId) {
     db,
     tools,
   });
-  return { reply: result.content, setConfigCalls: pool.setConfigCalls };
+  return { reply: result.content, setConfigCalls: pool.setConfigCalls, turnMetricsInserts: pool.turnMetricsInserts };
 }
 
 const alice = await runForUser('11111111-1111-1111-1111-111111111111');
 assert(alice.reply === 'done for 11111111-1111-1111-1111-111111111111', 'loop returns the LLM\'s final reply after the tool round-trip');
 assert(
-  alice.setConfigCalls.length === 1 && alice.setConfigCalls[0] === '11111111-1111-1111-1111-111111111111',
-  'the tool call was scoped to the requesting user exactly once',
+  // 2, not 1: the whoami tool call's own withUserScope, plus recordTurnMetrics's separate
+  // withUserScope for the turn_metrics insert (io/turnMetrics.ts) — both correctly scoped to the
+  // same requesting user, in two distinct transactions.
+  alice.setConfigCalls.length === 2 && alice.setConfigCalls.every((id) => id === '11111111-1111-1111-1111-111111111111'),
+  'every DB access this turn made (the tool call and the turn_metrics insert) was scoped to the requesting user',
 );
+
+assert(alice.turnMetricsInserts.length === 1, 'exactly one turn_metrics row is written for a successful turn');
+{
+  const m = alice.turnMetricsInserts[0];
+  assert(m.outcome === 'ok', 'turn_metrics records outcome ok for a successful turn');
+  assert(m.roundCount === 2, 'turn_metrics round_count matches the two LLM rounds the turn took');
+  assert(Array.isArray(m.rounds) && m.rounds.length === 2, 'turn_metrics rounds jsonb has one entry per round');
+  assert(
+    m.rounds[0].tool_calls.length === 1 && m.rounds[0].tool_calls[0].name === 'whoami' && m.rounds[0].tool_calls[0].outcome === 'ok',
+    'round 0 recorded the whoami tool call with its outcome',
+  );
+  assert(m.toolCallCount === 1, 'turn_metrics tool_call_count sums tool calls across every round');
+  assert(m.totalDurationMs >= 0, 'turn_metrics total_duration_ms is a real elapsed-time measurement');
+}
 
 const bob = await runForUser('22222222-2222-2222-2222-222222222222');
 assert(
@@ -161,6 +201,43 @@ assert(
   const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
   assert(result.content === 'done anyway', 'a throwing focusHint never breaks the turn\'s reply');
   assert(result.focusedNoteId === undefined, 'a throwing focusHint just leaves focusedNoteId unset');
+}
+
+// turn_metrics failure path: the LLM itself throws partway through a turn (here, mid-loop —
+// only one turn is scripted but the tool call it requests forces a second round). runTurn must
+// still write exactly one turn_metrics row, reflecting only the round that actually completed.
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const tools = createToolRegistry([whoamiTool]);
+  const llm = createStubLlmProvider([
+    {
+      message: { role: 'assistant', content: '' },
+      toolCalls: [{ id: 'call_1', name: 'whoami', arguments: {} }],
+    },
+  ]);
+
+  let threw = false;
+  try {
+    await runTurn({
+      userId: 'x',
+      taskId: 'task-failing-turn',
+      messages: [{ role: 'user', content: 'hi' }],
+      llm,
+      db,
+      tools,
+    });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'runTurn rethrows when the LLM call itself fails mid-turn');
+  assert(pool.turnMetricsInserts.length === 1, 'a failed turn still writes exactly one turn_metrics row');
+
+  const m = pool.turnMetricsInserts[0];
+  assert(m.outcome === 'error', 'turn_metrics records outcome error for a failed turn');
+  assert(typeof m.errorReason === 'string' && m.errorReason.length > 0, 'turn_metrics captures a populated error_reason');
+  assert(m.roundCount === 1, 'turn_metrics round_count reflects only the round that completed before the failure');
+  assert(m.rounds[0].tool_calls.length === 1, 'the completed round\'s tool call is preserved in the failure-path row');
 }
 
 if (process.exitCode) {

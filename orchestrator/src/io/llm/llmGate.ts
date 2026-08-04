@@ -106,13 +106,14 @@ async function logCall(
     promptTokens: number | null;
     completionTokens: number | null;
     totalTokens: number | null;
+    durationMs: number | null;
     reason: string | null;
   },
 ): Promise<void> {
   await db.withSystemScope((session) =>
     session.query(
-      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, reason)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         fields.userId,
         fields.kind,
@@ -122,6 +123,7 @@ async function logCall(
         fields.promptTokens,
         fields.completionTokens,
         fields.totalTokens,
+        fields.durationMs,
         fields.reason,
       ],
     ),
@@ -220,12 +222,14 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
             promptTokens: null,
             completionTokens: null,
             totalTokens: null,
+            durationMs: null,
             reason,
           });
           throw err;
         }
       }
 
+      const callStart = Date.now();
       let turn: LlmTurn;
       try {
         turn = await base.complete(messages, tools, options);
@@ -240,6 +244,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
           promptTokens: null,
           completionTokens: null,
           totalTokens: null,
+          durationMs: Date.now() - callStart,
           reason,
         });
         throw err;
@@ -254,6 +259,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
         promptTokens: turn.usage?.promptTokens ?? null,
         completionTokens: turn.usage?.completionTokens ?? null,
         totalTokens: turn.usage?.totalTokens ?? null,
+        durationMs: Date.now() - callStart,
         reason: null,
       });
 

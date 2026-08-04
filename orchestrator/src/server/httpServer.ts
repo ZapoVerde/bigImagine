@@ -109,6 +109,7 @@ import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js
 import { runWithCallContext } from '../io/llm/callContext.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
+import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
@@ -589,6 +590,35 @@ async function handleUploadAttachment(
   sendJson(res, status, body);
 }
 
+const MAX_CLIENT_LOG_ENTRIES = 200;
+
+// Deliberately unauthenticated, same posture as GET /healthz — not /v1/whoami, which does 401
+// without a valid key. The errors most worth capturing here are exactly the ones that happen
+// before whoami() resolves (a broken unlock flow, a crash during initial mount). authenticate()
+// still runs, best-effort, so a userId gets attached whenever one's already resolvable; abuse
+// surface is bounded by readJsonBody's existing size cap, the entries-per-request cap below, and
+// fileLogBuffer's own on-disk ring cap regardless of how much gets posted.
+async function handleClientLogs(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let body: unknown;
+  try {
+    body = await readJsonBody(req);
+  } catch (err) {
+    sendJson(res, err instanceof JsonBodyTooLargeError ? 413 : 400, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+  const entries = (body as { entries?: unknown })?.entries;
+  if (!Array.isArray(entries)) {
+    sendJson(res, 400, { error: 'expected { entries: [...] }' });
+    return;
+  }
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  const accepted = entries.slice(0, MAX_CLIENT_LOG_ENTRIES) as ClientLogEntry[];
+  recordClientLogBatch(accepted, { userId });
+  sendJson(res, 202, { accepted: accepted.length });
+}
+
 async function handleAdminCredentialsList(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const credentials = await listCredentials(deps.credentials);
   sendJson(res, 200, { credentials });
@@ -1051,6 +1081,10 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url === '/healthz') {
     sendJson(res, 200, { status: 'ok' });
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/client-logs') {
+    await handleClientLogs(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/whoami') {
