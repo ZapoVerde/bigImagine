@@ -329,7 +329,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       }
       await refreshActiveMessages(session.chatId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to reach bigBrain');
+      setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
     } finally {
       setSending(false);
     }
@@ -494,7 +494,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         </div>
 
         <div className="chat-history" ref={historyRef}>
-          {messages.length === 0 && chatId && <div className="empty-state">Ask bigBrain something.</div>}
+          {messages.length === 0 && chatId && <div className="empty-state">Ask BigImagine something.</div>}
           {messages.length === 0 && !chatId && (
             <div className="chat-empty-landing">
               {onSwitchView && (
@@ -592,7 +592,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                 send();
               }
             }}
-            placeholder="Message bigBrain…"
+            placeholder="Message BigImagine…"
             rows={2}
             autoFocus
           />

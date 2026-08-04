@@ -14,6 +14,7 @@ import {
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
+import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
   ChatMemorySettings,
   CredentialSummary,
@@ -61,9 +62,10 @@ function formatUtcOffset(tz: string): string {
 }
 
 // Ported from the old standalone adminPage.ts — same two endpoints, same behavior (restart-on-
-// save, poll /healthz until the orchestrator comes back). The admin key is deliberately kept in
-// component state only, never localStorage: unlike the household API key gating the rest of this
-// app, this one key can rotate every other credential in the system.
+// save, poll /healthz until the orchestrator comes back). Persisted to localStorage
+// (ADMIN_API_KEY_STORAGE_KEY) like the household key: this is a single-user deployment, so there's
+// no household member whose access this key needs to withhold — re-typing it every page load
+// would be pure friction with no real security benefit here.
 //
 // Under Cloudflare Access, httpServer.ts's isAdminAuthorized trusts the Access identity directly
 // (see client.ts's adminListCredentials/adminGetActiveProfile) — a second manually-typed secret
@@ -77,7 +79,7 @@ interface SettingsViewProps {
 }
 
 export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps) {
-  const [adminKey, setAdminKey] = useState('');
+  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY) ?? '');
   const [checking, setChecking] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -145,47 +147,17 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
   }
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const [creds, connection, tz, notificationSettings, chatMemorySettingsResult] = await Promise.all([
-          adminListCredentials(null),
-          adminGetActiveProfile(null),
-          adminGetTimezone(null),
-          adminGetNotificationSettings(null),
-          adminGetChatMemorySettings(null),
-        ]);
-        setCredentials(creds);
-        setSelectedName(creds[0]?.name ?? '');
-        setProfileNames(connection.profileNames);
-        setActiveProfile(connection.activeProfile);
-        setActiveModel(connection.activeModel);
-        setSelectedProfile(connection.activeProfile);
-        setSelectedModel(connection.activeModel);
-        setVisionCapableProfiles(connection.visionCapableProfiles);
-        setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
-        setTimezone(tz);
-        setSelectedTimezone(tz);
-        applyNotificationSettings(notificationSettings);
-        applyChatMemorySettings(chatMemorySettingsResult);
-        setUnlocked(true);
-      } catch {
-        // Not covered by Access (or Access isn't configured here) — fall back to the key form.
-      } finally {
-        setChecking(false);
-      }
-    })();
-  }, []);
-
-  async function load() {
-    setLoadError(null);
+  // Shared by the mount-time probes (no key, then a stored key) and the manual Load button —
+  // returns whether it unlocked so each caller can decide what to do next (persist the key,
+  // evict a stale stored key, fall through to the key form).
+  async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
       const [creds, connection, tz, notificationSettings, chatMemorySettingsResult] = await Promise.all([
-        adminListCredentials(adminKey),
-        adminGetActiveProfile(adminKey),
-        adminGetTimezone(adminKey),
-        adminGetNotificationSettings(adminKey),
-        adminGetChatMemorySettings(adminKey),
+        adminListCredentials(key),
+        adminGetActiveProfile(key),
+        adminGetTimezone(key),
+        adminGetNotificationSettings(key),
+        adminGetChatMemorySettings(key),
       ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -201,9 +173,42 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyNotificationSettings(notificationSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
-    } catch (err) {
-      setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error };
     }
+  }
+
+  useEffect(() => {
+    (async () => {
+      if ((await attemptLoad(null)).ok) {
+        setChecking(false);
+        return;
+      }
+      // Not covered by Access (or Access isn't configured here) — try a previously-saved admin
+      // key before falling back to the manual key form.
+      const stored = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
+      if (stored) {
+        setAdminKey(stored);
+        if ((await attemptLoad(stored)).ok) {
+          setChecking(false);
+          return;
+        }
+        localStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
+      }
+      setChecking(false);
+    })();
+  }, []);
+
+  async function load() {
+    setLoadError(null);
+    const result = await attemptLoad(adminKey);
+    if (result.ok) {
+      localStorage.setItem(ADMIN_API_KEY_STORAGE_KEY, adminKey);
+      return;
+    }
+    const err = result.error;
+    setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
   }
 
   async function saveTimezone() {
@@ -376,7 +381,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   if (!unlocked) {
     return (
       <div className="settings-view">
-        <h1>bigBrain — provider credentials</h1>
+        <h1>BigImagine — provider credentials</h1>
         <label>
           Admin API key
           <br />
@@ -391,7 +396,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
 
   return (
     <div className="settings-view">
-      <h1>bigBrain — provider credentials</h1>
+      <h1>BigImagine — provider credentials</h1>
 
       <fieldset>
         <legend>Theme</legend>

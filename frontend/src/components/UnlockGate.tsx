@@ -18,7 +18,7 @@ export default function UnlockGate({ onUnlock }: UnlockGateProps) {
           if (key.trim()) onUnlock(key.trim());
         }}
       >
-        <h1>bigBrain</h1>
+        <h1>BigImagine</h1>
         <label>
           API key
           <br />

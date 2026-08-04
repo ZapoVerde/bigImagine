@@ -36,7 +36,7 @@ export default function TabStrip({
       >
         {sidebarCollapsed ? '☰' : '«'}
       </button>
-      <h1>bigBrain</h1>
+      <h1>BigImagine</h1>
       <nav>
         {tabs.map((tab) => (
           <button
