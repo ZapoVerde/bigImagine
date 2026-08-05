@@ -33,7 +33,7 @@ alter table lorebooks enable row level security;
 alter table lorebooks force row level security;
 create policy user_scoped on lorebooks using (user_id = app_current_user_id()) with check (user_id = app_current_user_id());
 
-grant select, insert, update, delete on lorebooks to bigbrain_app;
+grant select, insert, update, delete on lorebooks to bigimagine_app;
 
 create table lorebook_entries (
   entry_id      uuid primary key default gen_random_uuid(),
@@ -63,4 +63,4 @@ alter table lorebook_entries enable row level security;
 alter table lorebook_entries force row level security;
 create policy user_scoped on lorebook_entries using (user_id = app_current_user_id()) with check (user_id = app_current_user_id());
 
-grant select, insert, update, delete on lorebook_entries to bigbrain_app;
+grant select, insert, update, delete on lorebook_entries to bigimagine_app;
