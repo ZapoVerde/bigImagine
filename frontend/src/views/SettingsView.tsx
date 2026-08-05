@@ -4,6 +4,7 @@ import {
   adminGetActiveProfile,
   adminGetChatMemorySettings,
   adminGetNotificationSettings,
+  adminGetPersonaSettings,
   adminGetPiaProxyUrl,
   adminGetScreenLockSettings,
   adminGetTimezone,
@@ -13,6 +14,7 @@ import {
   adminSetChatMemorySettings,
   adminSetCredential,
   adminSetNotificationSettings,
+  adminSetPersonaSettings,
   adminSetPiaProxyUrl,
   adminSetScreenLockSettings,
   adminSetTimezone,
@@ -23,6 +25,7 @@ import type {
   ChatMemorySettings,
   CredentialSummary,
   NotificationSettings,
+  PersonaSettings,
   ProfileModelsResult,
   ScreenLockSettings,
 } from '../api/types';
@@ -129,6 +132,14 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedPiaProxyUrl, setSelectedPiaProxyUrl] = useState('');
   const [piaProxyUrlStatus, setPiaProxyUrlStatus] = useState('');
 
+  // The household's own name/description (docs/prompt-macros.md's Stage 1) — folded into a chat's
+  // prompt stack when a preset enables the 'persona' marker slot, same no-restart shape as timezone.
+  const [personaName, setPersonaName] = useState('');
+  const [selectedPersonaName, setSelectedPersonaName] = useState('');
+  const [personaDescription, setPersonaDescription] = useState('');
+  const [selectedPersonaDescription, setSelectedPersonaDescription] = useState('');
+  const [personaSettingsStatus, setPersonaSettingsStatus] = useState('');
+
   // ScreenLockOverlay.tsx's idle-timeout re-lock — screenLockPassword is intentionally read back
   // in full (bi_principles.md §12: it isn't a secret, see adminServer.ts's own note), same as
   // every other field on this tab, unlike a provider credential.
@@ -156,6 +167,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedNotificationsEnabled(settings.enabled);
   }
 
+  function applyPersonaSettings(settings: PersonaSettings) {
+    setPersonaName(settings.name);
+    setSelectedPersonaName(settings.name);
+    setPersonaDescription(settings.description);
+    setSelectedPersonaDescription(settings.description);
+  }
+
   function applyScreenLockSettings(settings: ScreenLockSettings) {
     setScreenLockPassword(settings.password);
     setSelectedScreenLockPassword(settings.password);
@@ -179,13 +197,14 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // evict a stale stored key, fall through to the key form).
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, connection, tz, notificationSettings, piaProxyUrlResult, screenLockSettings, chatMemorySettingsResult] =
+      const [creds, connection, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, chatMemorySettingsResult] =
         await Promise.all([
           adminListCredentials(key),
           adminGetActiveProfile(key),
           adminGetTimezone(key),
           adminGetNotificationSettings(key),
           adminGetPiaProxyUrl(key),
+          adminGetPersonaSettings(key),
           adminGetScreenLockSettings(key),
           adminGetChatMemorySettings(key),
         ]);
@@ -203,6 +222,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyNotificationSettings(notificationSettings);
       setPiaProxyUrl(piaProxyUrlResult ?? '');
       setSelectedPiaProxyUrl(piaProxyUrlResult ?? '');
+      applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
@@ -268,6 +288,20 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setPiaProxyUrl(selectedPiaProxyUrl);
     setPiaProxyUrlStatus('Saved — takes effect on the next chub import/search call, no restart needed.');
+  }
+
+  async function savePersonaSettings() {
+    if (selectedPersonaName === personaName && selectedPersonaDescription === personaDescription) return;
+    setPersonaSettingsStatus('');
+    try {
+      await adminSetPersonaSettings({ name: selectedPersonaName, description: selectedPersonaDescription }, adminKey);
+    } catch (err) {
+      setPersonaSettingsStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setPersonaName(selectedPersonaName);
+    setPersonaDescription(selectedPersonaDescription);
+    setPersonaSettingsStatus('Saved — takes effect the next time a preset applies the User Persona marker.');
   }
 
   async function saveNotificationSettings() {
@@ -605,6 +639,38 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{piaProxyUrlStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Persona</legend>
+        <label>
+          Your name
+          <br />
+          <input
+            value={selectedPersonaName}
+            onChange={(e) => setSelectedPersonaName(e.target.value)}
+            placeholder="e.g. Jeremy"
+          />
+        </label>
+        <br />
+        <label>
+          Your description
+          <br />
+          <textarea
+            value={selectedPersonaDescription}
+            onChange={(e) => setSelectedPersonaDescription(e.target.value)}
+            placeholder="A short description of yourself, injected wherever a prompt stack preset enables the User Persona marker."
+            rows={3}
+          />
+        </label>
+        <br />
+        <button
+          onClick={savePersonaSettings}
+          disabled={selectedPersonaName === personaName && selectedPersonaDescription === personaDescription}
+        >
+          Save
+        </button>
+        <div className="status">{personaSettingsStatus}</div>
       </fieldset>
 
       <fieldset>

@@ -29,6 +29,14 @@ import type { ToolDefinition } from '../io/llm/types.js';
 export interface ToolHandlerContext {
   userId: string;
   db: DbSession;
+  /** The live conversation this turn belongs to (RunTurnOptions.taskId when taskKind is 'chat') —
+   *  undefined for a non-chat task (e.g. an agent_routine dispatch has no chat to anchor to).
+   *  plugins/canonize's propose_canon_fact uses this to scope a proposed fact to its chat. */
+  chatId?: string;
+  /** The chat_messages row this turn's tool calls should anchor to — the just-persisted user
+   *  message that triggered this turn (server/httpServer.ts persists it before calling runTurn
+   *  specifically so this is available here, not one turn stale). Undefined when chatId is. */
+  anchorMessageId?: string;
 }
 
 export type ToolHandler = (args: unknown, ctx: ToolHandlerContext) => Promise<unknown>;

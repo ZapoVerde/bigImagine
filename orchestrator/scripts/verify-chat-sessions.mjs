@@ -99,18 +99,20 @@ function createFakePool() {
             if (setParts.includes('canvas_note_id =')) row.canvas_note_id = params[idx++];
             return { rows: sql.includes('returning') ? [row] : [] };
           }
-          // chat_messages
+          // chat_messages — always returns the inserted row (real Postgres only does with
+          // `returning message_id`, but appendMessages always asks for it now, so this stays simple).
           if (sql.includes('insert into chat_messages')) {
             const [chatId, userId, role, content] = params;
-            messages.push({
+            const row = {
               message_id: randomUUID(),
               chat_id: chatId,
               user_id: userId,
               role,
               content,
               created_at: now(),
-            });
-            return { rows: [] };
+            };
+            messages.push(row);
+            return { rows: [row] };
           }
           // Anchored with startsWith, checked before the generic select-all branch below —
           // 'delete from chat_messages where chat_id' is itself a substring match for the old

@@ -80,12 +80,17 @@
  * parseSetPiaProxyUrlBody(raw) — validates {value: a non-empty http(s) URL}; undefined on any
  *   malformed shape
  * setPiaProxyUrl(store, value) — upserts pia_proxy_url
+ * getPersonaSettings(store) — {name, description}, each '' if never set
+ * parseSetPersonaSettingsBody(raw) — validates {name?, description?: string}, at least one
+ *   present; undefined on any malformed shape
+ * setPersonaSettings(store, body) — upserts whichever of persona_name/persona_description was given
  *
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
  *                      isValidTimeZone/parseSetNotificationSettingsBody/
- *                      parseSetScreenLockSettingsBody/parseSetPiaProxyUrlBody are pure; the rest are
+ *                      parseSetScreenLockSettingsBody/parseSetPiaProxyUrlBody/
+ *                      parseSetPersonaSettingsBody are pure; the rest are
  *                      impure (Postgres IO via the injected store, or a
  *                      network call to the named provider for listModelsForProfile)
  *     state_ownership: []
@@ -319,6 +324,45 @@ export function parseSetScreenLockSettingsBody(raw: unknown): SetScreenLockSetti
 export async function setScreenLockSettings(store: OrchestratorSettingsStore, body: SetScreenLockSettingsBody): Promise<void> {
   if (body.password !== undefined) await store.set('screen_lock_password', body.password);
   if (body.timeoutMinutes !== undefined) await store.set('screen_lock_timeout_minutes', String(body.timeoutMinutes));
+}
+
+// --- Persona settings (migration 0053, docs/prompt-macros.md's Stage 1) ---
+// The household's own name and self-description — read back and displayed in full, same shape as
+// screen lock/notifications above, not write-only like a provider credential. Empty (the default)
+// means the 'persona' prompt-stack marker slot has nothing to inject even if a preset enables it
+// (assemblePromptStack.ts already treats an empty/undefined field as "skip this slot").
+
+export interface PersonaSettings {
+  name: string;
+  description: string;
+}
+
+export async function getPersonaSettings(store: OrchestratorSettingsStore): Promise<PersonaSettings> {
+  const name = (await store.get('persona_name')) ?? '';
+  const description = (await store.get('persona_description')) ?? '';
+  return { name, description };
+}
+
+export interface SetPersonaSettingsBody {
+  name?: string;
+  description?: string;
+}
+
+export function parseSetPersonaSettingsBody(raw: unknown): SetPersonaSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { name, description } = raw as Record<string, unknown>;
+  if (name === undefined && description === undefined) return undefined;
+  if (name !== undefined && typeof name !== 'string') return undefined;
+  if (description !== undefined && typeof description !== 'string') return undefined;
+  return {
+    name: typeof name === 'string' ? name : undefined,
+    description: typeof description === 'string' ? description : undefined,
+  };
+}
+
+export async function setPersonaSettings(store: OrchestratorSettingsStore, body: SetPersonaSettingsBody): Promise<void> {
+  if (body.name !== undefined) await store.set('persona_name', body.name);
+  if (body.description !== undefined) await store.set('persona_description', body.description);
 }
 
 // --- pia-proxy settings (io/piaProxyFetch.ts, migration 0052) ---

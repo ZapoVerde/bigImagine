@@ -39,6 +39,43 @@
   background: var(--color-accent-hover);
 }
 
+.browse-chub-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* Tri-state: neutral (base .tag-chip look, shared with DocumentsView's picker), .include (green),
+   .exclude (red-toned, struck through so the excluded state reads unambiguously at a glance). */
+.chub-tag-chip.include {
+  background: var(--color-accent-subtle);
+  color: var(--color-accent);
+  border-color: transparent;
+}
+
+.chub-tag-chip.exclude {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-color: transparent;
+  text-decoration: line-through;
+}
+
+.browse-chub-clear-tags {
+  font: inherit;
+  font-size: var(--font-size-2xs);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  border: 1px dashed var(--color-border-subtle);
+  background: transparent;
+  color: var(--color-text-faint);
+  cursor: pointer;
+}
+
+.browse-chub-clear-tags:hover {
+  background: var(--color-hover-surface);
+}
+
 /* Cards stack to a single column on a narrow phone screen — auto-fill/minmax degrades gracefully
    rather than a fixed column count that would overlap or truncate at phone width. */
 .browse-chub-grid {

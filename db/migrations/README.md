@@ -195,3 +195,17 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Exists because chub.ai blocks Australian IPs; `plugins/characters`' chub import/search tools
   (`io/piaProxyFetch.ts`) are the first consumer. Same selector shape as `ntfy_server_url` — not a
   secret, just a plain internal container URL, read live on every call.
+- `0053_persona_settings.sql` — widens `orchestrator_settings.key` with `persona_name` and
+  `persona_description`: the household's own name and self-description, BigImagine's analogue of
+  SillyTavern's user persona (`{{user}}`/`{{persona}}`). Stage 1 of `docs/prompt-macros.md`'s
+  staged macro-port plan — deliberately the simplified single-persona shape (a name, a description,
+  and reuse of the existing marker-slot `enabled` toggle to push it into the prompt stack) rather
+  than ST's full multi-persona/position system. Consumed by
+  `plugins/context-stack-presets/src/applyPromptStackToChatTool.ts` to populate the `persona`
+  marker key added to `assemblePromptStack.ts`'s `MarkerKey` alongside this migration.
+- `0054_canon_facts_chat_anchor.sql` — adds `chat_id`/`anchor_message_id` to `canon_facts`, both
+  `on delete set null` (never `cascade` — a proposal is never erased, per `bi_principles.md` §15).
+  Point-in-time canon recall: `plugins/canonize/src/recallCanonFactsTool.ts`'s new
+  `as_of_message_id` arg filters facts to only those anchored at or before a given chat message, so
+  "what did the story know as of turn N" is a plain filtered read, not a separate snapshot to keep
+  in sync. Omitting `as_of_message_id` is byte-for-byte the pre-migration behavior.

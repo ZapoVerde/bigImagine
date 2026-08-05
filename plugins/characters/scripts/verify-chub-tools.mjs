@@ -75,6 +75,25 @@ assert(extractChubFullPath('botmaster/sabrina-abc') === 'botmaster/sabrina-abc',
   assert(result.results[1].tagline === '' && result.results[1].avatarUrl === '', 'a node missing tagline/avatar_url normalizes to empty strings, not undefined');
 }
 
+// --- search_chub_characters: tags / excludeTags ---
+{
+  let requestedUrl;
+  globalThis.fetch = async (url) => {
+    requestedUrl = url;
+    return new Response(JSON.stringify({ data: { count: 0, nodes: [] } }), { status: 200 });
+  };
+
+  const tool = createSearchChubCharactersTool(fakeSettings('http://pia-proxy:8080'));
+  await tool.handler({ tags: ['Fantasy', 'Romance'], excludeTags: ['Horror'] }, {});
+
+  // One decodeURIComponent pass undoes fetchThroughPiaProxy's own encodeURIComponent wrapping, but
+  // the comma URLSearchParams put inside the *target* URL's tags= value was itself encoded (%2C)
+  // before that wrapping — so it survives as the literal string "%2C" here, not a raw comma.
+  const decoded = decodeURIComponent(requestedUrl);
+  assert(decoded.includes('tags=Fantasy%2CRomance'), 'search_chub_characters joins tags with a comma');
+  assert(decoded.includes('exclude_tags=Horror'), 'search_chub_characters maps excludeTags to exclude_tags');
+}
+
 // --- import_character_card_from_url ---
 {
   const BLANK_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');

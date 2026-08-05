@@ -153,6 +153,7 @@ import {
   getChatMemorySettings,
   getHouseholdTimezone,
   getNotificationSettings,
+  getPersonaSettings,
   getPiaProxyUrl,
   getScreenLockSettings,
   listCredentials,
@@ -162,6 +163,7 @@ import {
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
   parseSetNotificationSettingsBody,
+  parseSetPersonaSettingsBody,
   parseSetPiaProxyUrlBody,
   parseSetScreenLockSettingsBody,
   parseSetTimezoneBody,
@@ -171,6 +173,7 @@ import {
   setCredential,
   setHouseholdTimezone,
   setNotificationSettings,
+  setPersonaSettings,
   setPiaProxyUrl,
   setScreenLockSettings,
 } from './adminServer.js';
@@ -420,6 +423,10 @@ async function handleChatCompletions(
   let sessionTitle: string | undefined;
   let priorMessageCount = 0;
   let sessionKind: 'chat' | 'rp' = 'chat';
+  // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
+  // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
+  // use even when this turn doesn't add a fresh chat_messages row of its own.
+  let existingLatestUserMessageId: string | undefined;
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
@@ -431,6 +438,7 @@ async function handleChatCompletions(
     sessionTitle = detail.session.title;
     priorMessageCount = detail.messages.length;
     sessionKind = detail.session.kind;
+    existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
     }
@@ -503,6 +511,19 @@ async function handleChatCompletions(
     messagesForLlm = trimmed;
   }
 
+  // Point-in-time canon recall's anchor (db/migrations/0053_canon_facts_chat_anchor.sql) needs the
+  // triggering user message's id available to mid-turn tool calls, not just to the post-turn
+  // appendMessages below — so a genuinely new turn's user message is persisted here, before
+  // runTurn runs, rather than only after. A rerun/edit-resend has no new user message to insert
+  // (see isNewTurn's own comment below); it anchors to the existing one instead.
+  const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
+  const isNewTurn = messages.length > priorMessageCount;
+  let anchorMessageId: string | undefined = existingLatestUserMessageId;
+  if (body.chat_id && latestUserMessage && isNewTurn) {
+    const [inserted] = await chats.appendMessages(userId, body.chat_id, [{ role: 'user', content: latestUserMessage.content }]);
+    anchorMessageId = inserted?.messageId;
+  }
+
   let reply: string;
   let focusedNoteId: string | null | undefined;
   try {
@@ -524,6 +545,7 @@ async function handleChatCompletions(
       llm: turnLlm,
       db,
       tools: sessionTools,
+      anchorMessageId,
     }));
   } catch (err) {
     // Surfaced to the client rather than falling through to startHttpServer's generic top-level
@@ -536,19 +558,9 @@ async function handleChatCompletions(
   const echoedModel = model ?? turnDefaultModel;
 
   if (body.chat_id) {
-    const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
-    // A "rerun"/"edit" resend first truncates the chat back to some earlier point (DELETE/POST
-    // .../truncate below), then resends a messages array that's already fully accounted for in
-    // what's persisted (rerun: identical to what's left after truncating; edit: the truncated
-    // history plus one new user message). Only a genuinely new turn's client array is longer than
-    // what was already stored — that's the one case needing a new user-message row here; a
-    // same-length resend means the "latest user message" already exists, and inserting it again
-    // would duplicate it.
-    const isNewTurn = messages.length > priorMessageCount;
-    await chats.appendMessages(userId, body.chat_id, [
-      ...(latestUserMessage && isNewTurn ? [{ role: 'user' as const, content: latestUserMessage.content }] : []),
-      { role: 'assistant' as const, content: reply },
-    ]);
+    // The user message (if this was a genuinely new turn) is already persisted above, before
+    // runTurn ran — only the assistant reply is appended here now.
+    await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply }]);
     // First exchange in a still-untitled session names it, once — bigBrain never retitles a
     // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
     // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
@@ -952,8 +964,35 @@ async function handlePiaProxyUrlSet(req: IncomingMessage, res: ServerResponse, d
   }
 
   await setPiaProxyUrl(deps.settings, value);
-  // No restart needed — the next chub import/search tool call reads it live.
-  sendJson(res, 200, { url: value });
+  sendJson(res, 200, { url: await getPiaProxyUrl(deps.settings) });
+}
+
+// GET/POST /v1/admin/persona-settings — the household's own name/description
+// (docs/prompt-macros.md's Stage 1), read live by
+// plugins/context-stack-presets' applyPromptStackToChatTool.ts. Same admin-authed,
+// read-back-in-full shape as screen-lock/notification settings.
+async function handlePersonaSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getPersonaSettings(deps.settings));
+}
+
+async function handlePersonaSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const body = parseSetPersonaSettingsBody(raw);
+  if (!body) {
+    sendJson(res, 400, { error: 'expected { name?: string, description?: string }, at least one present' });
+    return;
+  }
+
+  await setPersonaSettings(deps.settings, body);
+  // No restart needed — applyPromptStackToChatTool.ts reads both fields live on every apply.
+  sendJson(res, 200, await getPersonaSettings(deps.settings));
 }
 
 async function handleAdminScreenLockSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -1473,6 +1512,22 @@ async function handleRequest(
       return;
     }
     await handlePiaProxyUrlSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/persona-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handlePersonaSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/persona-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handlePersonaSettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-settings') {

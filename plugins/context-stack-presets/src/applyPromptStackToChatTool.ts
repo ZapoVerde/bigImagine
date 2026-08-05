@@ -21,17 +21,26 @@
  * greeting under the identical zero-messages guard that tool uses, so calling this on a chat that
  * already has messages (re-applying a different stack later) never re-seeds.
  *
+ * fields.persona (docs/prompt-macros.md's Stage 1) comes from the household-wide
+ * persona_name/persona_description settings (migration 0053), not from the character row — it's
+ * the human's own self-description, orthogonal to whichever character the chat is linked to, so
+ * it's read once here via the injected settings store rather than joined off `characters`. Read
+ * live on every apply, same no-restart shape as every other orchestrator_settings value. Settings
+ * is nullable (matching recallCanonFactsTool.ts's own settings? pattern) purely so this tool stays
+ * constructible in a settings-less test harness; production always wires a real store.
+ *
  * @api-declaration
- * createApplyPromptStackToChatTool() — returns the apply_prompt_stack_to_chat RegisteredTool
+ * createApplyPromptStackToChatTool(settings) — returns the apply_prompt_stack_to_chat RegisteredTool
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the injected session)
+ *     purity:          impure (Postgres IO via the injected session, orchestrator settings read)
  *     state_ownership: []
- *     external_io:     [Postgres (via the DbSession it's given)]
+ *     external_io:     [Postgres (via the DbSession it's given), orchestrator settings store]
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
+import type { OrchestratorSettingsStore } from '@bigbrain/orchestrator/settings';
 import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from './assemblePromptStack.js';
 import type { SlotRow } from './slotRows.js';
 
@@ -55,7 +64,7 @@ function isApplyPromptStackToChatArgs(value: unknown): value is { chatId: string
   );
 }
 
-export function createApplyPromptStackToChatTool(): RegisteredTool {
+export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsStore | null): RegisteredTool {
   return {
     definition: {
       name: 'apply_prompt_stack_to_chat',
@@ -110,14 +119,28 @@ export function createApplyPromptStackToChatTool(): RegisteredTool {
         character = characterRows[0];
       }
 
-      const fields: PromptStackFields = character
-        ? {
-            system: character.system_prompt || undefined,
-            description: character.persona || undefined,
-            scenario: character.scenario || undefined,
-            mes_example: character.example_dialogue || undefined,
-          }
-        : {};
+      let persona: string | undefined;
+      if (settings) {
+        const personaName = await settings.get('persona_name');
+        const personaDescription = await settings.get('persona_description');
+        if (personaDescription) {
+          persona = personaName ? `${personaName}: ${personaDescription}` : personaDescription;
+        } else if (personaName) {
+          persona = personaName;
+        }
+      }
+
+      const fields: PromptStackFields = {
+        ...(character
+          ? {
+              system: character.system_prompt || undefined,
+              description: character.persona || undefined,
+              scenario: character.scenario || undefined,
+              mes_example: character.example_dialogue || undefined,
+            }
+          : {}),
+        persona,
+      };
 
       const messages = assemblePromptStack(fields, slots);
       const systemText = messages.map((m) => m.content).join('\n\n');

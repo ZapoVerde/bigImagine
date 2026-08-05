@@ -54,6 +54,12 @@ export interface ScreenLockSettings {
   timeoutMinutes: number;
 }
 
+// orchestrator/src/server/adminServer.ts getPersonaSettings() — '' means never set.
+export interface PersonaSettings {
+  name: string;
+  description: string;
+}
+
 // orchestrator/src/server/openai.ts buildChatCompletion()
 export interface ChatCompletionResponse {
   id: string;

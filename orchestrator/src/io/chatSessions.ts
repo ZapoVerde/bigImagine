@@ -161,7 +161,15 @@ export interface ChatSessionStore {
     },
   ): Promise<ChatSessionRow | undefined>;
   deleteChat(userId: string, chatId: string): Promise<boolean>;
-  appendMessages(userId: string, chatId: string, messages: { role: 'user' | 'assistant'; content: string }[]): Promise<void>;
+  /** Returns the inserted rows' message_ids (same order as the input) — server/httpServer.ts uses
+   *  the user message's id as the anchor it threads into runTurn for point-in-time canon recall
+   *  (db/migrations/0053_canon_facts_chat_anchor.sql), so mid-turn tool calls anchor to the message
+   *  that actually triggered them rather than one turn stale. */
+  appendMessages(
+    userId: string,
+    chatId: string,
+    messages: { role: 'user' | 'assistant'; content: string }[],
+  ): Promise<{ messageId: string; role: 'user' | 'assistant' }[]>;
   /** Removes exactly one message, wherever it falls in the conversation — safe because only
    *  clean user/assistant turns are ever persisted (tool_use/tool_result blocks live only inside
    *  one runTurn round and are never written to chat_messages), so there's no structural pairing
@@ -339,19 +347,22 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
     },
 
     async appendMessages(userId, chatId, messages) {
-      if (messages.length === 0) return;
-      await db.withUserScope(userId, async (session) => {
+      if (messages.length === 0) return [];
+      return db.withUserScope(userId, async (session) => {
+        const inserted: { messageId: string; role: 'user' | 'assistant' }[] = [];
         for (const message of messages) {
           // clock_timestamp(), not the column's `default now()` — now() is frozen for the whole
           // transaction, so a multi-message insert (one user + one assistant turn) would give
           // every row the identical created_at and leave ordering to an arbitrary UUID tiebreak.
           // clock_timestamp() actually advances between statements, keeping messages in order.
-          await session.query(
-            'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp())',
+          const [row] = await session.query<{ message_id: string }>(
+            'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp()) returning message_id',
             [chatId, userId, message.role, message.content],
           );
+          inserted.push({ messageId: row!.message_id, role: message.role });
         }
         await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
+        return inserted;
       });
     },
 

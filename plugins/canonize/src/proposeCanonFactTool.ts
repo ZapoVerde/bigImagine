@@ -15,6 +15,11 @@
  * existing arc_tag, and a missing one on a plot proposal is rejected here before it ever reaches
  * SQL, mirroring isCreateNoteArgs-style arg validation.
  *
+ * chat_id/anchor_message_id (db/migrations/0053_canon_facts_chat_anchor.sql) stamp which chat and
+ * message this fact was proposed at, from ctx (never args) — the anchor recall_canon_facts's
+ * as_of_message_id filters against for point-in-time recall. Null for a proposal made outside a
+ * chat turn (e.g. an agent_routine dispatch), which just means the fact is always globally visible.
+ *
  * @api-declaration
  * createProposeCanonFactTool(embeddings) — returns the propose_canon_fact RegisteredTool
  *
@@ -103,8 +108,8 @@ export function createProposeCanonFactTool(embeddings: EmbeddingProvider): Regis
 
       const [row] = await ctx.db.query<{ fact_id: string }>(
         `insert into canon_facts
-           (user_id, scene_id, category, arc_tag, summary, detail, vector_embed, linked_character_ids, linked_location_id)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           (user_id, scene_id, category, arc_tag, summary, detail, vector_embed, linked_character_ids, linked_location_id, chat_id, anchor_message_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          returning fact_id`,
         [
           ctx.userId,
@@ -116,6 +121,11 @@ export function createProposeCanonFactTool(embeddings: EmbeddingProvider): Regis
           toPgVectorLiteral(vector!),
           args.linked_character_ids ?? [],
           args.linked_location_id ?? null,
+          // Never from args — chat/anchor identity is trusted context, the same boundary user_id
+          // already uses, not something the model gets to assert (db/migrations/
+          // 0053_canon_facts_chat_anchor.sql).
+          ctx.chatId ?? null,
+          ctx.anchorMessageId ?? null,
         ],
       );
       // Never returns anything selectable into a prompt — the proposal is inert until approved.

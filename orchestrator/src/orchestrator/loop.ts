@@ -82,6 +82,11 @@ export interface RunTurnOptions {
   db: PostgresClient;
   tools: ToolRegistry;
   maxToolRounds?: number;
+  /** The chat_messages row this turn's tools should anchor derived writes to (e.g.
+   *  propose_canon_fact) — server/httpServer.ts persists the triggering user message before
+   *  calling runTurn specifically so this id is available here, not one turn stale. Only
+   *  meaningful alongside a chat taskId; omitted for stateless/non-chat turns. */
+  anchorMessageId?: string;
 }
 
 export interface RunTurnResult {
@@ -127,6 +132,9 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
 
 async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulator): Promise<RunTurnResult> {
   const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 10 } = opts;
+  // taskId is the chat_id for a live conversation (RunTurnOptions.taskId's own doc comment) — only
+  // meaningful to thread through to tools as chatId when this turn actually is one.
+  const chatId = (opts.taskKind ?? 'chat') === 'chat' ? opts.taskId : undefined;
 
   const messages: LlmMessage[] = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
@@ -168,7 +176,7 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
       const resultPayload = await db.withUserScope(userId, async (session) => {
         if (!tool) return { error: `unknown tool: ${call.name}` };
         try {
-          return await tool.handler(call.arguments, { userId, db: session });
+          return await tool.handler(call.arguments, { userId, db: session, chatId, anchorMessageId: opts.anchorMessageId });
         } catch (err) {
           log.error(`tool ${call.name} threw`, err);
           return { error: err instanceof Error ? err.message : String(err) };

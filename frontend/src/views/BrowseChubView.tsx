@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ApiError, callTool } from '../api/client';
 import type { ChubSearchResult, ImportedChubCharacter } from '../api/types';
 import ChubAvatarThumb from '../components/ChubAvatarThumb';
@@ -15,6 +15,43 @@ type ImportState = { status: 'idle' } | { status: 'importing' } | { status: 'imp
 // frontend/backend module exists to hold it).
 const PAGE_SIZE = 24;
 
+// chub.ai exposes no "list all topics" endpoint (confirmed: GET /tags is 405) — a curated pick of
+// commonly-seen topics (from live search responses inspected while building this) stands in for a
+// dynamic vocabulary. Case-sensitive, matches chub's own topic spelling exactly.
+const CHUB_TAG_OPTIONS = [
+  'Fantasy', 'Sci-Fi', 'Romance', 'Adventure', 'Comedy', 'Horror', 'Drama', 'Slice of Life',
+  'Isekai', 'RPG', 'Anime', 'Multiple Characters', 'Male', 'Female', 'Non-Human', 'Villain',
+  'Dominant', 'Submissive', 'Wholesome', 'Dark',
+];
+
+type TagState = 'include' | 'exclude';
+
+// Persisted like useTheme.ts's display preference — a per-device browsing filter, not household
+// orchestrator config, so localStorage is the right home for it (bb_principles.md §13).
+const TAG_STATES_STORAGE_KEY = 'bb_chub_tag_states';
+
+function loadStoredTagStates(): Record<string, TagState> {
+  try {
+    const raw = localStorage.getItem(TAG_STATES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const entries = Object.entries(parsed as Record<string, unknown>).filter(
+      (entry): entry is [string, TagState] => entry[1] === 'include' || entry[1] === 'exclude',
+    );
+    return Object.fromEntries(entries);
+  } catch {
+    return {};
+  }
+}
+
+// Tri-state per tag: absent (neutral) -> include -> exclude -> absent, cycling on each tap.
+function cycleTagState(current: TagState | undefined): TagState | undefined {
+  if (current === undefined) return 'include';
+  if (current === 'include') return 'exclude';
+  return undefined;
+}
+
 // The Browse Chub screen (plan: "search/filter, image grid, per-card Import button") — chub.ai
 // blocks Australian IPs, so every search_chub_characters/import_character_card_from_url call here
 // goes through pia-proxy server-side (searchChubCharactersTool.ts/importCharacterCardFromUrlTool.ts),
@@ -24,10 +61,20 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
   const [query, setQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [page, setPage] = useState(1);
+  const [tagStates, setTagStates] = useState<Record<string, TagState>>(loadStoredTagStates);
   const [result, setResult] = useState<ChubSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importStates, setImportStates] = useState<Record<string, ImportState>>({});
+
+  const includeTags = useMemo(
+    () => Object.entries(tagStates).filter(([, s]) => s === 'include').map(([t]) => t),
+    [tagStates],
+  );
+  const excludeTags = useMemo(
+    () => Object.entries(tagStates).filter(([, s]) => s === 'exclude').map(([t]) => t),
+    [tagStates],
+  );
 
   const runSearch = useCallback(
     async (searchQuery: string, searchPage: number) => {
@@ -36,7 +83,12 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
       try {
         const searchResult = await callTool<ChubSearchResult>(
           'search_chub_characters',
-          { query: searchQuery || undefined, page: searchPage },
+          {
+            query: searchQuery || undefined,
+            page: searchPage,
+            tags: includeTags.length > 0 ? includeTags : undefined,
+            excludeTags: excludeTags.length > 0 ? excludeTags : undefined,
+          },
           apiKey,
         );
         setResult(searchResult);
@@ -47,17 +99,37 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         setLoading(false);
       }
     },
-    [apiKey],
+    [apiKey, includeTags, excludeTags],
   );
 
   useEffect(() => {
     void runSearch(submittedQuery, page);
   }, [runSearch, submittedQuery, page]);
 
+  useEffect(() => {
+    localStorage.setItem(TAG_STATES_STORAGE_KEY, JSON.stringify(tagStates));
+  }, [tagStates]);
+
   function onSubmitSearch(e: FormEvent) {
     e.preventDefault();
     setPage(1);
     setSubmittedQuery(query.trim());
+  }
+
+  function onTapTag(tag: string) {
+    setPage(1);
+    setTagStates((prev) => {
+      const next = { ...prev };
+      const nextState = cycleTagState(prev[tag]);
+      if (nextState === undefined) delete next[tag];
+      else next[tag] = nextState;
+      return next;
+    });
+  }
+
+  function clearAllTags() {
+    setPage(1);
+    setTagStates({});
   }
 
   async function importCharacter(fullPath: string) {
@@ -85,6 +157,27 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         />
         <button type="submit">Search</button>
       </form>
+
+      <div className="browse-chub-tags">
+        {CHUB_TAG_OPTIONS.map((tag) => {
+          const state = tagStates[tag];
+          return (
+            <button
+              key={tag}
+              type="button"
+              className={`tag-chip chub-tag-chip${state ? ` ${state}` : ''}`}
+              onClick={() => onTapTag(tag)}
+            >
+              {tag}
+            </button>
+          );
+        })}
+        {Object.keys(tagStates).length > 0 && (
+          <button type="button" className="browse-chub-clear-tags" onClick={clearAllTags}>
+            Clear tags
+          </button>
+        )}
+      </div>
 
       {error && <div className="error-banner">{error}</div>}
       {loading && <div className="empty-state">Loading&hellip;</div>}

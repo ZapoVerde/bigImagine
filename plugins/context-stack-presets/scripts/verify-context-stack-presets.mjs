@@ -21,9 +21,24 @@ function assert(cond, message) {
 
 const SYSTEM_USER_ID = '00000000-0000-0000-0000-000000000000';
 
+function createFakeSettingsStore(initial = {}) {
+  const values = new Map(Object.entries(initial));
+  return {
+    async get(key) {
+      return values.get(key);
+    },
+    async set(key, value) {
+      values.set(key, value);
+    },
+  };
+}
+
 function createFakePool() {
   const presets = [];
   const slots = [];
+  const characters = [];
+  const chatSessions = [];
+  const chatMessages = [];
   let counter = 0;
   let tick = 0;
   const nextUpdatedAt = () => `2026-08-04T00:00:${String(++tick).padStart(2, '0')}Z`;
@@ -45,6 +60,9 @@ function createFakePool() {
   return {
     presets,
     slots,
+    characters,
+    chatSessions,
+    chatMessages,
     async connect() {
       let scopedUserId;
       return {
@@ -136,6 +154,50 @@ function createFakePool() {
             return { rows: [{ preset_id: deleted.preset_id }] };
           }
 
+          if (sql.startsWith('select params, character_id from chat_sessions')) {
+            const [chatId, userId] = params;
+            const chat = chatSessions.find((c) => c.chat_id === chatId && c.user_id === userId);
+            return { rows: chat ? [{ params: chat.params, character_id: chat.character_id }] : [] };
+          }
+
+          if (sql.startsWith('select system_prompt, persona, scenario, example_dialogue, greetings from characters')) {
+            const [characterId, userId] = params;
+            const character = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+            return {
+              rows: character
+                ? [{
+                    system_prompt: character.system_prompt,
+                    persona: character.persona,
+                    scenario: character.scenario,
+                    example_dialogue: character.example_dialogue,
+                    greetings: character.greetings,
+                  }]
+                : [],
+            };
+          }
+
+          if (sql.startsWith('update chat_sessions set params')) {
+            const [chatId, paramsJson, presetId] = params;
+            const chat = chatSessions.find((c) => c.chat_id === chatId);
+            if (chat) {
+              chat.params = JSON.parse(paramsJson);
+              chat.prompt_stack_preset_id = presetId;
+            }
+            return { rows: [] };
+          }
+
+          if (sql.startsWith('select count(*)::text as count from chat_messages')) {
+            const [chatId] = params;
+            const count = chatMessages.filter((m) => m.chat_id === chatId).length;
+            return { rows: [{ count: String(count) }] };
+          }
+
+          if (sql.startsWith('insert into chat_messages')) {
+            const [chatId, userId, role, content] = params;
+            chatMessages.push({ chat_id: chatId, user_id: userId, role, content });
+            return { rows: [] };
+          }
+
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
         release() {},
@@ -146,11 +208,18 @@ function createFakePool() {
 
 assert(info.id === 'context-stack-presets' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is present and matches the required format');
 
-const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined });
-assert(pluginTools.length === 4, 'registerTools returns exactly four tools');
+const fakeSettings = createFakeSettingsStore();
+const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined, settings: fakeSettings });
+assert(pluginTools.length === 5, 'registerTools returns exactly five tools');
 
 const registry = createToolRegistry(pluginTools);
-for (const name of ['create_context_stack_preset', 'get_context_stack_presets', 'update_context_stack_preset', 'delete_context_stack_preset']) {
+for (const name of [
+  'create_context_stack_preset',
+  'get_context_stack_presets',
+  'update_context_stack_preset',
+  'delete_context_stack_preset',
+  'apply_prompt_stack_to_chat',
+]) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -242,6 +311,60 @@ const assembled = assemblePromptStack(
 assert(assembled.length === 2, 'assemblePromptStack skips a marker slot with no matching field and a disabled slot');
 assert(assembled[0].content === 'A quiet tavern.' && assembled[0].role === 'system', 'assemblePromptStack emits a marker slot\'s value under role system');
 assert(assembled[1].role === 'system' && assembled[1].content === 'Stay in character.', 'assemblePromptStack emits a custom slot under its own chosen role');
+
+// --- apply_prompt_stack_to_chat (docs/prompt-macros.md's Stage 1: the 'persona' marker) ---
+const applyTool = registry.get('apply_prompt_stack_to_chat');
+
+const presetWithPersona = await db.withUserScope(userId, (session) =>
+  createTool.handler(
+    {
+      name: 'RP Standard',
+      slots: [
+        { slotType: 'marker', markerKey: 'system' },
+        { slotType: 'marker', markerKey: 'description' },
+        { slotType: 'marker', markerKey: 'persona' },
+      ],
+    },
+    { userId, db: session },
+  ),
+);
+
+pool.characters.push({
+  character_id: 'char-1',
+  user_id: userId,
+  system_prompt: 'You are a helpful narrator.',
+  persona: 'A grizzled tavern keeper.',
+  scenario: 'A dusty roadside inn.',
+  example_dialogue: '',
+  greetings: ['Welcome, traveler.'],
+});
+pool.chatSessions.push({ chat_id: 'chat-1', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+
+const appliedNoPersona = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ chatId: 'chat-1', presetId: presetWithPersona.presetId }, { userId, db: session }),
+);
+assert(appliedNoPersona.applied === true, 'apply_prompt_stack_to_chat applies a preset to a linked chat');
+assert(appliedNoPersona.systemText.includes('You are a helpful narrator.'), 'apply_prompt_stack_to_chat includes the character system prompt');
+assert(appliedNoPersona.systemText.includes('A grizzled tavern keeper.'), "apply_prompt_stack_to_chat maps character.persona onto the description marker (character.persona is the card's own field, not the household's)");
+assert(!appliedNoPersona.systemText.includes('Jeremy'), 'apply_prompt_stack_to_chat skips the persona marker when persona_name/persona_description are unset');
+assert(appliedNoPersona.greetingInserted === true, 'apply_prompt_stack_to_chat seeds the first greeting on a chat with no messages');
+
+const reapplied = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ chatId: 'chat-1', presetId: presetWithPersona.presetId }, { userId, db: session }),
+);
+assert(reapplied.greetingInserted === false, 'apply_prompt_stack_to_chat does not re-seed a greeting once the chat has messages');
+
+await fakeSettings.set('persona_name', 'Jeremy');
+await fakeSettings.set('persona_description', 'A software engineer who likes concise answers.');
+pool.chatSessions.push({ chat_id: 'chat-2', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+
+const appliedWithPersona = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ chatId: 'chat-2', presetId: presetWithPersona.presetId }, { userId, db: session }),
+);
+assert(
+  appliedWithPersona.systemText.includes('Jeremy: A software engineer who likes concise answers.'),
+  'apply_prompt_stack_to_chat folds household persona_name/persona_description into the persona marker once both are set',
+);
 
 if (process.exitCode) {
   console.error('\ncontext-stack-presets verification FAILED');

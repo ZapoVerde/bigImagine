@@ -85,6 +85,14 @@
  * ntfy_server_url: a plain internal container URL (http://pia-proxy:8080), not a secret, read live
  * on every call rather than baked in at boot.
  *
+ * persona_name/persona_description (migration 0053, docs/prompt-macros.md's Stage 1) are the
+ * household's own name and self-description — BigImagine's analogue of SillyTavern's user
+ * persona. Deliberately the simplified single-persona shape the ST port settled on: no positions,
+ * no multiple saved personas, just a name and a description read live by
+ * plugins/context-stack-presets' applyPromptStackToChatTool.ts and folded into the prompt stack's
+ * `persona` marker slot when a preset enables it — same no-restart, read-back-in-full shape as
+ * screen_lock_password.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -123,6 +131,8 @@ export const SETTING_NAMES = [
   'screen_lock_password',
   'screen_lock_timeout_minutes',
   'pia_proxy_url',
+  'persona_name',
+  'persona_description',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

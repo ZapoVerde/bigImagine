@@ -11,6 +11,7 @@ import type {
   Folder,
   ImportedCharacter,
   NotificationSettings,
+  PersonaSettings,
   ProfileModelsResult,
   ScreenLockSettings,
   StagedAttachment,
@@ -433,6 +434,25 @@ export async function adminSetPiaProxyUrl(url: string, adminKey: string | null):
     body: JSON.stringify({ value: url }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** persona_name/persona_description (docs/prompt-macros.md's Stage 1) — the household's own name
+ *  and self-description, folded into a chat's prompt stack when a preset enables the 'persona'
+ *  marker slot. Same no-restart, admin-authed shape as pia_proxy_url. */
+export async function adminGetPersonaSettings(adminKey: string | null): Promise<PersonaSettings> {
+  const res = await fetch('/v1/admin/persona-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<PersonaSettings>;
+}
+
+export async function adminSetPersonaSettings(body: { name?: string; description?: string }, adminKey: string | null): Promise<PersonaSettings> {
+  const res = await fetch('/v1/admin/persona-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<PersonaSettings>;
 }
 
 /** ntfy_server_url/notifications_enabled (plugins/notifications) — same no-restart shape as

@@ -16,6 +16,7 @@ const MARKER_LABELS: Record<string, string> = {
   description: 'Description',
   personality: 'Personality',
   scenario: 'Scenario',
+  persona: 'User Persona',
   location: 'Active Location',
   canon_facts: 'Canon Facts',
   mes_example: 'Example Messages',

@@ -32,7 +32,7 @@ function cosineDistance(a, b) {
   return 1 - dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-function createFakePool(embeddings, facts, presence, scenes) {
+function createFakePool(embeddings, facts, presence, scenes, chatMessages) {
   return {
     async connect() {
       let scopedUserId;
@@ -58,8 +58,14 @@ function createFakePool(embeddings, facts, presence, scenes) {
             return { rows: scene ? [{ active_location_id: scene.active_location_id }] : [] };
           }
 
-          if (sql.startsWith('with candidates as')) {
-            const [userId, presentIds, activeLocationId, sceneId, vectorLiteral, topK] = params;
+          if (sql.startsWith('select chat_id, created_at from chat_messages')) {
+            const [messageId, userId] = params;
+            const m = chatMessages.find((cm) => cm.message_id === messageId && cm.user_id === userId);
+            return { rows: m ? [{ chat_id: m.chat_id, created_at: m.created_at }] : [] };
+          }
+
+          if (sql.startsWith('with anchor as')) {
+            const [userId, presentIds, activeLocationId, sceneId, vectorLiteral, topK, asOfCreatedAt, asOfMessageId, asOfChatId] = params;
             assert(scopedUserId === userId, 'recall_canon_facts is scoped to the requesting user');
             const queryVector = vectorLiteral.slice(1, -1).split(',').map(Number);
 
@@ -67,11 +73,22 @@ function createFakePool(embeddings, facts, presence, scenes) {
             const candidates = facts.filter((f) => {
               if (f.user_id !== userId) return false;
               if (f.status !== 'approved') return false;
-              if (presentIds && f.linked_character_ids.some((id) => presentIds.includes(id))) return true;
-              if (f.linked_location_id !== null && f.linked_location_id === activeLocationId) return true;
-              if (f.scene_id === sceneId && f.linked_character_ids.length === 0 && f.linked_location_id === null) return true;
-              if (f.scene_id === null && f.linked_character_ids.length === 0 && f.linked_location_id === null) return true;
-              return false;
+              const inScope =
+                (presentIds && f.linked_character_ids.some((id) => presentIds.includes(id))) ||
+                (f.linked_location_id !== null && f.linked_location_id === activeLocationId) ||
+                (f.scene_id === sceneId && f.linked_character_ids.length === 0 && f.linked_location_id === null) ||
+                (f.scene_id === null && f.linked_character_ids.length === 0 && f.linked_location_id === null);
+              if (!inScope) return false;
+
+              // as_of_message_id filter — mirrors the handler's `left join chat_messages` + tuple
+              // compare: a global fact (no chat_id) is always visible; a chat-scoped fact needs its
+              // own anchor at or before the given one, in the same chat.
+              if (asOfMessageId === null) return true;
+              if (f.chat_id == null) return true; // == : undefined (unset in fixtures) and null both mean "global"
+              if (f.chat_id !== asOfChatId) return false;
+              const anchor = chatMessages.find((cm) => cm.message_id === f.anchor_message_id);
+              if (!anchor) return false;
+              return anchor.created_at <= asOfCreatedAt && f.anchor_message_id <= asOfMessageId;
             });
 
             // DISTINCT ON (coalesce(arc_tag, fact_id::text)): keep the most-recently-approved row
@@ -288,12 +305,54 @@ facts.push({
 scenes.push({ scene_id: sceneId, user_id: userId, active_location_id: activeLoc });
 presence.push({ scene_id: sceneId, character_id: charPresent, user_id: userId });
 
-const pool = createFakePool(embeddings, facts, presence, scenes);
+// --- point-in-time recall: a chat with three messages, one fact anchored at each ---
+const chatId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+const chatMessages = [
+  { message_id: 'm-1', chat_id: chatId, user_id: userId, created_at: '2026-08-01T00:00:01Z' },
+  { message_id: 'm-2', chat_id: chatId, user_id: userId, created_at: '2026-08-01T00:00:02Z' },
+  { message_id: 'm-3', chat_id: chatId, user_id: userId, created_at: '2026-08-01T00:00:03Z' },
+];
+facts.push({
+  fact_id: 'f-anchor-early',
+  user_id: userId,
+  scene_id: sceneId,
+  category: 'concept',
+  arc_tag: 'gate-status',
+  summary: 'The gate was still standing.',
+  detail: '',
+  vector_embed: await embedText('The gate was still standing.'),
+  status: 'approved',
+  linked_character_ids: [],
+  linked_location_id: null,
+  chat_id: chatId,
+  anchor_message_id: 'm-1',
+  proposed_at: '2026-08-01T00:00:01Z',
+  approved_at: '2026-08-01T00:00:01Z',
+});
+facts.push({
+  fact_id: 'f-anchor-late',
+  user_id: userId,
+  scene_id: sceneId,
+  category: 'concept',
+  arc_tag: 'gate-status',
+  summary: 'The gate has fallen.',
+  detail: '',
+  vector_embed: await embedText('The gate has fallen.'),
+  status: 'approved',
+  linked_character_ids: [],
+  linked_location_id: null,
+  chat_id: chatId,
+  anchor_message_id: 'm-3',
+  proposed_at: '2026-08-01T00:00:03Z',
+  approved_at: '2026-08-01T00:00:03Z',
+});
+
+const pool = createFakePool(embeddings, facts, presence, scenes, chatMessages);
 const db = createPostgresClient(pool);
 
-async function recall(query) {
+async function recall(query, extra = {}) {
   return db.withUserScope(userId, (session) =>
-    recallTool.handler({ query, scene_id: sceneId }, { userId, db: session }),
+    recallTool.handler({ query, scene_id: sceneId, ...extra }, { userId, db: session }),
   );
 }
 
@@ -321,6 +380,43 @@ const top2 = await db.withUserScope(userId, (session) =>
   recallTool.handler({ query: 'truth', scene_id: sceneId, top_k: 2 }, { userId, db: session }),
 );
 assert(top2.length === 2, 'top_k limits the returned rows');
+
+// --- point-in-time recall (as_of_message_id) ---
+{
+  const live = await recall('the gate');
+  const liveIds = live.map((r) => r.factId);
+  assert(liveIds.includes('f-anchor-late') && !liveIds.includes('f-anchor-early'), 'without as_of_message_id, only the current/live state comes back — later facts win, not earlier ones');
+}
+{
+  const asOfEarly = await recall('the gate', { as_of_message_id: 'm-1' });
+  const asOfEarlyIds = asOfEarly.map((r) => r.factId);
+  assert(
+    asOfEarlyIds.includes('f-anchor-early') && !asOfEarlyIds.includes('f-anchor-late'),
+    'as_of_message_id set to an early point excludes a fact anchored later in the same chat',
+  );
+}
+{
+  const asOfLate = await recall('the gate', { as_of_message_id: 'm-3' });
+  const asOfLateIds = asOfLate.map((r) => r.factId);
+  assert(asOfLateIds.includes('f-anchor-late'), 'as_of_message_id set to the anchor\'s own point includes that fact');
+}
+{
+  const asOfEarly = await recall('jealousy distrust relationships', { as_of_message_id: 'm-1' });
+  const asOfEarlyIds = asOfEarly.map((r) => r.factId);
+  assert(
+    asOfEarlyIds.includes('f-platform-global') && asOfEarlyIds.includes('f-scene-global'),
+    'a global fact (no chat_id) is always visible in an as_of query, regardless of anchor',
+  );
+}
+{
+  let threw = false;
+  try {
+    await recall('the gate', { as_of_message_id: 'no-such-message' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'an as_of_message_id that does not resolve to a real message is rejected, not silently ignored');
+}
 
 if (process.exitCode) {
   console.error('\ncanon recall verification FAILED');

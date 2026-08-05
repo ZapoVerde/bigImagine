@@ -42,6 +42,7 @@ export type MarkerKey =
   | 'description'
   | 'personality'
   | 'scenario'
+  | 'persona'
   | 'mes_example'
   | 'post_history_instructions'
   | 'global_rules'

@@ -4,12 +4,14 @@
  * @architectural-role IO Wrapper — plugin package entry point
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as prompt-presets/notes/lists): an
- * `info` object and an async `registerTools`. These tools only need ctx.db/ctx.userId, supplied
- * per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack.ts itself is
+ * `info` object and an async `registerTools`. Most of these tools only need ctx.db/ctx.userId,
+ * supplied per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack.ts itself is
  * deliberately not exposed as a tool here: it's a pure function. apply_prompt_stack_to_chat is the
  * one IO-performing caller of it wired up so far (the RP settings panel's "Apply" action,
  * frontend/src/views/ChatView.tsx) — a later Orchestrator resolving a turn's effective preset for
- * scenes/Director-Pass would be a second caller, not a replacement for this one.
+ * scenes/Director-Pass would be a second caller, not a replacement for this one. It alone needs
+ * deps.settings, to read the persona_name/persona_description settings (migration 0053,
+ * docs/prompt-macros.md's Stage 1) it folds into the 'persona' marker slot.
  *
  * @api-declaration
  * info — plugin identity
@@ -37,12 +39,12 @@ export const info = {
   description: 'Reusable, ordered prompt-stack presets — which context slots go into an assembled turn, and in what order: create, list, edit, delete.',
 };
 
-export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]> {
+export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]> {
   return [
     createCreateContextStackPresetTool(),
     createGetContextStackPresetsTool(),
     createUpdateContextStackPresetTool(),
     createDeleteContextStackPresetTool(),
-    createApplyPromptStackToChatTool(),
+    createApplyPromptStackToChatTool(deps.settings),
   ];
 }

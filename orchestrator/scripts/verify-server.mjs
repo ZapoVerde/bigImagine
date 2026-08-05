@@ -170,10 +170,16 @@ function createFakeChatSessionStore() {
       // A monotonic counter, not wall-clock time — two messages appended in the same call (or
       // the same millisecond) must still sort deterministically, the exact real-Postgres bug
       // clock_timestamp() fixed in chatSessions.ts itself (see appendMessages there).
-      for (const m of messages) arr.push({ messageId: newId('msg'), role: m.role, content: m.content, createdAt: ++counter });
+      const inserted = [];
+      for (const m of messages) {
+        const row = { messageId: newId('msg'), role: m.role, content: m.content, createdAt: ++counter };
+        arr.push(row);
+        inserted.push({ messageId: row.messageId, role: row.role });
+      }
       messagesByChat.set(chatId, arr);
       const row = sessions.get(chatId);
       if (row) row.updatedAt = new Date().toISOString();
+      return inserted;
     },
     async deleteMessage(userId, chatId, messageId) {
       const row = sessions.get(chatId);
