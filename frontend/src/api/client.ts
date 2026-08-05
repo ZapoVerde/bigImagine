@@ -9,6 +9,7 @@ import type {
   ChatSummary,
   CredentialSummary,
   Folder,
+  ImportedCharacter,
   NotificationSettings,
   ProfileModelsResult,
   StagedAttachment,
@@ -333,6 +334,55 @@ export async function adminSetTimezone(timezone: string, adminKey: string | null
     body: JSON.stringify({ value: timezone }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** POST /v1/characters/import — imports a character from an uploaded card PNG or JSON file.
+ *  `content-type` omitted for the same reason uploadAttachment omits it: FormData needs the
+ *  browser to set its own multipart boundary. */
+export async function importCharacterCard(file: File, apiKey: string | null): Promise<ImportedCharacter> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  const res = await fetch('/v1/characters/import', {
+    method: 'POST',
+    headers: authHeaders(apiKey),
+    body: form,
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ImportedCharacter>;
+}
+
+/** GET /v1/characters/:id/export.{png,json} — triggers a browser download via a throwaway object
+ *  URL. A plain `<a href>` can't carry the Authorization header a 'key'-mode session needs, same
+ *  constraint uploadAttachment works around for the opposite (upload) direction; fetching the
+ *  bytes ourselves and revoking the object URL right after the click is the same workaround. */
+export async function exportCharacterCard(characterId: string, format: 'png' | 'json', apiKey: string | null): Promise<void> {
+  const res = await fetch(`/v1/characters/${encodeURIComponent(characterId)}/export.${format}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const disposition = res.headers.get('content-disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `character.${format}`;
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(objectUrl);
+}
+
+/** GET /v1/characters/:id/avatar, as an object URL the caller must revoke when done with it —
+ *  the Roster list's thumbnails and the editor pane's preview both need this rather than a plain
+ *  `<img src>`, since a 'key'-mode session's Authorization header can't travel on an <img> tag.
+ *  Null (not a throw) when the character has no avatar, since that's the common case, not an
+ *  error. */
+export async function fetchCharacterAvatarUrl(characterId: string, apiKey: string | null): Promise<string | null> {
+  const res = await fetch(`/v1/characters/${encodeURIComponent(characterId)}/avatar`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
 }
 
 /** ntfy_server_url/notifications_enabled (plugins/notifications) — same no-restart shape as

@@ -277,3 +277,42 @@ export interface ContextStackPreset {
   slots: ContextStackSlot[];
   updatedAt: string;
 }
+
+// plugins/characters/src/getCharactersTool.ts — the Character Roster's list-pane row shape.
+export interface CharacterSummary {
+  characterId: string;
+  name: string;
+}
+
+// plugins/characters/src/getCharacterTool.ts
+export type CharacterDetail =
+  | { found: false; characterId: string }
+  | {
+      found: true;
+      characterId: string;
+      name: string;
+      persona: string;
+      scenario: string;
+      systemPrompt: string;
+      exampleDialogue: string;
+      greetings: string[];
+      specVersion: 'v2' | 'v3';
+      hasAvatar: boolean;
+      hasSourceJson: boolean;
+      createdAt: string;
+      updatedAt: string;
+    };
+
+// POST /v1/characters/import's response shape (handleCharacterImport.ts, relaying
+// plugins/characters/src/importCharacterCardTool.ts's return value).
+export interface ImportedCharacter {
+  characterId: string;
+  name: string;
+  specVersion: 'v2' | 'v3';
+  hasAvatar: boolean;
+}
+
+// plugins/characters/src/applyCharacterToChatTool.ts
+export type ApplyCharacterToChatResult =
+  | { applied: false; reason: string }
+  | { applied: true; systemText: string; greetingInserted: boolean };

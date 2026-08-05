@@ -7,12 +7,17 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "verify": "npm run build && node scripts/verify-characters.mjs"
+    "verify": "npm run build && node scripts/verify-card-codec.mjs && BIGBRAIN_CHARACTER_MEDIA_DIR=/tmp/bigbrain-verify-character-media node scripts/verify-characters.mjs"
   },
   "dependencies": {
-    "@bigbrain/orchestrator": "*"
+    "@bigbrain/orchestrator": "*",
+    "crc": "^4.3.2",
+    "png-chunk-text": "^1.0.0",
+    "png-chunks-extract": "^1.0.0"
   },
   "devDependencies": {
+    "@types/png-chunk-text": "^1.0.3",
+    "@types/png-chunks-extract": "^1.0.2",
     "typescript": "~6.0.2"
   }
 }

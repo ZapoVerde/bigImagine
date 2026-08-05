@@ -115,6 +115,8 @@ import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
+import { importCharacterCard } from './handleCharacterImport.js';
+import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
@@ -1141,6 +1143,25 @@ async function handleRequest(
   }
   if (req.method === 'POST' && req.url === '/v1/attachments/extract') {
     await handleUploadAttachment(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/characters/import') {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    const result = await importCharacterCard(req, deps, userId);
+    sendJson(res, result.status, result.body);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/')) {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    await handleCharacterExportRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
     return;
   }
   if (req.url === '/v1/chats' || req.url?.startsWith('/v1/chats/') || req.url?.startsWith('/v1/chats?')) {

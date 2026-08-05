@@ -1,0 +1,337 @@
+.characters-view {
+  display: flex;
+  height: 100%;
+}
+
+.characters-view.loading {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+}
+
+.characters-list {
+  width: 18rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--color-border-subtle);
+}
+
+.characters-editor {
+  flex: 1;
+  min-width: 0;
+  padding: 1.2rem 1.6rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.characters-back {
+  display: none;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 0.2rem 0;
+  cursor: pointer;
+}
+
+/* Mobile: list and editor are both full-width panes — below the breakpoint only one shows at a
+   time, switched via the row click / characters-back button (CharactersView.tsx's
+   mobileShowEditor state), same shape PromptStacksView uses. */
+@media (max-width: 768px) {
+  .characters-view.mobile-editor .characters-list {
+    display: none;
+  }
+
+  .characters-view:not(.mobile-editor) .characters-editor {
+    display: none;
+  }
+
+  .characters-view.mobile-editor .characters-back {
+    display: inline-block;
+  }
+}
+
+.characters-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 1rem 1rem 0.6rem;
+  font-weight: var(--font-weight-semibold);
+}
+
+.characters-list-header-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.characters-import-input {
+  display: none;
+}
+
+.characters-import-btn,
+.characters-new-btn {
+  font-size: var(--font-size-sm);
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  cursor: pointer;
+}
+
+.characters-import-btn:hover,
+.characters-new-btn:hover {
+  background: var(--color-secondary-hover);
+}
+
+.characters-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+.characters-row:hover {
+  background: var(--color-hover-surface);
+}
+
+.characters-row.selected {
+  background: var(--color-active-surface);
+}
+
+.characters-row-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+}
+
+.character-avatar-thumb {
+  width: 2.2rem;
+  height: 2.2rem;
+  flex-shrink: 0;
+  border-radius: var(--radius-pill);
+  object-fit: cover;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.characters-editor-avatar.character-avatar-thumb {
+  width: 4rem;
+  height: 4rem;
+}
+
+.characters-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.characters-name-input {
+  flex: 1;
+  min-width: 10rem;
+  font: inherit;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  padding: 0.3rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+.characters-name-input:hover,
+.characters-name-input:focus {
+  border-color: var(--color-border-subtle);
+  background: var(--color-bg-surface);
+}
+
+.characters-delete-btn {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+  cursor: pointer;
+}
+
+.characters-delete-btn:hover {
+  background: var(--color-danger-bg);
+}
+
+.characters-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.characters-field textarea {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+  resize: vertical;
+}
+
+.characters-greetings {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.characters-greetings-label {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+}
+
+.characters-greeting-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.4rem;
+}
+
+.characters-greeting-row textarea {
+  flex: 1;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+  resize: vertical;
+}
+
+.characters-greeting-reorder {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.characters-greeting-reorder button {
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 0.55rem;
+  line-height: 1;
+  padding: 0.15rem 0.25rem;
+  cursor: pointer;
+}
+
+.characters-greeting-reorder button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.characters-greeting-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--color-text-faint);
+  font-size: var(--font-size-md);
+  padding: 0.1rem 0.5rem;
+  cursor: pointer;
+}
+
+.characters-greeting-delete:hover {
+  color: var(--color-danger);
+}
+
+.characters-greetings > button {
+  align-self: flex-start;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.characters-greetings > button:hover {
+  background: var(--color-hover-surface);
+}
+
+.characters-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.characters-actions button {
+  padding: 0.4rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.characters-actions button:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.characters-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.characters-actions button:nth-child(3),
+.characters-actions button:nth-child(4) {
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+}
+
+.characters-actions button:nth-child(3):hover,
+.characters-actions button:nth-child(4):hover {
+  background: var(--color-secondary-hover);
+}
+
+.saved-note {
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+}
+
+.characters-start-chat {
+  margin-top: 0.4rem;
+}
+
+.characters-start-chat-btn {
+  width: 100%;
+  padding: 0.65rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+}
+
+.characters-start-chat-btn:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.characters-start-chat-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
