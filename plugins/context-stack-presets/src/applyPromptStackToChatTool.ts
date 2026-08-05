@@ -32,8 +32,8 @@
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
-import { assemblePromptStack, type PromptStackFields } from './assemblePromptStack.js';
-import { slotRowToWire, type SlotRow } from './slotRows.js';
+import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from './assemblePromptStack.js';
+import type { SlotRow } from './slotRows.js';
 
 interface CharacterFieldsRow {
   system_prompt: string;
@@ -89,7 +89,17 @@ export function createApplyPromptStackToChatTool(): RegisteredTool {
         [args.presetId],
       );
       if (slotRows.length === 0) return { applied: false, reason: 'preset not found or has no slots' };
-      const slots = slotRows.map(slotRowToWire);
+      // Mapped straight from SlotRow rather than via slotRowToWire: that helper's SlotInput type
+      // makes `enabled` optional (a create/update call may omit it, defaulting true at the insert
+      // boundary), but a row read back from the DB always has it set, and assemblePromptStack's
+      // PromptStackSlot requires it non-optional.
+      const slots: PromptStackSlot[] = slotRows.map((row) => ({
+        slotType: row.slot_type as 'marker' | 'custom',
+        markerKey: row.marker_key ?? undefined,
+        enabled: row.enabled,
+        customRole: (row.custom_role as 'system' | 'user' | 'assistant' | null) ?? undefined,
+        customContent: row.custom_content ?? undefined,
+      }));
 
       let character: CharacterFieldsRow | undefined;
       if (chat.character_id) {
