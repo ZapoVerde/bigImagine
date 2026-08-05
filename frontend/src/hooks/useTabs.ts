@@ -1,6 +1,16 @@
 import { useEffect, useState } from 'react';
 
-export type TabType = 'blank' | 'chat' | 'rp' | 'notes' | 'documents' | 'settings' | 'canon' | 'promptstacks' | 'characters';
+export type TabType =
+  | 'blank'
+  | 'chat'
+  | 'rp'
+  | 'notes'
+  | 'documents'
+  | 'settings'
+  | 'canon'
+  | 'promptstacks'
+  | 'characters'
+  | 'browse-chub';
 // 'rp' behaves like 'chat' (many instances, each keyed by chatId), not like a singleton summoned
 // view — it's excluded here for that reason, not because it's a specialist view (see openRp below).
 export type SummonableType = Exclude<TabType, 'blank' | 'chat' | 'rp'>;
@@ -24,6 +34,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   canon: 'Canon',
   promptstacks: 'Prompt Stacks',
   characters: 'Characters',
+  'browse-chub': 'Browse Chub',
 };
 
 function newChatTab(): TabInstance {

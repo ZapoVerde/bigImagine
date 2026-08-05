@@ -12,6 +12,10 @@
  * the field export_character_card prefers, so export stays a lossless round-trip
  * (bi_principles.md §7) even though persona collapses description+personality into one column.
  *
+ * The actual insert (and avatar write, when there's a PNG) is insertCharacterFromCard.ts —
+ * shared with importCharacterCardFromUrlTool.ts, which differs from this tool only in *where*
+ * cardJson/avatar bytes come from, never in what happens once they're parsed.
+ *
  * @api-declaration
  * createImportCharacterCardTool() — returns the import_character_card RegisteredTool
  *
@@ -23,13 +27,8 @@
  */
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
-import { writeAvatar } from './avatarStorage.js';
 import { decodePngCard, parseCardJson } from './cardCodec.js';
-
-interface CharacterRow {
-  character_id: string;
-  name: string;
-}
+import { insertCharacterFromCard } from './insertCharacterFromCard.js';
 
 function isImportCharacterCardArgs(value: unknown): value is { filename: string; fileBase64: string } {
   const v = value as Record<string, unknown>;
@@ -79,31 +78,7 @@ export function createImportCharacterCardTool(): RegisteredTool {
 
       const parsed = parseCardJson(cardJson);
 
-      const rows = await ctx.db.query<CharacterRow>(
-        `insert into characters
-           (user_id, name, persona, scenario, system_prompt, example_dialogue, greetings, spec_version, source_json, avatar_path)
-         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
-         returning character_id, name`,
-        [
-          ctx.userId,
-          parsed.name,
-          parsed.persona,
-          parsed.scenario,
-          parsed.systemPrompt,
-          parsed.exampleDialogue,
-          JSON.stringify(parsed.greetings),
-          parsed.specVersion,
-          JSON.stringify(cardJson),
-          isPng ? 'local' : null,
-        ],
-      );
-      const row = rows[0]!;
-
-      if (isPng) {
-        await writeAvatar(row.character_id, bytes);
-      }
-
-      return { characterId: row.character_id, name: row.name, specVersion: parsed.specVersion, hasAvatar: isPng };
+      return insertCharacterFromCard(ctx.db, ctx.userId, parsed, cardJson, isPng ? bytes : undefined);
     },
   };
 }

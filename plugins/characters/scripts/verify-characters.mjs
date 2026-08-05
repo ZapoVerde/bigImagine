@@ -243,7 +243,7 @@ function createFakePool() {
 assert(info.id === 'characters' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is present and matches the required format');
 
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, db: null, credentials: null, settings: null });
-assert(pluginTools.length === 9, 'registerTools returns exactly nine tools');
+assert(pluginTools.length === 11, 'registerTools returns exactly eleven tools');
 
 const registry = createToolRegistry(pluginTools);
 const EXPECTED_TOOL_NAMES = [
@@ -253,6 +253,8 @@ const EXPECTED_TOOL_NAMES = [
   'update_character',
   'delete_character',
   'import_character_card',
+  'import_character_card_from_url',
+  'search_chub_characters',
   'export_character_card',
   'get_character_avatar',
   'apply_character_to_chat',

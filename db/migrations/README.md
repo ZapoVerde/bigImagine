@@ -178,3 +178,20 @@ Already applied by hand, not run automatically (see the file for the exact comma
   nothing the real household-key/Access auth in `App.tsx` hasn't already gated) and unset (empty)
   disables the feature. Applied against the dedicated `bigimagine-postgres`/`bigimagine` database,
   not the old shared one `0048` had to special-case.
+- `0051_lorebooks.sql` — adds `lorebooks` and `lorebook_entries`: storage for traditional
+  SillyTavern-style keyword-triggered world info, kept separate from Canonize's canon_facts/
+  semantic-recall path (`docs/spec.md`'s "no keyword-match fallback" describes the active recall
+  mechanism, not a ban on holding the data). All books' entries live in the one `lorebook_entries`
+  table (`lorebook_id` distinguishes the book), not one table per book. Column shape follows ST's
+  real entry definition (`stacks/sillytavern/st-source/public/scripts/world-info.js`'s
+  `newWorldInfoEntryDefinition`, ~35 fields) — columns cover what's worth browsing/filtering/toggling
+  in a UI, `source_json` holds the complete original entry verbatim (same convention as
+  `characters.source_json`) so the rarer fields (recursion flags, character filters, sticky/cooldown,
+  automation triggers) aren't lost even though nothing reads them yet. **Storage only** — no
+  import/export routes, UI, or prompt-stack wiring exist yet; that's a separate, later task.
+- `0052_pia_proxy_settings.sql` — widens `orchestrator_settings.key` with `pia_proxy_url`: the
+  internal address of the standalone `pia-proxy` container (`stacks/pia-proxy`, a sibling Dockge
+  stack, not part of this codebase) that routes a fetch through a real PIA WireGuard tunnel.
+  Exists because chub.ai blocks Australian IPs; `plugins/characters`' chub import/search tools
+  (`io/piaProxyFetch.ts`) are the first consumer. Same selector shape as `ntfy_server_url` — not a
+  secret, just a plain internal container URL, read live on every call.

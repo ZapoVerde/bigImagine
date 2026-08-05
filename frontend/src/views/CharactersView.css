@@ -1,6 +1,25 @@
 .characters-view {
+  position: relative;
   display: flex;
   height: 100%;
+}
+
+.characters-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  text-align: center;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent-contrast);
+  background: var(--color-accent);
+  opacity: 0.92;
+  border: 2px dashed var(--color-accent-contrast);
+  border-radius: var(--radius-md);
+  pointer-events: none;
 }
 
 .characters-view.loading {

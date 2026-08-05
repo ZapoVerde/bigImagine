@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc",
     "check": "tsc --noEmit",
-    "verify": "npm run build && node scripts/verify-card-codec.mjs && BIGBRAIN_CHARACTER_MEDIA_DIR=/tmp/bigbrain-verify-character-media node scripts/verify-characters.mjs"
+    "verify": "npm run build && node scripts/verify-card-codec.mjs && BIGBRAIN_CHARACTER_MEDIA_DIR=/tmp/bigbrain-verify-character-media node scripts/verify-characters.mjs && BIGBRAIN_CHARACTER_MEDIA_DIR=/tmp/bigbrain-verify-character-media node scripts/verify-chub-tools.mjs"
   },
   "dependencies": {
     "@bigbrain/orchestrator": "*",

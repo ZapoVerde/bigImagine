@@ -402,6 +402,39 @@ export async function fetchCharacterAvatarUrl(characterId: string, apiKey: strin
   return URL.createObjectURL(blob);
 }
 
+/** GET /v1/characters/chub-avatar?url= — same authenticated-blob-fetch shape as
+ *  fetchCharacterAvatarUrl, for BrowseChubView.tsx's search-result grid: a chub.ai avatar_url
+ *  can't go on a plain <img src> either (the household-key Authorization header wouldn't travel),
+ *  and the server-side route enforces its own chub-CDN host allowlist regardless of what URL is
+ *  passed here. Null (not a throw) on failure, same "common enough to not be an error" reasoning
+ *  as a character with no avatar. */
+export async function fetchChubAvatarUrl(chubAvatarUrl: string, apiKey: string | null): Promise<string | null> {
+  const res = await fetch(`/v1/characters/chub-avatar?url=${encodeURIComponent(chubAvatarUrl)}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+/** pia_proxy_url (stacks/pia-proxy) — same no-restart, admin-only shape as timezone. */
+export async function adminGetPiaProxyUrl(adminKey: string | null): Promise<string | null> {
+  const res = await fetch('/v1/admin/pia-proxy-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { url: string | null };
+  return body.url;
+}
+
+/** Resolves once saved — no restart, no polling; the next chub import/search call reads it live. */
+export async function adminSetPiaProxyUrl(url: string, adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/pia-proxy-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ value: url }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
 /** ntfy_server_url/notifications_enabled (plugins/notifications) — same no-restart shape as
  *  timezone: send_push_notification reads both live on every call. */
 export async function adminGetNotificationSettings(adminKey: string | null): Promise<NotificationSettings> {

@@ -86,6 +86,16 @@
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
  * into anything at boot, so a POST here just writes the value and responds 200 immediately.
  *
+ * Same admin gate and no-restart shape again for GET/POST /v1/admin/pia-proxy-settings —
+ * pia_proxy_url, the internal address of the standalone pia-proxy container (stacks/pia-proxy)
+ * plugins/characters' chub.ai import/search tools fetch through. Admin-only with no household-key
+ * counterpart (unlike timezone/screen-lock): the frontend never reads this value itself, only
+ * io/piaProxyFetch.ts does, server-side. GET /v1/characters/chub-avatar?url= (registered before
+ * the generic /v1/characters/ prefix below) is the one place a chub CDN URL crosses straight from
+ * the browser rather than through a tool call — gated by an explicit host allowlist
+ * (CHUB_AVATAR_ALLOWED_HOSTS) before ever reaching fetchThroughPiaProxy, since an unguarded proxy
+ * of an arbitrary `url` param would be an open SSRF relay.
+ *
  * POST /v1/attachments/extract (handleUploadAttachment.ts's extractAttachmentUpload) turns a
  * staged file into Markdown ahead of a chat turn — same Bearer/Access auth as chat completions,
  * no persistence of its own. handleChatCompletions then splices any `attachments` in the request
@@ -127,6 +137,7 @@ import { formatCurrentDateContext } from '../util/dateContext.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
+import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
@@ -142,6 +153,7 @@ import {
   getChatMemorySettings,
   getHouseholdTimezone,
   getNotificationSettings,
+  getPiaProxyUrl,
   getScreenLockSettings,
   listCredentials,
   listModelsForProfile,
@@ -150,6 +162,7 @@ import {
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
   parseSetNotificationSettingsBody,
+  parseSetPiaProxyUrlBody,
   parseSetScreenLockSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
@@ -158,6 +171,7 @@ import {
   setCredential,
   setHouseholdTimezone,
   setNotificationSettings,
+  setPiaProxyUrl,
   setScreenLockSettings,
 } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
@@ -867,6 +881,81 @@ async function handleAdminScreenLockSettingsGet(res: ServerResponse, deps: HttpS
   sendJson(res, 200, await getScreenLockSettings(deps.settings));
 }
 
+// GET /v1/characters/chub-avatar?url= — the one place a chub CDN URL crosses straight from the
+// browser (BrowseChubView.tsx's search-result grid) rather than through a tool call, so it needs
+// its own guard beyond fetchThroughPiaProxy: an unrestricted `url` param would make this an open
+// image-fetch relay to anywhere on the internet (an SSRF hole reachable from any authenticated
+// household member's browser, not just an LLM tool call). Restricted to chub's own avatar CDN
+// host, confirmed live (2026-08-05) as the host every avatar_url/max_res_url in chub's search and
+// character-detail responses actually uses.
+const CHUB_AVATAR_ALLOWED_HOSTS = new Set(['avatars.charhub.io']);
+
+async function handleChubAvatarProxy(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const target = new URL(req.url ?? '', 'http://placeholder').searchParams.get('url');
+  if (!target) {
+    sendJson(res, 400, { error: 'missing url query param' });
+    return;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(target);
+  } catch {
+    sendJson(res, 400, { error: 'invalid url' });
+    return;
+  }
+  if (!CHUB_AVATAR_ALLOWED_HOSTS.has(parsed.hostname)) {
+    sendJson(res, 400, { error: `url must be hosted on one of: ${Array.from(CHUB_AVATAR_ALLOWED_HOSTS).join(', ')}` });
+    return;
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetchThroughPiaProxy(deps.settings, target);
+  } catch (err) {
+    sendJson(res, 502, { error: err instanceof Error ? err.message : 'chub-avatar proxy fetch failed' });
+    return;
+  }
+  if (!upstream.ok) {
+    sendJson(res, upstream.status, { error: `chub.ai returned HTTP ${upstream.status}` });
+    return;
+  }
+
+  const bytes = Buffer.from(await upstream.arrayBuffer());
+  res.writeHead(200, {
+    'content-type': upstream.headers.get('content-type') ?? 'application/octet-stream',
+    'content-length': bytes.length,
+  });
+  res.end(bytes);
+}
+
+// GET/POST /v1/admin/pia-proxy-settings — admin-only, no household-authed counterpart (unlike
+// timezone/screen-lock): pia_proxy_url is only ever read server-side, by io/piaProxyFetch.ts, never
+// by the frontend directly.
+async function handlePiaProxyUrlGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { url: await getPiaProxyUrl(deps.settings) });
+}
+
+async function handlePiaProxyUrlSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const value = parseSetPiaProxyUrlBody(raw);
+  if (!value) {
+    sendJson(res, 400, { error: 'expected { value: a non-empty http(s) URL, e.g. "http://pia-proxy:8080" }' });
+    return;
+  }
+
+  await setPiaProxyUrl(deps.settings, value);
+  // No restart needed — the next chub import/search tool call reads it live.
+  sendJson(res, 200, { url: value });
+}
+
 async function handleAdminScreenLockSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   let raw: unknown;
   try {
@@ -1232,6 +1321,15 @@ async function handleRequest(
     sendJson(res, result.status, result.body);
     return;
   }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/chub-avatar')) {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    await handleChubAvatarProxy(req, res, deps);
+    return;
+  }
   if (req.method === 'GET' && req.url?.startsWith('/v1/characters/')) {
     const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
     if (!userId) {
@@ -1359,6 +1457,22 @@ async function handleRequest(
       return;
     }
     await handleAdminScreenLockSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/pia-proxy-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handlePiaProxyUrlGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/pia-proxy-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handlePiaProxyUrlSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-settings') {

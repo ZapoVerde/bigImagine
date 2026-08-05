@@ -78,6 +78,13 @@
  * and displayed in full, not just reported as "configured". Unset/empty disables the feature.
  * screen_lock_timeout_minutes is the idle window in minutes; both are read live, no restart.
  *
+ * pia_proxy_url (migration 0052, io/piaProxyFetch.ts) is the internal address of the standalone
+ * pia-proxy container (stacks/pia-proxy, a sibling Dockge stack, not part of this codebase) that
+ * routes a fetch through a real PIA WireGuard tunnel — chub.ai blocks Australian IPs, and this is
+ * how plugins/characters' chub import/search tools reach it anyway. Same selector shape as
+ * ntfy_server_url: a plain internal container URL (http://pia-proxy:8080), not a secret, read live
+ * on every call rather than baked in at boot.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -115,6 +122,7 @@ export const SETTING_NAMES = [
   'canon_extraction_prompt',
   'screen_lock_password',
   'screen_lock_timeout_minutes',
+  'pia_proxy_url',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

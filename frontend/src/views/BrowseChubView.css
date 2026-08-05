@@ -1,0 +1,142 @@
+.browse-chub-view {
+  height: 100%;
+  overflow-y: auto;
+  padding: 1.2rem 1.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.browse-chub-search {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.browse-chub-search input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-size-md);
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+}
+
+.browse-chub-search button {
+  flex-shrink: 0;
+  padding: 0.5rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.browse-chub-search button:hover {
+  background: var(--color-accent-hover);
+}
+
+/* Cards stack to a single column on a narrow phone screen — auto-fill/minmax degrades gracefully
+   rather than a fixed column count that would overlap or truncate at phone width. */
+.browse-chub-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 1rem;
+}
+
+.browse-chub-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.8rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
+  text-align: center;
+}
+
+.chub-avatar-thumb {
+  width: 6rem;
+  height: 6rem;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  background: var(--color-bg-canvas);
+  border: 1px solid var(--color-border-subtle);
+}
+
+.browse-chub-card-name {
+  font-weight: var(--font-weight-semibold);
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.browse-chub-card-tagline {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.browse-chub-import-btn {
+  width: 100%;
+  margin-top: 0.2rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.browse-chub-import-btn:hover:not(:disabled) {
+  background: var(--color-secondary-hover);
+}
+
+.browse-chub-import-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.browse-chub-card-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-xs);
+}
+
+.browse-chub-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  padding: 0.5rem 0;
+}
+
+.browse-chub-pagination button {
+  padding: 0.35rem 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: inherit;
+  cursor: pointer;
+}
+
+.browse-chub-pagination button:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+}
+
+.browse-chub-pagination button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}

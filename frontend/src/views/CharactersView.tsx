@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import { ApiError, callTool, createChat, exportCharacterCard, importCharacterCard } from '../api/client';
 import type { CharacterDetail, CharacterSummary } from '../api/types';
 import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
@@ -54,7 +54,12 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
   const [startingChat, setStartingChat] = useState(false);
   const [startingRp, setStartingRp] = useState(false);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // dragenter/dragleave fire on every child boundary crossing, not just the container's own edge —
+  // a counter (rather than a plain boolean) is the standard way to tell "left a child" from "left
+  // the whole drop zone" without flicker.
+  const dragCounter = useRef(0);
 
   const refresh = useCallback(
     async (selectAfter?: string) => {
@@ -216,17 +221,56 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
     }
   }
 
-  async function handleImportFile(file: File) {
+  // Shared by the file-picker input and drag-and-drop: imports each file in turn (a card PNG or
+  // JSON per drop is normal, so this is a sequence, not a single import) and lands on whichever one
+  // imported last, since selecting all of them at once isn't a thing this editor supports.
+  async function handleImportFiles(files: File[]) {
     setError(null);
-    try {
-      const imported = await importCharacterCard(file, apiKey);
-      setCreatingNew(false);
-      await refresh(imported.characterId);
-      await loadDetail(imported.characterId);
-      setMobileShowEditor(true);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to import character card');
+    let lastImportedId: string | null = null;
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
+        const imported = await importCharacterCard(file, apiKey);
+        lastImportedId = imported.characterId;
+      } catch (err) {
+        failures.push(`${file.name}: ${err instanceof ApiError ? err.message : 'failed to import'}`);
+      }
     }
+    if (lastImportedId) {
+      setCreatingNew(false);
+      await refresh(lastImportedId);
+      await loadDetail(lastImportedId);
+      setMobileShowEditor(true);
+    }
+    if (failures.length > 0) setError(failures.join('; '));
+  }
+
+  function onDragEnter(e: DragEvent<HTMLDivElement>) {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragCounter.current += 1;
+    setDragOver(true);
+  }
+
+  function onDragOver(e: DragEvent<HTMLDivElement>) {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+  }
+
+  function onDragLeave(e: DragEvent<HTMLDivElement>) {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setDragOver(false);
+  }
+
+  async function onDrop(e: DragEvent<HTMLDivElement>) {
+    if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+    e.preventDefault();
+    dragCounter.current = 0;
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) await handleImportFiles(files);
   }
 
   // Always a brand-new chat, never the one currently open elsewhere — see plan's own note on why
@@ -272,7 +316,18 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
   const showEditor = creatingNew || selectedId !== null;
 
   return (
-    <div className={`characters-view${mobileShowEditor ? ' mobile-editor' : ''}`}>
+    <div
+      className={`characters-view${mobileShowEditor ? ' mobile-editor' : ''}${dragOver ? ' drag-over' : ''}`}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={(e) => void onDrop(e)}
+    >
+      {dragOver && (
+        <div className="characters-drop-overlay">
+          <span>Drop a character card (PNG or JSON) to import</span>
+        </div>
+      )}
       <div className="characters-list">
         <div className="characters-list-header">
           <span>Characters</span>
@@ -289,11 +344,12 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
           ref={fileInputRef}
           type="file"
           accept=".png,.json,image/png,application/json"
+          multiple
           className="characters-import-input"
           onChange={(e) => {
-            const file = e.target.files?.[0];
+            const files = Array.from(e.target.files ?? []);
             e.target.value = '';
-            if (file) void handleImportFile(file);
+            if (files.length > 0) void handleImportFiles(files);
           }}
         />
         {characters.length === 0 && <div className="empty-state">No characters yet &mdash; create one or import a card.</div>}

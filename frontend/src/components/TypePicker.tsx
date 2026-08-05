@@ -13,6 +13,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'documents', label: 'Documents' },
   { type: 'promptstacks', label: 'Prompt Stacks' },
   { type: 'characters', label: 'Characters' },
+  { type: 'browse-chub', label: 'Browse Chub' },
   { type: 'settings', label: 'Settings' },
   { type: 'canon', label: 'Canon' },
 ];

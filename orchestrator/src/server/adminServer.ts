@@ -76,12 +76,16 @@
  *   at least one present; undefined on any malformed shape
  * setScreenLockSettings(store, body) — upserts whichever of screen_lock_password/
  *   screen_lock_timeout_minutes was given
+ * getPiaProxyUrl(store) — the stored pia-proxy URL, or null if never set
+ * parseSetPiaProxyUrlBody(raw) — validates {value: a non-empty http(s) URL}; undefined on any
+ *   malformed shape
+ * setPiaProxyUrl(store, value) — upserts pia_proxy_url
  *
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
  *                      isValidTimeZone/parseSetNotificationSettingsBody/
- *                      parseSetScreenLockSettingsBody are pure; the rest are
+ *                      parseSetScreenLockSettingsBody/parseSetPiaProxyUrlBody are pure; the rest are
  *                      impure (Postgres IO via the injected store, or a
  *                      network call to the named provider for listModelsForProfile)
  *     state_ownership: []
@@ -315,6 +319,31 @@ export function parseSetScreenLockSettingsBody(raw: unknown): SetScreenLockSetti
 export async function setScreenLockSettings(store: OrchestratorSettingsStore, body: SetScreenLockSettingsBody): Promise<void> {
   if (body.password !== undefined) await store.set('screen_lock_password', body.password);
   if (body.timeoutMinutes !== undefined) await store.set('screen_lock_timeout_minutes', String(body.timeoutMinutes));
+}
+
+// --- pia-proxy settings (io/piaProxyFetch.ts, migration 0052) ---
+// Same live-read, no-restart shape as ntfy_server_url — a plain internal container address, not a
+// secret, so it's read back and displayed in full rather than only reported as "configured".
+
+export async function getPiaProxyUrl(store: OrchestratorSettingsStore): Promise<string | null> {
+  return (await store.get('pia_proxy_url')) ?? null;
+}
+
+export function parseSetPiaProxyUrlBody(raw: unknown): string | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { value } = raw as Record<string, unknown>;
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
+  } catch {
+    return undefined;
+  }
+  return value;
+}
+
+export function setPiaProxyUrl(store: OrchestratorSettingsStore, value: string): Promise<void> {
+  return store.set('pia_proxy_url', value);
 }
 
 // --- Chat memory settings (docs/chat-memory.md) ---

@@ -326,6 +326,24 @@ export interface ImportedCharacter {
   hasAvatar: boolean;
 }
 
+// plugins/characters/src/searchChubCharactersTool.ts
+export interface ChubCharacterSummary {
+  fullPath: string;
+  name: string;
+  tagline: string;
+  avatarUrl: string;
+}
+
+export interface ChubSearchResult {
+  count: number;
+  page: number;
+  results: ChubCharacterSummary[];
+}
+
+// import_character_card_from_url's return value — same shape as ImportedCharacter
+// (importCharacterCardFromUrlTool.ts calls the same insertCharacterFromCard.ts helper).
+export type ImportedChubCharacter = ImportedCharacter;
+
 // plugins/characters/src/applyCharacterToChatTool.ts
 export type ApplyCharacterToChatResult =
   | { applied: false; reason: string }

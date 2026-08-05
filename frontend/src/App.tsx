@@ -12,6 +12,7 @@ import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
 import { useTheme } from './hooks/useTheme';
+import BrowseChubView from './views/BrowseChubView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
@@ -186,6 +187,7 @@ export default function App() {
             {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
             {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} onOpenRp={openRp} />}
+            {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
           </div>
         ))}

@@ -4,6 +4,7 @@ import {
   adminGetActiveProfile,
   adminGetChatMemorySettings,
   adminGetNotificationSettings,
+  adminGetPiaProxyUrl,
   adminGetScreenLockSettings,
   adminGetTimezone,
   adminListCredentials,
@@ -12,6 +13,7 @@ import {
   adminSetChatMemorySettings,
   adminSetCredential,
   adminSetNotificationSettings,
+  adminSetPiaProxyUrl,
   adminSetScreenLockSettings,
   adminSetTimezone,
 } from '../api/client';
@@ -121,6 +123,12 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedNotificationsEnabled, setSelectedNotificationsEnabled] = useState(false);
   const [notificationSettingsStatus, setNotificationSettingsStatus] = useState('');
 
+  // stacks/pia-proxy's internal address — plugins/characters' chub.ai import/search tools read this
+  // live, no restart needed, same shape as timezone.
+  const [piaProxyUrl, setPiaProxyUrl] = useState('');
+  const [selectedPiaProxyUrl, setSelectedPiaProxyUrl] = useState('');
+  const [piaProxyUrlStatus, setPiaProxyUrlStatus] = useState('');
+
   // ScreenLockOverlay.tsx's idle-timeout re-lock — screenLockPassword is intentionally read back
   // in full (bi_principles.md §12: it isn't a secret, see adminServer.ts's own note), same as
   // every other field on this tab, unlike a provider credential.
@@ -171,14 +179,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // evict a stale stored key, fall through to the key form).
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, connection, tz, notificationSettings, screenLockSettings, chatMemorySettingsResult] = await Promise.all([
-        adminListCredentials(key),
-        adminGetActiveProfile(key),
-        adminGetTimezone(key),
-        adminGetNotificationSettings(key),
-        adminGetScreenLockSettings(key),
-        adminGetChatMemorySettings(key),
-      ]);
+      const [creds, connection, tz, notificationSettings, piaProxyUrlResult, screenLockSettings, chatMemorySettingsResult] =
+        await Promise.all([
+          adminListCredentials(key),
+          adminGetActiveProfile(key),
+          adminGetTimezone(key),
+          adminGetNotificationSettings(key),
+          adminGetPiaProxyUrl(key),
+          adminGetScreenLockSettings(key),
+          adminGetChatMemorySettings(key),
+        ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
       setProfileNames(connection.profileNames);
@@ -191,6 +201,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setTimezone(tz);
       setSelectedTimezone(tz);
       applyNotificationSettings(notificationSettings);
+      setPiaProxyUrl(piaProxyUrlResult ?? '');
+      setSelectedPiaProxyUrl(piaProxyUrlResult ?? '');
       applyScreenLockSettings(screenLockSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
@@ -243,6 +255,19 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setTimezone(selectedTimezone);
     setTimezoneStatus('Saved — takes effect on the next message, no restart needed.');
+  }
+
+  async function savePiaProxyUrl() {
+    if (!selectedPiaProxyUrl || selectedPiaProxyUrl === piaProxyUrl) return;
+    setPiaProxyUrlStatus('');
+    try {
+      await adminSetPiaProxyUrl(selectedPiaProxyUrl, adminKey);
+    } catch (err) {
+      setPiaProxyUrlStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setPiaProxyUrl(selectedPiaProxyUrl);
+    setPiaProxyUrlStatus('Saved — takes effect on the next chub import/search call, no restart needed.');
   }
 
   async function saveNotificationSettings() {
@@ -562,6 +587,24 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{notificationSettingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Chub Import</legend>
+        <label>
+          PIA proxy URL
+          <br />
+          <input
+            value={selectedPiaProxyUrl}
+            onChange={(e) => setSelectedPiaProxyUrl(e.target.value)}
+            placeholder="e.g. http://pia-proxy:8080 — the internal address of the stacks/pia-proxy container"
+          />
+        </label>
+        <br />
+        <button onClick={savePiaProxyUrl} disabled={!selectedPiaProxyUrl || selectedPiaProxyUrl === piaProxyUrl}>
+          Save
+        </button>
+        <div className="status">{piaProxyUrlStatus}</div>
       </fieldset>
 
       <fieldset>
