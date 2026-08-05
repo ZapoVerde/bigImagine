@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
 
-export type TabType = 'blank' | 'chat' | 'notes' | 'documents' | 'settings' | 'canon' | 'promptstacks' | 'characters';
-export type SummonableType = Exclude<TabType, 'blank' | 'chat'>;
+export type TabType = 'blank' | 'chat' | 'rp' | 'notes' | 'documents' | 'settings' | 'canon' | 'promptstacks' | 'characters';
+// 'rp' behaves like 'chat' (many instances, each keyed by chatId), not like a singleton summoned
+// view — it's excluded here for that reason, not because it's a specialist view (see openRp below).
+export type SummonableType = Exclude<TabType, 'blank' | 'chat' | 'rp'>;
 
 export interface TabInstance {
   id: string;
   type: TabType;
-  /** Only meaningful for type 'chat'. Undefined = a fresh chat not yet created server-side. */
+  /** Only meaningful for type 'chat' or 'rp'. Undefined for a fresh 'chat' not yet created
+   *  server-side — never undefined for 'rp', which always opens with a real chatId already
+   *  (see openRp below). */
   chatId?: string;
   title: string;
 }
@@ -115,6 +119,19 @@ export function useTabs() {
     });
   }
 
+  /** Opens an RP tab for a chatId that already exists server-side (a character must be picked
+   *  first — CharactersView's "Start RP" creates the chat, then calls this). Focuses the existing
+   *  tab if that chat is already open, else opens a new one — no "claim an empty landing tab"
+   *  branch like openChat has, since there's no such thing as an empty/draft RP tab. */
+  function openRp(chatId: string, title?: string) {
+    setState((s) => {
+      const existing = s.tabs.find((t) => t.type === 'rp' && t.chatId === chatId);
+      if (existing) return { ...s, activeTabId: existing.id };
+      const tab: TabInstance = { id: crypto.randomUUID(), type: 'rp', chatId, title: title ?? 'RP' };
+      return { tabs: [...s.tabs, tab], activeTabId: tab.id };
+    });
+  }
+
   /** Learns a chat tab's real id/title once a fresh chat is lazily created, or a title changes. */
   function updateTab(id: string, patch: Partial<Pick<TabInstance, 'chatId' | 'title'>>) {
     setState((s) => ({ ...s, tabs: s.tabs.map((t) => (t.id === id ? { ...t, ...patch } : t)) }));
@@ -131,5 +148,5 @@ export function useTabs() {
     });
   }
 
-  return { tabs: state.tabs, activeTabId: state.activeTabId, openBlank, summon, openChat, updateTab, close, focus };
+  return { tabs: state.tabs, activeTabId: state.activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus };
 }

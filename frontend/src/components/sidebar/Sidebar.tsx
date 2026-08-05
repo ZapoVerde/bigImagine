@@ -9,6 +9,7 @@ interface SidebarProps {
   collapsed: boolean;
   onToggleCollapsed: () => void;
   onOpenChat: (chatId: string, title?: string) => void;
+  onOpenRp: (chatId: string, title?: string) => void;
 
   selectedNoteId: string | null;
   onSelectNote: (id: string) => void;
@@ -18,6 +19,7 @@ interface SidebarProps {
 
 const TITLES: Partial<Record<TabType, string>> = {
   chat: 'History',
+  rp: 'RP',
   notes: 'Notes',
 };
 
@@ -41,7 +43,8 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
       </div>
       {!collapsed && title && (
         <div className="sidebar-content">
-          {props.activeType === 'chat' && <ChatBrowser apiKey={props.apiKey} onOpenChat={props.onOpenChat} />}
+          {props.activeType === 'chat' && <ChatBrowser apiKey={props.apiKey} kind="chat" onOpenChat={props.onOpenChat} />}
+          {props.activeType === 'rp' && <ChatBrowser apiKey={props.apiKey} kind="rp" onOpenChat={props.onOpenRp} />}
           {props.activeType === 'notes' && (
             <NotesBrowser
               apiKey={props.apiKey}

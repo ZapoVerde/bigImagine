@@ -7,6 +7,8 @@ import './CharactersView.css';
 interface CharactersViewProps {
   apiKey: string | null;
   onOpenChat: (chatId?: string, title?: string) => void;
+  /** RP always opens with a real chatId already created below — unlike onOpenChat, never optional. */
+  onOpenRp: (chatId: string, title?: string) => void;
 }
 
 interface Draft {
@@ -40,7 +42,7 @@ function draftFromDetail(detail: CharacterDetail): Draft {
 // explicitly wherever the selection changes, rather than driven off a useEffect keyed on
 // selectedId, since saving an *already-selected* character needs a fresh fetch too and a same-value
 // setSelectedId wouldn't retrigger an effect.
-export default function CharactersView({ apiKey, onOpenChat }: CharactersViewProps) {
+export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: CharactersViewProps) {
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterDetail | null>(null);
@@ -50,6 +52,7 @@ export default function CharactersView({ apiKey, onOpenChat }: CharactersViewPro
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [startingChat, setStartingChat] = useState(false);
+  const [startingRp, setStartingRp] = useState(false);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -243,6 +246,25 @@ export default function CharactersView({ apiKey, onOpenChat }: CharactersViewPro
     }
   }
 
+  // Same shape as startChat, but kind: 'rp' (db/migrations/0049_chat_kind.sql) — the created chat
+  // gets no tool access and no household_memory leakage by construction (chatSessions.ts), and
+  // opens into its own RP sidebar section/tab type rather than the general chat one. No Prompt
+  // Stack picker here — that lives in the RP chat's own settings panel once it's open.
+  async function startRp() {
+    if (!detail?.found) return;
+    setStartingRp(true);
+    setError(null);
+    try {
+      const chat = await createChat(apiKey, { title: detail.name, kind: 'rp' });
+      await callTool('apply_character_to_chat', { characterId: detail.characterId, chatId: chat.chatId }, apiKey);
+      onOpenRp(chat.chatId, detail.name);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to start RP');
+    } finally {
+      setStartingRp(false);
+    }
+  }
+
   if (characters === null) {
     return <div className="characters-view loading">Loading characters&hellip;</div>;
   }
@@ -388,6 +410,9 @@ export default function CharactersView({ apiKey, onOpenChat }: CharactersViewPro
               <div className="characters-start-chat">
                 <button type="button" className="characters-start-chat-btn" onClick={startChat} disabled={startingChat}>
                   {startingChat ? 'Starting…' : 'Start chat with this character'}
+                </button>
+                <button type="button" className="characters-start-chat-btn" onClick={startRp} disabled={startingRp}>
+                  {startingRp ? 'Starting…' : 'Start RP'}
                 </button>
               </div>
             )}

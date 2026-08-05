@@ -282,14 +282,25 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
 // docs/chat-memory.md: the always-injected half of chat memory (small, unconditional — see
 // recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead).
 // household_memory is every user's own row (RLS already scopes it); chat_memory_entries is this
-// one chat's distilled digest of whatever's rolled off the live window below.
-async function buildChatMemorySystemPrompt(db: PostgresClient, userId: string, chatId: string): Promise<string> {
+// one chat's distilled digest of whatever's rolled off the live window below. household_memory is
+// skipped entirely for an 'rp' chat (docs/bi_principles.md §4/§16, db/migrations/0049_chat_kind.sql)
+// — in-fiction details have no business leaking into unrelated chats, or vice versa.
+// chat_memory_entries stays in for RP too: it's already scoped per chat_id, and still useful in a
+// long roleplay.
+async function buildChatMemorySystemPrompt(
+  db: PostgresClient,
+  userId: string,
+  chatId: string,
+  kind: 'chat' | 'rp',
+): Promise<string> {
   return db.withUserScope(userId, async (session) => {
     const [household, entries] = await Promise.all([
-      session.query<{ content: string }>(
-        'select content from household_memory where user_id = $1 order by updated_at desc',
-        [userId],
-      ),
+      kind === 'rp'
+        ? Promise.resolve([])
+        : session.query<{ content: string }>(
+            'select content from household_memory where user_id = $1 order by updated_at desc',
+            [userId],
+          ),
       session.query<{ content: string }>(
         'select content from chat_memory_entries where chat_id = $1 order by updated_at',
         [chatId],
@@ -382,6 +393,7 @@ async function handleChatCompletions(
   let sessionWasEmpty = false;
   let sessionTitle: string | undefined;
   let priorMessageCount = 0;
+  let sessionKind: 'chat' | 'rp' = 'chat';
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
@@ -392,6 +404,7 @@ async function handleChatCompletions(
     sessionWasEmpty = detail.messages.length === 0;
     sessionTitle = detail.session.title;
     priorMessageCount = detail.messages.length;
+    sessionKind = detail.session.kind;
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
     }
@@ -457,7 +470,7 @@ async function handleChatCompletions(
   // same as before this feature existed.
   if (body.chat_id) {
     const [memoryContext, trimmed] = await Promise.all([
-      buildChatMemorySystemPrompt(db, userId, body.chat_id),
+      buildChatMemorySystemPrompt(db, userId, body.chat_id, sessionKind),
       trimToLiveWindow(messagesForLlm, deps.settings),
     ]);
     systemPrompt = [systemPrompt, memoryContext].filter(Boolean).join('\n\n');
@@ -890,14 +903,18 @@ async function handleChatRoutes(
     if (req.method === 'GET') {
       const search = url.searchParams.get('search') ?? undefined;
       const folderId = url.searchParams.get('folder_id') ?? undefined;
-      sendJson(res, 200, { chats: await deps.chats.listChats(userId, { search, folderId }) });
+      const kindParam = url.searchParams.get('kind');
+      const kind = kindParam === 'chat' || kindParam === 'rp' ? kindParam : undefined;
+      sendJson(res, 200, { chats: await deps.chats.listChats(userId, { search, folderId, kind }) });
       return;
     }
     if (req.method === 'POST') {
-      const body = (await readJsonBody(req)) as { title?: string; folder_id?: string };
+      const body = (await readJsonBody(req)) as { title?: string; folder_id?: string; kind?: string };
+      const kind = body.kind === 'rp' ? 'rp' : undefined;
       const session = await deps.chats.createChat(userId, {
         title: typeof body.title === 'string' ? body.title : undefined,
         folderId: typeof body.folder_id === 'string' ? body.folder_id : undefined,
+        kind,
       });
       sendJson(res, 201, session);
       return;
@@ -975,13 +992,17 @@ async function handleChatRoutes(
     // Fire-and-forget: the end-of-chat memory judgment call can take a few seconds and the archive
     // action itself has already fully succeeded (archived_at is stamped) — a failure here is
     // logged, not surfaced as a failed archive (bb_principles.md §11: a discarded path is logged
-    // with why, not silently swallowed, but it doesn't need to block the caller either).
-    archiveChatMemory(
-      { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmProfiles: deps.llmProfiles },
-      userId,
-      chatId,
-      archived.title,
-    ).catch((err) => log.error('archive_chat: long-term-memory extraction failed', { chatId, err }));
+    // with why, not silently swallowed, but it doesn't need to block the caller either). Skipped
+    // entirely for an 'rp' chat — it never wrote to household_memory in its system prompt either
+    // (buildChatMemorySystemPrompt above), so it shouldn't write inferred facts back into it now.
+    if (archived.kind !== 'rp') {
+      archiveChatMemory(
+        { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmProfiles: deps.llmProfiles },
+        userId,
+        chatId,
+        archived.title,
+      ).catch((err) => log.error('archive_chat: long-term-memory extraction failed', { chatId, err }));
+    }
     sendJson(res, 200, archived);
     return;
   }

@@ -42,8 +42,9 @@
  *
  * @api-declaration
  * createChatSessionStore(db) -> ChatSessionStore
- *   .listChats(userId, {search?, folderId?}) — summaries, updated_at desc
- *   .createChat(userId, {title?, folderId?}) — full new session row
+ *   .listChats(userId, {search?, folderId?, kind?}) — summaries, updated_at desc
+ *   .createChat(userId, {title?, folderId?, kind?, toolNames?}) — full new session row; kind
+ *     defaults to 'chat', and an 'rp' chat defaults toolNames to [] unless overridden
  *   .getChat(userId, chatId) — {session, messages} or undefined
  *   .updateChat(userId, chatId, patch) — updated row or undefined; bumps updated_at
  *   .deleteChat(userId, chatId) — true if a row was deleted
@@ -98,6 +99,18 @@ export interface ChatSessionRow {
    *  (docs/bb_principles.md §3) that triggers chatMemorySync.ts's end-of-chat long-term-memory
    *  extraction. Null means still ongoing (eligible for rolling sync). */
   archivedAt: string | null;
+  /** Set once at creation, never patched afterward (db/migrations/0049_chat_kind.sql) — 'rp' chats
+   *  get no household_memory read/write (httpServer.ts's buildChatMemorySystemPrompt and archive
+   *  route) and start with empty tool_names, keeping roleplay isolated from household assistant
+   *  behavior by construction rather than by a checkbox someone has to remember to set. */
+  kind: 'chat' | 'rp';
+  /** Which character this chat is playing, if any — set by applyCharacterToChatTool.ts. Lets a
+   *  later apply_prompt_stack_to_chat pull that character's fields without the caller re-passing
+   *  characterId. Null for a chat never applied to a character. */
+  characterId: string | null;
+  /** The last context_stack_presets row applied to this chat via apply_prompt_stack_to_chat, so
+   *  the settings panel can show the current selection on reload. Null until first applied. */
+  promptStackPresetId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -128,8 +141,13 @@ export interface FolderRow {
 }
 
 export interface ChatSessionStore {
-  listChats(userId: string, opts?: { search?: string; folderId?: string }): Promise<ChatSummary[]>;
-  createChat(userId: string, init?: { title?: string; folderId?: string }): Promise<ChatSessionRow>;
+  listChats(userId: string, opts?: { search?: string; folderId?: string; kind?: 'chat' | 'rp' }): Promise<ChatSummary[]>;
+  /** kind defaults to 'chat'. When init.kind === 'rp' and toolNames isn't explicitly given, tool_names
+   *  defaults to [] (no tools) rather than null (all tools) — see this file's own preamble. */
+  createChat(
+    userId: string,
+    init?: { title?: string; folderId?: string; kind?: 'chat' | 'rp'; toolNames?: string[] | null },
+  ): Promise<ChatSessionRow>;
   getChat(userId: string, chatId: string): Promise<ChatDetail | undefined>;
   updateChat(
     userId: string,
@@ -178,6 +196,9 @@ interface SessionDbRow {
   parent_chat_id: string | null;
   fork_message_id: string | null;
   archived_at: string | null;
+  kind: 'chat' | 'rp';
+  character_id: string | null;
+  prompt_stack_preset_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -193,13 +214,16 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     parentChatId: row.parent_chat_id,
     forkMessageId: row.fork_message_id,
     archivedAt: row.archived_at,
+    kind: row.kind,
+    characterId: row.character_id,
+    promptStackPresetId: row.prompt_stack_preset_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, created_at, updated_at';
 
 export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
   return {
@@ -220,6 +244,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           params.push(opts.folderId);
           clauses.push(`folder_id = $${params.length}`);
         }
+        if (opts.kind) {
+          params.push(opts.kind);
+          clauses.push(`kind = $${params.length}`);
+        }
         const where = clauses.length > 0 ? `where ${clauses.join(' and ')}` : '';
         const rows = await session.query<{ chat_id: string; title: string; folder_id: string | null; updated_at: string }>(
           `select chat_id, title, folder_id, updated_at from chat_sessions ${where} order by updated_at desc`,
@@ -231,10 +259,15 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
     async createChat(userId, init = {}) {
       return db.withUserScope(userId, async (session) => {
+        const kind = init.kind ?? 'chat';
+        // RP starts with no tool access by default (empty array, not null) — enforced here so
+        // every RP-creating call site gets the guarantee for free, rather than each one having to
+        // remember to pass it (see this file's own preamble).
+        const toolNames = init.toolNames !== undefined ? init.toolNames : kind === 'rp' ? [] : null;
         const rows = await session.query<SessionDbRow>(
-          `insert into chat_sessions (user_id, title, folder_id) values ($1, coalesce($2, 'New chat'), $3)
+          `insert into chat_sessions (user_id, title, folder_id, kind, tool_names) values ($1, coalesce($2, 'New chat'), $3, $4, $5)
            returning ${SESSION_COLUMNS}`,
-          [userId, init.title ?? null, init.folderId ?? null],
+          [userId, init.title ?? null, init.folderId ?? null, kind, toolNames],
         );
         return toSessionRow(rows[0]!);
       });
@@ -369,8 +402,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         const toCopy = messages.slice(0, forkIdx + 1);
 
         const newRows = await session.query<SessionDbRow>(
-          `insert into chat_sessions (user_id, title, params, tool_names, parent_chat_id, fork_message_id)
-           values ($1, $2, $3, $4, $5, $6)
+          `insert into chat_sessions
+             (user_id, title, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
@@ -379,6 +413,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             parent.toolNames,
             chatId,
             forkFromMessageId,
+            parent.kind,
+            parent.characterId,
+            parent.promptStackPresetId,
           ],
         );
         const newChatId = newRows[0]!.chat_id;

@@ -137,6 +137,13 @@ export interface ChatSessionRow {
   forkMessageId: string | null;
   /** Set once, explicitly, via the Archive action — null means still ongoing. */
   archivedAt: string | null;
+  /** Set once at creation, never changed afterward. An 'rp' chat gets no household_memory
+   *  read/write and starts with empty toolNames — see orchestrator/src/io/chatSessions.ts. */
+  kind: 'chat' | 'rp';
+  /** Which character this chat is playing, if any — set by apply_character_to_chat. */
+  characterId: string | null;
+  /** The last context_stack_presets row applied via apply_prompt_stack_to_chat, if any. */
+  promptStackPresetId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -314,5 +321,10 @@ export interface ImportedCharacter {
 
 // plugins/characters/src/applyCharacterToChatTool.ts
 export type ApplyCharacterToChatResult =
+  | { applied: false; reason: string }
+  | { applied: true; systemText: string; greetingInserted: boolean };
+
+// plugins/context-stack-presets/src/applyPromptStackToChatTool.ts
+export type ApplyPromptStackToChatResult =
   | { applied: false; reason: string }
   | { applied: true; systemText: string; greetingInserted: boolean };

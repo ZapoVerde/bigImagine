@@ -4,12 +4,16 @@ import type { ChatSummary, Folder } from '../../api/types';
 
 interface ChatBrowserProps {
   apiKey: string | null;
-  /** Opens (or focuses, if already open in another tab) a chat — wired to useTabs' openChat. */
+  /** Which sidebar section this instance renders — 'chat' (general) or 'rp' (roleplay). Folder
+   *  grouping, search, and delete are shared; only the listChats filter and copy differ. */
+  kind: 'chat' | 'rp';
+  /** Opens (or focuses, if already open in another tab) a chat/RP tab — wired to useTabs'
+   *  openChat/openRp. */
   onOpenChat: (chatId: string, title?: string) => void;
 }
 
-// The sidebar's chat browser: folders + past chat sessions, click to open/focus a chat tab.
-export default function ChatBrowser({ apiKey, onOpenChat }: ChatBrowserProps) {
+// The sidebar's chat/RP browser: folders + past sessions of one kind, click to open/focus a tab.
+export default function ChatBrowser({ apiKey, kind, onOpenChat }: ChatBrowserProps) {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [search, setSearch] = useState('');
@@ -19,7 +23,7 @@ export default function ChatBrowser({ apiKey, onOpenChat }: ChatBrowserProps) {
   async function refresh(searchText?: string) {
     try {
       const [chatList, folderList] = await Promise.all([
-        listChats(apiKey, searchText || undefined),
+        listChats(apiKey, searchText || undefined, kind),
         listFolders(apiKey),
       ]);
       setChats(chatList);
@@ -102,7 +106,7 @@ export default function ChatBrowser({ apiKey, onOpenChat }: ChatBrowserProps) {
           className="sidebar-search"
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Search chats…"
+          placeholder={kind === 'rp' ? 'Search RP…' : 'Search chats…'}
         />
         <button className="sidebar-add-btn" title="New folder" onClick={addFolder}>
           + Folder
@@ -125,7 +129,7 @@ export default function ChatBrowser({ apiKey, onOpenChat }: ChatBrowserProps) {
           </div>
         ))}
         {(chatsByFolder.get(null) ?? []).map(renderChatRow)}
-        {chats.length === 0 && <div className="empty-state small">No chats yet.</div>}
+        {chats.length === 0 && <div className="empty-state small">{kind === 'rp' ? 'No RP chats yet.' : 'No chats yet.'}</div>}
       </div>
     </div>
   );

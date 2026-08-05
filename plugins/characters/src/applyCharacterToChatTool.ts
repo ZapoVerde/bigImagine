@@ -10,7 +10,9 @@
  * mechanism the existing prompt-preset picker already uses to apply a saved instruction set to a
  * chat. params is a full-replace jsonb column (orchestrator/src/io/chatSessions.ts's updateChat), so
  * the existing row is read first and only its `system` key is overwritten, same read-merge-write
- * shape that store uses internally.
+ * shape that store uses internally. Also stamps chat_sessions.character_id (0049_chat_kind.sql) so
+ * a later apply_prompt_stack_to_chat call (plugins/context-stack-presets) can find which character
+ * this chat is playing without the caller re-passing it.
  *
  * Only seeds the character's first greeting as an assistant message when the target chat currently
  * has zero messages — this is meant to be called on a freshly-created chat (the frontend always
@@ -103,10 +105,14 @@ export function createApplyCharacterToChatTool(): RegisteredTool {
 
       const systemText = composeSystemText(character);
       const nextParams = { ...(chat.params ?? {}), system: systemText };
-      await ctx.db.query('update chat_sessions set params = $2::jsonb, updated_at = now() where chat_id = $1', [
-        args.chatId,
-        JSON.stringify(nextParams),
-      ]);
+      // Also stamps character_id (db/migrations/0049_chat_kind.sql) — every chat a character gets
+      // applied to (this tool is the only writer of that column) remembers which one it's playing,
+      // so apply_prompt_stack_to_chat can pull this character's fields later without the caller
+      // re-passing characterId.
+      await ctx.db.query(
+        'update chat_sessions set params = $2::jsonb, character_id = $3, updated_at = now() where chat_id = $1',
+        [args.chatId, JSON.stringify(nextParams), args.characterId],
+      );
 
       const [{ count }] = await ctx.db.query<{ count: string }>(
         'select count(*)::text as count from chat_messages where chat_id = $1',

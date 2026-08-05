@@ -160,13 +160,19 @@ async function jsonRequest<T>(path: string, apiKey: string | null, init?: { meth
   return res.json() as Promise<T>;
 }
 
-export async function listChats(apiKey: string | null, search?: string): Promise<ChatSummary[]> {
-  const query = search ? `?search=${encodeURIComponent(search)}` : '';
+export async function listChats(apiKey: string | null, search?: string, kind?: 'chat' | 'rp'): Promise<ChatSummary[]> {
+  const params = new URLSearchParams();
+  if (search) params.set('search', search);
+  if (kind) params.set('kind', kind);
+  const query = params.toString() ? `?${params.toString()}` : '';
   const body = await jsonRequest<{ chats: ChatSummary[] }>(`/v1/chats${query}`, apiKey);
   return body.chats;
 }
 
-export function createChat(apiKey: string | null, init?: { title?: string; folder_id?: string }): Promise<ChatSessionRow> {
+export function createChat(
+  apiKey: string | null,
+  init?: { title?: string; folder_id?: string; kind?: 'chat' | 'rp' },
+): Promise<ChatSessionRow> {
   return jsonRequest<ChatSessionRow>('/v1/chats', apiKey, { method: 'POST', body: init ?? {} });
 }
 

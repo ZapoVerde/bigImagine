@@ -21,7 +21,17 @@ import {
   uploadAttachment,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
-import type { ChatMessage, ChatParams, ChatSessionRow, Folder, ProfileModelsResult, PromptPreset } from '../api/types';
+import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
+import type {
+  ApplyPromptStackToChatResult,
+  ChatMessage,
+  ChatParams,
+  ChatSessionRow,
+  ContextStackPreset,
+  Folder,
+  ProfileModelsResult,
+  PromptPreset,
+} from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
@@ -668,11 +678,11 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   // The household's active connection (Settings tab) is still the default every chat starts
   // from, but both the connection and the model within it can now be overridden per chat —
   // io/orchestratorSettings.ts's active_llm_profile stays what a brand-new chat uses, this is
-  // just an escape hatch. Reuses the same admin endpoints SettingsView's own picker uses;
-  // harmless to call under Cloudflare Access (isAdminAuthorized trusts the Access identity the
-  // same way the rest of the app already does), see client.ts's doc comments. Unlike the
-  // Settings-tab connection switch, picking a different one here needs no restart — httpServer.ts
-  // builds a throwaway provider for this chat's turns instead of the boot-time one.
+  // just an escape hatch. Reuses the same admin endpoints SettingsView's own picker uses, so it
+  // needs the same stored admin key SettingsView reads from ADMIN_API_KEY_STORAGE_KEY — without
+  // it these calls have no Authorization header and isAdminAuthorized rejects them outright.
+  // Unlike the Settings-tab connection switch, picking a different one here needs no restart —
+  // httpServer.ts builds a throwaway provider for this chat's turns instead of the boot-time one.
   const [activeProfile, setActiveProfile] = useState('');
   const [profileNames, setProfileNames] = useState<string[]>([]);
   const [profile, setProfile] = useState(session?.params.profile ?? '');
@@ -680,7 +690,8 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   const [modelsError, setModelsError] = useState('');
 
   useEffect(() => {
-    adminGetActiveProfile(null)
+    const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
+    adminGetActiveProfile(adminKey)
       .then((connection) => {
         setActiveProfile(connection.activeProfile);
         setProfileNames(connection.profileNames);
@@ -695,7 +706,8 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     const effectiveProfile = profile || activeProfile;
     if (!effectiveProfile) return;
     let cancelled = false;
-    adminListModelsForProfile(effectiveProfile, null)
+    const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
+    adminListModelsForProfile(effectiveProfile, adminKey)
       .then((result) => {
         if (!cancelled) setModelOptions(result.models);
       })
@@ -742,6 +754,44 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
       await reloadPresets();
     } catch {
       // best-effort — the row simply won't disappear if this fails, no need for a banner
+    }
+  }
+
+  // Prompt stack picker — RP chats only (db/migrations/0049_chat_kind.sql). Loaded lazily off
+  // session.kind rather than unconditionally like presets above, since a general chat never shows
+  // this field at all and has no use for the list.
+  const [stacks, setStacks] = useState<ContextStackPreset[]>([]);
+  const [selectedStackId, setSelectedStackId] = useState(session?.promptStackPresetId ?? '');
+  const [applyingStack, setApplyingStack] = useState(false);
+  const [stackError, setStackError] = useState('');
+
+  useEffect(() => {
+    if (session?.kind !== 'rp') return;
+    callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey)
+      .then(setStacks)
+      .catch((err) => setStackError(err instanceof ApiError ? err.message : 'failed to load prompt stacks'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.kind]);
+
+  // Only updates the local system-prompt textarea from the tool's response — the tool has already
+  // persisted params.system (and prompt_stack_preset_id) server-side, same as
+  // apply_character_to_chat does, so no extra onSave call is needed here.
+  async function applyStack() {
+    if (!session || !selectedStackId) return;
+    setApplyingStack(true);
+    setStackError('');
+    try {
+      const result = await callTool<ApplyPromptStackToChatResult>(
+        'apply_prompt_stack_to_chat',
+        { chatId: session.chatId, presetId: selectedStackId },
+        apiKey,
+      );
+      if (result.applied) setSystem(result.systemText);
+      else setStackError(result.reason);
+    } catch (err) {
+      setStackError(err instanceof ApiError ? err.message : 'failed to apply prompt stack');
+    } finally {
+      setApplyingStack(false);
     }
   }
 
@@ -842,6 +892,26 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         {modelsError && <div className="error-banner">{modelsError}</div>}
       </label>
 
+      {session?.kind === 'rp' && (
+        <label>
+          Prompt stack
+          <select value={selectedStackId} onChange={(e) => setSelectedStackId(e.target.value)}>
+            <option value="">(none)</option>
+            {stacks.map((s) => (
+              <option key={s.presetId} value={s.presetId}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          <div className="settings-actions">
+            <button type="button" onClick={applyStack} disabled={!selectedStackId || applyingStack}>
+              {applyingStack ? 'Applying…' : 'Apply'}
+            </button>
+          </div>
+          {stackError && <div className="error-banner">{stackError}</div>}
+        </label>
+      )}
+
       <div className="settings-row">
         <label>
           Temperature
@@ -865,7 +935,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         </select>
       </label>
 
-      {allToolNames.length > 0 && (
+      {allToolNames.length > 0 && session?.kind !== 'rp' && (
         <fieldset className="tool-checklist">
           <legend>Tools available in this chat</legend>
           {allToolNames.map((name) => (

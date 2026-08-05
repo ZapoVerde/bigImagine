@@ -5,15 +5,16 @@
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as prompt-presets/notes/lists): an
  * `info` object and an async `registerTools`. These tools only need ctx.db/ctx.userId, supplied
- * per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack.ts is deliberately
- * not exposed as a tool here: it's a pure function meant to be called directly by whatever
- * resolves a turn's effective preset (an Orchestrator, once scenes/characters exist), not
- * something an LLM invokes on demand.
+ * per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack.ts itself is
+ * deliberately not exposed as a tool here: it's a pure function. apply_prompt_stack_to_chat is the
+ * one IO-performing caller of it wired up so far (the RP settings panel's "Apply" action,
+ * frontend/src/views/ChatView.tsx) — a later Orchestrator resolving a turn's effective preset for
+ * scenes/Director-Pass would be a second caller, not a replacement for this one.
  *
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [create_context_stack_preset, get_context_stack_presets,
- *   update_context_stack_preset, delete_context_stack_preset]
+ *   update_context_stack_preset, delete_context_stack_preset, apply_prompt_stack_to_chat]
  *
  * @contract
  *   assertions:
@@ -28,6 +29,7 @@ import { createCreateContextStackPresetTool } from './createContextStackPresetTo
 import { createGetContextStackPresetsTool } from './getContextStackPresetsTool.js';
 import { createUpdateContextStackPresetTool } from './updateContextStackPresetTool.js';
 import { createDeleteContextStackPresetTool } from './deleteContextStackPresetTool.js';
+import { createApplyPromptStackToChatTool } from './applyPromptStackToChatTool.js';
 
 export const info = {
   id: 'context-stack-presets',
@@ -41,5 +43,6 @@ export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]
     createGetContextStackPresetsTool(),
     createUpdateContextStackPresetTool(),
     createDeleteContextStackPresetTool(),
+    createApplyPromptStackToChatTool(),
   ];
 }

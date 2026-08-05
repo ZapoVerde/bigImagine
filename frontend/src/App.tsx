@@ -36,7 +36,7 @@ export default function App() {
   // sessionStorage (not localStorage) so this reappears next session rather than being
   // permanently silenced by one click — see BackupWarningModal's own note on why.
   const [showBackupWarning, setShowBackupWarning] = useState(false);
-  const { tabs, activeTabId, openBlank, summon, openChat, updateTab, close, focus } = useTabs();
+  const { tabs, activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus } = useTabs();
   const { theme, toggle: toggleTheme } = useTheme();
 
   // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
@@ -120,6 +120,7 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
         onOpenChat={openChat}
+        onOpenRp={openRp}
         selectedNoteId={selectedNoteId}
         onSelectNote={setSelectedNoteId}
         onDeselectNote={() => setSelectedNoteId(null)}
@@ -162,6 +163,16 @@ export default function App() {
                 onOpenChat={openChat}
               />
             )}
+            {tab.type === 'rp' && (
+              <ChatView
+                apiKey={apiKey}
+                chatId={tab.chatId}
+                onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
+                onTitleChange={(title) => updateTab(tab.id, { title })}
+                onSwitchView={summon}
+                onOpenChat={openChat}
+              />
+            )}
             {tab.type === 'notes' && (
               <NotesView
                 apiKey={apiKey}
@@ -172,7 +183,7 @@ export default function App() {
             {tab.type === 'documents' && <DocumentsView apiKey={apiKey} />}
             {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
-            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} />}
+            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} onOpenRp={openRp} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
           </div>
         ))}
