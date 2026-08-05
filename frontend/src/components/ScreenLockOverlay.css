@@ -1,0 +1,72 @@
+/* Fully opaque, not a translucent scrim like BackupWarningModal's — the entire point is that no
+   content behind it, not even a silhouette, stays visible. z-index above every other overlay in
+   the app (BackupWarningModal is 1000) since this is meant to be the last thing standing between
+   an unattended screen and whoever picks it up. */
+.screen-lock-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-bg-canvas);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+}
+
+.screen-lock-box {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  width: 20rem;
+  max-width: 90vw;
+  text-align: center;
+}
+
+.screen-lock-box h2 {
+  margin: 0 0 0.5rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-secondary);
+}
+
+.screen-lock-box .hint {
+  margin: 0 0 1rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.screen-lock-box input {
+  font-size: 1rem;
+  padding: 0.4rem 0.6rem;
+  margin: 0 0 0.75rem;
+  width: 100%;
+  box-sizing: border-box;
+  text-align: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+}
+
+.screen-lock-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+  min-height: 1.2em;
+  margin: 0 0 0.5rem;
+}
+
+.screen-lock-box button {
+  font-size: 1rem;
+  padding: 0.4rem 1rem;
+  width: 100%;
+  cursor: pointer;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.screen-lock-box button:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}

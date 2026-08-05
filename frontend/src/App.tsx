@@ -4,6 +4,7 @@ import './App.css';
 import { API_KEY_STORAGE_KEY } from './api/authStorage';
 import { whoami } from './api/client';
 import BackupWarningModal from './components/BackupWarningModal';
+import ScreenLockOverlay from './components/ScreenLockOverlay';
 import Sidebar from './components/sidebar/Sidebar';
 import TabStrip from './components/TabStrip';
 import TimerStrip from './components/temporal/TimerStrip';
@@ -106,6 +107,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <ScreenLockOverlay apiKey={apiKey} />
       {showBackupWarning && (
         <BackupWarningModal
           onDismiss={() => {

@@ -47,6 +47,13 @@ export interface NotificationSettings {
   enabled: boolean;
 }
 
+// orchestrator/src/server/adminServer.ts getScreenLockSettings() — password === '' means the
+// idle-lock overlay is disabled.
+export interface ScreenLockSettings {
+  password: string;
+  timeoutMinutes: number;
+}
+
 // orchestrator/src/server/openai.ts buildChatCompletion()
 export interface ChatCompletionResponse {
   id: string;

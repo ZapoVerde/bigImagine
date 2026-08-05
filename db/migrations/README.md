@@ -170,3 +170,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   syncs — the horizon here is a revision window layered on top of that persistence, not the sole
   source of continuity. See `docs/chat-memory.md` and `docs/bi_principles.md` §18 (every prompt,
   and prompt-adjacent behavior knob, surfaced in Settings for manual tuning).
+- `0050_screen_lock_settings.sql` — widens `orchestrator_settings.key` with `screen_lock_password`
+  and `screen_lock_timeout_minutes`: an idle-timeout re-lock overlay
+  (`frontend/src/components/ScreenLockOverlay.tsx`), ported from SillyTavern-Playground's
+  `driver/ui/lockScreen.js`. Privacy-only by design, same as playground's — the password is
+  plaintext (fails `bi_principles.md` §12's "grants access on its own" test, since it protects
+  nothing the real household-key/Access auth in `App.tsx` hasn't already gated) and unset (empty)
+  disables the feature. Applied against the dedicated `bigimagine-postgres`/`bigimagine` database,
+  not the old shared one `0048` had to special-case.

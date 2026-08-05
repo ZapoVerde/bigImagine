@@ -63,6 +63,15 @@
  * credential at boot — see index.ts's provider-resolution sequence. triggerRestart is injectable
  * specifically so tests can exercise this route without killing the test process.
  *
+ * A screen-lock idle-timeout overlay (ported from SillyTavern-Playground's driver/ui/
+ * lockScreen.js) gets two GET surfaces for the same orchestrator_settings pair
+ * (screen_lock_password/screen_lock_timeout_minutes, io/orchestratorSettings.ts): GET
+ * /v1/screen-lock-settings, household-key/Access gated like /v1/timezone, is what
+ * ScreenLockOverlay.tsx itself polls, since it must work for a regular authenticated user, not
+ * just an admin; GET/POST /v1/admin/screen-lock-settings, admin-gated like every other Settings-
+ * tab field, is where the password is actually set. No restart needed either way — both routes
+ * read/write the same live value.
+ *
  * Same admin gate, same restart-on-save shape, for GET/POST /v1/admin/settings — the Settings
  * tab's connection picker, backing orchestrator_settings (io/orchestratorSettings.ts). Unlike
  * credentials, the GET response includes the actual current value (a profile/model name isn't a
@@ -133,6 +142,7 @@ import {
   getChatMemorySettings,
   getHouseholdTimezone,
   getNotificationSettings,
+  getScreenLockSettings,
   listCredentials,
   listModelsForProfile,
   parseSetActiveProfileBody,
@@ -140,6 +150,7 @@ import {
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
   parseSetNotificationSettingsBody,
+  parseSetScreenLockSettingsBody,
   parseSetTimezoneBody,
   setActiveProfile,
   setCanonSettings,
@@ -147,6 +158,7 @@ import {
   setCredential,
   setHouseholdTimezone,
   setNotificationSettings,
+  setScreenLockSettings,
 } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
 import {
@@ -848,6 +860,33 @@ async function handleNotificationSettingsSet(req: IncomingMessage, res: ServerRe
   sendJson(res, 200, await getNotificationSettings(deps.settings));
 }
 
+// Admin-gated counterpart to handleScreenLockSettingsGet above — same value, but this is the
+// Settings tab's own read (and the only place the password gets written), so it's behind the
+// admin key like every other Settings-tab field, not the lighter household gate the overlay uses.
+async function handleAdminScreenLockSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getScreenLockSettings(deps.settings));
+}
+
+async function handleAdminScreenLockSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetScreenLockSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { password?: string, timeout_minutes?: positive number }, at least one' });
+    return;
+  }
+
+  await setScreenLockSettings(deps.settings, parsed);
+  // No restart needed — ScreenLockOverlay.tsx polls /v1/screen-lock-settings live.
+  sendJson(res, 200, await getScreenLockSettings(deps.settings));
+}
+
 async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   if (deps.llm.listModels) {
     try {
@@ -1100,6 +1139,19 @@ async function handleHouseholdTimezoneGet(req: IncomingMessage, res: ServerRespo
   sendJson(res, 200, { timezone: await getHouseholdTimezone(deps.settings) });
 }
 
+// screen_lock_password isn't a secret (bi_principles.md §12 — see adminServer.ts's own note), and
+// ScreenLockOverlay.tsx needs it as a regular authenticated user, not an admin: it has to poll
+// this the moment the app itself is authenticated, before anyone would have entered the separate
+// admin key just to open Settings. Same household-key/Access gate as /v1/timezone above.
+async function handleScreenLockSettingsGet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  sendJson(res, 200, await getScreenLockSettings(deps.settings));
+}
+
 // A lightweight side channel for a chat still mid-flight (docs/bootstrap.md: /v1/chat/completions
 // is a single blocking POST, not a stream) — the frontend polls this while waiting, to show which
 // tool loop.ts's runTurn is currently running (orchestrator/turnStatus.ts). taskId for a
@@ -1152,6 +1204,10 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url === '/v1/timezone') {
     await handleHouseholdTimezoneGet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/screen-lock-settings') {
+    await handleScreenLockSettingsGet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url?.startsWith('/v1/chat/status')) {
@@ -1287,6 +1343,22 @@ async function handleRequest(
       return;
     }
     await handleNotificationSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/screen-lock-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleAdminScreenLockSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/screen-lock-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleAdminScreenLockSettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-settings') {

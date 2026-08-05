@@ -71,6 +71,13 @@
  * Director Pass wiring. Both were added to 0010's CHECK constraint together in 0048, the same
  * widen-both-sides shape 0043's own entry documents.
  *
+ * screen_lock_password/screen_lock_timeout_minutes (migration 0050) back the idle-timeout re-lock
+ * overlay (ScreenLockOverlay.tsx, ported from SillyTavern-Playground's lockScreen.js) —
+ * screen_lock_password isn't a secret by §12's own test (it protects nothing the real household-
+ * key/Access auth hasn't already gated), so like every other value in this store it's read back
+ * and displayed in full, not just reported as "configured". Unset/empty disables the feature.
+ * screen_lock_timeout_minutes is the idle window in minutes; both are read live, no restart.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -106,6 +113,8 @@ export const SETTING_NAMES = [
   'chat_memory_household_memory_prompt',
   'canon_recall_top_k',
   'canon_extraction_prompt',
+  'screen_lock_password',
+  'screen_lock_timeout_minutes',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

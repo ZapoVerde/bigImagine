@@ -42,6 +42,12 @@
  * call, no restart. No legacy env fallback here — this is a new feature with no pre-existing
  * env-only deployment to stay compatible with.
  *
+ * Also backs the Settings tab's screen-lock fields (GET/POST /v1/admin/screen-lock-settings) —
+ * screen_lock_password/screen_lock_timeout_minutes, ported from SillyTavern-Playground's idle-lock
+ * (driver/ui/lockScreen.js). The one household-authed (not admin-only) GET here is
+ * httpServer.ts's own /v1/screen-lock-settings route — the overlay itself has to poll this as a
+ * regular authenticated user, not an admin, same reasoning as /v1/timezone below.
+ *
  * @api-declaration
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
  * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
@@ -64,11 +70,18 @@
  *   undefined on any malformed shape
  * setNotificationSettings(store, body) — upserts whichever of ntfy_server_url/
  *   notifications_enabled was given
+ * getScreenLockSettings(store) — { password, timeoutMinutes }, defaults timeoutMinutes to 5 when
+ *   unset; password defaults to '' (feature off)
+ * parseSetScreenLockSettingsBody(raw) — validates {password?, timeout_minutes?: positive number},
+ *   at least one present; undefined on any malformed shape
+ * setScreenLockSettings(store, body) — upserts whichever of screen_lock_password/
+ *   screen_lock_timeout_minutes was given
  *
  * @contract
  *   assertions:
  *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
- *                      isValidTimeZone/parseSetNotificationSettingsBody are pure; the rest are
+ *                      isValidTimeZone/parseSetNotificationSettingsBody/
+ *                      parseSetScreenLockSettingsBody are pure; the rest are
  *                      impure (Postgres IO via the injected store, or a
  *                      network call to the named provider for listModelsForProfile)
  *     state_ownership: []
@@ -257,6 +270,51 @@ export function parseSetNotificationSettingsBody(raw: unknown): SetNotificationS
 export async function setNotificationSettings(store: OrchestratorSettingsStore, body: SetNotificationSettingsBody): Promise<void> {
   if (body.serverUrl !== undefined) await store.set('ntfy_server_url', body.serverUrl);
   if (body.enabled !== undefined) await store.set('notifications_enabled', String(body.enabled));
+}
+
+// --- Screen lock settings (docs/bi_principles.md §12, §13 — ported from SillyTavern-Playground's
+// driver/ui/lockScreen.js) ---
+// password isn't a secret by §12's own test: it protects nothing the real household-key/Access
+// auth in App.tsx hasn't already gated, purely a privacy shield for an unattended screen. Read
+// back and displayed in full, same shape as timezone/notifications above, not write-only like a
+// provider credential. Empty password (the default) means the feature is off.
+
+export interface ScreenLockSettings {
+  password: string;
+  timeoutMinutes: number;
+}
+
+const DEFAULT_SCREEN_LOCK_TIMEOUT_MINUTES = 5;
+
+export async function getScreenLockSettings(store: OrchestratorSettingsStore): Promise<ScreenLockSettings> {
+  const password = (await store.get('screen_lock_password')) ?? '';
+  const rawTimeout = await store.get('screen_lock_timeout_minutes');
+  const timeoutMinutes = rawTimeout ? Number(rawTimeout) : DEFAULT_SCREEN_LOCK_TIMEOUT_MINUTES;
+  return { password, timeoutMinutes: Number.isFinite(timeoutMinutes) && timeoutMinutes > 0 ? timeoutMinutes : DEFAULT_SCREEN_LOCK_TIMEOUT_MINUTES };
+}
+
+export interface SetScreenLockSettingsBody {
+  password?: string;
+  timeoutMinutes?: number;
+}
+
+export function parseSetScreenLockSettingsBody(raw: unknown): SetScreenLockSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { password, timeout_minutes } = raw as Record<string, unknown>;
+  if (password === undefined && timeout_minutes === undefined) return undefined;
+  if (password !== undefined && typeof password !== 'string') return undefined;
+  if (timeout_minutes !== undefined && (typeof timeout_minutes !== 'number' || !Number.isFinite(timeout_minutes) || timeout_minutes <= 0)) {
+    return undefined;
+  }
+  return {
+    password: typeof password === 'string' ? password : undefined,
+    timeoutMinutes: typeof timeout_minutes === 'number' ? timeout_minutes : undefined,
+  };
+}
+
+export async function setScreenLockSettings(store: OrchestratorSettingsStore, body: SetScreenLockSettingsBody): Promise<void> {
+  if (body.password !== undefined) await store.set('screen_lock_password', body.password);
+  if (body.timeoutMinutes !== undefined) await store.set('screen_lock_timeout_minutes', String(body.timeoutMinutes));
 }
 
 // --- Chat memory settings (docs/chat-memory.md) ---

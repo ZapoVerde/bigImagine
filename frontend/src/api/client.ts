@@ -12,6 +12,7 @@ import type {
   ImportedCharacter,
   NotificationSettings,
   ProfileModelsResult,
+  ScreenLockSettings,
   StagedAttachment,
 } from './types';
 
@@ -65,6 +66,16 @@ export async function getTimezone(apiKey: string | null): Promise<string> {
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   const body = (await res.json()) as { timezone: string };
   return body.timezone;
+}
+
+/** GET /v1/screen-lock-settings — same household-key/Access auth as getTimezone, not the admin
+ *  key: ScreenLockOverlay.tsx polls this as a regular authenticated user. password === '' means
+ *  the idle-lock overlay is disabled (bi_principles.md §12 — see adminServer.ts's own note on why
+ *  this plaintext round-trip is fine). */
+export async function getScreenLockSettings(apiKey: string | null): Promise<ScreenLockSettings> {
+  const res = await fetch('/v1/screen-lock-settings', { headers: authHeaders(apiKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ScreenLockSettings>;
 }
 
 /** Invokes one registered tool by name — POST /v1/tools/:name, same auth and RLS scoping as chat.
@@ -405,6 +416,27 @@ export async function adminSetNotificationSettings(
   adminKey: string | null,
 ): Promise<void> {
   const res = await fetch('/v1/admin/notification-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** The Settings tab's own read/write of the screen-lock fields — admin-gated, unlike
+ *  getScreenLockSettings above. Resolves once saved — no restart, the overlay's next poll picks
+ *  it up live. */
+export async function adminGetScreenLockSettings(adminKey: string | null): Promise<ScreenLockSettings> {
+  const res = await fetch('/v1/admin/screen-lock-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ScreenLockSettings>;
+}
+
+export async function adminSetScreenLockSettings(
+  patch: { password?: string; timeout_minutes?: number },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch('/v1/admin/screen-lock-settings', {
     method: 'POST',
     headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
     body: JSON.stringify(patch),

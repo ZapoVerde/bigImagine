@@ -4,6 +4,7 @@ import {
   adminGetActiveProfile,
   adminGetChatMemorySettings,
   adminGetNotificationSettings,
+  adminGetScreenLockSettings,
   adminGetTimezone,
   adminListCredentials,
   adminListModelsForProfile,
@@ -11,6 +12,7 @@ import {
   adminSetChatMemorySettings,
   adminSetCredential,
   adminSetNotificationSettings,
+  adminSetScreenLockSettings,
   adminSetTimezone,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
@@ -20,6 +22,7 @@ import type {
   CredentialSummary,
   NotificationSettings,
   ProfileModelsResult,
+  ScreenLockSettings,
 } from '../api/types';
 import './SettingsView.css';
 
@@ -118,6 +121,15 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedNotificationsEnabled, setSelectedNotificationsEnabled] = useState(false);
   const [notificationSettingsStatus, setNotificationSettingsStatus] = useState('');
 
+  // ScreenLockOverlay.tsx's idle-timeout re-lock — screenLockPassword is intentionally read back
+  // in full (bi_principles.md §12: it isn't a secret, see adminServer.ts's own note), same as
+  // every other field on this tab, unlike a provider credential.
+  const [screenLockPassword, setScreenLockPassword] = useState('');
+  const [selectedScreenLockPassword, setSelectedScreenLockPassword] = useState('');
+  const [screenLockTimeoutMinutes, setScreenLockTimeoutMinutes] = useState(5);
+  const [selectedScreenLockTimeoutMinutes, setSelectedScreenLockTimeoutMinutes] = useState('5');
+  const [screenLockStatus, setScreenLockStatus] = useState('');
+
   // docs/chat-memory.md — mirrors SillyTavern-Canonize's own "Connections & Prompts" panel.
   const [chatMemorySettings, setChatMemorySettingsState] = useState<ChatMemorySettings | null>(null);
   const [selectedChatMemoryProfile, setSelectedChatMemoryProfile] = useState('');
@@ -136,6 +148,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedNotificationsEnabled(settings.enabled);
   }
 
+  function applyScreenLockSettings(settings: ScreenLockSettings) {
+    setScreenLockPassword(settings.password);
+    setSelectedScreenLockPassword(settings.password);
+    setScreenLockTimeoutMinutes(settings.timeoutMinutes);
+    setSelectedScreenLockTimeoutMinutes(String(settings.timeoutMinutes));
+  }
+
   function applyChatMemorySettings(settings: ChatMemorySettings) {
     setChatMemorySettingsState(settings);
     setSelectedChatMemoryProfile(settings.profile ?? '');
@@ -152,11 +171,12 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // evict a stale stored key, fall through to the key form).
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, connection, tz, notificationSettings, chatMemorySettingsResult] = await Promise.all([
+      const [creds, connection, tz, notificationSettings, screenLockSettings, chatMemorySettingsResult] = await Promise.all([
         adminListCredentials(key),
         adminGetActiveProfile(key),
         adminGetTimezone(key),
         adminGetNotificationSettings(key),
+        adminGetScreenLockSettings(key),
         adminGetChatMemorySettings(key),
       ]);
       setCredentials(creds);
@@ -171,6 +191,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setTimezone(tz);
       setSelectedTimezone(tz);
       applyNotificationSettings(notificationSettings);
+      applyScreenLockSettings(screenLockSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
       setUnlocked(true);
       return { ok: true };
@@ -242,6 +263,25 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     if (selectedNtfyServerUrl) setNtfyServerUrl(selectedNtfyServerUrl);
     setNotificationsEnabled(selectedNotificationsEnabled);
     setNotificationSettingsStatus('Saved — takes effect on the next send_push_notification call, no restart needed.');
+  }
+
+  async function saveScreenLockSettings() {
+    const timeoutValue = Number(selectedScreenLockTimeoutMinutes);
+    if (!Number.isFinite(timeoutValue) || timeoutValue <= 0) {
+      setScreenLockStatus('error: timeout must be a positive number of minutes');
+      return;
+    }
+    if (selectedScreenLockPassword === screenLockPassword && timeoutValue === screenLockTimeoutMinutes) return;
+    setScreenLockStatus('');
+    try {
+      await adminSetScreenLockSettings({ password: selectedScreenLockPassword, timeout_minutes: timeoutValue }, adminKey);
+    } catch (err) {
+      setScreenLockStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+      return;
+    }
+    setScreenLockPassword(selectedScreenLockPassword);
+    setScreenLockTimeoutMinutes(timeoutValue);
+    setScreenLockStatus('Saved — takes effect for this tab on its next reload, no restart needed.');
   }
 
   // Only the fields that actually changed are sent — an untouched prompt textarea stays exactly
@@ -522,6 +562,45 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{notificationSettingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Screen Lock</legend>
+        <label>
+          Password
+          <br />
+          <input
+            type="text"
+            value={selectedScreenLockPassword}
+            onChange={(e) => setSelectedScreenLockPassword(e.target.value)}
+            placeholder="(no lock — leave blank to disable)"
+          />
+        </label>
+        <p>
+          Privacy only, not real security — the app locks itself after the idle timeout below and asks for this
+          password again. Leave blank to turn the lock off.
+        </p>
+        <label>
+          Idle timeout (minutes)
+          <br />
+          <input
+            type="text"
+            value={selectedScreenLockTimeoutMinutes}
+            onChange={(e) => setSelectedScreenLockTimeoutMinutes(e.target.value)}
+            placeholder="5"
+          />
+        </label>
+        <br />
+        <button
+          onClick={saveScreenLockSettings}
+          disabled={
+            selectedScreenLockPassword === screenLockPassword &&
+            Number(selectedScreenLockTimeoutMinutes) === screenLockTimeoutMinutes
+          }
+        >
+          Save
+        </button>
+        <div className="status">{screenLockStatus}</div>
       </fieldset>
 
       <fieldset>
