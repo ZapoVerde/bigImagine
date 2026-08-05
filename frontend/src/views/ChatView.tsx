@@ -45,6 +45,7 @@ import './ChatView.css';
 const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }[] = [
   { type: 'notes', label: 'Notes', icon: '📝' },
   { type: 'documents', label: 'Documents', icon: '📄' },
+  { type: 'characters', label: 'Characters', icon: '🎭' },
 ];
 
 interface ChatViewProps {

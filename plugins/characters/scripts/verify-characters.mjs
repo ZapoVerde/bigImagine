@@ -55,7 +55,7 @@ function createFakePool() {
               scenario,
               system_prompt: systemPrompt,
               example_dialogue: exampleDialogue,
-              greetings,
+              greetings: JSON.parse(greetings),
               spec_version: 'v2',
               source_json: null,
               avatar_path: null,
@@ -76,7 +76,7 @@ function createFakePool() {
               scenario,
               system_prompt: systemPrompt,
               example_dialogue: exampleDialogue,
-              greetings,
+              greetings: JSON.parse(greetings),
               spec_version: specVersion,
               source_json: JSON.parse(sourceJson),
               avatar_path: avatarPath,
@@ -133,7 +133,7 @@ function createFakePool() {
             const fieldOrder = ['name', 'persona', 'scenario', 'system_prompt', 'example_dialogue', 'greetings'];
             const patchedFields = fieldOrder.filter((f) => sql.includes(`${f} = $`));
             patchedFields.forEach((field, i) => {
-              row[field] = rest[i];
+              row[field] = field === 'greetings' ? JSON.parse(rest[i]) : rest[i];
             });
             return { rows: [{ character_id: row.character_id, name: row.name }] };
           }

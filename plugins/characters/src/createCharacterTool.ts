@@ -85,7 +85,7 @@ export function createCreateCharacterTool(): RegisteredTool {
       }
       const [row] = await ctx.db.query<CharacterRow>(
         `insert into characters (user_id, name, persona, scenario, system_prompt, example_dialogue, greetings)
-         values ($1, $2, $3, $4, $5, $6, $7)
+         values ($1, $2, $3, $4, $5, $6, $7::jsonb)
          returning character_id, name`,
         [
           ctx.userId,
@@ -94,7 +94,7 @@ export function createCreateCharacterTool(): RegisteredTool {
           args.scenario ?? '',
           args.system_prompt ?? '',
           args.example_dialogue ?? '',
-          args.greetings ?? [],
+          JSON.stringify(args.greetings ?? []),
         ],
       );
       return { characterId: row!.character_id, name: row!.name };

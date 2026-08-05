@@ -102,8 +102,8 @@ export function createUpdateCharacterTool(): RegisteredTool {
         sets.push(`example_dialogue = $${params.length}`);
       }
       if (args.greetings !== undefined) {
-        params.push(args.greetings);
-        sets.push(`greetings = $${params.length}`);
+        params.push(JSON.stringify(args.greetings));
+        sets.push(`greetings = $${params.length}::jsonb`);
       }
       const rows = await ctx.db.query<CharacterRow>(
         `update characters set ${sets.join(', ')} where character_id = $1 and user_id = $2 returning character_id, name`,

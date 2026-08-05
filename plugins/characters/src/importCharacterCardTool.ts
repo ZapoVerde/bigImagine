@@ -82,7 +82,7 @@ export function createImportCharacterCardTool(): RegisteredTool {
       const rows = await ctx.db.query<CharacterRow>(
         `insert into characters
            (user_id, name, persona, scenario, system_prompt, example_dialogue, greetings, spec_version, source_json, avatar_path)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+         values ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9::jsonb, $10)
          returning character_id, name`,
         [
           ctx.userId,
@@ -91,7 +91,7 @@ export function createImportCharacterCardTool(): RegisteredTool {
           parsed.scenario,
           parsed.systemPrompt,
           parsed.exampleDialogue,
-          parsed.greetings,
+          JSON.stringify(parsed.greetings),
           parsed.specVersion,
           JSON.stringify(cardJson),
           isPng ? 'local' : null,
