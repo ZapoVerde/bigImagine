@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
+import remarkQuotes from '../lib/remarkQuotes';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import {
   ApiError,
   adminListConnectionModels,
@@ -596,7 +599,20 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                 ) : (
                   <>
                     <div className="markdown-content">
-                      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>{m.content}</ReactMarkdown>
+                      {/* allowDangerousHtml + rehypeRaw let literal HTML the LLM writes inline (chiefly
+                          <details>/<summary> spoiler blocks, SillyTavern-style "hidden text") parse into
+                          real elements instead of rendering as escaped text. rehypeSanitize runs right
+                          after with hast-util-sanitize's default (GitHub) schema, which strips anything
+                          not on its allowlist — script tags, event-handler attributes, iframes, etc. —
+                          so this never becomes a path for injected HTML/JS from message content (including
+                          tool/RAG output that ends up quoted back into a message) to execute. */}
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm, remarkBreaks, remarkQuotes]}
+                        remarkRehypeOptions={{ allowDangerousHtml: true }}
+                        rehypePlugins={[rehypeRaw, [rehypeSanitize, defaultSchema]]}
+                      >
+                        {m.content}
+                      </ReactMarkdown>
                     </div>
                     {m.messageId && (
                       <div className="message-actions">

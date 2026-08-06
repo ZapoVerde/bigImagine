@@ -50,6 +50,13 @@
   --color-bubble-assistant-bg: #f0f0f0;
   --color-bubble-assistant-text: #111111;
 
+  /* --- Narrative text (message-body dialogue vs. action/emphasis split, SillyTavern-style) ---
+     Aliased to existing hues rather than new literals: quoted dialogue borrows --color-secondary
+     (amber), italicized action/emphasis borrows --color-text-muted — same pairing ST's own default
+     theme uses for the same distinction. */
+  --color-narrative-quote: var(--color-secondary);
+  --color-narrative-em: var(--color-text-muted);
+
   /* --- Radius scale ("curves") --- */
   --radius-sm: 0.35rem;
   --radius-md: 0.6rem;
@@ -123,4 +130,8 @@ body.dark {
   --color-bubble-user-text: #ffffff;
   --color-bubble-assistant-bg: #26272c;
   --color-bubble-assistant-text: #f2f2f2;
+
+  /* --- Narrative text --- */
+  --color-narrative-quote: var(--color-secondary);
+  --color-narrative-em: var(--color-text-muted);
 }

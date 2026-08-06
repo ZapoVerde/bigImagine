@@ -438,6 +438,57 @@
   background: rgba(255, 255, 255, 0.15);
 }
 
+/* SillyTavern-style narrative split: spoken dialogue (wrapped in <q> by remarkQuotes.ts) gets its
+   own accent color, italicized action/emphasis gets a muted tone, so dialogue reads distinctly
+   from prose at a glance. */
+.markdown-content q {
+  color: var(--color-narrative-quote);
+  /* The matched text already includes its own literal quote characters (straight/curly/etc) —
+     suppress the browser's auto-inserted open/close quote marks so they don't double up. */
+  quotes: none;
+}
+
+.markdown-content em,
+.markdown-content i {
+  color: var(--color-narrative-em);
+}
+
+.markdown-content q em,
+.markdown-content q i {
+  color: inherit;
+}
+
+.markdown-content blockquote {
+  border-left: 3px solid var(--color-narrative-quote);
+  padding-left: 0.7rem;
+  margin: 0.4rem 0;
+  opacity: 0.9;
+}
+
+/* SillyTavern-style hidden text: <details>/<summary> the LLM writes inline (a spoiler or an aside
+   it wants collapsed by default) renders as a bordered, click-to-reveal block instead of the bare
+   browser default. */
+.markdown-content details {
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.6rem;
+  margin: 0.3rem 0;
+}
+
+.chat-bubble.user .markdown-content details {
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.markdown-content summary {
+  cursor: pointer;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-narrative-quote);
+}
+
+.markdown-content details[open] summary {
+  margin-bottom: 0.4rem;
+}
+
 .markdown-content table {
   border-collapse: collapse;
 }
