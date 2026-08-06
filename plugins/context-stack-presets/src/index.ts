@@ -5,13 +5,15 @@
  * @description
  * The contract orchestrator/pluginLoader.ts expects (same as prompt-presets/notes/lists): an
  * `info` object and an async `registerTools`. Most of these tools only need ctx.db/ctx.userId,
- * supplied per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack.ts itself is
- * deliberately not exposed as a tool here: it's a pure function. apply_prompt_stack_to_chat is the
- * one IO-performing caller of it wired up so far (the RP settings panel's "Apply" action,
- * frontend/src/views/ChatView.tsx) — a later Orchestrator resolving a turn's effective preset for
- * scenes/Director-Pass would be a second caller, not a replacement for this one. It alone needs
- * deps.settings, to read the persona_name/persona_description settings (migration 0053,
- * docs/prompt-macros.md's Stage 1) it folds into the 'persona' marker slot.
+ * supplied per-call — no LLM/embeddings/cipher/Notion providers. assemblePromptStack (now a core
+ * util, orchestrator/src/util/assemblePromptStack.ts — moved out of this plugin 2026-08-06 so
+ * server/httpServer.ts's per-turn narrator assembly, docs/turn-loop-plan.md §3.2, could call it
+ * without inverting the plugin/core dependency direction) is deliberately not exposed as a tool
+ * here: it's a pure function. apply_prompt_stack_to_chat is this plugin's own IO-performing
+ * caller of it (the RP settings panel's "Apply" action, frontend/src/views/ChatView.tsx) — a
+ * second caller now lives in core, not a replacement for this one. It alone needs deps.settings,
+ * to read the persona_name/persona_description settings (migration 0053, docs/prompt-macros.md's
+ * Stage 1) it folds into the 'persona' marker slot.
  *
  * @api-declaration
  * info — plugin identity

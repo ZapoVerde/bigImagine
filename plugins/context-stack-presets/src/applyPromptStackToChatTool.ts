@@ -41,7 +41,7 @@
 
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import type { OrchestratorSettingsStore } from '@bigbrain/orchestrator/settings';
-import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from './assemblePromptStack.js';
+import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from '@bigbrain/orchestrator/assemble-prompt-stack';
 import type { SlotRow } from './slotRows.js';
 
 interface CharacterFieldsRow {

@@ -1,14 +1,15 @@
 // Proves all four tools end to end through info/registerTools (the real loader contract) using a
 // small stateful fake Postgres pool that simulates context_stack_presets/context_stack_slots
 // across a sequence of calls — same style as plugins/prompt-presets's verify-prompt-presets.mjs.
-// Also exercises assemblePromptStack directly (a pure function, no DB involved) and the
-// migration's builtin-visibility RLS shape: own presets + builtins on get, builtins untouchable by
-// update/delete regardless of caller.
+// Also exercises assemblePromptStack (now a core util, orchestrator/scripts/verify-assemble-
+// prompt-stack.mjs covers it in more depth) through this plugin's own apply_prompt_stack_to_chat
+// caller, and the migration's builtin-visibility RLS shape: own presets + builtins on get,
+// builtins untouchable by update/delete regardless of caller.
 
 import { createPostgresClient } from '@bigbrain/orchestrator/postgres';
 import { createToolRegistry } from '@bigbrain/orchestrator/tool-registry';
 import { info, registerTools } from '../dist/index.js';
-import { assemblePromptStack } from '../dist/assemblePromptStack.js';
+import { assemblePromptStack } from '@bigbrain/orchestrator/assemble-prompt-stack';
 
 function assert(cond, message) {
   if (!cond) {

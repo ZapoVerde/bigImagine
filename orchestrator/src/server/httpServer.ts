@@ -142,6 +142,7 @@ import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
+import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
@@ -394,6 +395,148 @@ async function resolveMacrosInSystemPrompt(
   return interpolateMacros(systemText, snapshot);
 }
 
+interface SlotDbRow {
+  slot_type: string;
+  marker_key: string | null;
+  enabled: boolean;
+  custom_role: string | null;
+  custom_content: string | null;
+}
+
+interface NarratorCharacterFieldsRow {
+  name: string;
+  system_prompt: string;
+  persona: string;
+  scenario: string;
+  example_dialogue: string;
+}
+
+// Shared by both per-turn narrator assembly and the cleanup pass below — the same
+// context_stack_slots read applyPromptStackToChatTool.ts does, just usable from core without
+// crossing the plugin/core dependency line (assemblePromptStack itself already lives in core,
+// util/assemblePromptStack.ts, moved here 2026-08-06 for exactly this reason).
+async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlot[]> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<SlotDbRow>(
+      `select slot_type, marker_key, enabled, custom_role, custom_content
+       from context_stack_slots where preset_id = $1 order by position`,
+      [presetId],
+    ),
+  );
+  return rows.map((row) => ({
+    slotType: row.slot_type as 'marker' | 'custom',
+    markerKey: row.marker_key ?? undefined,
+    enabled: row.enabled,
+    customRole: (row.custom_role as 'system' | 'user' | 'assistant' | null) ?? undefined,
+    customContent: row.custom_content ?? undefined,
+  }));
+}
+
+// docs/turn-loop-plan.md §3.2: the per-turn replacement for apply_prompt_stack_to_chat's
+// bake-once-at-Apply behavior. Same two-phase pattern that tool already uses (assemblePromptStack
+// then interpolateMacros) — re-run fresh every turn instead of frozen into params.system, and with
+// memory_recall folded in as a field the preset's own slot ordering places, instead of
+// buildChatMemorySystemPrompt's result being concatenated on unconditionally after the fact.
+//
+// canon_facts is deliberately left unset here even when a preset enables that slot:
+// recall_canon_facts (plugins/canonize/src/recallCanonFactsTool.ts) scopes by scene_id via
+// scene_presence/scenes.active_location_id, and chat_sessions has no scene_id column linking a
+// chat to a scene — there is no trusted scope to auto-fetch against yet. The tool itself stays
+// live for the model to call mid-turn when it does have a scene_id; this is a real gap (a chat<->
+// scene link doesn't exist), not an oversight, flagged rather than guessed at.
+async function assembleNarratorSystemText(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  userId: string,
+  characterId: string | null,
+  presetId: string,
+  memoryContext: string,
+): Promise<string> {
+  const [slots, characterRows, persona] = await Promise.all([
+    loadPromptStackSlots(db, userId, presetId),
+    characterId
+      ? db.withUserScope(userId, (session) =>
+          session.query<NarratorCharacterFieldsRow>(
+            'select name, system_prompt, persona, scenario, example_dialogue from characters where character_id = $1 and user_id = $2',
+            [characterId, userId],
+          ),
+        )
+      : Promise.resolve([]),
+    getPersonaSettings(settings),
+  ]);
+  // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
+  // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
+  if (slots.length === 0) return '';
+
+  const character = characterRows[0];
+  const personaText = persona.description
+    ? persona.name
+      ? `${persona.name}: ${persona.description}`
+      : persona.description
+    : persona.name || undefined;
+
+  const fields: PromptStackFields = {
+    system: character?.system_prompt || undefined,
+    description: character?.persona || undefined,
+    scenario: character?.scenario || undefined,
+    mes_example: character?.example_dialogue || undefined,
+    persona: personaText,
+    memory_recall: memoryContext || undefined,
+  };
+
+  const joined = assemblePromptStack(fields, slots)
+    .map((m) => m.content)
+    .join('\n\n');
+
+  const snapshot: MacroSnapshot = {
+    charName: character?.name,
+    userName: persona.name || undefined,
+    persona: personaText,
+    description: character?.persona || undefined,
+    scenario: character?.scenario || undefined,
+  };
+  return interpolateMacros(joined, snapshot);
+}
+
+// docs/turn-loop-plan.md §4: an optional, unconditional-when-set post-processing pass over the
+// raw generated turn — BigImagine's analogue of the user's real-world Triggeryze sideCall (banned
+// constructions/names/words, header reconstruction, internal-thoughts-suffix fixups). Per the
+// user's own direction, exposed as its own context_stack_presets row (mostly custom-type slots,
+// {{message}} embedded in their text) rather than a second, simpler "instruction content" schema —
+// so this reuses loadPromptStackSlots/assemblePromptStack exactly like the narrator does, just
+// with an empty fields object (a cleanup preset has no card/persona/memory fields to draw from,
+// only {{message}}) and each slot's own chosen role preserved rather than collapsed into one
+// system string, since this becomes its own fresh messages array, not a system-prompt fragment.
+//
+// Runs through the same gated llm.complete() (kind: 'chat', same taskId as the main turn — this
+// is part of the turn the user is waiting on, not a background job, so it should never be
+// throttled by agent_routine caps and gets the standard retry/backoff for free from llmGate.ts).
+// On exhausted-retry failure: logged, the raw reply is kept unchanged — per the user's explicit
+// call, cleanup failing never blocks or degrades the turn itself.
+async function runCleanupPass(
+  db: PostgresClient,
+  userId: string,
+  chatId: string,
+  cleanupPresetId: string,
+  turnLlm: LlmProvider,
+  reply: string,
+): Promise<string> {
+  const slots = await loadPromptStackSlots(db, userId, cleanupPresetId);
+  const messages = assemblePromptStack({}, slots).map((m) => ({
+    ...m,
+    content: interpolateMacros(m.content, { message: reply }),
+  }));
+  if (messages.length === 0) return reply;
+
+  try {
+    const turn = await runWithCallContext({ taskId: chatId, kind: 'chat', userId }, () => turnLlm.complete(messages, []));
+    return turn.message.content || reply;
+  } catch (err) {
+    log.error(`cleanup pass failed for chat ${chatId}, keeping the raw reply`, err);
+    return reply;
+  }
+}
+
 // The other half: raw history older than the live window is never sent at all — only reachable via
 // recall_chat_history. Same knob (chat_memory_live_window_pairs) orchestrator/src/orchestrator/
 // chatMemorySync.ts's own sync pipeline uses for where the live window ends, read live so the two
@@ -471,22 +614,30 @@ async function handleChatCompletions(
   // here for docs/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
   // everything else about the turn is indifferent to it.
   let sessionCharacterId: string | null = null;
+  // Which context_stack_presets row (if any) drives this turn's per-turn narrator assembly
+  // (docs/turn-loop-plan.md §3.2) and, separately, the post-runTurn cleanup pass (§4). Two
+  // independent optional presets, only the first read here — cleanupPresetId is read straight off
+  // detail.session where it's used, below.
+  let sessionPromptStackPresetId: string | null = null;
   // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
   // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
   // use even when this turn doesn't add a fresh chat_messages row of its own.
   let existingLatestUserMessageId: string | undefined;
+  let sessionDetail: Awaited<ReturnType<ChatSessionStore['getChat']>> | undefined;
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
       sendJson(res, 404, { error: 'unknown chat_id' });
       return;
     }
+    sessionDetail = detail;
     sessionParams = detail.session.params;
     sessionWasEmpty = detail.messages.length === 0;
     sessionTitle = detail.session.title;
     priorMessageCount = detail.messages.length;
     sessionKind = detail.session.kind;
     sessionCharacterId = detail.session.characterId;
+    sessionPromptStackPresetId = detail.session.promptStackPresetId;
     existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
@@ -554,23 +705,43 @@ async function handleChatCompletions(
   // contain literal `{{...}}`-looking text, e.g. discussing templating syntax, that has no
   // business being rewritten) and to a cheap .includes('{{') check, so the common case — an RP
   // chat whose system prompt has no macros in it — pays for none of the extra reads below.
-  if (sessionKind === 'rp' && sessionParams.system?.includes('{{')) {
-    sessionParams = { ...sessionParams, system: await resolveMacrosInSystemPrompt(sessionParams.system, db, deps.settings, userId, sessionCharacterId) };
-  }
-
-  let systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
-
   // docs/chat-memory.md: only the persisted-session path (bigBrain's own frontend, which the
   // rolling-sync pipeline actually maintains derived state for) gets server-side history trimming
   // and memory injection — a stateless caller (Open WebUI) gets exactly what it sent, unchanged,
   // same as before this feature existed.
+  let systemPrompt: string;
   if (body.chat_id) {
     const [memoryContext, trimmed] = await Promise.all([
       buildChatMemorySystemPrompt(db, userId, body.chat_id, sessionKind),
       trimToLiveWindow(messagesForLlm, deps.settings),
     ]);
-    systemPrompt = [systemPrompt, memoryContext].filter(Boolean).join('\n\n');
     messagesForLlm = trimmed;
+
+    if (sessionKind === 'rp' && sessionPromptStackPresetId) {
+      // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): re-run assemblePromptStack
+      // fresh every turn instead of replaying the frozen string apply_prompt_stack_to_chat baked
+      // once into params.system at Apply-click — a character-card/persona/memory-digest edit
+      // takes effect on the very next message, no re-apply needed. memory_recall is folded in as
+      // a field the preset's own slot ordering places, not appended after the fact.
+      const narratorText = await assembleNarratorSystemText(
+        db,
+        deps.settings,
+        userId,
+        sessionCharacterId,
+        sessionPromptStackPresetId,
+        memoryContext,
+      );
+      systemPrompt = [formatCurrentDateContext(timezone), narratorText].filter(Boolean).join('\n\n');
+    } else {
+      // No applied preset — a 'chat'-kind chat, or an 'rp' chat that's never been through Apply:
+      // unchanged legacy behavior, the frozen params.system, macro-resolved if 'rp'.
+      if (sessionKind === 'rp' && sessionParams.system?.includes('{{')) {
+        sessionParams = { ...sessionParams, system: await resolveMacrosInSystemPrompt(sessionParams.system, db, deps.settings, userId, sessionCharacterId) };
+      }
+      systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system, memoryContext].filter(Boolean).join('\n\n');
+    }
+  } else {
+    systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
   }
 
   // Point-in-time canon recall's anchor (db/migrations/0053_canon_facts_chat_anchor.sql) needs the
@@ -618,6 +789,14 @@ async function handleChatCompletions(
     return;
   }
   const echoedModel = model ?? turnDefaultModel;
+
+  // Step 5 of the seven-step turn loop (docs/turn-loop-plan.md §4.2): between runTurn resolving
+  // and the assistant message being persisted. Skipped entirely (zero cost) for the common case —
+  // no chat_id, or a chat that hasn't opted into a cleanup preset.
+  const cleanupPresetId = sessionDetail?.session.cleanupPresetId;
+  if (body.chat_id && cleanupPresetId) {
+    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply);
+  }
 
   if (body.chat_id) {
     // The user message (if this was a genuinely new turn) is already persisted above, before

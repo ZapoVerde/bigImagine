@@ -18,6 +18,12 @@
  * time/random fields to this same shape, Stage 3 adds a variables read, and neither changes this
  * function's signature or its one caller (server/httpServer.ts, resolved fresh every turn).
  *
+ * `message` (docs/turn-loop-plan.md §4.1) is the one field so far that isn't a per-turn constant
+ * like the others — it's the raw just-generated turn text, only ever set when resolving a cleanup
+ * preset's slots (the caller building the narrator prompt never has a message yet). Added exactly
+ * the way this file's own doc comment above anticipated: a new optional field plus a new switch
+ * case, no change to the function's signature or its caller's shape.
+ *
  * @api-declaration
  * MacroSnapshot — the turn-scoped values macros resolve against
  * interpolateMacros(text, snapshot) — substitutes every recognized `{{...}}` token in text
@@ -42,6 +48,9 @@ export interface MacroSnapshot {
   description?: string;
   /** {{scenario}} — character.scenario. */
   scenario?: string;
+  /** {{message}} — the raw just-generated turn text, set only when resolving a cleanup preset
+   *  (server/httpServer.ts's post-runTurn cleanup pass). Unset for narrator/character resolution. */
+  message?: string;
 }
 
 const TOKEN_PATTERN = /\{\{(\w+)(?:::([^}]*))?\}\}/g;
@@ -59,6 +68,8 @@ function resolveToken(name: string, arg: string | undefined, snapshot: MacroSnap
       return snapshot.description ?? '';
     case 'scenario':
       return snapshot.scenario ?? '';
+    case 'message':
+      return snapshot.message ?? '';
     case 'noop':
       return '';
     case 'newline':

@@ -1,6 +1,6 @@
 /**
- * @file plugins/context-stack-presets/src/assemblePromptStack.ts
- * @stamp 2026-08-04
+ * @file orchestrator/src/util/assemblePromptStack.ts
+ * @stamp 2026-08-06
  * @architectural-role Pure Function — walks a preset's ordered slots against a scene/character's
  *   fields, producing the LlmMessage[] to send
  * @description
@@ -8,8 +8,8 @@
  * §17 requires it to be a pure function of scene state so the static prefix stays byte-identical
  * across every character's turn in a scene (that's what makes prompt caching actually pay off) —
  * so this module never queries context_stack_presets/context_stack_slots itself. Whatever
- * resolves which preset applies to a turn (an Orchestrator, once scenes/characters exist per
- * docs/bootstrap.md) reads the slots and hands the array in here alongside a plain fields object.
+ * resolves which preset applies to a turn reads the slots and hands the array in here alongside a
+ * plain fields object.
  *
  * `fields` is deliberately flat — one string per marker, not per-marker message arrays — matching
  * spec.md's own "Fixed order, always" framing for step 2: every marker (including recent_history)
@@ -21,6 +21,15 @@
  * injections the model should treat as ground truth, not something a user or the model itself
  * said. Only a 'custom' slot's role is caller-chosen (validated at the create/update tool
  * boundary, matching context_stack_slots' own custom_role check constraint).
+ *
+ * Moved here from plugins/context-stack-presets/src/ (2026-08-06, docs/turn-loop-plan.md §3.2):
+ * server/httpServer.ts needs to call this directly for per-turn narrator assembly, and
+ * plugins/document-ingestion's own doc already establishes the rule this file was violating by
+ * living in a plugin — "plugins depend on @bigbrain/orchestrator, never the reverse." A pure
+ * function with zero plugin-specific state belongs in core the same way interpolateMacros.ts
+ * already does; plugins/context-stack-presets/src/applyPromptStackToChatTool.ts now imports it
+ * back via the `@bigbrain/orchestrator/assemble-prompt-stack` export, same as any other core util
+ * a plugin consumes.
  *
  * @api-declaration
  * MarkerKey — the closed vocabulary of card fields + BI additions from migration 0042
@@ -35,7 +44,7 @@
  *     external_io:     []
  */
 
-import type { LlmMessage } from '@bigbrain/orchestrator/llm-types';
+import type { LlmMessage } from '../io/llm/types.js';
 
 export type MarkerKey =
   | 'system'

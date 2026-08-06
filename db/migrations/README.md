@@ -217,3 +217,25 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `GET /v1/admin/chat-memory-sync-status`) — confirmation that each pipeline stage is actually
   working, per `bi_principles.md` §11, not an editing surface (canon-fact approve/reject stays on
   `CanonQueueView`, untouched by this migration).
+- `0056_llm_gate_retry.sql` — widens `llm_calls` with `request_id`/`attempt` (docs/llm-gate-plan.md,
+  `io/llm/llmGate.ts`'s new internal retry/queueing: a retryable failure — 429/5xx, or a bare
+  thrown transport error — is retried with bounded exponential backoff, admitted through a
+  per-lane concurrency slot, invisible to every caller). Every attempt of one logical `complete()`
+  call is its own row sharing a `request_id`, so a call that needed 2 attempts to succeed shows up
+  as two rows instead of losing the earlier failed attempt's latency/outcome. Also widens
+  `orchestrator_settings.key` with the five `llm_gate_*` tuning keys (two per-lane concurrency
+  caps, `max_retries`, `retry_base_ms`, `retry_max_ms`) — unset means "use `llmGate.ts`'s own
+  conservative built-in default," same fallback shape as every other tunable setting. `tallySince`
+  (the `agent_routine` cap tally) now counts `outcome in ('ok', 'error')`, not just `'ok'` — a
+  retried attempt is still real provider spend even when it ultimately fails, distinct from a
+  `'refused'` row (a preflight rejection that never reached the provider at all).
+- `0057_cleanup_preset.sql` — adds `chat_sessions.cleanup_preset_id`, `on delete set null` (same
+  shape as `prompt_stack_preset_id`'s own addition in `0049`). The turn loop's optional step 5
+  cleanup pass (docs/turn-loop-plan.md §4): a second LLM call that post-processes a turn's raw
+  reply before persistence — banned constructions/names/words, header reconstruction,
+  internal-thoughts-suffix fixups, the same job the user's real-world Triggeryze `sideCall` does
+  today. Per the user's explicit direction this is exposed as its own `context_stack_presets` row
+  (mostly `custom`-type slots, `{{message}}` embedded in their text via
+  `util/interpolateMacros.ts`'s new `message` field), not a second "instruction content" schema.
+  Null (the default) means cleanup is off — the common case until a user opts in;
+  `server/httpServer.ts` skips straight to persistence when unset, zero cost.

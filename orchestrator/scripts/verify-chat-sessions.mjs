@@ -97,6 +97,7 @@ function createFakePool() {
             if (setParts.includes('params =')) row.params = JSON.parse(params[idx++]);
             if (setParts.includes('tool_names =')) row.tool_names = params[idx++];
             if (setParts.includes('canvas_note_id =')) row.canvas_note_id = params[idx++];
+            if (setParts.includes('cleanup_preset_id =')) row.cleanup_preset_id = params[idx++];
             return { rows: sql.includes('returning') ? [row] : [] };
           }
           // chat_messages — always returns the inserted row (real Postgres only does with

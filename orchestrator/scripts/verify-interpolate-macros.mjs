@@ -45,6 +45,12 @@ assert(
   'the same token resolves consistently every occurrence within one call — one snapshot, applied uniformly',
 );
 
+assert(
+  interpolateMacros('TEXT TO FIX:\n{{message}}', { message: 'raw turn text' }) === 'TEXT TO FIX:\nraw turn text',
+  'message resolves to the raw just-generated turn text, for cleanup preset resolution',
+);
+assert(interpolateMacros('{{message}}', {}) === '', 'message resolves to empty string, not the literal token, when unset (narrator/character resolution)');
+
 if (process.exitCode) {
   console.error('\ninterpolateMacros verification FAILED');
   process.exit(1);
