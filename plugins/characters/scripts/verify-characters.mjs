@@ -27,12 +27,14 @@ function createFakePool() {
   const characters = [];
   const chatSessions = [];
   const chatMessages = [];
+  const chatMessageSwipes = [];
   let counter = 0;
 
   return {
     characters,
     chatSessions,
     chatMessages,
+    chatMessageSwipes,
     async connect() {
       let scopedUserId;
       return {
@@ -228,7 +230,24 @@ function createFakePool() {
           if (sql.startsWith('insert into chat_messages')) {
             const [chatId, userId, role, content] = params;
             assert(scopedUserId === userId, "apply_character_to_chat's greeting insert is scoped to the requesting user");
-            chatMessages.push({ chat_id: chatId, user_id: userId, role, content });
+            const messageId = `msg-${++counter}`;
+            chatMessages.push({ message_id: messageId, chat_id: chatId, user_id: userId, role, content, active_swipe_id: null });
+            return { rows: [{ message_id: messageId }] };
+          }
+
+          // --- apply_character_to_chat: alternate-greeting swipe insert ---
+          if (sql.startsWith('insert into chat_message_swipes')) {
+            const [messageId, content] = params;
+            const swipeId = `swipe-${++counter}`;
+            chatMessageSwipes.push({ swipe_id: swipeId, message_id: messageId, content });
+            return { rows: [{ swipe_id: swipeId }] };
+          }
+
+          // --- apply_character_to_chat: active-swipe pointer ---
+          if (sql.startsWith('update chat_messages set active_swipe_id')) {
+            const [activeSwipeId, messageId] = params;
+            const row = chatMessages.find((m) => m.message_id === messageId);
+            if (row) row.active_swipe_id = activeSwipeId;
             return { rows: [] };
           }
 
@@ -440,6 +459,27 @@ const appliedAgain = await db.withUserScope(userId, (session) =>
   applyTool.handler({ characterId: bare.characterId, chatId: 'chat-1' }, { userId, db: session }),
 );
 assert(appliedAgain.greetingInserted === false, 'apply_character_to_chat never seeds a greeting into a chat that already has messages');
+
+// --- apply_character_to_chat: a card with alternate greetings loads them all in as swipe history ---
+const multiGreeting = await db.withUserScope(userId, (session) =>
+  createTool.handler({ name: 'Sabrina', greetings: ['Hey there.', 'Oh, it is you.', 'Well, well.'] }, { userId, db: session }),
+);
+pool.chatSessions.push({ chat_id: 'chat-2', user_id: userId, params: {} });
+const appliedMulti = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ characterId: multiGreeting.characterId, chatId: 'chat-2' }, { userId, db: session }),
+);
+assert(appliedMulti.greetingInserted === true, 'a card with alternate greetings still seeds the opening message');
+const seededMessage = pool.chatMessages.find((m) => m.chat_id === 'chat-2' && m.role === 'assistant');
+assert(seededMessage.content === 'Hey there.', 'the opening message starts on the first greeting');
+const seededSwipes = pool.chatMessageSwipes.filter((s) => s.message_id === seededMessage.message_id);
+assert(
+  seededSwipes.length === 3 && seededSwipes.map((s) => s.content).join('|') === 'Hey there.|Oh, it is you.|Well, well.',
+  'every greeting (including the first) is stashed as a swipe row, in card order',
+);
+assert(
+  seededMessage.active_swipe_id === seededSwipes[0].swipe_id,
+  "the opening message's active_swipe_id points at the first greeting's own swipe row",
+);
 
 const appliedMissingChat = await db.withUserScope(userId, (session) =>
   applyTool.handler({ characterId: elara.characterId, chatId: 'no-such-chat' }, { userId, db: session }),

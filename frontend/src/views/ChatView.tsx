@@ -152,6 +152,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // same flag `sending` uses, since a swipe replaces one message's content in place and shouldn't
   // render the "new turn incoming" pending bubble the way send/rerun's own full turns do.
   const [swipingId, setSwipingId] = useState<string | null>(null);
+  // Mobile: browse an already-stored swipe (e.g. a card's alternate greetings) with a left/right
+  // finger drag on the bubble itself, same direction convention st-source/RossAscends-mods.js uses
+  // (finger-left -> next, finger-right -> prev) so it feels familiar to anyone coming from ST. A
+  // plain ref, not state — the gesture only reads position at touchend, no re-render needed mid-drag.
+  const touchSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Settings rail state — collapsed by default, but (unlike the old gear-icon toggle) available
   // even before a chat exists, so a system prompt/model/tools can be set up before the first
@@ -584,8 +589,52 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           )}
           {messages.map((m, i) => {
             const isLastAssistant = m.role === 'assistant' && !messages.slice(i + 1).some((x) => x.role === 'assistant');
+            // The chat's very first message being an assistant message only ever happens via
+            // apply_character_to_chat's greeting seed (applyCharacterToChatTool.ts) — there's no
+            // other path that produces an assistant reply with no user message before it. Its
+            // "swipes" are a card's pre-written alternate_greetings, not earlier LLM turns, so
+            // running past the last one must stop there rather than fall into Rerun's regenerate
+            // path (server/httpServer.ts's swipe route enforces the same rule; this just keeps the
+            // button/gesture from offering an action the server would reject anyway).
+            const isOpeningGreeting = i === 0 && m.role === 'assistant';
+            const hasMoreSwipesAhead = m.swipes ? m.swipes.index < m.swipes.count - 1 : false;
+            const swipeNextDisabled = sending || swipingId === m.messageId || (isOpeningGreeting && !hasMoreSwipesAhead);
+            const swipePrevDisabled = sending || swipingId === m.messageId || !m.swipes || m.swipes.index === 0;
+            // Mobile: a left/right drag on the bubble browses swipes the same way the ‹/› buttons
+            // do (see touchSwipeStartRef above) — only wired up when there's actually more than one
+            // stored variant to browse between.
+            const swipeGestureEnabled = isLastAssistant && m.messageId && m.swipes && m.swipes.count > 1;
+            const handleSwipeTouchStart = swipeGestureEnabled
+              ? (e: React.TouchEvent<HTMLDivElement>) => {
+                  const t = e.touches[0];
+                  if (t) touchSwipeStartRef.current = { x: t.clientX, y: t.clientY };
+                }
+              : undefined;
+            const handleSwipeTouchEnd = swipeGestureEnabled
+              ? (e: React.TouchEvent<HTMLDivElement>) => {
+                  const start = touchSwipeStartRef.current;
+                  touchSwipeStartRef.current = null;
+                  const end = e.changedTouches[0];
+                  if (!start || !end) return;
+                  const dx = end.clientX - start.x;
+                  const dy = end.clientY - start.y;
+                  // Mostly-horizontal drags only, past a minimum distance — otherwise a normal
+                  // vertical scroll of the chat history would keep getting misread as a swipe.
+                  if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+                  if (dx < 0) {
+                    if (!swipeNextDisabled) swipe(m.messageId!, 'next');
+                  } else if (!swipePrevDisabled) {
+                    swipe(m.messageId!, 'prev');
+                  }
+                }
+              : undefined;
             return (
-              <div key={m.messageId ?? `pending-${i}`} className={`chat-bubble ${m.role}`}>
+              <div
+                key={m.messageId ?? `pending-${i}`}
+                className={`chat-bubble ${m.role}`}
+                onTouchStart={handleSwipeTouchStart}
+                onTouchEnd={handleSwipeTouchEnd}
+              >
                 {editingId === m.messageId ? (
                   <div className="message-edit">
                     <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={3} autoFocus />
@@ -624,11 +673,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                           <span className="swipe-controls">
                             {m.swipes && m.swipes.count > 1 && (
                               <>
-                                <button
-                                  onClick={() => swipe(m.messageId!, 'prev')}
-                                  disabled={sending || swipingId === m.messageId || m.swipes.index === 0}
-                                  title="Previous reply"
-                                >
+                                <button onClick={() => swipe(m.messageId!, 'prev')} disabled={swipePrevDisabled} title="Previous reply">
                                   ‹
                                 </button>
                                 <span className="swipe-count">
@@ -638,14 +683,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                             )}
                             <button
                               onClick={() => swipe(m.messageId!, 'next')}
-                              disabled={sending || swipingId === m.messageId}
-                              title={m.swipes && m.swipes.index < m.swipes.count - 1 ? 'Next reply' : 'Regenerate this reply'}
+                              disabled={swipeNextDisabled}
+                              title={hasMoreSwipesAhead ? 'Next reply' : isOpeningGreeting ? 'No more greetings' : 'Regenerate this reply'}
                             >
-                              {swipingId === m.messageId
-                                ? '…'
-                                : m.swipes && m.swipes.index < m.swipes.count - 1
-                                  ? '›'
-                                  : 'Rerun'}
+                              {swipingId === m.messageId ? '…' : hasMoreSwipesAhead || isOpeningGreeting ? '›' : 'Rerun'}
                             </button>
                           </span>
                         )}

@@ -258,7 +258,7 @@ export function truncateMessagesFrom(
   );
 }
 
-export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier_swipe' };
+export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier_swipe' | 'no_further_swipe' };
 
 /** Swipe capability on the last LLM response — messageId must be the chat's current last message.
  *  'prev'/'next' mostly just swap to an already-stored variant (no LLM call); 'next' past the

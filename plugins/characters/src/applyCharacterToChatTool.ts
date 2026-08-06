@@ -1,6 +1,6 @@
 /**
  * @file plugins/characters/src/applyCharacterToChatTool.ts
- * @stamp 2026-08-05
+ * @stamp 2026-08-06
  * @architectural-role IO Wrapper — loads a character into a chat's system prompt + opening greeting
  * @description
  * "Loading a card into the context stack", scoped to what's actually wired today: full
@@ -14,13 +14,18 @@
  * a later apply_prompt_stack_to_chat call (plugins/context-stack-presets) can find which character
  * this chat is playing without the caller re-passing it.
  *
- * Only seeds the character's first greeting as an assistant message when the target chat currently
- * has zero messages — this is meant to be called on a freshly-created chat (the frontend always
- * opens a brand new one for this action), never on an in-progress conversation, so there's no risk
- * of silently overwriting real history; the zero-message check is a safety backstop, not the only
- * thing enforcing that. chat_messages insertion mirrors chatSessions.ts's own appendMessages
+ * Only seeds the character's greetings as an assistant message when the target chat currently has
+ * zero messages — this is meant to be called on a freshly-created chat (the frontend always opens a
+ * brand new one for this action), never on an in-progress conversation, so there's no risk of
+ * silently overwriting real history; the zero-message check is a safety backstop, not the only thing
+ * enforcing that. chat_messages insertion mirrors chatSessions.ts's own appendMessages
  * (clock_timestamp() for ordering) rather than importing it — plugins own their own SQL and never
  * reach into orchestrator's internal IO modules, same as every other tool in this plugin.
+ *
+ * A card with more than one greeting (first_mes + alternate_greetings) loads every one of them in
+ * as that opening message's swipe history (chat_message_swipes) rather than discarding all but the
+ * first — chatSessions.ts's existing recordSwipe/cycleSwipe machinery, and ChatView.tsx's existing
+ * prev/next swipe controls, then apply to the greeting for free with no new concept on either side.
  *
  * @api-declaration
  * createApplyCharacterToChatTool() — returns the apply_character_to_chat RegisteredTool
@@ -120,11 +125,28 @@ export function createApplyCharacterToChatTool(): RegisteredTool {
       );
       let greetingInserted = false;
       if (count === '0' && character.greetings.length > 0) {
-        await ctx.db.query(
-          'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp())',
+        const [{ message_id }] = await ctx.db.query<{ message_id: string }>(
+          'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp()) returning message_id',
           [args.chatId, ctx.userId, 'assistant', character.greetings[0]],
         );
         greetingInserted = true;
+
+        // A card's alternate_greetings load in as this message's swipe history (chat_message_swipes,
+        // db/migrations/0059_chat_message_swipes.sql) rather than a separate concept — the frontend's
+        // existing swipe controls (ChatView.tsx) then just work on the opening message for free. Every
+        // greeting is inserted, including the first (mirroring recordSwipe's own "original + regenerated"
+        // shape), satisfying that table's "zero or two-plus rows" invariant when there's more than one.
+        if (character.greetings.length > 1) {
+          let activeSwipeId: string | undefined;
+          for (const greeting of character.greetings) {
+            const [{ swipe_id }] = await ctx.db.query<{ swipe_id: string }>(
+              'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
+              [message_id, greeting],
+            );
+            if (activeSwipeId === undefined) activeSwipeId = swipe_id;
+          }
+          await ctx.db.query('update chat_messages set active_swipe_id = $1 where message_id = $2', [activeSwipeId, message_id]);
+        }
       }
 
       return { applied: true, systemText, greetingInserted };

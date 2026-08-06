@@ -49,9 +49,12 @@
  * already-stored variants for most calls; 'next' past the newest stored variant is what "Rerun"
  * actually is now (regenerateSwipe below, in place via recordSwipe, no truncate/resend) — the two
  * are the same action from the store's point of view, so the frontend's Rerun button just sends
- * 'next'. Deleting the current last turn naturally re-exposes whatever's now last with its own,
- * never-pruned swipe history still intact — no restore logic needed for that (see migration
- * 0059's own comment for why).
+ * 'next' — except when messageId is the chat's sole message (the character-card greeting
+ * applyCharacterToChatTool.ts seeded, never an LLM turn): 'next' past its last stored
+ * alternate_greeting returns { status: 'no_further_swipe' } instead of regenerating, since there's
+ * no prior user turn to regenerate a reply to. Deleting the current last turn naturally re-exposes
+ * whatever's now last with its own, never-pruned swipe history still intact — no restore logic
+ * needed for that (see migration 0059's own comment for why).
  *
  * handleChatCompletions also always prepends a current-date/time system message
  * (util/dateContext.ts, using the household_timezone admin setting) ahead of a chat's own custom
@@ -1845,7 +1848,17 @@ async function handleChatRoutes(
         return;
       }
       // needs_regenerate: 'next' past the newest stored variant — this is "Rerun" (this module's
-      // own preamble on the swipe route).
+      // own preamble on the swipe route). Except when this message is the chat's only message: that
+      // means it's the seeded opening greeting (applyCharacterToChatTool.ts only ever seeds one when
+      // the chat has zero prior messages) and its "variants" are a card's pre-written
+      // alternate_greetings, not an earlier LLM turn — there is no prior user message to regenerate a
+      // reply to, and regenerateSwipe would otherwise run the LLM with an empty message history to
+      // fabricate one. Content the platform was handed, not content the LLM reasoned about, so it's
+      // never a Rerun candidate — cycling stops at the last stored greeting instead.
+      if (detail.messages.length === 1) {
+        sendJson(res, 200, { status: 'no_further_swipe' });
+        return;
+      }
       const result = await regenerateSwipe(deps, userId, chatId, detail, messageId);
       if (!result.ok) {
         sendJson(res, 500, { error: result.error });
