@@ -14,9 +14,9 @@
  * createLlmProvider(env: NodeJS.ProcessEnv) — reads BIGBRAIN_LLM_PROFILES (JSON) and
  *   BIGBRAIN_LLM_ACTIVE_PROFILE (which key in it to use)
  * createLlmProviderForProfile(profile: LlmProfile) — the kind-dispatch on its own, factored out
- *   so the Settings tab's model picker (server/httpServer.ts's GET /v1/admin/settings/models) can
- *   build a throwaway provider for any configured profile — even one that isn't active — just to
- *   call its listModels(), without duplicating the anthropic/openai-compatible branch here too
+ *   so the Connections tab's model picker (GET /v1/admin/connections/:id/models) can build a
+ *   throwaway provider for any saved connection — even one that isn't active — just to call its
+ *   listModels(), without duplicating the anthropic/openai-compatible branch here too
  *
  * @contract
  *   assertions:
@@ -48,6 +48,7 @@ export function createLlmProviderForProfile(profile: LlmProfile): LlmProvider {
     model: profile.model,
     baseUrl: profile.baseUrl!,
     supportsVision: profile.supportsVision,
+    provider: profile.provider,
   });
 }
 

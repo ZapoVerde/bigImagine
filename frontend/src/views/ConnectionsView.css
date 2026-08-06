@@ -1,0 +1,275 @@
+.connections-view {
+  display: flex;
+  height: 100%;
+}
+
+.connections-view.loading {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+}
+
+.connections-list {
+  width: 18rem;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--color-border-subtle);
+}
+
+.connections-editor {
+  flex: 1;
+  min-width: 0;
+  padding: 1.2rem 1.6rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.connections-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.connections-editor input,
+.connections-editor select {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-primary);
+}
+
+.connections-field-note {
+  color: var(--color-text-faint);
+  font-weight: normal;
+}
+
+.connections-model-freeform {
+  margin-top: 0.3rem;
+}
+
+.connections-back {
+  display: none;
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  padding: 0.2rem 0;
+  cursor: pointer;
+}
+
+/* Mobile: list and editor are both full-width panes — below the breakpoint only one shows at a
+   time, same shape PromptStacksView.tsx's own mobileShowEditor uses. */
+@media (max-width: 768px) {
+  .connections-view.mobile-editor .connections-list {
+    display: none;
+  }
+
+  .connections-view:not(.mobile-editor) .connections-editor {
+    display: none;
+  }
+
+  .connections-view.mobile-editor .connections-back {
+    display: inline-block;
+  }
+}
+
+.connections-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1rem 0.6rem;
+  font-weight: var(--font-weight-semibold);
+}
+
+.connections-new-btn {
+  font-size: var(--font-size-sm);
+  padding: 0.25rem 0.6rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  cursor: pointer;
+}
+
+.connections-new-btn:hover {
+  background: var(--color-secondary-hover);
+}
+
+.connections-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 1rem;
+  cursor: pointer;
+}
+
+.connections-row:hover {
+  background: var(--color-hover-surface);
+}
+
+.connections-row.selected {
+  background: var(--color-active-surface);
+}
+
+.connections-row-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+}
+
+.connections-row-badge {
+  flex-shrink: 0;
+  font-size: var(--font-size-2xs);
+  text-transform: uppercase;
+  letter-spacing: var(--label-letter-spacing);
+  color: var(--color-text-faint);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-pill);
+  padding: 0.05rem 0.5rem;
+}
+
+.connections-row-badge-active {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.connections-editor-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.connections-default-btn {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.connections-default-btn.active {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.connections-default-btn:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+.connections-name-input {
+  flex: 1;
+  min-width: 10rem;
+  font: inherit;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  padding: 0.3rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+}
+
+.connections-name-input:hover,
+.connections-name-input:focus {
+  border-color: var(--color-border-subtle);
+  background: var(--color-bg-surface);
+}
+
+.connections-delete-btn {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+  cursor: pointer;
+}
+
+.connections-delete-btn:hover:not(:disabled) {
+  background: var(--color-danger-bg);
+}
+
+.connections-delete-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.connections-provider-pin {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.connections-provider-pin legend {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  padding: 0 0.3rem;
+}
+
+.connections-provider-row {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.connections-provider-row label {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.connections-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.2rem;
+}
+
+.connections-actions button {
+  padding: 0.4rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.connections-actions button:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.connections-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.saved-note {
+  color: var(--color-success);
+  font-size: var(--font-size-sm);
+}

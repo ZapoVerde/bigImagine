@@ -103,18 +103,60 @@ export interface CredentialSummary {
   updatedAt: string | null;
 }
 
-// orchestrator/src/server/adminServer.ts ActiveProfileSetting
-export interface ActiveProfileSetting {
-  activeProfile: string;
-  activeModel: string;
-  profileNames: string[];
-  visionCapableProfiles: string[];
+// orchestrator/src/io/llmConnections.ts LlmConnectionRow — the Connections tab's list/detail shape.
+// No apiKey field at all (write-only by construction, same as CredentialSummary above) — a
+// connection always has one set (required at creation), so there's no "configured" state to track.
+export interface LlmConnectionSummary {
+  id: string;
+  name: string;
+  kind: 'anthropic' | 'openai-compatible';
+  model: string;
+  baseUrl: string | null;
+  supportsVision: boolean;
+  providerOrder: string[] | null;
+  allowFallbacks: boolean;
+  quantizations: string[] | null;
+  isActive: boolean;
+  updatedAt: string;
+}
+
+// orchestrator/src/server/adminServer.ts parseCreateConnectionBody's expected shape (LlmConnectionInit)
+export interface CreateConnectionInput {
+  name: string;
+  kind: 'anthropic' | 'openai-compatible';
+  model: string;
+  apiKey: string;
+  baseUrl?: string;
+  supportsVision?: boolean;
+  providerOrder?: string[];
+  allowFallbacks?: boolean;
+  quantizations?: string[];
+}
+
+// orchestrator/src/server/adminServer.ts parseUpdateConnectionBody's expected shape
+// (LlmConnectionPatch) — every field optional (a PATCH); baseUrl/providerOrder/quantizations
+// additionally accept null to explicitly clear a previously-set value.
+export interface UpdateConnectionInput {
+  name?: string;
+  model?: string;
+  /** Omit to leave the stored key untouched — only send when actually rotating it. */
+  apiKey?: string;
+  baseUrl?: string | null;
+  supportsVision?: boolean;
+  providerOrder?: string[] | null;
+  allowFallbacks?: boolean;
+  quantizations?: string[] | null;
 }
 
 // orchestrator/src/server/adminServer.ts ProfileModelsResult
 export interface ProfileModelsResult {
   models: { id: string; pricing?: { prompt: string; completion: string } }[];
   defaultModel: string;
+}
+
+// orchestrator/src/server/adminServer.ts ModelProvidersResult — OpenRouter-only routing table
+export interface ModelProvidersResult {
+  providers: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[];
 }
 
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions
@@ -124,8 +166,8 @@ export interface ChatParams {
   top_p?: number;
   max_tokens?: number;
   model?: string;
-  /** Which BIGBRAIN_LLM_PROFILES connection this chat uses, overriding the household's active
-   *  one. Unset means "use whichever connection is active". */
+  /** Which admin-managed connection (LlmConnectionSummary.name) this chat uses, overriding the
+   *  household's active one. Unset means "use whichever connection is active". */
   profile?: string;
 }
 
@@ -162,7 +204,7 @@ export interface ChatSessionRow {
 }
 
 // orchestrator/src/server/adminServer.ts getChatMemorySettings() + httpServer.ts's route handler
-// (which attaches profileNames from deps.llmProfiles, same split as ActiveProfileSetting).
+// (which attaches profileNames from deps.llmConnections.list()).
 export interface ChatMemorySettings {
   profile: string | null;
   profileNames: string[];
@@ -210,6 +252,21 @@ export interface StoredChatMessage {
 export interface ChatDetail {
   session: ChatSessionRow;
   messages: StoredChatMessage[];
+}
+
+// GET /v1/chats/:id/lineage's node shape — the Branch Map panel's data source. Deliberately
+// narrower than ChatSessionRow (no params/toolNames/etc.) since the panel only ever renders
+// title/status/relationships, never a chat's actual settings.
+export interface ChatLineageNode {
+  chatId: string;
+  title: string;
+  folderId: string | null;
+  parentChatId: string | null;
+  forkMessageId: string | null;
+  archivedAt: string | null;
+  kind: 'chat' | 'rp';
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Folder {

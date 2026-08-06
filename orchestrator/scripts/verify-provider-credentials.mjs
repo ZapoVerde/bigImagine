@@ -10,7 +10,6 @@ import {
   UNMANAGED_SENTINEL,
   createProviderCredentialStore,
 } from '../dist/io/providerCredentials.js';
-import { withOverriddenApiKeys, withOverriddenSupportsVision } from '../dist/io/llm/profiles.js';
 import { parseSetCredentialBody, parseVisionCapableProfiles } from '../dist/server/adminServer.js';
 
 function assert(cond, message) {
@@ -117,39 +116,13 @@ const store = createProviderCredentialStore(db, cipher);
   assert(!serialized.includes(pool.rowsByName.get('brave_api_key').ciphertext), 'list() output never contains a raw ciphertext value');
 }
 
-// --- withOverriddenApiKeys ---
-{
-  const raw = JSON.stringify({
-    deepseek: { kind: 'openai-compatible', model: 'x', apiKey: 'old-deepseek', baseUrl: 'https://x' },
-    openrouter: { kind: 'openai-compatible', model: 'y', apiKey: 'old-openrouter', baseUrl: 'https://y' },
-  });
-  const merged = JSON.parse(withOverriddenApiKeys(raw, { deepseek: 'new-deepseek', openrouter: undefined }));
-  assert(merged.deepseek.apiKey === 'new-deepseek', 'withOverriddenApiKeys overrides the named profile present in overrides');
-  assert(merged.deepseek.kind === 'openai-compatible' && merged.deepseek.model === 'x' && merged.deepseek.baseUrl === 'https://x', 'withOverriddenApiKeys leaves kind/baseUrl/model untouched');
-  assert(merged.openrouter.apiKey === 'old-openrouter', 'an undefined override leaves that profile\'s existing apiKey untouched');
-}
+// withOverriddenApiKeys/withOverriddenSupportsVision (io/llm/profiles.ts) are gone — connections are
+// real DB rows now (io/llmConnections.ts, db/migrations/0062_llm_connections.sql), edited via its
+// update()/create() rather than spliced onto a static env-defined profile. This coverage moved to
+// the connection store itself; see verify-server.mjs's /v1/admin/connections tests.
 
-// --- withOverriddenSupportsVision (Stage 5 — vision) ---
-{
-  const raw = JSON.stringify({
-    deepseek: { kind: 'openai-compatible', model: 'x', apiKey: 'k', baseUrl: 'https://x' },
-    openrouter: { kind: 'openai-compatible', model: 'y', apiKey: 'k', baseUrl: 'https://y' },
-    anthropic: { kind: 'anthropic', model: 'z', apiKey: 'k' },
-  });
-  const merged = JSON.parse(withOverriddenSupportsVision(raw, { openrouter: true }));
-  assert(merged.openrouter.supportsVision === true, 'withOverriddenSupportsVision sets true on a profile named in flags');
-  assert(merged.deepseek.supportsVision === false, 'a profile not named in flags is explicitly set to false, not left unset');
-  assert(merged.anthropic.supportsVision === false, 'every profile gets an explicit value, not just the ones in flags');
-  assert(merged.openrouter.kind === 'openai-compatible' && merged.openrouter.model === 'y' && merged.openrouter.baseUrl === 'https://y', 'other fields are left untouched');
-
-  const unsetAgain = JSON.parse(withOverriddenSupportsVision(JSON.stringify(merged), {}));
-  assert(unsetAgain.openrouter.supportsVision === false, 'an empty flags object clears every profile\'s flag back to false');
-
-  const staleName = JSON.parse(withOverriddenSupportsVision(raw, { 'removed-profile': true }));
-  assert(!('removed-profile' in staleName), 'a flags entry naming a profile not present in raw is silently ignored');
-}
-
-// --- parseVisionCapableProfiles (server/adminServer.ts) ---
+// --- parseVisionCapableProfiles (server/adminServer.ts) — retired setting, still parsed once by
+// index.ts's one-time llm_connections seed on a pre-cutover deployment's first boot after upgrading ---
 {
   assert(parseVisionCapableProfiles(undefined).length === 0, 'parseVisionCapableProfiles defaults to [] when unset');
   assert(parseVisionCapableProfiles('not json').length === 0, 'parseVisionCapableProfiles defaults to [] on malformed JSON');

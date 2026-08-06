@@ -17,15 +17,12 @@
  * only by construction (docs/bb_principles.md §12): the Settings tab is built around that —
  * credentials can be set/rotated, never viewed back.
  *
- * Also backs the Settings tab's connection picker (GET/POST /v1/admin/settings, and
- * GET /v1/admin/settings/models for the model dropdown within whichever connection is
- * selected) — unlike credentials, a connection profile/model *name* isn't a secret, so
- * getActiveProfileSetting reads it back in full rather than only reporting "configured".
- * parseSetActiveProfileBody validates against the caller-supplied list of profile names actually
- * defined in BIGBRAIN_LLM_PROFILES, so an admin can't set the active profile to a name that
- * doesn't exist. listModelsForProfile builds a throwaway LlmProvider for any configured profile —
- * even one that isn't currently active — purely to call its listModels(), so the model dropdown
- * can preview a connection's catalog before switching to it.
+ * Also backs the Connections tab's CRUD (GET/POST/PATCH/DELETE /v1/admin/connections,
+ * io/llmConnections.ts) — unlike credentials, a connection's name/model/baseUrl aren't secrets, so
+ * list() returns them in full; only apiKey stays write-only (never round-tripped back out).
+ * listModelsForConnection/listProvidersForConnection build a throwaway LlmProvider for one already-
+ * saved connection (by id) purely to call its listModels()/listProviders(), so the Connections
+ * tab's model/provider-pinning dropdowns can preview a connection's live catalog after it's saved.
  *
  * Also backs the Settings tab's timezone field (GET/POST /v1/admin/timezone) — the household's
  * IANA zone name, read fresh on every chat turn (server/httpServer.ts's handleChatCompletions via
@@ -52,15 +49,14 @@
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
  * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
  * setCredential(store, name, value) — encrypts + upserts the one named credential
- * getActiveProfileSetting(store, profiles, envActiveProfile) — DB value if set, else the
- *   boot-time env fallback, for both the active profile and its model, alongside every
- *   selectable profile name
- * parseSetActiveProfileBody(raw, profileNames) — validates {value, model?}; undefined on any
- *   malformed shape or unknown profile name
- * setActiveProfile(store, body) — upserts active_llm_profile, and active_llm_model when given
- * listModelsForProfile(profiles, profileName) — the live model catalog for one named profile
- *   (or its single static model if the provider kind has no listModels), for the picker to show
- *   before an admin commits to switching
+ * parseCreateConnectionBody(raw) — validates an LlmConnectionInit; undefined on any malformed shape
+ * parseUpdateConnectionBody(raw) — validates an LlmConnectionPatch; undefined on any malformed shape
+ * listModelsForConnection(connections, id) — the live model catalog for one saved connection
+ *   (or its single static model if the provider kind has no listModels), for the Connections tab
+ *   to show before an admin commits to a model choice
+ * listProvidersForConnection(connections, id, modelId) — the live list of upstream inference
+ *   providers OpenRouter can route the named model to, undefined if the connection's kind has no
+ *   listProviders capability (i.e. isn't OpenRouter)
  * getHouseholdTimezone(store) — the stored IANA zone name, or 'UTC' if never set
  * parseSetTimezoneBody(raw) — validates {value} is a real IANA zone name Intl recognizes;
  *   undefined on any malformed shape or unrecognized name
@@ -87,12 +83,12 @@
  *
  * @contract
  *   assertions:
- *     purity:          parseSetCredentialBody/parseSetActiveProfileBody/parseSetTimezoneBody/
- *                      isValidTimeZone/parseSetNotificationSettingsBody/
+ *     purity:          parseSetCredentialBody/parseCreateConnectionBody/parseUpdateConnectionBody/
+ *                      parseSetTimezoneBody/isValidTimeZone/parseSetNotificationSettingsBody/
  *                      parseSetScreenLockSettingsBody/parseSetPiaProxyUrlBody/
  *                      parseSetPersonaSettingsBody are pure; the rest are
  *                      impure (Postgres IO via the injected store, or a
- *                      network call to the named provider for listModelsForProfile)
+ *                      network call to the named connection for listModelsForConnection)
  *     state_ownership: []
  *     external_io:     [Postgres (via the stores it's given); the configured LLM provider APIs]
  */
@@ -100,7 +96,8 @@
 import type { CredentialName, CredentialSummary, ProviderCredentialStore } from '../io/providerCredentials.js';
 import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
-import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
+import { createLlmProviderForProfile } from '../io/llm/index.js';
+import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
@@ -128,11 +125,12 @@ export function setCredential(store: ProviderCredentialStore, name: CredentialNa
   return store.set(name, value);
 }
 
-// llm_vision_capable_profiles' value is a JSON array of profile names, the one setting here that
-// isn't a bare scalar (io/orchestratorSettings.ts's own preamble explains why) — parsed
-// defensively since it's operator/admin-set indirectly via this route, not hand-edited. Exported
-// so index.ts's boot sequence can reuse the exact same parse when splicing the flag onto every
-// profile via profiles.ts's withOverriddenSupportsVision, rather than a second copy of this logic.
+// llm_vision_capable_profiles' value is a JSON array of profile names — a retired setting, kept in
+// orchestratorSettings.ts's SETTING_NAMES (never narrowed, same precedent as CREDENTIAL_NAMES'
+// deepseek/openrouter entries) purely so index.ts's one-time llm_connections seed can still read a
+// pre-cutover deployment's env-defined profiles' vision flags into each new row's supports_vision
+// column. No longer read anywhere after that seed runs — a connection's own supports_vision column
+// (io/llmConnections.ts) is the live source of truth from then on.
 export function parseVisionCapableProfiles(raw: string | undefined): string[] {
   if (!raw) return [];
   try {
@@ -143,60 +141,69 @@ export function parseVisionCapableProfiles(raw: string | undefined): string[] {
   }
 }
 
-export interface ActiveProfileSetting {
-  activeProfile: string;
-  activeModel: string;
-  profileNames: string[];
-  /** Every configured profile name an admin has marked vision-capable — not just the active
-   *  one, since the Settings tab's picker can preview any configured profile's own flag before
-   *  committing to it (io/llm/profiles.ts's LlmProfile.supportsVision). */
-  visionCapableProfiles: string[];
+// Shared by parseCreateConnectionBody/parseUpdateConnectionBody — provider_order/quantizations are
+// both "at most a couple of provider tags"/"a quantization filter list", never validated against a
+// live catalog here (that would mean a network call just to parse a request body); an unrecognized
+// tag is caught downstream, the same way an unrecognized model id already is (the actual API call
+// fails, surfaced to the admin as a 502 from the models/providers preview routes, not silently).
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
 
-export async function getActiveProfileSetting(
-  store: OrchestratorSettingsStore,
-  profiles: Record<string, LlmProfile>,
-  envActiveProfile: string,
-): Promise<ActiveProfileSetting> {
-  const activeProfile = (await store.get('active_llm_profile')) ?? envActiveProfile;
-  const storedModel = await store.get('active_llm_model');
-  const activeModel = storedModel ?? profiles[activeProfile]?.model ?? '';
-  const visionCapableProfiles = parseVisionCapableProfiles(await store.get('llm_vision_capable_profiles'));
-  return { activeProfile, activeModel, profileNames: Object.keys(profiles), visionCapableProfiles };
-}
-
-export interface SetActiveProfileBody {
-  profile: string;
-  model?: string;
-  /** Undefined leaves this profile's stored vision flag untouched — same "only touch what's
-   *  given" shape as model. Set (true or false) to add/remove `profile` from the stored
-   *  llm_vision_capable_profiles list. */
-  supportsVision?: boolean;
-}
-
-export function parseSetActiveProfileBody(raw: unknown, profileNames: string[]): SetActiveProfileBody | undefined {
+export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { value, model, supportsVision } = raw as Record<string, unknown>;
-  if (typeof value !== 'string' || !profileNames.includes(value)) return undefined;
-  if (model !== undefined && (typeof model !== 'string' || model.length === 0)) return undefined;
+  const { name, kind, model, apiKey, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
+    raw as Record<string, unknown>;
+  if (typeof name !== 'string' || !name.trim()) return undefined;
+  if (kind !== 'anthropic' && kind !== 'openai-compatible') return undefined;
+  if (typeof model !== 'string' || !model) return undefined;
+  if (typeof apiKey !== 'string' || !apiKey) return undefined;
+  if (kind === 'openai-compatible' && (typeof baseUrl !== 'string' || !baseUrl)) return undefined;
+  if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
   if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
+  if (providerOrder !== undefined && !isStringArray(providerOrder)) return undefined;
+  if (allowFallbacks !== undefined && typeof allowFallbacks !== 'boolean') return undefined;
+  if (quantizations !== undefined && !isStringArray(quantizations)) return undefined;
   return {
-    profile: value,
-    model: typeof model === 'string' ? model : undefined,
+    name: name.trim(),
+    kind,
+    model,
+    apiKey,
+    baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
     supportsVision: typeof supportsVision === 'boolean' ? supportsVision : undefined,
+    providerOrder: providerOrder as string[] | undefined,
+    allowFallbacks: typeof allowFallbacks === 'boolean' ? allowFallbacks : undefined,
+    quantizations: quantizations as string[] | undefined,
   };
 }
 
-export async function setActiveProfile(store: OrchestratorSettingsStore, body: SetActiveProfileBody): Promise<void> {
-  await store.set('active_llm_profile', body.profile);
-  if (body.model) await store.set('active_llm_model', body.model);
-  if (body.supportsVision !== undefined) {
-    const current = parseVisionCapableProfiles(await store.get('llm_vision_capable_profiles'));
-    const next = body.supportsVision
-      ? Array.from(new Set([...current, body.profile]))
-      : current.filter((name) => name !== body.profile);
-    await store.set('llm_vision_capable_profiles', JSON.stringify(next));
-  }
+// Every field optional (a PATCH — only touch what's given), unlike create's required set.
+// baseUrl/providerOrder/quantizations additionally accept `null` to explicitly clear a
+// previously-set value, distinct from `undefined` ("leave it alone") — same three-state shape
+// io/llmConnections.ts's own LlmConnectionPatch already expects.
+export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { name, model, apiKey, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
+    raw as Record<string, unknown>;
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
+  if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
+  if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
+  if (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== 'string') return undefined;
+  if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
+  if (providerOrder !== undefined && providerOrder !== null && !isStringArray(providerOrder)) return undefined;
+  if (allowFallbacks !== undefined && typeof allowFallbacks !== 'boolean') return undefined;
+  if (quantizations !== undefined && quantizations !== null && !isStringArray(quantizations)) return undefined;
+
+  const patch: LlmConnectionPatch = {};
+  if (name !== undefined) patch.name = (name as string).trim();
+  if (model !== undefined) patch.model = model as string;
+  if (apiKey !== undefined) patch.apiKey = apiKey as string;
+  if (baseUrl !== undefined) patch.baseUrl = baseUrl as string | null;
+  if (supportsVision !== undefined) patch.supportsVision = supportsVision as boolean;
+  if (providerOrder !== undefined) patch.providerOrder = providerOrder as string[] | null;
+  if (allowFallbacks !== undefined) patch.allowFallbacks = allowFallbacks as boolean;
+  if (quantizations !== undefined) patch.quantizations = quantizations as string[] | null;
+  return patch;
 }
 
 export interface ProfileModelsResult {
@@ -204,15 +211,36 @@ export interface ProfileModelsResult {
   defaultModel: string;
 }
 
-export async function listModelsForProfile(
-  profiles: Record<string, LlmProfile>,
-  profileName: string,
+export async function listModelsForConnection(
+  connections: LlmConnectionStore,
+  id: string,
 ): Promise<ProfileModelsResult | undefined> {
-  const profile = profiles[profileName];
+  const profile = await connections.resolveById(id);
   if (!profile) return undefined;
   const provider = createLlmProviderForProfile(profile);
   const models = provider.listModels ? await provider.listModels() : [{ id: profile.model }];
   return { models, defaultModel: profile.model };
+}
+
+export interface ModelProvidersResult {
+  providers: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[];
+}
+
+// listModelsForConnection's counterpart for OpenRouter's per-model provider routing table —
+// undefined return covers both "no such connection" and "this connection's kind has no
+// listProviders capability" (every non-OpenRouter kind), so the route handler doesn't need to tell
+// those two apart: either way, there's nothing to show.
+export async function listProvidersForConnection(
+  connections: LlmConnectionStore,
+  id: string,
+  modelId: string,
+): Promise<ModelProvidersResult | undefined> {
+  const profile = await connections.resolveById(id);
+  if (!profile) return undefined;
+  const provider = createLlmProviderForProfile(profile);
+  if (!provider.listProviders) return undefined;
+  const providers = await provider.listProviders(modelId);
+  return { providers };
 }
 
 // UTC is a deliberate, safe default — not a real guess at where the household is, just a value
@@ -399,8 +427,8 @@ export function setPiaProxyUrl(store: OrchestratorSettingsStore, value: string):
 // horizon), and a "default + bespoke" override per prompt. Read live on every sync tick
 // (orchestrator/src/orchestrator/chatMemorySync.ts) — a save here takes effect on the next tick,
 // no restart, same shape as notification settings above. profileNames isn't included here —
-// httpServer.ts's route handler attaches it from deps.llmProfiles, same split as
-// getActiveProfileSetting/ActiveProfileSetting.
+// httpServer.ts's route handler attaches it from deps.llmConnections.list(), same split as the
+// Connections tab's own listing route.
 
 export interface ChatMemorySettings {
   profile: string | null;

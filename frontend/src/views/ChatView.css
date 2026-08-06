@@ -88,6 +88,22 @@
   background: var(--color-hover-surface);
 }
 
+/* Not mobile-only either, same reasoning as chat-prompt-inspector-summon above — BranchMapPanel
+   has no persistent rail of its own. Offered on every chat, not just 'rp'. */
+.chat-branch-map-summon {
+  background: none;
+  border: none;
+  font-size: var(--font-size-base);
+  padding: 0.3rem 0.5rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.chat-branch-map-summon:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
 .chat-title {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);

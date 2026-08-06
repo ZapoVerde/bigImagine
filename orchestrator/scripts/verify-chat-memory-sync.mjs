@@ -319,7 +319,8 @@ const settings = createFakeSettingsStore({
   chat_memory_sync_every_pairs: '2',
   chat_memory_digest_horizon_pairs: '8',
 });
-const deps = { db, llm, embeddings, settings, llmProfiles: {} };
+const llmConnections = { async resolveByName() { return undefined; } };
+const deps = { db, llm, embeddings, settings, llmConnections };
 
 function seedMessages(chatId, tag, count) {
   for (let i = 1; i <= count; i++) {

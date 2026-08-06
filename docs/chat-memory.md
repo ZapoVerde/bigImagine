@@ -90,6 +90,19 @@ detect-and-repair one:
   `chat_sync_points`/`chat_chunks`/`chat_memory_entries` rows whose restore point falls at or before
   that message. The branch is constructed correct from birth — there is nothing to detect, because
   nothing is mutating out from under it.
+- **Everything that configures how a chat behaves comes along too**: `params` (system prompt,
+  temperature, model/profile), `tool_names`, `folder_id`, `kind`, `character_id`,
+  `prompt_stack_preset_id`, and `cleanup_preset_id` are all copied verbatim from the parent. Only
+  `title` (defaults to `Fork of {parent title}`, or an explicit override) and `canvas_note_id`
+  (starts unfocused) are new. The intent is that forking never silently narrows a chat back down to
+  defaults — the branch behaves exactly like the chat it came from until someone changes it.
+- **`getLineage`** (`chatSessions.ts`) turns `parent_chat_id`/`fork_message_id` provenance into a
+  navigable structure: given any chat in a fork family, it walks `parent_chat_id` up to the root and
+  back down through every descendant, returning the whole family root-first. `GET
+  /v1/chats/:id/lineage` exposes this to the frontend's Branch Map panel (`components/branchMap/`,
+  summoned from the chat header's 🌳 button) — a read-only tree of the family, click any node to
+  switch to it. This is what makes forking safe to leave unnamed: the relationship between branches
+  lives in `parent_chat_id`, not in a naming convention a household member has to maintain by hand.
 - **An edit** (`truncateMessagesFrom`) still deletes forward messages from the *same* `chat_id`,
   and that's where a real cascade matters. It's handled by the schema, not application code:
   `chat_sync_points.last_message_id` is `on delete cascade` from `chat_messages`, and

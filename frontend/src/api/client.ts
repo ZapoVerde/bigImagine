@@ -1,16 +1,19 @@
 import type {
-  ActiveProfileSetting,
   ChatCompletionResponse,
   ChatDetail,
+  ChatLineageNode,
   ChatMemorySettings,
   ChatMemorySyncStatusRow,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
   ChatSummary,
+  CreateConnectionInput,
   CredentialSummary,
   Folder,
   ImportedCharacter,
+  LlmConnectionSummary,
+  ModelProvidersResult,
   NotificationSettings,
   PersonaSettings,
   ProfileModelsResult,
@@ -18,6 +21,7 @@ import type {
   ScreenLockSettings,
   StagedAttachment,
   StoredChatMessage,
+  UpdateConnectionInput,
 } from './types';
 
 export class ApiError extends Error {
@@ -202,6 +206,14 @@ export function getPromptPreview(chatId: string, apiKey: string | null): Promise
   return jsonRequest<PromptPreview>(`/v1/chats/${encodeURIComponent(chatId)}/prompt-preview`, apiKey);
 }
 
+/** GET /v1/chats/:id/lineage — the whole fork family this chat belongs to, root first. The Branch
+ *  Map panel's data source; see ChatSessionStore.getLineage's own doc for exactly what "family"
+ *  means. */
+export async function getChatLineage(chatId: string, apiKey: string | null): Promise<ChatLineageNode[]> {
+  const body = await jsonRequest<{ nodes: ChatLineageNode[] }>(`/v1/chats/${encodeURIComponent(chatId)}/lineage`, apiKey);
+  return body.nodes;
+}
+
 export function updateChat(
   chatId: string,
   patch: {
@@ -326,40 +338,67 @@ export async function adminSetCredential(name: string, value: string, adminKey: 
   if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
-/** The connection picker's current state — which named BIGBRAIN_LLM_PROFILES entry is active,
- *  and every selectable name. */
-export async function adminGetActiveProfile(adminKey: string | null): Promise<ActiveProfileSetting> {
-  const res = await fetch('/v1/admin/settings', { headers: authHeaders(adminKey) });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<ActiveProfileSetting>;
+/** The Connections tab's full list — every admin-managed connection, redacted (no apiKey field at
+ *  all; see LlmConnectionSummary). */
+export async function adminListConnections(adminKey: string | null): Promise<LlmConnectionSummary[]> {
+  const body = await jsonRequest<{ connections: LlmConnectionSummary[] }>('/v1/admin/connections', adminKey);
+  return body.connections;
 }
 
-/** Resolves once the save is accepted (202) — same restart-on-save shape as adminSetCredential.
- *  supportsVision, when passed, adds/removes profileName from the stored
- *  llm_vision_capable_profiles list; omitted leaves that profile's flag untouched. */
-export async function adminSetActiveProfile(
-  profileName: string,
-  model: string,
+export function adminCreateConnection(input: CreateConnectionInput, adminKey: string | null): Promise<LlmConnectionSummary> {
+  return jsonRequest<LlmConnectionSummary>('/v1/admin/connections', adminKey, { method: 'POST', body: input });
+}
+
+/** Only send the fields actually changing — apiKey omitted leaves the stored key untouched
+ *  (write-only, never round-tripped back for editing). */
+export function adminUpdateConnection(
+  id: string,
+  patch: UpdateConnectionInput,
   adminKey: string | null,
-  supportsVision?: boolean,
-): Promise<void> {
-  const res = await fetch('/v1/admin/settings', {
+): Promise<LlmConnectionSummary> {
+  return jsonRequest<LlmConnectionSummary>(`/v1/admin/connections/${encodeURIComponent(id)}`, adminKey, {
+    method: 'PATCH',
+    body: patch,
+  });
+}
+
+/** 409s (thrown as ApiError) if `id` is the currently active connection — activate a different one
+ *  first, same "explicit successor" shape the old Settings picker's restart-required switch implied. */
+export async function adminDeleteConnection(id: string, adminKey: string | null): Promise<void> {
+  await jsonRequest<{ deleted: boolean }>(`/v1/admin/connections/${encodeURIComponent(id)}`, adminKey, { method: 'DELETE' });
+}
+
+/** Resolves once the save is accepted (202) — the orchestrator restarts a moment later to boot
+ *  against the newly active connection (deps.llm is a boot-time singleton, bi_principles.md §14),
+ *  same restart-on-save shape as adminSetCredential. */
+export async function adminActivateConnection(id: string, adminKey: string | null): Promise<void> {
+  const res = await fetch(`/v1/admin/connections/${encodeURIComponent(id)}/activate`, {
     method: 'POST',
-    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify({ value: profileName, model, ...(supportsVision !== undefined ? { supportsVision } : {}) }),
+    headers: authHeaders(adminKey),
   });
   if (res.status !== 202) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
-/** The model catalog for one named connection — even one that isn't currently active — so the
- *  Settings tab can populate its model dropdown as soon as a profile is picked, before switching
- *  to it. defaultModel is that profile's own static config model, a sensible pre-selection. */
-export async function adminListModelsForProfile(profileName: string, adminKey: string | null): Promise<ProfileModelsResult> {
-  const res = await fetch(`/v1/admin/settings/models?profile=${encodeURIComponent(profileName)}`, {
-    headers: authHeaders(adminKey),
-  });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<ProfileModelsResult>;
+/** The model catalog for one saved connection — even one that isn't currently active — so the
+ *  Connections tab can populate its model dropdown once a connection exists. defaultModel is that
+ *  connection's own stored model, a sensible pre-selection. */
+export async function adminListConnectionModels(id: string, adminKey: string | null): Promise<ProfileModelsResult> {
+  return jsonRequest<ProfileModelsResult>(`/v1/admin/connections/${encodeURIComponent(id)}/models`, adminKey);
+}
+
+/** The upstream inference providers OpenRouter can route one named model to — undefined
+ *  connections (anything not OpenRouter) 404, surfaced to the caller as a thrown ApiError rather
+ *  than an empty list, so the UI can tell "no such provider catalog" apart from "this model has
+ *  no providers" (which shouldn't happen for a model the catalog itself returned). */
+export async function adminListConnectionProviders(
+  id: string,
+  modelId: string,
+  adminKey: string | null,
+): Promise<ModelProvidersResult> {
+  return jsonRequest<ModelProvidersResult>(
+    `/v1/admin/connections/${encodeURIComponent(id)}/providers?model=${encodeURIComponent(modelId)}`,
+    adminKey,
+  );
 }
 
 /** The household's IANA timezone (defaults to "UTC" server-side until ever set) — used to tell

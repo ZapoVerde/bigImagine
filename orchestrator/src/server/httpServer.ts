@@ -85,15 +85,17 @@
  * tab field, is where the password is actually set. No restart needed either way — both routes
  * read/write the same live value.
  *
- * Same admin gate, same restart-on-save shape, for GET/POST /v1/admin/settings — the Settings
- * tab's connection picker, backing orchestrator_settings (io/orchestratorSettings.ts). Unlike
- * credentials, the GET response includes the actual current value (a profile/model name isn't a
- * secret) alongside every selectable profile name from BIGBRAIN_LLM_PROFILES, so the picker can
- * render a dropdown with the active one pre-selected. GET /v1/admin/settings/models?profile=NAME
- * (same gate) lists the model catalog for any one configured profile — even one that isn't
- * currently active — by building a throwaway provider for it (adminServer.ts's
- * listModelsForProfile), so the model dropdown can be populated before an admin commits to a
- * switch.
+ * Same admin gate, for the Connections tab's CRUD (io/llmConnections.ts, replacing the old
+ * single-fieldset Settings "Connection" picker): GET/POST /v1/admin/connections list/create rows;
+ * PATCH/DELETE /v1/admin/connections/:id update/remove one (DELETE 409s on the active row —
+ * activate a different connection first); POST /v1/admin/connections/:id/activate flips is_active
+ * and restarts (same restart-required contract the old picker had — deps.llm is a boot-time
+ * singleton, bi_principles.md §14). GET /v1/admin/connections/:id/models lists that connection's
+ * model catalog by building a throwaway provider for it (adminServer.ts's listModelsForConnection).
+ * GET /v1/admin/connections/:id/providers?model=ID lists the upstream inference providers
+ * OpenRouter can route that model to (adminServer.ts's listProvidersForConnection) — 404 when the
+ * connection kind has no such catalog (i.e. isn't OpenRouter), since there's nothing to pin
+ * routing to either way.
  *
  * Same admin gate, but no restart, for GET/POST /v1/admin/timezone — the household_timezone
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
@@ -137,8 +139,9 @@ import { readFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { extname } from 'node:path';
 import { generateChatTitle } from '../io/llm/generateChatTitle.js';
-import { createLlmProviderForProfile, type LlmProfile } from '../io/llm/index.js';
+import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { runWithCallContext } from '../io/llm/callContext.js';
+import type { LlmConnectionStore } from '../io/llmConnections.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
@@ -163,7 +166,6 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
-  getActiveProfileSetting,
   getCanonSettings,
   getChatMemorySettings,
   getChatMemorySyncStatus,
@@ -173,8 +175,9 @@ import {
   getPiaProxyUrl,
   getScreenLockSettings,
   listCredentials,
-  listModelsForProfile,
-  parseSetActiveProfileBody,
+  listModelsForConnection,
+  listProvidersForConnection,
+  parseCreateConnectionBody,
   parseSetCanonSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetCredentialBody,
@@ -183,7 +186,7 @@ import {
   parseSetPiaProxyUrlBody,
   parseSetScreenLockSettingsBody,
   parseSetTimezoneBody,
-  setActiveProfile,
+  parseUpdateConnectionBody,
   setCanonSettings,
   setChatMemorySettings,
   setCredential,
@@ -215,10 +218,10 @@ export interface HttpServerDeps {
   adminApiKey: string;
   credentials: ProviderCredentialStore;
   settings: OrchestratorSettingsStore;
-  /** Every profile defined in BIGBRAIN_LLM_PROFILES, apiKey-resolved — the selectable set for the
-   *  Settings tab's connection picker (GET/POST /v1/admin/settings) and the source of each
-   *  connection's model catalog (GET /v1/admin/settings/models). */
-  llmProfiles: Record<string, LlmProfile>;
+  /** The admin-managed connection registry (db/migrations/0062_llm_connections.sql,
+   *  io/llmConnections.ts) — backs the Connections tab's CRUD (GET/POST/PATCH/DELETE
+   *  /v1/admin/connections) and its per-connection model/provider catalog preview routes. */
+  llmConnections: LlmConnectionStore;
   modelName: string;
   port: number;
   /** Defaults to a real process.exit(0) — restart: unless-stopped relaunches the container, which
@@ -748,24 +751,23 @@ async function buildPromptPreview(
 }
 
 // A chat's own profile override (a per-chat connection picker, distinct from the household-wide
-// one in Settings) swaps in a throwaway provider for that one named connection, built fresh per
-// turn the same way the Settings tab's model-catalog preview already does (server/adminServer.ts's
-// listModelsForProfile) — cheap, since every provider here is a stateless fetch wrapper
+// active connection) swaps in a throwaway provider for that one named connection (io/llmConnections.ts),
+// built fresh per turn — cheap, since every provider here is a stateless fetch wrapper
 // (io/llm/anthropic.ts, io/llm/openaiCompatible.ts). Unlike the household setting, this needs no
-// restart to take effect. An unknown profile name (stale override, a profile since removed from
-// BIGBRAIN_LLM_PROFILES) falls back to the household's active connection rather than failing the
-// whole turn, logging why per bb_principles.md §11. Shared by handleChatCompletions and
+// restart to take effect. An unknown connection name (stale override, a connection since renamed
+// or deleted in the Connections tab) falls back to the household's active connection rather than
+// failing the whole turn, logging why per bb_principles.md §11. Shared by handleChatCompletions and
 // regenerateSwipe below — resolving which connection a chat's turn runs through doesn't depend on
 // whether the reply is being appended as a new turn or swapped in as a swipe.
-function resolveTurnLlm(
+async function resolveTurnLlm(
   deps: HttpServerDeps,
   sessionParams: ChatParams,
   chatId: string | undefined,
-): { turnLlm: LlmProvider; turnDefaultModel: string } {
+): Promise<{ turnLlm: LlmProvider; turnDefaultModel: string }> {
   let turnLlm = deps.llm;
   let turnDefaultModel = deps.modelName;
   if (sessionParams.profile) {
-    const profile = deps.llmProfiles[sessionParams.profile];
+    const profile = await deps.llmConnections.resolveByName(sessionParams.profile);
     if (profile) {
       // A per-chat override builds its own throwaway provider (this function's own doc above) —
       // gated the same as deps.llm (index.ts wraps that one once, at boot), since a call through
@@ -775,7 +777,7 @@ function resolveTurnLlm(
       turnDefaultModel = profile.model;
     } else {
       log.error(
-        `chat_id ${chatId} names unknown profile "${sessionParams.profile}" (not in BIGBRAIN_LLM_PROFILES) — falling back to the active connection`,
+        `chat_id ${chatId} names unknown connection "${sessionParams.profile}" — falling back to the active connection`,
       );
     }
   }
@@ -804,7 +806,7 @@ async function regenerateSwipe(
   const anchorMessageId = [...priorMessages].reverse().find((m) => m.role === 'user')?.messageId;
 
   const sessionTools = session.toolNames !== null ? filterToolRegistry(deps.tools, session.toolNames) : deps.tools;
-  const { turnLlm } = resolveTurnLlm(deps, session.params, chatId);
+  const { turnLlm } = await resolveTurnLlm(deps, session.params, chatId);
   const timezone = await getHouseholdTimezone(deps.settings);
   const { systemPrompt, messagesForLlm: trimmed } = await assembleSessionTurnContext(
     db,
@@ -949,7 +951,7 @@ async function handleChatCompletions(
     }
   }
 
-  const { turnLlm, turnDefaultModel } = resolveTurnLlm(deps, sessionParams, body.chat_id);
+  const { turnLlm, turnDefaultModel } = await resolveTurnLlm(deps, sessionParams, body.chat_id);
 
   // The one deterministic gate bb_principles.md §2/§11 requires for images: fail the whole turn
   // visibly, before runTurn/llm.complete is ever called, rather than silently dropping the image
@@ -1216,70 +1218,140 @@ async function handleAdminCredentialsSet(
   });
 }
 
-async function handleAdminSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const setting = await getActiveProfileSetting(
-    deps.settings,
-    deps.llmProfiles,
-    process.env.BIGBRAIN_LLM_ACTIVE_PROFILE ?? '',
-  );
-  sendJson(res, 200, setting);
-}
+// The Connections tab's CRUD surface (io/llmConnections.ts) — same id-in-path shape as
+// handleFolderRoutes above. GET/POST on the collection; GET/PATCH/DELETE plus two catalog-preview
+// sub-routes on one connection by id.
+async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
+  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers'
+  const segments = rest.split('/').filter(Boolean);
 
-async function handleAdminSettingsModels(
-  req: IncomingMessage,
-  res: ServerResponse,
-  deps: HttpServerDeps,
-): Promise<void> {
-  const profileName = new URL(req.url ?? '', 'http://placeholder').searchParams.get('profile');
-  if (!profileName) {
-    sendJson(res, 400, { error: 'expected a ?profile=<name> query parameter' });
+  if (segments.length === 0) {
+    if (req.method === 'GET') {
+      sendJson(res, 200, { connections: await deps.llmConnections.list() });
+      return;
+    }
+    if (req.method === 'POST') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const parsed = parseCreateConnectionBody(raw);
+      if (!parsed) {
+        sendJson(res, 400, {
+          error:
+            'expected { name: non-empty string, kind: "anthropic" | "openai-compatible", model: non-empty string, ' +
+            'apiKey: non-empty string, baseUrl? (required for openai-compatible), supportsVision?, providerOrder?: string[], ' +
+            'allowFallbacks?, quantizations?: string[] }',
+        });
+        return;
+      }
+      const created = await deps.llmConnections.create(parsed);
+      sendJson(res, 201, created);
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
     return;
   }
 
-  let result;
-  try {
-    result = await listModelsForProfile(deps.llmProfiles, profileName);
-  } catch (err) {
-    log.error(`failed to list models for connection "${profileName}"`, err);
-    sendJson(res, 502, { error: 'failed to reach this connection to list its models' });
+  const id = decodeURIComponent(segments[0]!);
+
+  if (segments.length === 1) {
+    if (req.method === 'PATCH') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const parsed = parseUpdateConnectionBody(raw);
+      if (!parsed) {
+        sendJson(res, 400, { error: 'expected a partial connection patch — see POST /v1/admin/connections for field shapes' });
+        return;
+      }
+      const updated = await deps.llmConnections.update(id, parsed);
+      if (!updated) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      sendJson(res, 200, updated);
+      return;
+    }
+    if (req.method === 'DELETE') {
+      const result = await deps.llmConnections.remove(id);
+      if (result === 'not_found') {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      if (result === 'is_active') {
+        sendJson(res, 409, { error: 'cannot delete the active connection — activate a different one first' });
+        return;
+      }
+      sendJson(res, 200, { deleted: true });
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
     return;
   }
-  if (!result) {
-    sendJson(res, 404, { error: `unknown profile "${profileName}"` });
+
+  if (segments.length === 2 && segments[1] === 'activate' && req.method === 'POST') {
+    const activated = await deps.llmConnections.activate(id);
+    if (!activated) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    const payload = JSON.stringify({ status: 'restarting' });
+    res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
+    res.end(payload, () => {
+      const restart = deps.triggerRestart ?? (() => process.exit(0));
+      setTimeout(restart, 100);
+    });
     return;
   }
 
-  sendJson(res, 200, result);
-}
-
-async function handleAdminSettingsSet(
-  req: IncomingMessage,
-  res: ServerResponse,
-  deps: HttpServerDeps,
-): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
+  if (segments.length === 2 && segments[1] === 'models' && req.method === 'GET') {
+    let result;
+    try {
+      result = await listModelsForConnection(deps.llmConnections, id);
+    } catch (err) {
+      log.error(`failed to list models for connection "${id}"`, err);
+      sendJson(res, 502, { error: 'failed to reach this connection to list its models' });
+      return;
+    }
+    if (!result) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, result);
     return;
   }
 
-  const profileNames = Object.keys(deps.llmProfiles);
-  const parsed = parseSetActiveProfileBody(raw, profileNames);
-  if (!parsed) {
-    sendJson(res, 400, { error: `expected { value: one of ${profileNames.join(', ')}, model?: string }` });
+  if (segments.length === 2 && segments[1] === 'providers' && req.method === 'GET') {
+    const modelId = url.searchParams.get('model');
+    if (!modelId) {
+      sendJson(res, 400, { error: 'expected a ?model=<id> query parameter' });
+      return;
+    }
+    let result;
+    try {
+      result = await listProvidersForConnection(deps.llmConnections, id, modelId);
+    } catch (err) {
+      log.error(`failed to list providers for model "${modelId}" on connection "${id}"`, err);
+      sendJson(res, 502, { error: 'failed to reach this connection to list its providers' });
+      return;
+    }
+    if (!result) {
+      sendJson(res, 404, { error: 'not found, or this connection has no provider catalog' });
+      return;
+    }
+    sendJson(res, 200, result);
     return;
   }
 
-  await setActiveProfile(deps.settings, parsed);
-
-  const payload = JSON.stringify({ status: 'restarting' });
-  res.writeHead(202, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) });
-  res.end(payload, () => {
-    const restart = deps.triggerRestart ?? (() => process.exit(0));
-    setTimeout(restart, 100);
-  });
+  sendJson(res, 404, { error: 'not found' });
 }
 
 async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -1307,11 +1379,12 @@ async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps
   sendJson(res, 200, { timezone: value });
 }
 
-// docs/chat-memory.md — profileNames comes from deps.llmProfiles (a boot-time set, same as
-// GET /v1/admin/settings' ActiveProfileSetting), everything else is live-read via adminServer.ts.
+// docs/chat-memory.md — profileNames comes from deps.llmConnections.list() (the live, admin-managed
+// set, io/llmConnections.ts), everything else is live-read via adminServer.ts.
 async function handleChatMemorySettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const settings = await getChatMemorySettings(deps.settings);
-  sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
+  const profileNames = (await deps.llmConnections.list()).map((c) => c.name);
+  sendJson(res, 200, { ...settings, profileNames });
 }
 
 async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -1337,7 +1410,8 @@ async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResp
   // No restart needed — the next sync tick (orchestrator/src/orchestrator/chatMemorySync.ts) reads
   // every one of these live.
   const settings = await getChatMemorySettings(deps.settings);
-  sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
+  const profileNames = (await deps.llmConnections.list()).map((c) => c.name);
+  sendJson(res, 200, { ...settings, profileNames });
 }
 
 // The review panel's actual data (bi_principles.md §11) — read-only, no POST counterpart, since
@@ -1678,7 +1752,7 @@ async function handleChatRoutes(
     // (buildChatMemorySystemPrompt above), so it shouldn't write inferred facts back into it now.
     if (archived.kind !== 'rp') {
       archiveChatMemory(
-        { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmProfiles: deps.llmProfiles },
+        { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
         userId,
         chatId,
         archived.title,
@@ -1695,6 +1769,17 @@ async function handleChatRoutes(
       return;
     }
     sendJson(res, 200, result.preview);
+    return;
+  }
+
+  // Branch Map panel's data source — the whole fork family this chat belongs to, root first.
+  if (segments[1] === 'lineage' && segments.length === 2 && req.method === 'GET') {
+    const nodes = await deps.chats.getLineage(userId, chatId);
+    if (!nodes) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, { nodes });
     return;
   }
 
@@ -1991,28 +2076,12 @@ async function handleRequest(
     await handleAdminCredentialsSet(req, res, deps);
     return;
   }
-  if (req.method === 'GET' && req.url === '/v1/admin/settings') {
+  if (req.url === '/v1/admin/connections' || req.url?.startsWith('/v1/admin/connections/') || req.url?.startsWith('/v1/admin/connections?')) {
     if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
       sendJson(res, 401, { error: 'missing or incorrect admin key' });
       return;
     }
-    await handleAdminSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/admin/settings/models')) {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminSettingsModels(req, res, deps);
+    await handleAdminConnectionRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/timezone') {

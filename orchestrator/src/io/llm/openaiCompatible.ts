@@ -30,6 +30,11 @@
  *   are all required and read from env by io/llm/index.ts, never hardcoded here
  * listOpenAiCompatibleModels(config) — the live catalog behind server/httpServer.ts's
  *   GET /v1/models, when the active profile is this kind
+ * listOpenAiCompatibleModelProviders(config, modelId) — the live list of upstream inference
+ *   providers OpenRouter can route a given model to (GET {baseUrl}/models/{id}/endpoints), behind
+ *   server/httpServer.ts's GET /v1/admin/connections/:id/providers. Unlike /models, this route is
+ *   an OpenRouter-only extension, not a standard OpenAI-compatible one — calling it against a
+ *   native endpoint (DeepSeek, etc.) will simply 404 and surface as a normal fetch error to the caller.
  *
  * @contract
  *   assertions:
@@ -55,6 +60,15 @@ export interface OpenAiCompatibleConfig {
   baseUrl: string;
   maxTokens?: number;
   supportsVision?: boolean;
+  /** OpenRouter's own per-request `provider` object — set from the resolved LlmProfile's own
+   *  `provider` field (io/llm/profiles.ts) by io/llm/index.ts's createLlmProviderForProfile.
+   *  Undefined means "send no provider override", the pre-existing behavior; a non-OpenRouter
+   *  openai-compatible endpoint that doesn't recognize this field simply ignores it. */
+  provider?: {
+    order?: string[];
+    allowFallbacks: boolean;
+    quantizations?: string[];
+  };
 }
 
 interface OaiToolCall {
@@ -169,6 +183,44 @@ export async function listOpenAiCompatibleModels(
   });
 }
 
+/** GET {baseUrl}/models/{modelId}/endpoints — OpenRouter's per-model routing table: every
+ *  upstream inference provider currently serving `modelId`, in the shape the Settings tab needs
+ *  to let an admin pin a provider (+ a fallback) instead of accepting whichever one OpenRouter's
+ *  own default routing would pick across the full set. `name` is the provider's own display name
+ *  (e.g. "OpenAI", "Fireworks") — the value OpenRouter's request-level `provider.order` expects;
+ *  `tag` is its more specific routing slug (occasionally a region-qualified variant of the same
+ *  provider, e.g. "azure/swedencentral"), kept alongside since `name` alone can collide. No auth
+ *  required by OpenRouter for this route either, same as listOpenAiCompatibleModels, but the key
+ *  is sent anyway for the same reason. */
+export async function listOpenAiCompatibleModelProviders(
+  config: Pick<OpenAiCompatibleConfig, 'baseUrl' | 'apiKey'>,
+  modelId: string,
+): Promise<{ name: string; tag: string; pricing?: { prompt: string; completion: string } }[]> {
+  const response = await fetchWithRetry(`${config.baseUrl}/models/${modelId}/endpoints`, {
+    headers: { authorization: `Bearer ${config.apiKey}` },
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`OpenAI-compatible API error ${response.status} listing providers for "${modelId}": ${body}`);
+  }
+  const payload = (await response.json()) as {
+    data?: {
+      endpoints?: { provider_name?: unknown; tag?: unknown; pricing?: { prompt?: unknown; completion?: unknown } }[];
+    };
+  };
+  const endpoints = payload.data?.endpoints ?? [];
+  return endpoints
+    .filter((e): e is typeof e & { provider_name: string } => typeof e.provider_name === 'string')
+    .map((e) => {
+      const pricing =
+        typeof e.pricing?.prompt === 'string' && typeof e.pricing?.completion === 'string'
+          ? { prompt: e.pricing.prompt, completion: e.pricing.completion }
+          : undefined;
+      const tag = typeof e.tag === 'string' ? e.tag : e.provider_name;
+      return pricing ? { name: e.provider_name, tag, pricing } : { name: e.provider_name, tag };
+    });
+}
+
 export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig): LlmProvider {
   return {
     name: 'openai-compatible',
@@ -198,6 +250,15 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
           // while "thinking" — ST's own DeepSeek integration (st-source/src/endpoints/backends/
           // chat-completions.js) hits the same conflict and disables thinking the same way.
           ...(options?.forceTool ? { thinking: { type: 'disabled' } } : {}),
+          ...(config.provider
+            ? {
+                provider: {
+                  ...(config.provider.order ? { order: config.provider.order } : {}),
+                  allow_fallbacks: config.provider.allowFallbacks,
+                  ...(config.provider.quantizations ? { quantizations: config.provider.quantizations } : {}),
+                },
+              }
+            : {}),
         }),
       });
 
@@ -222,5 +283,6 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
       return fromOaiResponse(choice.message, choice.finish_reason, usage);
     },
     listModels: () => listOpenAiCompatibleModels(config),
+    listProviders: (modelId: string) => listOpenAiCompatibleModelProviders(config, modelId),
   };
 }

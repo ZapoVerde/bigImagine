@@ -20,27 +20,79 @@ import { randomBytes } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
 
-// handleAdminSettingsGet falls back to this when the fake settings store has no row yet — set
-// deterministically rather than relying on whatever happens to be in the test process's env.
-process.env.BIGBRAIN_LLM_ACTIVE_PROFILE = 'deepseek';
-
-// Real LlmProfile shapes (not fakes) — handleAdminSettingsModels builds a real adapter
-// (createLlmProviderForProfile) around whichever one it's asked about, so these need real-shaped
-// baseUrls for the mocked-fetch model-catalog test further down to intercept.
-const llmProfiles = {
-  deepseek: {
-    kind: 'openai-compatible',
-    model: 'deepseek-v4-flash',
-    apiKey: 'sk-test-deepseek',
-    baseUrl: 'https://example.invalid/deepseek',
-  },
-  openrouter: {
-    kind: 'openai-compatible',
-    model: 'google/gemini-3.5-flash-lite',
-    apiKey: 'sk-test-openrouter',
-    baseUrl: 'https://example.invalid/openrouter',
-  },
-};
+// A hand-rolled fake satisfying LlmConnectionStore's shape directly (io/llmConnections.ts) — this
+// suite is testing the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not
+// llmConnections.ts's own DB/encryption logic. listModelsForConnection/listProvidersForConnection
+// build a real adapter (createLlmProviderForProfile) around whatever resolveById returns, so seeded
+// rows need real-shaped baseUrls for the mocked-fetch model-catalog test further down to intercept.
+function createFakeLlmConnectionStore(seedRows = []) {
+  const rows = new Map(seedRows.map((r) => [r.id, { ...r }]));
+  let nextId = 1;
+  function toPublic(row) {
+    const { apiKey, ...rest } = row;
+    return rest;
+  }
+  function toProfile(row) {
+    return { kind: row.kind, model: row.model, apiKey: row.apiKey, baseUrl: row.baseUrl ?? undefined, supportsVision: row.supportsVision };
+  }
+  return {
+    rows,
+    async list() {
+      return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name)).map(toPublic);
+    },
+    async create(init) {
+      const id = `conn-${nextId++}`;
+      const row = {
+        id,
+        name: init.name,
+        kind: init.kind,
+        model: init.model,
+        apiKey: init.apiKey,
+        baseUrl: init.baseUrl ?? null,
+        supportsVision: init.supportsVision ?? false,
+        providerOrder: init.providerOrder ?? null,
+        allowFallbacks: init.allowFallbacks ?? true,
+        quantizations: init.quantizations ?? null,
+        isActive: false,
+        updatedAt: new Date().toISOString(),
+      };
+      rows.set(id, row);
+      return toPublic(row);
+    },
+    async update(id, patch) {
+      const row = rows.get(id);
+      if (!row) return undefined;
+      Object.assign(row, patch, { updatedAt: new Date().toISOString() });
+      return toPublic(row);
+    },
+    async remove(id) {
+      const row = rows.get(id);
+      if (!row) return 'not_found';
+      if (row.isActive) return 'is_active';
+      rows.delete(id);
+      return 'ok';
+    },
+    async activate(id) {
+      const row = rows.get(id);
+      if (!row) return false;
+      for (const r of rows.values()) r.isActive = false;
+      row.isActive = true;
+      return true;
+    },
+    async resolveById(id) {
+      const row = rows.get(id);
+      return row ? toProfile(row) : undefined;
+    },
+    async resolveByName(name) {
+      const row = [...rows.values()].find((r) => r.name === name);
+      return row ? toProfile(row) : undefined;
+    },
+    async resolveActive() {
+      const row = [...rows.values()].find((r) => r.isActive);
+      return row ? toProfile(row) : undefined;
+    },
+  };
+}
 
 // A hand-rolled fake satisfying ProviderCredentialStore's shape directly — this suite is testing
 // the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not providerCredentials.ts's own
@@ -366,6 +418,36 @@ const settings = createFakeSettingsStore();
 const accessIdentity = createFakeAccessIdentityResolver();
 const chats = createFakeChatSessionStore();
 const restartCalls = [];
+const llmConnections = createFakeLlmConnectionStore([
+  {
+    id: 'conn-deepseek',
+    name: 'deepseek',
+    kind: 'openai-compatible',
+    model: 'deepseek-v4-flash',
+    apiKey: 'sk-test-deepseek',
+    baseUrl: 'https://example.invalid/deepseek',
+    supportsVision: false,
+    providerOrder: null,
+    allowFallbacks: true,
+    quantizations: null,
+    isActive: true,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'conn-openrouter',
+    name: 'openrouter',
+    kind: 'openai-compatible',
+    model: 'google/gemini-3.5-flash-lite',
+    apiKey: 'sk-test-openrouter',
+    baseUrl: 'https://example.invalid/openrouter',
+    supportsVision: false,
+    providerOrder: null,
+    allowFallbacks: true,
+    quantizations: null,
+    isActive: false,
+    updatedAt: '2026-01-01T00:00:00.000Z',
+  },
+]);
 
 const server = startHttpServer({
   llm,
@@ -377,7 +459,7 @@ const server = startHttpServer({
   adminApiKey: 'the-admin-key',
   credentials,
   settings,
-  llmProfiles,
+  llmConnections,
   modelName: 'bigbrain',
   port: 0,
   triggerRestart: () => restartCalls.push(Date.now()),
@@ -545,151 +627,146 @@ assert(
 await new Promise((resolve) => setTimeout(resolve, 250));
 assert(restartCalls.length === 1, 'triggerRestart fired exactly once after the response flushed, instead of the real process.exit');
 
-// --- Admin settings routes (connection picker) ---
+// --- Admin connections routes (io/llmConnections.ts, replacing the old settings/models/providers picker) ---
 
-const settingsNoAuthRes = await fetch(`${base}/v1/admin/settings`);
-assert(settingsNoAuthRes.status === 401, 'GET /v1/admin/settings with no auth header returns 401');
+const connectionsNoAuthRes = await fetch(`${base}/v1/admin/connections`);
+assert(connectionsNoAuthRes.status === 401, 'GET /v1/admin/connections with no auth header returns 401');
 
-const settingsGetRes = await fetch(`${base}/v1/admin/settings`, {
+const connectionsListRes = await fetch(`${base}/v1/admin/connections`, {
   headers: { authorization: 'Bearer the-admin-key' },
 });
-const settingsGetBody = await settingsGetRes.json();
-assert(settingsGetRes.status === 200, 'GET /v1/admin/settings with the correct admin key returns 200');
+const connectionsListBody = await connectionsListRes.json();
+assert(connectionsListRes.status === 200, 'GET /v1/admin/connections with the correct admin key returns 200');
 assert(
-  settingsGetBody.activeProfile === 'deepseek' &&
-    settingsGetBody.activeModel === 'deepseek-v4-flash' &&
-    JSON.stringify(settingsGetBody.profileNames) === JSON.stringify(['deepseek', 'openrouter']),
-  'GET /v1/admin/settings falls back to the env active profile and its static model before anything has been saved, and lists every known profile',
+  connectionsListBody.connections.length === 2 &&
+    connectionsListBody.connections.some((c) => c.name === 'deepseek' && c.isActive === true) &&
+    connectionsListBody.connections.some((c) => c.name === 'openrouter' && c.isActive === false),
+  'GET /v1/admin/connections lists every seeded connection with its isActive flag',
 );
 assert(
-  Array.isArray(settingsGetBody.visionCapableProfiles) && settingsGetBody.visionCapableProfiles.length === 0,
-  'GET /v1/admin/settings reports no vision-capable profiles before anything has been saved',
+  !JSON.stringify(connectionsListBody).includes('sk-test-deepseek') && !JSON.stringify(connectionsListBody).includes('sk-test-openrouter'),
+  'GET /v1/admin/connections never leaks an apiKey value',
 );
 
-const settingsSetNoAuthRes = await fetch(`${base}/v1/admin/settings`, {
+const createNoAuthRes = await fetch(`${base}/v1/admin/connections`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ value: 'openrouter' }),
+  body: JSON.stringify({ name: 'new-conn', kind: 'anthropic', model: 'claude-x', apiKey: 'sk-x' }),
 });
-assert(settingsSetNoAuthRes.status === 401, 'POST /v1/admin/settings with no auth header returns 401');
-assert(settings.setCalls.length === 0, 'the unauthenticated POST never reached the settings store');
+assert(createNoAuthRes.status === 401, 'POST /v1/admin/connections with no auth header returns 401');
 
-const settingsSetBadNameRes = await fetch(`${base}/v1/admin/settings`, {
+const createMissingFieldRes = await fetch(`${base}/v1/admin/connections`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'not-a-real-profile' }),
+  body: JSON.stringify({ name: 'new-conn', kind: 'anthropic', model: 'claude-x' }),
 });
-assert(settingsSetBadNameRes.status === 400, 'POST /v1/admin/settings rejects a profile name that is not a known profile');
+assert(createMissingFieldRes.status === 400, 'POST /v1/admin/connections rejects a body missing apiKey');
 
-const settingsSetBadModelRes = await fetch(`${base}/v1/admin/settings`, {
+const createNoBaseUrlRes = await fetch(`${base}/v1/admin/connections`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', model: '' }),
+  body: JSON.stringify({ name: 'new-conn', kind: 'openai-compatible', model: 'x', apiKey: 'sk-x' }),
 });
-assert(settingsSetBadModelRes.status === 400, 'POST /v1/admin/settings rejects an empty-string model');
+assert(createNoBaseUrlRes.status === 400, 'POST /v1/admin/connections rejects an openai-compatible connection with no baseUrl');
 
-const settingsSetOkRes = await fetch(`${base}/v1/admin/settings`, {
+const createOkRes = await fetch(`${base}/v1/admin/connections`, {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4' }),
+  body: JSON.stringify({ name: 'anthropic-direct', kind: 'anthropic', model: 'claude-x', apiKey: 'sk-anthropic' }),
 });
-const settingsSetOkBody = await settingsSetOkRes.json();
-assert(settingsSetOkRes.status === 202, 'an authenticated POST /v1/admin/settings with a known profile and model returns 202');
-assert(settingsSetOkBody.status === 'restarting', 'the response body signals a restart is coming');
+const createOkBody = await createOkRes.json();
+assert(createOkRes.status === 201 && createOkBody.name === 'anthropic-direct', 'POST /v1/admin/connections with a valid body creates a connection');
+assert(!('apiKey' in createOkBody), 'the created connection response never echoes the apiKey back');
+
+const patchRes = await fetch(`${base}/v1/admin/connections/${createOkBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ model: 'claude-x-2' }),
+});
+const patchBody = await patchRes.json();
 assert(
-  settings.setCalls.length === 2 &&
-    settings.setCalls[0].key === 'active_llm_profile' &&
-    settings.setCalls[0].value === 'openrouter' &&
-    settings.setCalls[1].key === 'active_llm_model' &&
-    settings.setCalls[1].value === 'anthropic/claude-4',
-  'the settings store recorded both the profile and model writes, in that order',
+  patchRes.status === 200 && patchBody.model === 'claude-x-2' && patchBody.name === 'anthropic-direct',
+  'PATCH /v1/admin/connections/:id updates only the given field, leaving name untouched',
 );
+
+const patchUnknownRes = await fetch(`${base}/v1/admin/connections/not-a-real-id`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ model: 'x' }),
+});
+assert(patchUnknownRes.status === 404, 'PATCH /v1/admin/connections/:id for an unknown id returns 404');
+
+const deleteActiveRes = await fetch(`${base}/v1/admin/connections/conn-deepseek`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(deleteActiveRes.status === 409, 'DELETE /v1/admin/connections/:id on the active connection returns 409');
+
+const deleteOkRes = await fetch(`${base}/v1/admin/connections/${createOkBody.id}`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const deleteOkBody = await deleteOkRes.json();
+assert(deleteOkRes.status === 200 && deleteOkBody.deleted === true, 'DELETE /v1/admin/connections/:id on a non-active connection succeeds');
+
+const deleteUnknownRes = await fetch(`${base}/v1/admin/connections/${createOkBody.id}`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(deleteUnknownRes.status === 404, 'DELETE /v1/admin/connections/:id for an already-deleted id returns 404');
+
+const activateNoAuthRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/activate`, { method: 'POST' });
+assert(activateNoAuthRes.status === 401, 'POST /v1/admin/connections/:id/activate with no auth header returns 401');
+
+const activateOkRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/activate`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const activateOkBody = await activateOkRes.json();
+assert(activateOkRes.status === 202 && activateOkBody.status === 'restarting', 'POST /v1/admin/connections/:id/activate returns 202 and signals a restart');
 
 await new Promise((resolve) => setTimeout(resolve, 250));
-assert(restartCalls.length === 2, 'triggerRestart fired again after the settings save flushed');
+assert(restartCalls.length === 2, 'triggerRestart fired again after the activate call flushed');
 
-const settingsGetAfterSaveRes = await fetch(`${base}/v1/admin/settings`, {
+const afterActivateListBody = await (
+  await fetch(`${base}/v1/admin/connections`, { headers: { authorization: 'Bearer the-admin-key' } })
+).json();
+assert(
+  afterActivateListBody.connections.find((c) => c.id === 'conn-openrouter').isActive === true &&
+    afterActivateListBody.connections.find((c) => c.id === 'conn-deepseek').isActive === false,
+  'activating a connection flips it active and clears the previously active one',
+);
+
+// deepseek is no longer active, so it can be deleted now.
+const deleteFormerlyActiveRes = await fetch(`${base}/v1/admin/connections/conn-deepseek`, {
+  method: 'DELETE',
   headers: { authorization: 'Bearer the-admin-key' },
 });
-const settingsGetAfterSaveBody = await settingsGetAfterSaveRes.json();
-assert(
-  settingsGetAfterSaveBody.activeProfile === 'openrouter' && settingsGetAfterSaveBody.activeModel === 'anthropic/claude-4',
-  'GET /v1/admin/settings reflects the newly saved active profile AND model, even before the restart completes',
-);
+assert(deleteFormerlyActiveRes.status === 200, 'DELETE /v1/admin/connections/:id succeeds once the connection is no longer active');
+llmConnections.rows.set('conn-deepseek', {
+  id: 'conn-deepseek',
+  name: 'deepseek',
+  kind: 'openai-compatible',
+  model: 'deepseek-v4-flash',
+  apiKey: 'sk-test-deepseek',
+  baseUrl: 'https://example.invalid/deepseek',
+  supportsVision: false,
+  providerOrder: null,
+  allowFallbacks: true,
+  quantizations: null,
+  isActive: false,
+  updatedAt: '2026-01-01T00:00:00.000Z',
+}); // restored for the routes exercised below
 
-// A profile switch with no model in the body leaves the previously saved model override alone —
-// setActiveProfile only touches active_llm_model when one is actually given.
-const settingsSetProfileOnlyRes = await fetch(`${base}/v1/admin/settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'deepseek' }),
-});
-assert(settingsSetProfileOnlyRes.status === 202, 'switching profile alone (no model) still succeeds');
-assert(settings.setCalls.length === 3, 'omitting model means only the profile write happens, not a second settings.set call');
+// --- Admin connections/:id/models route (the model dropdown within a chosen connection) ---
 
-// --- Admin settings: supportsVision toggle (Stage 5 — vision) ---
+const modelsNoAuthRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/models`);
+assert(modelsNoAuthRes.status === 401, 'GET /v1/admin/connections/:id/models with no auth header returns 401');
 
-const settingsSetVisionOnRes = await fetch(`${base}/v1/admin/settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4', supportsVision: true }),
-});
-assert(settingsSetVisionOnRes.status === 202, 'marking a profile vision-capable succeeds');
-
-const settingsGetAfterVisionOnBody = await (
-  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
-).json();
-assert(
-  JSON.stringify(settingsGetAfterVisionOnBody.visionCapableProfiles) === JSON.stringify(['openrouter']),
-  'GET /v1/admin/settings reflects the newly marked vision-capable profile',
-);
-
-// Omitting supportsVision on a later save of the SAME profile leaves its flag untouched.
-const settingsResaveNoVisionFieldRes = await fetch(`${base}/v1/admin/settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4' }),
-});
-assert(settingsResaveNoVisionFieldRes.status === 202, 'resaving the same profile without supportsVision still succeeds');
-const settingsGetAfterResaveBody = await (
-  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
-).json();
-assert(
-  JSON.stringify(settingsGetAfterResaveBody.visionCapableProfiles) === JSON.stringify(['openrouter']),
-  'omitting supportsVision on a save leaves the previously stored flag untouched',
-);
-
-// Explicitly turning it back off removes it from the stored list.
-const settingsSetVisionOffRes = await fetch(`${base}/v1/admin/settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', model: 'anthropic/claude-4', supportsVision: false }),
-});
-assert(settingsSetVisionOffRes.status === 202, 'unmarking a profile as vision-capable succeeds');
-const settingsGetAfterVisionOffBody = await (
-  await fetch(`${base}/v1/admin/settings`, { headers: { authorization: 'Bearer the-admin-key' } })
-).json();
-assert(
-  settingsGetAfterVisionOffBody.visionCapableProfiles.length === 0,
-  'explicitly setting supportsVision: false removes the profile from the stored list',
-);
-
-const settingsSetBadVisionRes = await fetch(`${base}/v1/admin/settings`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-  body: JSON.stringify({ value: 'openrouter', supportsVision: 'yes' }),
-});
-assert(settingsSetBadVisionRes.status === 400, 'POST /v1/admin/settings rejects a non-boolean supportsVision');
-
-// --- Admin settings/models route (the model dropdown within a chosen connection) ---
-
-const modelsNoAuthRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`);
-assert(modelsNoAuthRes.status === 401, 'GET /v1/admin/settings/models with no auth header returns 401');
-
-const modelsUnknownProfileRes = await fetch(`${base}/v1/admin/settings/models?profile=not-a-real-profile`, {
+const modelsUnknownConnRes = await fetch(`${base}/v1/admin/connections/not-a-real-id/models`, {
   headers: { authorization: 'Bearer the-admin-key' },
 });
-assert(modelsUnknownProfileRes.status === 404, 'GET /v1/admin/settings/models for an unknown profile returns 404');
+assert(modelsUnknownConnRes.status === 404, 'GET /v1/admin/connections/:id/models for an unknown id returns 404');
 
 // This mock has to coexist with the test's own outer fetch() calls to the local test server —
 // both go through the same globalThis.fetch in this single process — so it only fakes the one
@@ -712,22 +789,19 @@ globalThis.fetch = async (url, init) => {
   };
 };
 try {
-  const modelsOkRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`, {
+  const modelsOkRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/models`, {
     headers: { authorization: 'Bearer the-admin-key' },
   });
   const modelsOkBody = await modelsOkRes.json();
-  assert(
-    calledUrls.length === 1,
-    "the models route queried the requested profile's own baseUrl (openrouter), not the currently active one (deepseek)",
-  );
-  assert(modelsOkRes.status === 200, 'GET /v1/admin/settings/models for a known profile returns 200');
+  assert(calledUrls.length === 1, "the models route queried the requested connection's own baseUrl (openrouter)");
+  assert(modelsOkRes.status === 200, 'GET /v1/admin/connections/:id/models for a known connection returns 200');
   assert(
     modelsOkBody.models.length === 2 && modelsOkBody.models.some((m) => m.id === 'anthropic/claude-4'),
     'the response carries the live model catalog fetched from that connection',
   );
   assert(
     modelsOkBody.defaultModel === 'google/gemini-3.5-flash-lite',
-    "defaultModel is the profile's own static config model, not any override",
+    "defaultModel is the connection's own static config model, not any override",
   );
   const priced = modelsOkBody.models.find((m) => m.id === 'google/gemini-3.5-flash-lite');
   assert(
@@ -740,27 +814,27 @@ try {
   globalThis.fetch = originalFetch;
 }
 
-const modelsAccessRes = await fetch(`${base}/v1/admin/settings/models?profile=openrouter`, {
+const modelsAccessRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/models`, {
   headers: { 'cf-access-jwt-assertion': 'not-a-real-jwt' },
 });
 assert(
   modelsAccessRes.status === 401,
-  'GET /v1/admin/settings/models is gated by the same isAdminAuthorized check (an unresolvable Access header still 401s)',
+  'GET /v1/admin/connections/:id/models is gated by the same isAdminAuthorized check (an unresolvable Access header still 401s)',
 );
 
 // A valid Cloudflare Access identity authorizes admin routes with no admin key at all — the
 // gate is Access itself now, not a second manually-typed secret (see isAdminAuthorized).
-const accessAdminRes = await fetch(`${base}/v1/admin/settings`, {
+const accessAdminRes = await fetch(`${base}/v1/admin/connections`, {
   headers: { 'cf-access-jwt-assertion': 'valid-access-jwt' },
 });
-assert(accessAdminRes.status === 200, 'GET /v1/admin/settings with a valid Access identity and no admin key returns 200');
+assert(accessAdminRes.status === 200, 'GET /v1/admin/connections with a valid Access identity and no admin key returns 200');
 
-const accessAdminWrongJwtRes = await fetch(`${base}/v1/admin/settings`, {
+const accessAdminWrongJwtRes = await fetch(`${base}/v1/admin/connections`, {
   headers: { 'cf-access-jwt-assertion': 'not-a-real-jwt' },
 });
 assert(
   accessAdminWrongJwtRes.status === 401,
-  'GET /v1/admin/settings with an unresolvable Access header and no admin key still returns 401',
+  'GET /v1/admin/connections with an unresolvable Access header and no admin key still returns 401',
 );
 
 // --- Chat/folder CRUD routes ---
@@ -863,7 +937,7 @@ server.close();
     adminApiKey: 'unused-in-this-part',
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
-    llmProfiles,
+    llmConnections: createFakeLlmConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -934,7 +1008,24 @@ server.close();
     adminApiKey: 'unused-in-this-part',
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
-    llmProfiles,
+    // A chat's own params.profile override (below) names this connection by its name, resolved via
+    // resolveByName — same shape as the boot-time active connection, just a different row.
+    llmConnections: createFakeLlmConnectionStore([
+      {
+        id: 'conn-openrouter-3',
+        name: 'openrouter',
+        kind: 'openai-compatible',
+        model: 'google/gemini-3.5-flash-lite',
+        apiKey: 'sk-test-openrouter',
+        baseUrl: 'https://example.invalid/openrouter',
+        supportsVision: false,
+        providerOrder: null,
+        allowFallbacks: true,
+        quantizations: null,
+        isActive: false,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1200,7 +1291,7 @@ server.close();
     adminApiKey: 'unused-in-this-part',
     credentials: createFakeCredentialStore(),
     settings: settingsRp,
-    llmProfiles,
+    llmConnections: createFakeLlmConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1322,7 +1413,7 @@ server.close();
     adminApiKey: 'unused-in-this-part',
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
-    llmProfiles,
+    llmConnections: createFakeLlmConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1385,7 +1476,7 @@ server.close();
     adminApiKey: 'the-admin-key',
     credentials: createFakeCredentialStore(),
     settings: settings4,
-    llmProfiles,
+    llmConnections: createFakeLlmConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
     triggerRestart: () => {

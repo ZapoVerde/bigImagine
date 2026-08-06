@@ -1,28 +1,25 @@
 /**
  * @file orchestrator/src/io/llm/profiles.ts
- * @stamp 2026-07-23
- * @architectural-role Pure Function — LLM connection profile parsing/validation
+ * @stamp 2026-08-06
+ * @architectural-role Pure Function — LLM connection shape + one-time env-seed parsing
  * @description
- * The bigBrain equivalent of SillyTavern's connection-profile pattern: several named,
- * fully-specified connections defined once (BIGBRAIN_LLM_PROFILES, a JSON object keyed by
- * profile name), with one selected as active (BIGBRAIN_LLM_ACTIVE_PROFILE). Switching between,
- * say, DeepSeek's native endpoint and OpenRouter is changing which name is active — a config
- * change, not a rewrite (bb_principles.md §6) — rather than the single hardcoded provider/model
- * pair the original createLlmProvider design assumed.
+ * LlmProfile is the shape io/llm/index.ts's createLlmProviderForProfile consumes — today built
+ * from a decrypted io/llmConnections.ts row (the DB-backed, admin-managed connection registry),
+ * not read live from BIGBRAIN_LLM_PROFILES on every boot the way it used to be. parseLlmProfiles
+ * still exists for exactly one caller: index.ts's first-boot seed, which parses the env var once to
+ * populate llm_connections when that table is empty, so an existing deployment's connections/keys
+ * carry over without a manual DB write on cutover. Every later boot never calls this again.
+ *
+ * The withOverriddenApiKeys/withOverriddenModel/withOverriddenSupportsVision splice functions this
+ * file used to export are gone — they existed to patch a field onto an *env-defined* profile before
+ * parseLlmProfiles ever saw it; now that connections are real DB rows, admin edits go straight to
+ * io/llmConnections.ts's update(), no re-serialize-then-reparse step needed.
  *
  * @api-declaration
- * LlmProfile, parseLlmProfiles(raw: string) — throws with a specific, actionable message on
- *   any malformed profile rather than silently dropping or guessing at it
- * withOverriddenApiKeys(raw, overrides) — splices a DB-sourced apiKey (io/providerCredentials.ts)
- *   into the otherwise-static profiles JSON before parseLlmProfiles ever sees it, so this module
- *   and createLlmProvider need no other changes to support that
- * withOverriddenModel(raw, profileName, model) — splices a DB-sourced model override
- *   (io/orchestratorSettings.ts's active_llm_model) onto one named profile, same idea
- * withOverriddenSupportsVision(raw, flags) — splices a DB-sourced vision-capability flag
- *   (io/orchestratorSettings.ts's llm_vision_capable_profiles) onto every named profile present in
- *   flags, not just the active one — a chat can pick any configured profile via its own connection
- *   override (server/httpServer.ts's sessionParams.profile), so the flag has to travel with every
- *   profile, the same way withOverriddenApiKeys already does for every profile's own apiKey
+ * LlmProfile — kind/model/apiKey/baseUrl/supportsVision/provider, io/llmConnections.ts's
+ *   resolveByName/resolveActive build this shape from a decrypted connection row
+ * parseLlmProfiles(raw: string) — throws with a specific, actionable message on any malformed
+ *   profile rather than silently dropping or guessing at it; index.ts's first-boot seed only
  *
  * @contract
  *   assertions:
@@ -38,12 +35,21 @@ export interface LlmProfile {
   /** Required when kind is 'openai-compatible' (there's no sane default across vendors);
    *  optional override for 'anthropic', which already defaults to the real Anthropic API. */
   baseUrl?: string;
-  /** Whether this connection's model can accept image attachments. Never set directly in
-   *  BIGBRAIN_LLM_PROFILES — there's no reliable way to auto-detect vision capability across
-   *  arbitrary OpenAI-compatible endpoints, so this is always false until
-   *  withOverriddenSupportsVision splices in the admin-set, DB-backed flag
-   *  (io/orchestratorSettings.ts's llm_vision_capable_profiles) at boot. */
+  /** Whether this connection's model can accept image attachments. Never auto-detected — set
+   *  explicitly per connection (io/llmConnections.ts), since there's no reliable way to detect
+   *  vision capability across arbitrary OpenAI-compatible endpoints. */
   supportsVision: boolean;
+  /** OpenRouter's own per-request `provider` object (io/llm/openaiCompatible.ts's complete()) —
+   *  pin routing to a primary (+ optional fallback) provider and/or a quantization filter, instead
+   *  of OpenRouter's default full-set routing. Undefined means "no override", the pre-existing
+   *  behavior; every other adapter (Anthropic, non-OpenRouter openai-compatible) simply never
+   *  receives it. order holds at most a primary then a fallback provider tag — not an arbitrary
+   *  ranking — matching the "a provider and a fallback" scope this was built for. */
+  provider?: {
+    order?: string[];
+    allowFallbacks: boolean;
+    quantizations?: string[];
+  };
 }
 
 function validateProfile(name: string, value: unknown): LlmProfile {
@@ -90,57 +96,4 @@ export function parseLlmProfiles(raw: string): Record<string, LlmProfile> {
     profiles[name] = validateProfile(name, value);
   }
   return profiles;
-}
-
-/**
- * Pure: re-serializes `raw`'s parsed JSON with `apiKey` replaced on whichever named profiles
- * appear in both `raw` and `overrides` (an `undefined` override leaves that profile's existing
- * apiKey untouched, it does not delete the field). kind/baseUrl/model, and any profile not named
- * in overrides, pass through unchanged. Does not itself validate the result — the caller still
- * runs it through parseLlmProfiles/validateProfile same as any other BIGBRAIN_LLM_PROFILES value.
- */
-export function withOverriddenApiKeys(raw: string, overrides: Partial<Record<string, string>>): string {
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  for (const [name, apiKey] of Object.entries(overrides)) {
-    if (apiKey === undefined) continue;
-    const profile = parsed[name];
-    if (typeof profile !== 'object' || profile === null) continue;
-    parsed[name] = { ...(profile as Record<string, unknown>), apiKey };
-  }
-  return JSON.stringify(parsed);
-}
-
-/**
- * Pure: re-serializes `raw`'s parsed JSON with `model` replaced on the one named `profileName`,
- * when `model` is set — the Settings tab's model picker (GET/POST /v1/admin/settings) overriding
- * which model within the active connection is used, the same shape as withOverriddenApiKeys but
- * for a single profile/field instead of many. An unset model, an unknown profileName, or a
- * malformed profile entry all leave `raw` untouched.
- */
-export function withOverriddenModel(raw: string, profileName: string, model: string | undefined): string {
-  if (!model) return raw;
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  const profile = parsed[profileName];
-  if (typeof profile !== 'object' || profile === null) return raw;
-  parsed[profileName] = { ...(profile as Record<string, unknown>), model };
-  return JSON.stringify(parsed);
-}
-
-/**
- * Pure: re-serializes `raw`'s parsed JSON with `supportsVision` set to true on every profile name
- * present (and true) in `flags`, false on every other known profile — unlike withOverriddenModel,
- * this applies to every profile in `flags`, not just one, since a chat can select any configured
- * profile via its own connection override (server/httpServer.ts's sessionParams.profile), not just
- * the household-wide active one; the vision flag has to travel with whichever profile a turn
- * actually ends up using. A profile name in `flags` that isn't in `raw` is silently ignored (a
- * stale Settings-tab entry for a since-removed profile), same "don't fail the whole boot over a
- * stale reference" shape as withOverriddenApiKeys.
- */
-export function withOverriddenSupportsVision(raw: string, flags: Record<string, boolean>): string {
-  const parsed = JSON.parse(raw) as Record<string, unknown>;
-  for (const [name, profile] of Object.entries(parsed)) {
-    if (typeof profile !== 'object' || profile === null) continue;
-    parsed[name] = { ...(profile as Record<string, unknown>), supportsVision: flags[name] === true };
-  }
-  return JSON.stringify(parsed);
 }

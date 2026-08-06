@@ -13,17 +13,17 @@
  *
  * household_timezone (an IANA zone name, e.g. "America/New_York") is read fresh on every chat
  * turn (server/httpServer.ts's handleChatCompletions, via util/dateContext.ts) rather than baked
- * into anything at boot — unlike active_llm_profile/active_llm_model, changing it takes effect
- * immediately, no restart needed, since it's just interpolated into a system message per request.
+ * into anything at boot — changing it takes effect immediately, no restart needed, since it's just
+ * interpolated into a system message per request.
  *
- * llm_vision_capable_profiles is the one value here that isn't a bare scalar: a JSON-encoded array
- * of BIGBRAIN_LLM_PROFILES names an admin has marked vision-capable (io/llm/profiles.ts's
- * LlmProfile.supportsVision), read once at boot (index.ts) alongside active_llm_profile —
- * same restart-on-save shape, since it's spliced into the static profiles JSON the same way
- * withOverriddenApiKeys/withOverriddenModel already are. A single scalar can't express this: a
- * chat can pick any configured profile via its own connection override (server/httpServer.ts's
- * sessionParams.profile), not just the household-wide active one, so the flag has to be per
- * profile name, not per "the active choice."
+ * active_llm_profile/active_llm_model/llm_vision_capable_profiles are retired: LLM connections are
+ * now real, admin-managed rows (db/migrations/0062_llm_connections.sql, io/llmConnections.ts) with
+ * their own is_active/supports_vision columns, not a static BIGBRAIN_LLM_PROFILES map overlaid with
+ * settings-store patches. These three keys stay in SETTING_NAMES rather than being narrowed out —
+ * same "only ever widen, never narrow" precedent as 0010's own CHECK constraint (see this file's
+ * README entry) and CREDENTIAL_NAMES' still-present deepseek/openrouter entries
+ * (io/providerCredentials.ts) — purely so index.ts's one-time llm_connections seed can still read a
+ * pre-cutover deployment's values on its first boot after upgrading. Nothing reads them after that.
  *
  * ntfy_server_url (plugins/notifications) is the URL the orchestrator itself posts to — not a
  * secret (§12), just a selector. Deliberately the internal

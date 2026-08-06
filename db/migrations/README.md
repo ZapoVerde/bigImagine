@@ -262,3 +262,21 @@ Already applied by hand, not run automatically (see the file for the exact comma
   in full (not fork-point-filtered like `chat_sync_points`/`chat_chunks`/`chat_memory_entries`) —
   every fork gets its own `chat_id` and a complete copy of the parent's canon, per the same explicit
   call.
+- `0062_llm_connections.sql` — adds `llm_connections`, promoting LLM connections from a fixed set
+  in the `BIGBRAIN_LLM_PROFILES` env var to real, admin-managed, named rows (create/rename/delete
+  from the frontend's new Connections tab, not just field-overrides onto an env-defined profile).
+  `api_key_ciphertext` reuses `io/fieldCipher.ts`, same write-only-secret shape as
+  `provider_credentials`. `provider_order`/`quantizations` are jsonb string arrays backing
+  OpenRouter's own per-request `provider` object (pin a primary + fallback provider, or a
+  quantization filter, instead of its default full-set routing). `is_active` marks the one
+  connection the boot-time singleton uses for turns with no per-chat override, enforced to at most
+  one row via a partial unique index; `io/llmConnections.ts`'s `remove()` refuses to delete it.
+  `index.ts` seeds this table once from `BIGBRAIN_LLM_PROFILES` on first boot against an empty
+  table, so an existing deployment's profiles/keys carry over without a manual write — every boot
+  after that reads only from the table. `orchestrator_settings`' `active_llm_profile`/
+  `active_llm_model`/`llm_vision_capable_profiles` keys are retired in favor of `is_active`/
+  `supports_vision` living on the connection row itself, but stay in `SETTING_NAMES` (and 0010's
+  CHECK constraint, already wider than the TS union) rather than being narrowed out — same
+  never-narrow precedent as `CREDENTIAL_NAMES`' still-present `deepseek_api_key`/
+  `openrouter_api_key` entries, kept only so the one-time seed above can still read a pre-cutover
+  deployment's values on its first boot after upgrading; nothing reads them after that.

@@ -120,9 +120,16 @@ export interface LlmProvider {
    *
    *  pricing is per-token, in USD, as strings straight from the vendor (OpenRouter's /models is
    *  the only source that actually has it; DeepSeek's doesn't, so it's simply absent there — not
-   *  every provider needs to invent a number). Only GET /v1/admin/settings/models (the Settings
-   *  tab's model picker) surfaces it; the public GET /v1/models Open WebUI uses only ever sends
-   *  bare ids (server/httpServer.ts's handleModels maps to `.id` before responding), so this
-   *  field never reaches that unauthenticated route. */
+   *  every provider needs to invent a number). Only GET /v1/admin/connections/:id/models (the
+   *  Connections tab's model picker) surfaces it; the public GET /v1/models Open WebUI uses only
+   *  ever sends bare ids (server/httpServer.ts's handleModels maps to `.id` before responding), so
+   *  this field never reaches that unauthenticated route. */
   listModels?(): Promise<{ id: string; pricing?: { prompt: string; completion: string } }[]>;
+  /** Optional capability: the upstream inference providers currently serving one named model —
+   *  OpenRouter-only (openaiCompatible.ts's listOpenAiCompatibleModelProviders), undefined for
+   *  every other adapter, same "undefined means no catalog, not broken" convention as listModels.
+   *  Behind GET /v1/admin/connections/:id/providers so the Connections tab can show which providers
+   *  are available before an admin pins routing to one of them plus a fallback, instead of
+   *  accepting OpenRouter's own default routing across the full set. */
+  listProviders?(modelId: string): Promise<{ name: string; tag: string; pricing?: { prompt: string; completion: string } }[]>;
 }

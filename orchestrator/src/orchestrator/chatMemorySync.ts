@@ -66,9 +66,9 @@
 import { log } from '../io/logger.js';
 import { runWithCallContext } from '../io/llm/callContext.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
+import type { LlmConnectionStore } from '../io/llmConnections.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
-import type { LlmProfile } from '../io/llm/profiles.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -155,7 +155,7 @@ export interface ChatMemorySyncDeps {
   llm: LlmProvider;
   embeddings: EmbeddingProvider;
   settings: OrchestratorSettingsStore;
-  llmProfiles: Record<string, LlmProfile>;
+  llmConnections: LlmConnectionStore;
 }
 
 interface UserRow {
@@ -195,11 +195,11 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
 
   let llm = deps.llm;
   if (profileName) {
-    const profile = deps.llmProfiles[profileName];
+    const profile = await deps.llmConnections.resolveByName(profileName);
     if (profile) {
       llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
     } else {
-      log.error(`chat-memory sync: chat_memory_profile names unknown profile "${profileName}" — falling back to the active connection`);
+      log.error(`chat-memory sync: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
     }
   }
 

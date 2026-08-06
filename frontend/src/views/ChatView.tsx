@@ -4,8 +4,8 @@ import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import {
   ApiError,
-  adminGetActiveProfile,
-  adminListModelsForProfile,
+  adminListConnectionModels,
+  adminListConnections,
   archiveChat,
   callTool,
   chatCompletion,
@@ -30,11 +30,13 @@ import type {
   ChatSessionRow,
   ContextStackPreset,
   Folder,
+  LlmConnectionSummary,
   ProfileModelsResult,
   PromptPreset,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import PromptInspectorPanel from '../components/promptInspector/PromptInspectorPanel';
+import BranchMapPanel from '../components/branchMap/BranchMapPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
@@ -50,6 +52,7 @@ const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }
   { type: 'characters', label: 'Characters', icon: '🎭' },
   { type: 'browse-chub', label: 'Browse Chub', icon: '🔍' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
+  { type: 'connections', label: 'Connections', icon: '🔌' },
 ];
 
 interface ChatViewProps {
@@ -169,6 +172,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Only offered for 'rp' chats (the header button below is gated on activeChat?.kind === 'rp');
   // mounted only while open, same conditional-render shape as CanvasPanel.
   const [promptInspectorOpen, setPromptInspectorOpen] = useState(false);
+  // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
+  // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
+  const [branchMapOpen, setBranchMapOpen] = useState(false);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -190,6 +196,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setSettingsCollapsed(true);
       setMobileShowCanvas(false);
       setPromptInspectorOpen(false);
+      setBranchMapOpen(false);
       setError(null);
       setEditingId(null);
       return;
@@ -197,6 +204,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     if (activeChat?.chatId === chatId) return;
     setMobileShowCanvas(false);
     setPromptInspectorOpen(false);
+    setBranchMapOpen(false);
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
@@ -525,6 +533,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               🧾
             </button>
           )}
+          {activeChat && (
+            <button
+              type="button"
+              className="chat-branch-map-summon"
+              title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
+              onClick={() => setBranchMapOpen((v) => !v)}
+            >
+              🌳
+            </button>
+          )}
           {activeChat?.canvasNoteId && (
             <button
               type="button"
@@ -691,6 +709,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         />
       )}
 
+      {branchMapOpen && activeChat && (
+        <BranchMapPanel
+          apiKey={apiKey}
+          chatId={activeChat.chatId}
+          onOpenChat={onOpenChat ?? (() => {})}
+          onClose={() => setBranchMapOpen(false)}
+        />
+      )}
+
       <div className={`chat-settings-rail${settingsCollapsed ? ' collapsed' : ''}`}>
         <div className="chat-settings-rail-header">
           <button
@@ -740,39 +767,37 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   );
   const [saved, setSaved] = useState(false);
 
-  // The household's active connection (Settings tab) is still the default every chat starts
+  // The household's active connection (Connections tab) is still the default every chat starts
   // from, but both the connection and the model within it can now be overridden per chat —
-  // io/orchestratorSettings.ts's active_llm_profile stays what a brand-new chat uses, this is
-  // just an escape hatch. Reuses the same admin endpoints SettingsView's own picker uses, so it
-  // needs the same stored admin key SettingsView reads from ADMIN_API_KEY_STORAGE_KEY — without
-  // it these calls have no Authorization header and isAdminAuthorized rejects them outright.
-  // Unlike the Settings-tab connection switch, picking a different one here needs no restart —
+  // whichever llm_connections row has is_active stays what a brand-new chat uses, this is just an
+  // escape hatch. Reuses the same admin endpoints ConnectionsView's own picker uses, so it needs
+  // the same stored admin key ConnectionsView reads from ADMIN_API_KEY_STORAGE_KEY — without it
+  // these calls have no Authorization header and isAdminAuthorized rejects them outright. Unlike
+  // switching the household's active connection, picking a different one here needs no restart —
   // httpServer.ts builds a throwaway provider for this chat's turns instead of the boot-time one.
-  const [activeProfile, setActiveProfile] = useState('');
-  const [profileNames, setProfileNames] = useState<string[]>([]);
+  const [connections, setConnections] = useState<LlmConnectionSummary[]>([]);
   const [profile, setProfile] = useState(session?.params.profile ?? '');
   const [modelOptions, setModelOptions] = useState<ProfileModelsResult['models']>([]);
   const [modelsError, setModelsError] = useState('');
 
   useEffect(() => {
     const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
-    adminGetActiveProfile(adminKey)
-      .then((connection) => {
-        setActiveProfile(connection.activeProfile);
-        setProfileNames(connection.profileNames);
-      })
+    adminListConnections(adminKey)
+      .then(setConnections)
       .catch((err) => setModelsError(err instanceof ApiError ? err.message : 'failed to load connections'));
   }, []);
 
+  const activeConnection = connections.find((c) => c.isActive);
+  const effectiveConnection = connections.find((c) => c.name === profile) ?? activeConnection;
+
   // Refetches the model catalog whenever a different connection is picked (or the household
   // default resolves), so the model dropdown always reflects whichever connection this chat would
-  // actually use — same dependent-select shape as SettingsView's own connection/model pair.
+  // actually use — same dependent-select shape as ConnectionsView's own connection/model pair.
   useEffect(() => {
-    const effectiveProfile = profile || activeProfile;
-    if (!effectiveProfile) return;
+    if (!effectiveConnection) return;
     let cancelled = false;
     const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
-    adminListModelsForProfile(effectiveProfile, adminKey)
+    adminListConnectionModels(effectiveConnection.id, adminKey)
       .then((result) => {
         if (!cancelled) setModelOptions(result.models);
       })
@@ -782,7 +807,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     return () => {
       cancelled = true;
     };
-  }, [profile, activeProfile]);
+  }, [effectiveConnection]);
 
   // Instruction sets: a personal library of reusable named system-prompt snippets. Picking one
   // only copies its content into the textarea below — still freely hand-editable, and not saved
@@ -924,15 +949,15 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         Connection
         <select value={profile} onChange={(e) => setProfile(e.target.value)}>
           <option value="">
-            (household default{activeProfile ? ` — ${activeProfile}` : ''})
+            (household default{activeConnection ? ` — ${activeConnection.name}` : ''})
           </option>
-          {profileNames.map((name) => (
-            <option key={name} value={name}>
-              {name}
+          {connections.map((c) => (
+            <option key={c.name} value={c.name}>
+              {c.name}
             </option>
           ))}
         </select>
-        <span className="model-connection-note">Household default set in Settings; this only affects this chat.</span>
+        <span className="model-connection-note">Household default set in the Connections tab; this only affects this chat.</span>
       </label>
 
       <label>

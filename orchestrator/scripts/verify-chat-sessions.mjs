@@ -39,21 +39,109 @@ function createFakePool() {
           }
 
           // chat_sessions
-          if (sql.includes('insert into chat_sessions')) {
-            const [userId, title, folderId] = params;
+          // Discriminated by param count, not sql.includes('parent_chat_id') — SESSION_COLUMNS
+          // (used in every `returning` clause here, including createChat's) already contains that
+          // substring, so a text match alone can't tell the two inserts apart.
+          if (sql.includes('insert into chat_sessions') && params.length === 11) {
+            // forkChat's insert — column order per chatSessions.ts:
+            // (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind,
+            //  character_id, prompt_stack_preset_id, cleanup_preset_id)
+            const [userId, title, folderId, paramsJson, toolNames, parentChatId, forkMessageId, kind, characterId, promptStackPresetId, cleanupPresetId] =
+              params;
             const row = {
               chat_id: randomUUID(),
               user_id: userId,
               title: title ?? 'New chat',
-              folder_id: folderId,
-              params: {},
-              tool_names: null,
+              folder_id: folderId ?? null,
+              params: paramsJson ? JSON.parse(paramsJson) : {},
+              tool_names: toolNames ?? null,
               canvas_note_id: null,
+              parent_chat_id: parentChatId ?? null,
+              fork_message_id: forkMessageId ?? null,
+              archived_at: null,
+              kind: kind ?? 'chat',
+              character_id: characterId ?? null,
+              prompt_stack_preset_id: promptStackPresetId ?? null,
+              cleanup_preset_id: cleanupPresetId ?? null,
               created_at: now(),
               updated_at: now(),
             };
             sessions.set(row.chat_id, row);
             return { rows: [row] };
+          }
+          if (sql.includes('insert into chat_sessions')) {
+            const [userId, title, folderId, kind, toolNames] = params;
+            const row = {
+              chat_id: randomUUID(),
+              user_id: userId,
+              title: title ?? 'New chat',
+              folder_id: folderId ?? null,
+              params: {},
+              tool_names: toolNames ?? null,
+              canvas_note_id: null,
+              parent_chat_id: null,
+              fork_message_id: null,
+              archived_at: null,
+              kind: kind ?? 'chat',
+              character_id: null,
+              prompt_stack_preset_id: null,
+              cleanup_preset_id: null,
+              created_at: now(),
+              updated_at: now(),
+            };
+            sessions.set(row.chat_id, row);
+            return { rows: [row] };
+          }
+          // getLineage: walk parent_chat_id up to the root (RLS-scoped at every hop, same as real
+          // Postgres would enforce on the recursive join).
+          if (sql.startsWith('with recursive up')) {
+            const owned = (id) => {
+              const s = sessions.get(id);
+              return s && s.user_id === scopedUserId ? s : undefined;
+            };
+            let current = owned(params[0]);
+            if (!current) return { rows: [] };
+            const seen = new Set([current.chat_id]);
+            while (current.parent_chat_id) {
+              const parent = owned(current.parent_chat_id);
+              if (!parent || seen.has(parent.chat_id)) break;
+              current = parent;
+              seen.add(current.chat_id);
+            }
+            return { rows: [{ chat_id: current.chat_id }] };
+          }
+          // getLineage: every descendant of the given root, root included, oldest first.
+          if (sql.startsWith('with recursive down')) {
+            const root = sessions.get(params[0]);
+            if (!root || root.user_id !== scopedUserId) return { rows: [] };
+            const family = [...sessions.values()].filter((s) => s.user_id === scopedUserId);
+            const byParent = new Map();
+            for (const s of family) {
+              if (!byParent.has(s.parent_chat_id)) byParent.set(s.parent_chat_id, []);
+              byParent.get(s.parent_chat_id).push(s);
+            }
+            const rows = [];
+            const queue = [root];
+            while (queue.length > 0) {
+              const node = queue.shift();
+              rows.push(node);
+              queue.push(...(byParent.get(node.chat_id) ?? []));
+            }
+            rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
+            return { rows };
+          }
+          if (sql.includes('from chat_sync_points where chat_id')) {
+            return { rows: [] };
+          }
+          if (sql.includes('from canon_facts where chat_id')) {
+            return { rows: [] };
+          }
+          // Pre-existing gap, unrelated to forkChat/getLineage above: getChat's swipe-metadata
+          // lookup (chatSessions.ts) has never had a fake handler here, so any getChat call against
+          // a non-empty chat threw "unexpected query" before this fix — no test in this file
+          // exercises recordSwipe/cycleSwipe, so "no swipes yet" (empty) is accurate for all of them.
+          if (sql.includes('from chat_message_swipes where message_id')) {
+            return { rows: [] };
           }
           if (sql.includes('select chat_id, title, folder_id, updated_at from chat_sessions')) {
             let rows = [...sessions.values()].filter((s) => s.user_id === scopedUserId);
@@ -340,6 +428,67 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     afterTruncate.messages.length === 1 && afterTruncate.messages[0].messageId === u1.messageId,
     'truncating from U2 removes U2 and everything chronologically after it (A2), leaving only U1',
   );
+}
+
+// --- forkChat: copies settings + messages up to the fork point, tracks lineage ---
+{
+  const forkFolder = await store.createFolder(USER_A, { name: 'Fork test folder' });
+  const parent = await store.createChat(USER_A, { title: 'Fork parent', folderId: forkFolder.folderId });
+  await store.updateChat(USER_A, parent.chatId, {
+    params: { system: 'Stay in character.', temperature: 0.7 },
+    toolNames: ['roll_dice'],
+  });
+  await store.appendMessages(USER_A, parent.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+  ]);
+  const midDetail = await store.getChat(USER_A, parent.chatId);
+  const forkPoint = midDetail.messages[1]; // A1
+  await store.appendMessages(USER_A, parent.chatId, [
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ]);
+
+  const forked = await store.forkChat(USER_A, parent.chatId, forkPoint.messageId);
+  assert(forked !== undefined, 'forkChat succeeds at a valid message id');
+  assert(forked.title === 'Fork of Fork parent', 'a fork with no explicit title defaults to "Fork of {parent title}"');
+  assert(forked.folderId === forkFolder.folderId, "a fork inherits the parent's folder");
+  assert(forked.params.system === 'Stay in character.', "a fork inherits the parent's params");
+  assert(forked.toolNames.length === 1 && forked.toolNames[0] === 'roll_dice', "a fork inherits the parent's toolNames");
+  assert(forked.parentChatId === parent.chatId, 'a fork records its parent chat id');
+  assert(forked.forkMessageId === forkPoint.messageId, 'a fork records the message it branched from');
+
+  const forkedDetail = await store.getChat(USER_A, forked.chatId);
+  assert(
+    forkedDetail.messages.length === 2 && forkedDetail.messages.map((m) => m.content).join(',') === 'U1,A1',
+    'a fork copies messages up to (and including) the fork point, not anything after it',
+  );
+
+  const missingFork = await store.forkChat(USER_A, parent.chatId, 'no-such-message-id');
+  assert(missingFork === undefined, "forking from a message id that doesn't exist in the chat returns undefined");
+
+  // --- getLineage: the whole family, root first, reachable from any member ---
+  const fromParent = await store.getLineage(USER_A, parent.chatId);
+  const fromFork = await store.getLineage(USER_A, forked.chatId);
+  assert(
+    fromParent.length === 2 && fromFork.length === 2,
+    'getLineage returns the whole two-chat family whether asked from the parent or the fork',
+  );
+  assert(fromParent[0].chatId === parent.chatId, 'getLineage orders the root first');
+  assert(
+    JSON.stringify(fromParent.map((n) => n.chatId).sort()) === JSON.stringify(fromFork.map((n) => n.chatId).sort()),
+    'the family is identical regardless of which member getLineage is asked about',
+  );
+
+  const soloChat = await store.createChat(USER_A, { title: 'Never forked' });
+  const soloLineage = await store.getLineage(USER_A, soloChat.chatId);
+  assert(
+    soloLineage.length === 1 && soloLineage[0].chatId === soloChat.chatId,
+    'a chat with no forks still returns its own single-node family',
+  );
+
+  const missingLineage = await store.getLineage(USER_A, 'no-such-chat-id');
+  assert(missingLineage === undefined, 'getLineage on a nonexistent chat id returns undefined');
 }
 
 // --- deleteChat ---

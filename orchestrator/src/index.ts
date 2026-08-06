@@ -48,16 +48,12 @@
 import { setDefaultAutoSelectFamily } from 'node:net';
 import { Pool } from 'pg';
 import { log } from './io/logger.js';
-import { createLlmProvider } from './io/llm/index.js';
+import { createLlmProviderForProfile } from './io/llm/index.js';
 import { createGatedLlmProvider } from './io/llm/llmGate.js';
 import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispatch.js';
 import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
-import {
-  parseLlmProfiles,
-  withOverriddenApiKeys,
-  withOverriddenModel,
-  withOverriddenSupportsVision,
-} from './io/llm/profiles.js';
+import { parseLlmProfiles } from './io/llm/profiles.js';
+import { createLlmConnectionStore } from './io/llmConnections.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createFieldCipher } from './io/fieldCipher.js';
 import { createAccessIdentityResolver } from './io/accessIdentity.js';
@@ -101,68 +97,71 @@ async function main(): Promise<void> {
   const cipher = createFieldCipher();
   const credentials = createProviderCredentialStore(db, cipher);
   const settings = createOrchestratorSettingsStore(db);
+  const llmConnections = createLlmConnectionStore(db, cipher);
 
-  const rawProfilesJson = requireEnv('BIGBRAIN_LLM_PROFILES');
-  const legacyProfiles = parseLlmProfiles(rawProfilesJson);
-  const [deepseekKey, openrouterKey, voyageKey] = await Promise.all([
-    credentials.resolve('deepseek_api_key', legacyProfiles.deepseek?.apiKey),
-    credentials.resolve('openrouter_api_key', legacyProfiles.openrouter?.apiKey),
-    credentials.resolve('voyage_api_key', process.env.BIGBRAIN_EMBEDDINGS_API_KEY),
-  ]);
+  const voyageKey = await credentials.resolve('voyage_api_key', process.env.BIGBRAIN_EMBEDDINGS_API_KEY);
 
-  // Fail closed explicitly for the LLM keys — validateProfile would otherwise happily accept the
-  // post-cutover UNMANAGED_SENTINEL string as "a valid non-empty apiKey" and boot with a dead key
-  // that only fails later, at the first real LLM call. Voyage doesn't need this:
-  // createEmbeddingProvider already throws on an empty apiKey.
-  if (legacyProfiles.deepseek && !deepseekKey) {
-    throw new Error('deepseek_api_key has no provider_credentials row and no usable env fallback');
+  // First-boot only: llm_connections (db/migrations/0062) starts empty on a fresh volume, so seed
+  // it once from the pre-restructure BIGBRAIN_LLM_PROFILES env var plus whichever profile was
+  // active — an existing deployment's connections/keys carry over without a manual DB write on
+  // cutover. Every later boot skips this whole block entirely; once at least one row exists this
+  // table alone is the source of truth, and admin edits go straight through io/llmConnections.ts,
+  // never back through these env vars.
+  if ((await llmConnections.list()).length === 0) {
+    const legacyProfiles = parseLlmProfiles(requireEnv('BIGBRAIN_LLM_PROFILES'));
+    // Mirrors the pre-cutover code's own fallback exactly: a deployment that already switched
+    // profiles from the Settings tab has its choice in orchestrator_settings, not the env var —
+    // BIGBRAIN_LLM_ACTIVE_PROFILE was only ever the boot-time default for a deployment that never
+    // touched that UI. Falling straight to requireEnv here (skipping the DB read) is what broke
+    // the real bigimagine-orchestrator deployment on first deploy of this migration: its env var
+    // was never set, only orchestrator_settings.active_llm_profile was.
+    const activeName = (await settings.get('active_llm_profile')) ?? requireEnv('BIGBRAIN_LLM_ACTIVE_PROFILE');
+    if (!legacyProfiles[activeName]) {
+      const known = Object.keys(legacyProfiles).join(', ') || '(none defined)';
+      throw new Error(`BIGBRAIN_LLM_ACTIVE_PROFILE is "${activeName}", which isn't in BIGBRAIN_LLM_PROFILES — known profiles: ${known}`);
+    }
+    const visionCapableProfiles = parseVisionCapableProfiles(await settings.get('llm_vision_capable_profiles'));
+    for (const [name, profile] of Object.entries(legacyProfiles)) {
+      // deepseek/openrouter's key was already DB-rotatable via provider_credentials before this
+      // table existed — resolve through it once here so an already-rotated key isn't silently
+      // reverted to a stale .env value on cutover; every other profile's key comes straight from
+      // its own BIGBRAIN_LLM_PROFILES entry, which was always its only source. Fails closed same
+      // as before: a scrubbed post-cutover UNMANAGED_SENTINEL env value with no DB row throws here
+      // rather than seeding a dead key that only fails later, at the first real LLM call.
+      const apiKey =
+        name === 'deepseek'
+          ? await credentials.resolve('deepseek_api_key', profile.apiKey)
+          : name === 'openrouter'
+            ? await credentials.resolve('openrouter_api_key', profile.apiKey)
+            : profile.apiKey;
+      if (!apiKey) {
+        throw new Error(`${name}_api_key has no provider_credentials row and no usable env fallback`);
+      }
+      const created = await llmConnections.create({
+        name,
+        kind: profile.kind,
+        model: profile.model,
+        apiKey,
+        baseUrl: profile.baseUrl,
+        supportsVision: visionCapableProfiles.includes(name),
+      });
+      if (name === activeName) await llmConnections.activate(created.id);
+    }
   }
-  if (legacyProfiles.openrouter && !openrouterKey) {
-    throw new Error('openrouter_api_key has no provider_credentials row and no usable env fallback');
-  }
 
-  // Settings tab's connection picker (POST /v1/admin/settings) overrides which profile — and
-  // which model within it — is active, without a rebuild; same restart-on-save shape as
-  // credential rotation. Both fall back to the profile's own static config so an untouched
-  // deployment behaves exactly as before.
-  const activeProfile = (await settings.get('active_llm_profile')) ?? requireEnv('BIGBRAIN_LLM_ACTIVE_PROFILE');
-  const activeModel = await settings.get('active_llm_model');
-  const profilesJsonWithApiKeys = withOverriddenApiKeys(rawProfilesJson, {
-    deepseek: deepseekKey,
-    openrouter: openrouterKey,
-  });
-  // Which configured profiles an admin has marked vision-capable (io/llm/profiles.ts's
-  // LlmProfile.supportsVision) — spliced onto every profile it names, not just the active one,
-  // since a chat can select any configured profile via its own connection override
-  // (server/httpServer.ts's sessionParams.profile). Same restart-on-save shape as the profile/
-  // model picker above.
-  const visionCapableProfiles = parseVisionCapableProfiles(await settings.get('llm_vision_capable_profiles'));
-  const profilesJsonWithVision = withOverriddenSupportsVision(
-    profilesJsonWithApiKeys,
-    Object.fromEntries(visionCapableProfiles.map((name) => [name, true])),
-  );
-  // The unparsed, apiKey/vision-resolved profiles map — passed to httpServer.ts so the Settings
-  // tab's model dropdown (GET /v1/admin/settings/models) can list any configured profile's
-  // catalog, and so a per-chat profile override carries its own supportsVision, even for a
-  // profile that isn't currently active. Deliberately built from the pre-model-override JSON:
-  // a not-yet-active profile's "default model" should be its own static config, not whatever
-  // model happens to be overridden onto a *different* (the currently active) profile.
-  const llmProfiles = parseLlmProfiles(profilesJsonWithVision);
+  const activeProfile = await llmConnections.resolveActive();
+  if (!activeProfile) {
+    throw new Error(
+      'No active llm_connections row — configure at least one connection and activate it (the Connections tab, or POST /v1/admin/connections)',
+    );
+  }
   // Gated exactly once, here, per bb_principles.md §14 — everything downstream (every plugin's
   // closed-over llm, the HTTP server's default connection, this process's own agent_routine
   // dispatcher below) shares this one instance, so nothing needs to remember to gate itself. A
-  // chat's own per-profile connection override is the one other place a *new* LlmProvider gets
+  // chat's own per-connection override is the one other place a *new* LlmProvider gets
   // constructed at runtime (server/httpServer.ts) — that call site gates its own throwaway
   // instance the same way, since this wrap can't reach something built after boot.
-  const llm = createGatedLlmProvider(
-    createLlmProvider({
-      ...process.env,
-      BIGBRAIN_LLM_PROFILES: withOverriddenModel(profilesJsonWithVision, activeProfile, activeModel),
-      BIGBRAIN_LLM_ACTIVE_PROFILE: activeProfile,
-    }),
-    db,
-    settings,
-  );
+  const llm = createGatedLlmProvider(createLlmProviderForProfile(activeProfile), db, settings);
   const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
 
   // Default matches the Docker image layout: /app/orchestrator/dist/index.js -> /app/plugins.
@@ -181,10 +180,10 @@ async function main(): Promise<void> {
 
   // Rolling chat summarization/RAG (docs/chat-memory.md) — same composition-root tier as the
   // dispatch loop above and for the same reason (needs io/llm/callContext.ts's runWithCallContext,
-  // not reachable from a plugin). llmProfiles lets it build its own throwaway connection when
+  // not reachable from a plugin). llmConnections lets it build its own throwaway connection when
   // chat_memory_profile names one, the same per-call construction httpServer.ts's own per-chat
-  // profile override uses.
-  startChatMemorySyncLoop({ db, llm, embeddings, settings, llmProfiles });
+  // connection override uses.
+  startChatMemorySyncLoop({ db, llm, embeddings, settings, llmConnections });
 
   // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
   // io/accessIdentity.ts.
@@ -208,7 +207,7 @@ async function main(): Promise<void> {
     adminApiKey,
     credentials,
     settings,
-    llmProfiles,
+    llmConnections,
     modelName: 'bigbrain',
     port,
     backupConfigured,

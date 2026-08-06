@@ -15,6 +15,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'characters', label: 'Characters' },
   { type: 'browse-chub', label: 'Browse Chub' },
   { type: 'settings', label: 'Settings' },
+  { type: 'connections', label: 'Connections' },
   { type: 'canon', label: 'Canon' },
   { type: 'reviewpanel', label: 'Review Panel' },
 ];

@@ -16,11 +16,12 @@
  *
  * params carries defined keys only (system, temperature, top_p, max_tokens, model, profile), merged
  * over provider defaults at request time by httpServer.ts's chat_id handling. profile names one of
- * BIGBRAIN_LLM_PROFILES (io/llm/profiles.ts) to run this chat's turns through instead of the
- * household's active connection (io/orchestratorSettings.ts's active_llm_profile) — unlike that
- * household-wide setting, picking a different profile per chat needs no restart, since httpServer.ts
- * builds a throwaway provider for it the same way the Settings tab's model-catalog preview already
- * does (server/adminServer.ts's listModelsForProfile). toolNames: null = all
+ * the admin-managed connections (io/llmConnections.ts, db/migrations/0062_llm_connections.sql) to
+ * run this chat's turns through instead of the household's active one (that row's own is_active
+ * flag) — unlike the household-wide active connection, picking a different one per chat needs no
+ * restart, since httpServer.ts builds a throwaway provider for it the same way the Connections
+ * tab's own model-catalog preview does (server/adminServer.ts's listModelsForConnection).
+ * toolNames: null = all
  * registered tools (pre-existing behavior), [] = none, else an allow-list applied via
  * toolRegistry.ts's filterToolRegistry. canvasNoteId (Canvas): which note this chat's document
  * panel is focused on, if any — written by httpServer.ts from runTurn's focusedNoteId, or cleared
@@ -179,6 +180,21 @@ export interface FolderRow {
   parentId: string | null;
 }
 
+/** One node in a fork family tree — getLineage's return shape, the Branch Map panel's data
+ *  source. Deliberately narrower than ChatSessionRow (no params/toolNames/etc.) since the panel
+ *  only ever renders title/status/relationships, never a chat's actual settings. */
+export interface ChatLineageNode {
+  chatId: string;
+  title: string;
+  folderId: string | null;
+  parentChatId: string | null;
+  forkMessageId: string | null;
+  archivedAt: string | null;
+  kind: 'chat' | 'rp';
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ChatSessionStore {
   listChats(userId: string, opts?: { search?: string; folderId?: string; kind?: 'chat' | 'rp' }): Promise<ChatSummary[]>;
   /** kind defaults to 'chat'. When init.kind === 'rp' and toolNames isn't explicitly given, tool_names
@@ -233,6 +249,11 @@ export interface ChatSessionStore {
    *  preamble for exactly what does and doesn't come along. Undefined if forkFromMessageId isn't a
    *  message in this chat. */
   forkChat(userId: string, chatId: string, forkFromMessageId: string, title?: string): Promise<ChatSessionRow | undefined>;
+  /** The whole fork family a chat belongs to — every chat reachable by walking parent_chat_id up
+   *  to the root and back down through every descendant, root first. A chat that was never forked
+   *  and has no forks of its own still returns its single-node family (nothing to distinguish that
+   *  from "loading" otherwise). Undefined only if chatId itself doesn't exist. */
+  getLineage(userId: string, chatId: string): Promise<ChatLineageNode[] | undefined>;
   /** Stamps archived_at (now) — the explicit end-of-chat signal. Undefined if not found. Does not
    *  itself run the long-term-memory extraction; the caller (server/httpServer.ts) does that via
    *  orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory once this returns. */
@@ -283,6 +304,34 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
 
 const SESSION_COLUMNS =
   'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, created_at, updated_at';
+
+interface LineageDbRow {
+  chat_id: string;
+  title: string;
+  folder_id: string | null;
+  parent_chat_id: string | null;
+  fork_message_id: string | null;
+  archived_at: string | null;
+  kind: 'chat' | 'rp';
+  created_at: string;
+  updated_at: string;
+}
+
+const LINEAGE_COLUMNS = 'chat_id, title, folder_id, parent_chat_id, fork_message_id, archived_at, kind, created_at, updated_at';
+
+function toLineageNode(row: LineageDbRow): ChatLineageNode {
+  return {
+    chatId: row.chat_id,
+    title: row.title,
+    folderId: row.folder_id,
+    parentChatId: row.parent_chat_id,
+    forkMessageId: row.fork_message_id,
+    archivedAt: row.archived_at,
+    kind: row.kind,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
   return {
@@ -590,12 +639,13 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         const newRows = await session.query<SessionDbRow>(
           `insert into chat_sessions
-             (user_id, title, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
             title ?? `Fork of ${parent.title}`,
+            parent.folderId,
             JSON.stringify(parent.params),
             parent.toolNames,
             chatId,
@@ -726,6 +776,38 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         }
 
         return toSessionRow(newRows[0]!);
+      });
+    },
+
+    async getLineage(userId, chatId) {
+      return db.withUserScope(userId, async (session) => {
+        // Walk parent_chat_id up from chatId; the deepest row reached is the family's root. A
+        // depth column (rather than relying on result order) makes "furthest ancestor" an explicit
+        // pick instead of an assumption about recursive CTE row ordering.
+        const rootRows = await session.query<{ chat_id: string }>(
+          `with recursive up as (
+             select chat_id, parent_chat_id, 0 as depth from chat_sessions where chat_id = $1
+             union all
+             select cs.chat_id, cs.parent_chat_id, up.depth + 1
+             from chat_sessions cs join up on cs.chat_id = up.parent_chat_id
+           )
+           select chat_id from up order by depth desc limit 1`,
+          [chatId],
+        );
+        const rootId = rootRows[0]?.chat_id;
+        if (!rootId) return undefined;
+
+        const rows = await session.query<LineageDbRow>(
+          `with recursive down as (
+             select ${LINEAGE_COLUMNS} from chat_sessions where chat_id = $1
+             union all
+             select cs.chat_id, cs.title, cs.folder_id, cs.parent_chat_id, cs.fork_message_id, cs.archived_at, cs.kind, cs.created_at, cs.updated_at
+             from chat_sessions cs join down d on cs.parent_chat_id = d.chat_id
+           )
+           select * from down order by created_at`,
+          [rootId],
+        );
+        return rows.map(toLineageNode);
       });
     },
 

@@ -16,6 +16,7 @@ import BrowseChubView from './views/BrowseChubView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
+import ConnectionsView from './views/ConnectionsView';
 import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
 import PromptStacksView from './views/PromptStacksView';
@@ -191,6 +192,7 @@ export default function App() {
             {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} onOpenRp={openRp} />}
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
+            {tab.type === 'connections' && <ConnectionsView />}
           </div>
         ))}
       </div>

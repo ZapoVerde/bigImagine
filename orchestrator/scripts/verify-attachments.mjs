@@ -375,7 +375,7 @@ const server = startHttpServer({
   adminApiKey: 'unused',
   credentials: { async list() { return []; } },
   settings: { async get() { return undefined; }, async set() {} },
-  llmProfiles: {},
+  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; } },
   modelName: 'bigbrain',
   port: 0,
 });
@@ -516,7 +516,7 @@ const server2 = startHttpServer({
   adminApiKey: 'unused',
   credentials: { async list() { return []; } },
   settings: { async get() { return undefined; }, async set() {} },
-  llmProfiles: {},
+  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; } },
   modelName: 'bigbrain',
   port: 0,
 });

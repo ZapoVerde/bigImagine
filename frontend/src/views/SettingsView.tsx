@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import {
   ApiError,
-  adminGetActiveProfile,
   adminGetChatMemorySettings,
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
   adminGetScreenLockSettings,
   adminGetTimezone,
+  adminListConnections,
   adminListCredentials,
-  adminListModelsForProfile,
-  adminSetActiveProfile,
   adminSetChatMemorySettings,
   adminSetCredential,
   adminSetNotificationSettings,
@@ -19,19 +17,9 @@ import {
   adminSetScreenLockSettings,
   adminSetTimezone,
 } from '../api/client';
-import { formatPricePerMillion } from '../api/pricing';
-import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
-import type {
-  ChatMemorySettings,
-  CredentialSummary,
-  NotificationSettings,
-  PersonaSettings,
-  ProfileModelsResult,
-  ScreenLockSettings,
-} from '../api/types';
+import { useAdminUnlock } from '../hooks/useAdminUnlock';
+import type { ChatMemorySettings, CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
-
-type ModelOption = ProfileModelsResult['models'][number];
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
 // Access SSO) — a real dropdown of every IANA zone name beats a freeform text input that's easy
@@ -69,50 +57,31 @@ function formatUtcOffset(tz: string): string {
   }
 }
 
-// Ported from the old standalone adminPage.ts — same two endpoints, same behavior (restart-on-
-// save, poll /healthz until the orchestrator comes back). Persisted to localStorage
-// (ADMIN_API_KEY_STORAGE_KEY) like the household key: this is a single-user deployment, so there's
-// no household member whose access this key needs to withhold — re-typing it every page load
-// would be pure friction with no real security benefit here.
+// Admin-key unlock (mount-time Access probe, then a stored key, then the manual key form) is
+// hooks/useAdminUnlock.ts, shared with views/ConnectionsView.tsx — attemptLoad below is this tab's
+// own "prove the key works" fetch, everything around it (adminKey/checking/unlocked/loadError
+// state, localStorage persistence) lives in the hook.
 //
-// Under Cloudflare Access, httpServer.ts's isAdminAuthorized trusts the Access identity directly
-// (see client.ts's adminListCredentials/adminGetActiveProfile) — a second manually-typed secret
-// on top of Access would be redundant friction, not real defense in depth, for a household app.
-// So on mount this probes both admin endpoints with no key at all; if Access already covers it,
-// Settings unlocks immediately and the key form never appears. Only a deployment with no Access
-// configured (or a non-browser caller) ever needs to type the static admin key below.
+// The Connection fieldset that used to live here (create/switch/rotate a named LLM connection) has
+// moved to its own Connections tab (views/ConnectionsView.tsx, io/llmConnections.ts) — this view
+// only keeps a read-only fetch of the active connection's name, for the Chat Memory fieldset's
+// "household default" label below.
 interface SettingsViewProps {
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }
 
 export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps) {
-  const [adminKey, setAdminKey] = useState(() => localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY) ?? '');
-  const [checking, setChecking] = useState(true);
-  const [unlocked, setUnlocked] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [selectedName, setSelectedName] = useState('');
   const [value, setValue] = useState('');
   const [status, setStatus] = useState('');
   const pollRef = useRef<number | null>(null);
 
-  const [profileNames, setProfileNames] = useState<string[]>([]);
-  const [activeProfile, setActiveProfile] = useState('');
-  const [activeModel, setActiveModel] = useState('');
-  const [selectedProfile, setSelectedProfile] = useState('');
-  const [selectedModel, setSelectedModel] = useState('');
-  const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState('');
-  const [connectionStatus, setConnectionStatus] = useState('');
-  const connectionPollRef = useRef<number | null>(null);
-  // Which configured profiles are marked vision-capable (io/llm/profiles.ts's
-  // LlmProfile.supportsVision) — not just the active one, since the checkbox below previews
-  // whichever profile is currently *selected* in the dropdown, same live-preview shape as the
-  // model dropdown next to it.
-  const [visionCapableProfiles, setVisionCapableProfiles] = useState<string[]>([]);
-  const [selectedSupportsVision, setSelectedSupportsVision] = useState(false);
+  // Read-only — set from the one active row in adminListConnections(), purely to label the Chat
+  // Memory fieldset's "household default" option below. Editing connections lives in
+  // views/ConnectionsView.tsx now.
+  const [activeConnectionName, setActiveConnectionName] = useState('');
 
   const [timezone, setTimezone] = useState('');
   const [selectedTimezone, setSelectedTimezone] = useState('');
@@ -192,15 +161,15 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
   }
 
-  // Shared by the mount-time probes (no key, then a stored key) and the manual Load button —
-  // returns whether it unlocked so each caller can decide what to do next (persist the key,
-  // evict a stale stored key, fall through to the key form).
+  // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
+  // state (adminKey/checking/unlocked/loadError, the mount-time no-key-then-stored-key probe, the
+  // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, connection, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, chatMemorySettingsResult] =
+      const [creds, connections, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, chatMemorySettingsResult] =
         await Promise.all([
           adminListCredentials(key),
-          adminGetActiveProfile(key),
+          adminListConnections(key),
           adminGetTimezone(key),
           adminGetNotificationSettings(key),
           adminGetPiaProxyUrl(key),
@@ -210,13 +179,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
-      setProfileNames(connection.profileNames);
-      setActiveProfile(connection.activeProfile);
-      setActiveModel(connection.activeModel);
-      setSelectedProfile(connection.activeProfile);
-      setSelectedModel(connection.activeModel);
-      setVisionCapableProfiles(connection.visionCapableProfiles);
-      setSelectedSupportsVision(connection.visionCapableProfiles.includes(connection.activeProfile));
+      setActiveConnectionName(connections.find((c) => c.isActive)?.name ?? '');
       setTimezone(tz);
       setSelectedTimezone(tz);
       applyNotificationSettings(notificationSettings);
@@ -225,44 +188,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
-      setUnlocked(true);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };
     }
   }
 
-  useEffect(() => {
-    (async () => {
-      if ((await attemptLoad(null)).ok) {
-        setChecking(false);
-        return;
-      }
-      // Not covered by Access (or Access isn't configured here) — try a previously-saved admin
-      // key before falling back to the manual key form.
-      const stored = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
-      if (stored) {
-        setAdminKey(stored);
-        if ((await attemptLoad(stored)).ok) {
-          setChecking(false);
-          return;
-        }
-        localStorage.removeItem(ADMIN_API_KEY_STORAGE_KEY);
-      }
-      setChecking(false);
-    })();
-  }, []);
-
-  async function load() {
-    setLoadError(null);
-    const result = await attemptLoad(adminKey);
-    if (result.ok) {
-      localStorage.setItem(ADMIN_API_KEY_STORAGE_KEY, adminKey);
-      return;
-    }
-    const err = result.error;
-    setLoadError(err instanceof ApiError && err.status === 401 ? 'invalid admin key' : 'error loading credentials');
-  }
+  const { adminKey, setAdminKey, checking, unlocked, loadError, load } = useAdminUnlock(attemptLoad);
 
   async function saveTimezone() {
     if (!selectedTimezone || selectedTimezone === timezone) return;
@@ -381,70 +313,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     if (field === 'householdMemoryPrompt') setSelectedHouseholdMemoryPrompt('');
   }
 
-  // Refetches the model catalog whenever a different connection is picked, so the model dropdown
-  // always reflects the currently *selected* profile, not whichever one is live right now. The
-  // vision checkbox follows the same live-preview shape — no fetch needed, visionCapableProfiles
-  // already has every profile's flag.
-  useEffect(() => {
-    if (!unlocked || !selectedProfile) return;
-    setSelectedSupportsVision(visionCapableProfiles.includes(selectedProfile));
-    let cancelled = false;
-    setModelsError('');
-    setModelsLoading(true);
-    adminListModelsForProfile(selectedProfile, adminKey)
-      .then((result) => {
-        if (cancelled) return;
-        setAvailableModels(result.models);
-        setSelectedModel(selectedProfile === activeProfile ? activeModel : result.defaultModel);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setModelsError(err instanceof ApiError ? err.message : 'failed to list models for this connection');
-        setAvailableModels([]);
-      })
-      .finally(() => {
-        if (!cancelled) setModelsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProfile, unlocked, visionCapableProfiles]);
-
-  async function saveConnection() {
-    const visionChanged = selectedSupportsVision !== visionCapableProfiles.includes(selectedProfile);
-    if (!selectedModel || (selectedProfile === activeProfile && selectedModel === activeModel && !visionChanged)) {
-      return;
-    }
-    setConnectionStatus('');
-    try {
-      await adminSetActiveProfile(selectedProfile, selectedModel, adminKey, selectedSupportsVision);
-    } catch (err) {
-      setConnectionStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-      return;
-    }
-    setConnectionStatus('Saved. The orchestrator is restarting — this will take a few seconds.');
-
-    connectionPollRef.current = window.setInterval(async () => {
-      try {
-        const res = await fetch('/healthz');
-        if (res.ok) {
-          if (connectionPollRef.current) clearInterval(connectionPollRef.current);
-          setActiveProfile(selectedProfile);
-          setActiveModel(selectedModel);
-          setVisionCapableProfiles((prev) =>
-            selectedSupportsVision
-              ? Array.from(new Set([...prev, selectedProfile]))
-              : prev.filter((name) => name !== selectedProfile),
-          );
-          setConnectionStatus('Back up — reload to confirm.');
-        }
-      } catch {
-        // still restarting, keep polling
-      }
-    }, 2000);
-  }
-
   async function save() {
     if (!value) {
       setStatus('enter a value first');
@@ -502,68 +370,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         <button onClick={onToggleTheme}>
           {theme === 'dark' ? '☀ Switch to light mode' : '☾ Switch to dark mode'}
         </button>
-      </fieldset>
-
-      <fieldset>
-        <legend>Connection</legend>
-        <select value={selectedProfile} onChange={(e) => setSelectedProfile(e.target.value)}>
-          {profileNames.map((name) => (
-            <option key={name} value={name}>
-              {name}
-              {name === activeProfile ? ' (active)' : ''}
-            </option>
-          ))}
-        </select>
-        <br />
-        <select
-          value={selectedModel}
-          onChange={(e) => setSelectedModel(e.target.value)}
-          disabled={modelsLoading || availableModels.length === 0}
-        >
-          {/* The currently selected model might not be in this connection's live catalog (a
-              stale override, or the fetch simply hasn't resolved yet) — always include it so the
-              <select> never silently shows blank for a real value. */}
-          {[selectedModel, ...availableModels.map((m) => m.id)]
-            .filter(Boolean)
-            .filter((id, i, ids) => ids.indexOf(id) === i)
-            .map((id) => {
-              const model = availableModels.find((m) => m.id === id);
-              return (
-                <option key={id} value={id}>
-                  {id}
-                  {model?.pricing
-                    ? ` — ${formatPricePerMillion(model.pricing.prompt)} in / ${formatPricePerMillion(model.pricing.completion)} out per 1M tok`
-                    : ''}
-                  {id === activeModel && selectedProfile === activeProfile ? ' (active)' : ''}
-                </option>
-              );
-            })}
-        </select>
-        <br />
-        <label>
-          <input
-            type="checkbox"
-            checked={selectedSupportsVision}
-            onChange={(e) => setSelectedSupportsVision(e.target.checked)}
-          />
-          {' '}This connection can see images (vision)
-        </label>
-        <br />
-        <button
-          onClick={saveConnection}
-          disabled={
-            modelsLoading ||
-            !selectedModel ||
-            (selectedProfile === activeProfile &&
-              selectedModel === activeModel &&
-              selectedSupportsVision === visionCapableProfiles.includes(selectedProfile))
-          }
-        >
-          Switch &amp; Restart
-        </button>
-        {modelsLoading && <div className="status">Loading models…</div>}
-        {modelsError && <div className="error-banner">{modelsError}</div>}
-        <div className="status">{connectionStatus}</div>
       </fieldset>
 
       <fieldset>
@@ -718,7 +524,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Connection
           <br />
           <select value={selectedChatMemoryProfile} onChange={(e) => setSelectedChatMemoryProfile(e.target.value)}>
-            <option value="">(household default{activeProfile ? ` — ${activeProfile}` : ''})</option>
+            <option value="">(household default{activeConnectionName ? ` — ${activeConnectionName}` : ''})</option>
             {(chatMemorySettings?.profileNames ?? []).map((name) => (
               <option key={name} value={name}>
                 {name}
