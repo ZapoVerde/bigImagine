@@ -93,6 +93,16 @@
  * `persona` marker slot when a preset enables it — same no-restart, read-back-in-full shape as
  * screen_lock_password.
  *
+ * llm_gate_max_concurrent/llm_gate_max_concurrent_agent_routine/llm_gate_max_retries/
+ * llm_gate_retry_base_ms/llm_gate_retry_max_ms (migration 0056, docs/llm-gate-plan.md) tune the
+ * gate's retry/queueing behavior (io/llm/llmGate.ts, llmQueue.ts, llmBackoff.ts) — read live on
+ * every complete() call, same no-restart shape as everything else in this file. The two
+ * max_concurrent keys are separate per-lane caps (interactive chat/system calls vs. background
+ * agent_routine calls), not one shared number, so a background sync/extraction burst can never
+ * delay a live turn the household is waiting on. Unset means "use the gate's own conservative
+ * built-in default" (llmGate.ts's own DEFAULT_* constants), not "unlimited"/"no retry" — same
+ * fallback shape as the agent_routine caps above.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -133,6 +143,11 @@ export const SETTING_NAMES = [
   'pia_proxy_url',
   'persona_name',
   'persona_description',
+  'llm_gate_max_concurrent',
+  'llm_gate_max_concurrent_agent_routine',
+  'llm_gate_max_retries',
+  'llm_gate_retry_base_ms',
+  'llm_gate_retry_max_ms',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

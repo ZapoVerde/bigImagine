@@ -45,6 +45,16 @@
  * still make one more call that pushes it over before the next one is refused. Call-count caps
  * are exact by contrast, since the count of calls made so far is always precisely known.
  *
+ * Retry/queueing (docs/llm-gate-plan.md, added 2026-08-06): base.complete() is retried internally
+ * on a retryable failure (llmRetryClassify.ts) with bounded exponential backoff (llmBackoff.ts),
+ * bounded by llm_gate_max_retries — invisible to the caller, who still just gets one promise that
+ * resolves or rejects once. Every attempt is admitted through a per-lane concurrency slot
+ * (llmQueue.ts) so a burst of calls can't saturate the provider. Every attempt is also its own
+ * llm_calls row, sharing one request_id — per §6's resolved "do retries count against caps"
+ * question, tallySince below now counts 'error' rows alongside 'ok': a retried attempt is real
+ * provider spend even when it ultimately fails, distinct from a 'refused' row (a preflight
+ * rejection that never reached the provider at all, and correctly excluded).
+ *
  * @api-declaration
  * createGatedLlmProvider(base, db, settings) — returns an LlmProvider wrapping base
  *
@@ -55,13 +65,27 @@
  *     external_io:     [Postgres (via db.withSystemScope), whatever `base` does]
  */
 
+import { randomUUID } from 'node:crypto';
 import type { PostgresClient } from '../postgres.js';
 import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { LlmCompleteOptions, LlmMessage, LlmProvider, LlmTurn, ToolDefinition } from './types.js';
 import { getCallContext } from './callContext.js';
+import { isRetryableLlmError } from './llmRetryClassify.js';
+import { computeBackoffMs } from './llmBackoff.js';
+import { withLaneSlot, type LlmLane } from './llmQueue.js';
 
 const DEFAULT_HOUSEHOLD_MAX_RUNS_PER_DAY = 20;
 const DEFAULT_HOUSEHOLD_MAX_TOKENS_PER_DAY = 200_000;
+
+const DEFAULT_MAX_CONCURRENT_INTERACTIVE = 3;
+const DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE = 1;
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_BASE_MS = 500;
+const DEFAULT_RETRY_MAX_MS = 8000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 interface JobCapRow {
   status: string;
@@ -86,9 +110,12 @@ async function loadJobCaps(db: PostgresClient, jobId: string): Promise<JobCapRow
 
 async function tallySince(db: PostgresClient, where: string, params: unknown[]): Promise<TallyRow> {
   const rows = await db.withSystemScope((session) =>
+    // outcome in ('ok', 'error'), not just 'ok': a retried attempt that ultimately failed is
+    // still real provider spend (docs/llm-gate-plan.md §6). 'refused' rows are deliberately
+    // excluded — a preflight rejection never reached the provider at all.
     session.query<{ calls: string; tokens: string }>(
       `select count(*)::text as calls, coalesce(sum(total_tokens), 0)::text as tokens
-       from llm_calls where outcome = 'ok' and created_at > now() - interval '1 day' and ${where}`,
+       from llm_calls where outcome in ('ok', 'error') and created_at > now() - interval '1 day' and ${where}`,
       params,
     ),
   );
@@ -108,12 +135,14 @@ async function logCall(
     totalTokens: number | null;
     durationMs: number | null;
     reason: string | null;
+    requestId: string;
+    attempt: number;
   },
 ): Promise<void> {
   await db.withSystemScope((session) =>
     session.query(
-      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason, request_id, attempt)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         fields.userId,
         fields.kind,
@@ -125,6 +154,8 @@ async function logCall(
         fields.totalTokens,
         fields.durationMs,
         fields.reason,
+        fields.requestId,
+        fields.attempt,
       ],
     ),
   );
@@ -224,44 +255,65 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
             totalTokens: null,
             durationMs: null,
             reason,
+            requestId: randomUUID(),
+            attempt: 0,
           });
           throw err;
         }
       }
 
-      const callStart = Date.now();
-      let turn: LlmTurn;
-      try {
-        turn = await base.complete(messages, tools, options);
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        await logCall(db, {
-          userId: ctx.userId,
-          kind: ctx.kind,
-          taskId: ctx.taskId,
-          jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
-          outcome: 'error',
-          promptTokens: null,
-          completionTokens: null,
-          totalTokens: null,
-          durationMs: Date.now() - callStart,
-          reason,
-        });
-        throw err;
-      }
+      const lane: LlmLane = ctx.kind === 'agent_routine' ? 'agent_routine' : 'interactive';
+      const maxConcurrent = Number(
+        (await settings.get(lane === 'agent_routine' ? 'llm_gate_max_concurrent_agent_routine' : 'llm_gate_max_concurrent')) ??
+          (lane === 'agent_routine' ? DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE : DEFAULT_MAX_CONCURRENT_INTERACTIVE),
+      );
+      const maxRetries = Number((await settings.get('llm_gate_max_retries')) ?? DEFAULT_MAX_RETRIES);
+      const retryBaseMs = Number((await settings.get('llm_gate_retry_base_ms')) ?? DEFAULT_RETRY_BASE_MS);
+      const retryMaxMs = Number((await settings.get('llm_gate_retry_max_ms')) ?? DEFAULT_RETRY_MAX_MS);
 
-      await logCall(db, {
-        userId: ctx.userId,
-        kind: ctx.kind,
-        taskId: ctx.taskId,
-        jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
-        outcome: 'ok',
-        promptTokens: turn.usage?.promptTokens ?? null,
-        completionTokens: turn.usage?.completionTokens ?? null,
-        totalTokens: turn.usage?.totalTokens ?? null,
-        durationMs: Date.now() - callStart,
-        reason: null,
-      });
+      const requestId = randomUUID();
+      let turn: LlmTurn | undefined;
+      for (let attempt = 0; ; attempt++) {
+        const callStart = Date.now();
+        try {
+          turn = await withLaneSlot(lane, maxConcurrent, () => base.complete(messages, tools, options));
+          await logCall(db, {
+            userId: ctx.userId,
+            kind: ctx.kind,
+            taskId: ctx.taskId,
+            jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
+            outcome: 'ok',
+            promptTokens: turn.usage?.promptTokens ?? null,
+            completionTokens: turn.usage?.completionTokens ?? null,
+            totalTokens: turn.usage?.totalTokens ?? null,
+            durationMs: Date.now() - callStart,
+            reason: null,
+            requestId,
+            attempt,
+          });
+          break;
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          await logCall(db, {
+            userId: ctx.userId,
+            kind: ctx.kind,
+            taskId: ctx.taskId,
+            jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
+            outcome: 'error',
+            promptTokens: null,
+            completionTokens: null,
+            totalTokens: null,
+            durationMs: Date.now() - callStart,
+            reason,
+            requestId,
+            attempt,
+          });
+
+          const willRetry = isRetryableLlmError(err) && attempt < maxRetries;
+          if (!willRetry) throw err;
+          await sleep(computeBackoffMs(attempt, retryBaseMs, retryMaxMs));
+        }
+      }
 
       if (ctx.kind === 'agent_routine') {
         await reactToBreach(db, settings, ctx.taskId);

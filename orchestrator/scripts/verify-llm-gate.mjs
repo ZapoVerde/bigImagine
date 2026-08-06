@@ -4,6 +4,12 @@
 // (job or household, calls or tokens) is already at/over its ceiling from prior calls, and a
 // successful call that pushes a tally over its cap trips the same breaker a human would (that
 // job's own status -> 'capped', or the household-wide agent_routines_enabled switch).
+//
+// Also proves docs/llm-gate-plan.md's retry/queueing extension: a retryable failure (5xx/429, or
+// a bare thrown transport error) is retried internally up to llm_gate_max_retries times with
+// every attempt sharing one request_id, a non-retryable failure (4xx, malformed tool arguments)
+// skips retry entirely, and retried attempts still count toward agent_routine caps (outcome
+// 'error' rows, not just 'ok').
 
 import { createGatedLlmProvider } from '../dist/io/llm/llmGate.js';
 import { runWithCallContext } from '../dist/io/llm/callContext.js';
@@ -45,13 +51,16 @@ function createFakePool(jobs) {
           }
 
           if (sql.includes('insert into llm_calls')) {
-            const [userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, reason] = params;
-            llmCalls.push({ userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, reason });
+            const [userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt] =
+              params;
+            llmCalls.push({ userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt });
             return { rows: [] };
           }
 
+          // tallySince counts outcome in ('ok', 'error') — a retried attempt is still real spend
+          // (docs/llm-gate-plan.md §6), only 'refused' (never reached the provider) is excluded.
           if (sql.includes('from llm_calls where outcome') && sql.includes('job_id = $1')) {
-            const rows = llmCalls.filter((c) => c.outcome === 'ok' && c.jobId === params[0]);
+            const rows = llmCalls.filter((c) => (c.outcome === 'ok' || c.outcome === 'error') && c.jobId === params[0]);
             return {
               rows: [
                 {
@@ -63,7 +72,7 @@ function createFakePool(jobs) {
           }
 
           if (sql.includes('from llm_calls where outcome') && sql.includes("kind = 'agent_routine'")) {
-            const rows = llmCalls.filter((c) => c.outcome === 'ok' && c.kind === 'agent_routine');
+            const rows = llmCalls.filter((c) => (c.outcome === 'ok' || c.outcome === 'error') && c.kind === 'agent_routine');
             return {
               rows: [
                 {
@@ -228,12 +237,13 @@ function createFakeBase(turns) {
   assert(!!(await settings.get('agent_routines_disabled_reason')), 'the switch records why it flipped itself off');
 }
 
-// --- a base provider failure is logged as 'error' and rethrown, not swallowed ---
+// --- a base provider failure, with retries off, is logged as 'error' and rethrown after one
+// attempt, not swallowed ---
 {
   const jobs = new Map();
   const pool = createFakePool(jobs);
   const db = createPostgresClient(pool);
-  const settings = createFakeSettings();
+  const settings = createFakeSettings({ llm_gate_max_retries: '0' });
   const base = createFakeBase([new Error('upstream API exploded')]);
   const gated = createGatedLlmProvider(base, db, settings);
 
@@ -245,6 +255,87 @@ function createFakeBase(turns) {
   }
   assert(threw, 'a base provider error propagates unchanged, not masked by the gate');
   assert(pool.llmCalls.length === 1 && pool.llmCalls[0].outcome === 'error', 'a base provider failure is still logged for the audit trail');
+}
+
+// --- retryable failure (bare thrown error, no HTTP status -> transport-level) succeeds on a
+// later internal attempt; caller sees one resolved promise, never the intermediate failures ---
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({ llm_gate_max_retries: '3', llm_gate_retry_base_ms: '1', llm_gate_retry_max_ms: '2' });
+  const base = createFakeBase([
+    new Error('fetch failed'),
+    new Error('fetch failed'),
+    { message: { role: 'assistant', content: 'third time lucky' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings);
+
+  const turn = await runWithCallContext({ taskId: 'chat-3', kind: 'chat', userId: 'u1' }, () =>
+    gated.complete([{ role: 'user', content: 'hi' }], []),
+  );
+  assert(turn.message.content === 'third time lucky', 'a call that fails twice on a retryable error still resolves once it succeeds');
+  assert(pool.llmCalls.length === 3, 'every attempt (2 failures + 1 success) gets its own llm_calls row');
+  assert(
+    pool.llmCalls.every((c) => c.requestId === pool.llmCalls[0].requestId),
+    'every attempt of the same logical call shares one request_id',
+  );
+  assert(
+    pool.llmCalls.map((c) => c.attempt).join(',') === '0,1,2',
+    'attempt increments per retry, 0-indexed',
+  );
+  assert(
+    pool.llmCalls[0].outcome === 'error' && pool.llmCalls[1].outcome === 'error' && pool.llmCalls[2].outcome === 'ok',
+    'the two failed attempts are logged as error, the final one as ok',
+  );
+}
+
+// --- a non-retryable failure (4xx) skips retry entirely, even with retries available ---
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({ llm_gate_max_retries: '3', llm_gate_retry_base_ms: '1', llm_gate_retry_max_ms: '2' });
+  const base = createFakeBase([
+    new Error('OpenAI-compatible API error 401: invalid api key'),
+    { message: { role: 'assistant', content: 'should never be reached' }, toolCalls: [] },
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings);
+
+  let threw = false;
+  try {
+    await runWithCallContext({ taskId: 'chat-4', kind: 'chat', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'hi' }], []));
+  } catch (err) {
+    threw = err.message.includes('401');
+  }
+  assert(threw, 'a 401 (request itself is wrong) is not retried and propagates immediately');
+  assert(pool.llmCalls.length === 1, 'exactly one attempt is made — no retry burned on a non-retryable failure');
+}
+
+// --- retried attempts still count toward agent_routine caps, not just the eventual success ---
+{
+  const jobs = new Map([['job-6', { job_id: 'job-6', status: 'active', max_runs_per_day: 2, max_tokens_per_day: 50000 }]]);
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({
+    agent_routines_enabled: 'true',
+    agent_routine_max_runs_per_day: '20',
+    agent_routine_max_tokens_per_day: '200000',
+    llm_gate_max_retries: '2',
+    llm_gate_retry_base_ms: '1',
+    llm_gate_retry_max_ms: '2',
+  });
+  const base = createFakeBase([
+    new Error('fetch failed'),
+    { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings);
+
+  await runWithCallContext({ taskId: 'job-6', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
+  assert(
+    jobs.get('job-6').status === 'capped',
+    'the one failed attempt plus the one successful attempt together reach the 2-call cap — retries are not free',
+  );
 }
 
 if (process.exitCode) {
