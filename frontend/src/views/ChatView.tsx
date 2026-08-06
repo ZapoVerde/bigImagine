@@ -16,6 +16,7 @@ import {
   getChatTurnStatus,
   listFolders,
   listToolNames,
+  swipeMessage,
   truncateMessagesFrom,
   updateChat,
   uploadAttachment,
@@ -33,6 +34,7 @@ import type {
   PromptPreset,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
+import PromptInspectorPanel from '../components/promptInspector/PromptInspectorPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
@@ -73,12 +75,15 @@ interface ChatViewProps {
 
 // messageId is set only once a message round-trips through the server and comes back from
 // getChat — undefined for the brief optimistic window between sending and that refetch landing.
-// Copy/edit/rerun/delete all need a real id (they're per-message API calls), so they're simply
+// Copy/edit/swipe/delete all need a real id (they're per-message API calls), so they're simply
 // not offered on a message that doesn't have one yet.
 interface DisplayMessage {
   messageId?: string;
   role: 'user' | 'assistant';
   content: string;
+  /** Swipe capability on the last LLM response — present only once this message has been
+   *  regenerated at least once. See api/types.ts's StoredChatMessage for the shape. */
+  swipes?: { index: number; count: number };
 }
 
 function toWireMessages(messages: DisplayMessage[]): ChatMessage[] {
@@ -137,6 +142,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Which message a swipe (prev/next/regenerate) is in flight for, if any — deliberately not the
+  // same flag `sending` uses, since a swipe replaces one message's content in place and shouldn't
+  // render the "new turn incoming" pending bubble the way send/rerun's own full turns do.
+  const [swipingId, setSwipingId] = useState<string | null>(null);
 
   // Settings rail state — collapsed by default, but (unlike the old gear-icon toggle) available
   // even before a chat exists, so a system prompt/model/tools can be set up before the first
@@ -155,6 +164,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // one of the two is shown at a time — this tracks which. Irrelevant on desktop, where both
   // panes are always visible and this toggle is hidden.
   const [mobileShowCanvas, setMobileShowCanvas] = useState(false);
+  // Prompt Inspector: opt-in per bi_principles.md §5 (specialist views are layered on top, never
+  // required) — a household member reviewing exactly what an 'rp' chat's next turn would send.
+  // Only offered for 'rp' chats (the header button below is gated on activeChat?.kind === 'rp');
+  // mounted only while open, same conditional-render shape as CanvasPanel.
+  const [promptInspectorOpen, setPromptInspectorOpen] = useState(false);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -175,12 +189,14 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setMessages([]);
       setSettingsCollapsed(true);
       setMobileShowCanvas(false);
+      setPromptInspectorOpen(false);
       setError(null);
       setEditingId(null);
       return;
     }
     if (activeChat?.chatId === chatId) return;
     setMobileShowCanvas(false);
+    setPromptInspectorOpen(false);
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
@@ -213,7 +229,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // a tool's focusHint — shows up without a separate request.
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
-    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content })));
+    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, swipes: m.swipes })));
     setActiveChat(detail.session);
   }
 
@@ -348,25 +364,28 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  /** Regenerates one assistant reply: truncates it (and anything after it, though there normally
-   *  isn't anything — rerun is only offered on the last reply) server-side, then resends the
-   *  now-shorter history unchanged. handleChatCompletions recognizes a same-length resend and
-   *  appends only the new reply, not a duplicate of the user message that prompted it. */
-  async function rerun(messageId: string) {
-    if (!activeChat || sending) return;
+  /** Swipe capability on the last LLM response: 'prev'/'next' mostly just swap messageId's active
+   *  content to an already-generated variant, in place — no resend, nothing else in the
+   *  conversation changes. 'next' past the newest stored variant instead triggers a fresh
+   *  regeneration server-side (still in place, via recordSwipe) — this is also what "Rerun" is
+   *  now, so the Rerun button below just calls swipe(id, 'next'). Only ever offered on the
+   *  chat's current last assistant reply (isLastAssistant below); the server enforces this too. */
+  async function swipe(messageId: string, direction: 'prev' | 'next') {
+    if (!activeChat || sending || swipingId) return;
     setError(null);
-    setSending(true);
+    setSwipingId(messageId);
     try {
-      await truncateMessagesFrom(activeChat.chatId, messageId, apiKey);
-      const idx = messages.findIndex((m) => m.messageId === messageId);
-      const kept = idx === -1 ? messages : messages.slice(0, idx);
-      setMessages(kept);
-      await chatCompletion(toWireMessages(kept), apiKey, activeChat.chatId);
-      await refreshActiveMessages(activeChat.chatId);
+      const result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
+      if ('message' in result) {
+        setMessages((prev) =>
+          prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, swipes: result.message.swipes } : m)),
+        );
+      }
+      // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to rerun');
+      setError(err instanceof ApiError ? err.message : 'failed to swipe');
     } finally {
-      setSending(false);
+      setSwipingId(null);
     }
   }
 
@@ -476,6 +495,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
   return (
     <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}>
+      {promptInspectorOpen && activeChat?.kind === 'rp' && (
+        <PromptInspectorPanel
+          apiKey={apiKey}
+          chatId={activeChat.chatId}
+          refreshToken={messages.length}
+          onClose={() => setPromptInspectorOpen(false)}
+        />
+      )}
+
       <div className="chat-main">
         {error && <div className="error-banner">{error}</div>}
 
@@ -487,6 +515,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             </button>
           )}
           {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
+          {activeChat?.kind === 'rp' && (
+            <button
+              type="button"
+              className="chat-prompt-inspector-summon"
+              title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
+              onClick={() => setPromptInspectorOpen((v) => !v)}
+            >
+              🧾
+            </button>
+          )}
           {activeChat?.canvasNoteId && (
             <button
               type="button"
@@ -549,9 +587,33 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                         </button>
                         {m.role === 'user' && <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>}
                         {m.role === 'assistant' && isLastAssistant && (
-                          <button onClick={() => rerun(m.messageId!)} disabled={sending}>
-                            Rerun
-                          </button>
+                          <span className="swipe-controls">
+                            {m.swipes && m.swipes.count > 1 && (
+                              <>
+                                <button
+                                  onClick={() => swipe(m.messageId!, 'prev')}
+                                  disabled={sending || swipingId === m.messageId || m.swipes.index === 0}
+                                  title="Previous reply"
+                                >
+                                  ‹
+                                </button>
+                                <span className="swipe-count">
+                                  {m.swipes.index + 1}/{m.swipes.count}
+                                </span>
+                              </>
+                            )}
+                            <button
+                              onClick={() => swipe(m.messageId!, 'next')}
+                              disabled={sending || swipingId === m.messageId}
+                              title={m.swipes && m.swipes.index < m.swipes.count - 1 ? 'Next reply' : 'Regenerate this reply'}
+                            >
+                              {swipingId === m.messageId
+                                ? '…'
+                                : m.swipes && m.swipes.index < m.swipes.count - 1
+                                  ? '›'
+                                  : 'Rerun'}
+                            </button>
+                          </span>
                         )}
                         <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
                           Fork from here
@@ -600,7 +662,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 768) {
                 e.preventDefault();
                 send();
               }

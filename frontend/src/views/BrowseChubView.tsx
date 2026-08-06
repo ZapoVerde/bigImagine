@@ -1,34 +1,37 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { ApiError, callTool } from '../api/client';
-import type { ChubSearchResult, ImportedChubCharacter } from '../api/types';
-import ChubAvatarThumb from '../components/ChubAvatarThumb';
+import type { ChubCharacterSummary, ChubSearchResult, ImportedChubCharacter } from '../api/types';
+import ChubFilterPanel, {
+  CHUB_SORT_VALUES, RECENCY_BUCKETS, type ChubSort, type RecencyBucket, type TagState,
+} from '../components/ChubFilterPanel';
+import ChubResultCard, { type ImportState } from '../components/ChubResultCard';
 import './BrowseChubView.css';
 
 interface BrowseChubViewProps {
   apiKey: string | null;
 }
 
-type ImportState = { status: 'idle' } | { status: 'importing' } | { status: 'imported' } | { status: 'error'; message: string };
-
 // Must match searchChubCharactersTool.ts's own PAGE_SIZE — the tool doesn't echo it back in its
 // response, so this is the one place that constant is duplicated rather than shared (no shared
 // frontend/backend module exists to hold it).
-const PAGE_SIZE = 24;
-
-// chub.ai exposes no "list all topics" endpoint (confirmed: GET /tags is 405) — a curated pick of
-// commonly-seen topics (from live search responses inspected while building this) stands in for a
-// dynamic vocabulary. Case-sensitive, matches chub's own topic spelling exactly.
-const CHUB_TAG_OPTIONS = [
-  'Fantasy', 'Sci-Fi', 'Romance', 'Adventure', 'Comedy', 'Horror', 'Drama', 'Slice of Life',
-  'Isekai', 'RPG', 'Anime', 'Multiple Characters', 'Male', 'Female', 'Non-Human', 'Villain',
-  'Dominant', 'Submissive', 'Wholesome', 'Dark',
-];
-
-type TagState = 'include' | 'exclude';
+const PAGE_SIZE = 48;
 
 // Persisted like useTheme.ts's display preference — a per-device browsing filter, not household
 // orchestrator config, so localStorage is the right home for it (bb_principles.md §13).
 const TAG_STATES_STORAGE_KEY = 'bb_chub_tag_states';
+const FILTERS_STORAGE_KEY = 'bb_chub_filters';
+
+interface StoredFilters {
+  sort: ChubSort;
+  minTokens: number | undefined;
+  maxTokens: number | undefined;
+  minRating: number | undefined;
+  recencyBucket: RecencyBucket;
+}
+
+const DEFAULT_FILTERS: StoredFilters = {
+  sort: 'default', minTokens: undefined, maxTokens: undefined, minRating: undefined, recencyBucket: 'all',
+};
 
 function loadStoredTagStates(): Record<string, TagState> {
   try {
@@ -45,11 +48,42 @@ function loadStoredTagStates(): Record<string, TagState> {
   }
 }
 
+function loadStoredFilters(): StoredFilters {
+  try {
+    const raw = localStorage.getItem(FILTERS_STORAGE_KEY);
+    if (!raw) return DEFAULT_FILTERS;
+    const p = JSON.parse(raw) as Record<string, unknown>;
+    return {
+      sort: (CHUB_SORT_VALUES as readonly string[]).includes(p.sort as string) ? (p.sort as ChubSort) : DEFAULT_FILTERS.sort,
+      minTokens: typeof p.minTokens === 'number' ? p.minTokens : undefined,
+      maxTokens: typeof p.maxTokens === 'number' ? p.maxTokens : undefined,
+      minRating: typeof p.minRating === 'number' ? p.minRating : undefined,
+      recencyBucket: RECENCY_BUCKETS.includes(p.recencyBucket as RecencyBucket) ? (p.recencyBucket as RecencyBucket) : DEFAULT_FILTERS.recencyBucket,
+    };
+  } catch {
+    return DEFAULT_FILTERS;
+  }
+}
+
 // Tri-state per tag: absent (neutral) -> include -> exclude -> absent, cycling on each tap.
 function cycleTagState(current: TagState | undefined): TagState | undefined {
   if (current === undefined) return 'include';
   if (current === 'include') return 'exclude';
   return undefined;
+}
+
+const RECENCY_BUCKET_MS: Record<Exclude<RecencyBucket, 'all'>, number> = {
+  day: 24 * 60 * 60 * 1000,
+  week: 7 * 24 * 60 * 60 * 1000,
+  month: 30 * 24 * 60 * 60 * 1000,
+  year: 365 * 24 * 60 * 60 * 1000,
+};
+
+function withinRecencyBucket(createdAt: string, bucket: RecencyBucket): boolean {
+  if (bucket === 'all') return true;
+  const created = Date.parse(createdAt);
+  if (Number.isNaN(created)) return true; // no date to judge — don't hide it
+  return Date.now() - created <= RECENCY_BUCKET_MS[bucket];
 }
 
 // The Browse Chub screen (plan: "search/filter, image grid, per-card Import button") — chub.ai
@@ -62,6 +96,9 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [page, setPage] = useState(1);
   const [tagStates, setTagStates] = useState<Record<string, TagState>>(loadStoredTagStates);
+  const [filters, setFilters] = useState<StoredFilters>(loadStoredFilters);
+  const [filtersCollapsed, setFiltersCollapsed] = useState(true);
+  const [topicVocab, setTopicVocab] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<ChubSearchResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,10 +106,6 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
 
   const includeTags = useMemo(
     () => Object.entries(tagStates).filter(([, s]) => s === 'include').map(([t]) => t),
-    [tagStates],
-  );
-  const excludeTags = useMemo(
-    () => Object.entries(tagStates).filter(([, s]) => s === 'exclude').map(([t]) => t),
     [tagStates],
   );
 
@@ -87,7 +120,10 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
             query: searchQuery || undefined,
             page: searchPage,
             tags: includeTags.length > 0 ? includeTags : undefined,
-            excludeTags: excludeTags.length > 0 ? excludeTags : undefined,
+            sort: filters.sort === 'default' ? undefined : filters.sort,
+            minTokens: filters.minTokens,
+            maxTokens: filters.maxTokens,
+            minRating: filters.minRating,
           },
           apiKey,
         );
@@ -99,7 +135,7 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         setLoading(false);
       }
     },
-    [apiKey, includeTags, excludeTags],
+    [apiKey, includeTags, filters.sort, filters.minTokens, filters.maxTokens, filters.minRating],
   );
 
   useEffect(() => {
@@ -109,6 +145,39 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
   useEffect(() => {
     localStorage.setItem(TAG_STATES_STORAGE_KEY, JSON.stringify(tagStates));
   }, [tagStates]);
+
+  useEffect(() => {
+    localStorage.setItem(FILTERS_STORAGE_KEY, JSON.stringify(filters));
+  }, [filters]);
+
+  // Grows across the session as new topics are seen — never reset on page change, never a fixed
+  // guess-list (chub.ai has no "list all topics" endpoint, confirmed: GET /tags is 405).
+  useEffect(() => {
+    if (!result) return;
+    setTopicVocab((prev) => {
+      let changed = false;
+      const next = new Set(prev);
+      for (const card of result.results) {
+        for (const topic of card.topics) {
+          if (!next.has(topic)) {
+            next.add(topic);
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [result]);
+
+  const visibleResults = useMemo<ChubCharacterSummary[]>(() => {
+    if (!result) return [];
+    return result.results.filter((card) => {
+      if (card.topics.some((t) => tagStates[t] === 'exclude')) return false;
+      return withinRecencyBucket(card.createdAt, filters.recencyBucket);
+    });
+  }, [result, tagStates, filters.recencyBucket]);
+
+  const topicOptions = useMemo(() => Array.from(topicVocab).sort(), [topicVocab]);
 
   function onSubmitSearch(e: FormEvent) {
     e.preventDefault();
@@ -149,79 +218,77 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
 
   return (
     <div className="browse-chub-view">
-      <form className="browse-chub-search" onSubmit={onSubmitSearch}>
-        <input
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search chub.ai characters&hellip;"
-        />
-        <button type="submit">Search</button>
-      </form>
-
-      <div className="browse-chub-tags">
-        {CHUB_TAG_OPTIONS.map((tag) => {
-          const state = tagStates[tag];
-          return (
-            <button
-              key={tag}
-              type="button"
-              className={`tag-chip chub-tag-chip${state ? ` ${state}` : ''}`}
-              onClick={() => onTapTag(tag)}
-            >
-              {tag}
-            </button>
-          );
-        })}
-        {Object.keys(tagStates).length > 0 && (
-          <button type="button" className="browse-chub-clear-tags" onClick={clearAllTags}>
-            Clear tags
+      <div className="browse-chub-main">
+        <div className="browse-chub-toolbar">
+          <form className="browse-chub-search" onSubmit={onSubmitSearch}>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search chub.ai characters&hellip;"
+            />
+            <button type="submit">Search</button>
+          </form>
+          <button
+            type="button"
+            className="browse-chub-filter-summon mobile-only"
+            title={filtersCollapsed ? 'Show filters' : 'Hide filters'}
+            onClick={() => setFiltersCollapsed((c) => !c)}
+          >
+            ⚙ Filters
           </button>
+        </div>
+
+        {error && <div className="error-banner">{error}</div>}
+        {loading && <div className="empty-state">Loading&hellip;</div>}
+        {!loading && result && visibleResults.length === 0 && <div className="empty-state">No results.</div>}
+
+        {!loading && result && visibleResults.length > 0 && (
+          <>
+            <div className="browse-chub-grid">
+              {visibleResults.map((card) => (
+                <ChubResultCard
+                  key={card.fullPath}
+                  card={card}
+                  apiKey={apiKey}
+                  importState={importStates[card.fullPath] ?? { status: 'idle' }}
+                  onImport={() => void importCharacter(card.fullPath)}
+                />
+              ))}
+            </div>
+
+            <div className="browse-chub-pagination">
+              <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
+                &larr; Prev
+              </button>
+              <span>
+                Page {page} of {totalPages} &mdash; {result.count} results
+              </span>
+              <button type="button" onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>
+                Next &rarr;
+              </button>
+            </div>
+          </>
         )}
       </div>
 
-      {error && <div className="error-banner">{error}</div>}
-      {loading && <div className="empty-state">Loading&hellip;</div>}
-      {!loading && result && result.results.length === 0 && <div className="empty-state">No results.</div>}
-
-      {!loading && result && result.results.length > 0 && (
-        <>
-          <div className="browse-chub-grid">
-            {result.results.map((card) => {
-              const state = importStates[card.fullPath] ?? { status: 'idle' };
-              return (
-                <div key={card.fullPath} className="browse-chub-card">
-                  <ChubAvatarThumb avatarUrl={card.avatarUrl} apiKey={apiKey} className="browse-chub-card-avatar" />
-                  <div className="browse-chub-card-name">{card.name}</div>
-                  <div className="browse-chub-card-tagline">{card.tagline}</div>
-                  <button
-                    type="button"
-                    className="browse-chub-import-btn"
-                    disabled={state.status === 'importing' || state.status === 'imported'}
-                    onClick={() => void importCharacter(card.fullPath)}
-                  >
-                    {state.status === 'importing' && 'Importing…'}
-                    {state.status === 'imported' && 'Imported ✓'}
-                    {(state.status === 'idle' || state.status === 'error') && 'Import'}
-                  </button>
-                  {state.status === 'error' && <div className="browse-chub-card-error">{state.message}</div>}
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="browse-chub-pagination">
-            <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
-              &larr; Prev
-            </button>
-            <span>
-              Page {page} of {totalPages} &mdash; {result.count} results
-            </span>
-            <button type="button" onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>
-              Next &rarr;
-            </button>
-          </div>
-        </>
-      )}
+      <ChubFilterPanel
+        collapsed={filtersCollapsed}
+        onToggleCollapsed={() => setFiltersCollapsed((c) => !c)}
+        topics={topicOptions}
+        tagStates={tagStates}
+        onTapTag={onTapTag}
+        onClearAllTags={clearAllTags}
+        sort={filters.sort}
+        onSortChange={(sort) => { setPage(1); setFilters((f) => ({ ...f, sort })); }}
+        minTokens={filters.minTokens}
+        onMinTokensChange={(minTokens) => { setPage(1); setFilters((f) => ({ ...f, minTokens })); }}
+        maxTokens={filters.maxTokens}
+        onMaxTokensChange={(maxTokens) => { setPage(1); setFilters((f) => ({ ...f, maxTokens })); }}
+        minRating={filters.minRating}
+        onMinRatingChange={(minRating) => { setPage(1); setFilters((f) => ({ ...f, minRating })); }}
+        recencyBucket={filters.recencyBucket}
+        onRecencyBucketChange={(recencyBucket) => setFilters((f) => ({ ...f, recencyBucket }))}
+      />
     </div>
   );
 }

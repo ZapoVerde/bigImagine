@@ -1,4 +1,12 @@
+/* Rail-as-sibling-of-main split, mirroring ChatView.css's .chat-view / .chat-main. */
 .browse-chub-view {
+  height: 100%;
+  display: flex;
+}
+
+.browse-chub-main {
+  flex: 1;
+  min-width: 0;
   height: 100%;
   overflow-y: auto;
   padding: 1.2rem 1.6rem;
@@ -7,7 +15,24 @@
   gap: 1rem;
 }
 
+.browse-chub-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.browse-chub-filter-summon {
+  flex-shrink: 0;
+  padding: 0.5rem 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
 .browse-chub-search {
+  flex: 1;
   display: flex;
   gap: 0.5rem;
 }
@@ -37,43 +62,6 @@
 
 .browse-chub-search button:hover {
   background: var(--color-accent-hover);
-}
-
-.browse-chub-tags {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem;
-}
-
-/* Tri-state: neutral (base .tag-chip look, shared with DocumentsView's picker), .include (green),
-   .exclude (red-toned, struck through so the excluded state reads unambiguously at a glance). */
-.chub-tag-chip.include {
-  background: var(--color-accent-subtle);
-  color: var(--color-accent);
-  border-color: transparent;
-}
-
-.chub-tag-chip.exclude {
-  background: var(--color-danger-bg);
-  color: var(--color-danger);
-  border-color: transparent;
-  text-decoration: line-through;
-}
-
-.browse-chub-clear-tags {
-  font: inherit;
-  font-size: var(--font-size-2xs);
-  padding: 0.2rem 0.55rem;
-  border-radius: 999px;
-  border: 1px dashed var(--color-border-subtle);
-  background: transparent;
-  color: var(--color-text-faint);
-  cursor: pointer;
-}
-
-.browse-chub-clear-tags:hover {
-  background: var(--color-hover-surface);
 }
 
 /* Cards stack to a single column on a narrow phone screen — auto-fill/minmax degrades gracefully
@@ -121,6 +109,30 @@
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+.browse-chub-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.1rem 0.5rem;
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-faint);
+}
+
+.browse-chub-card-topics {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.25rem;
+}
+
+.browse-chub-card-topic {
+  font-size: var(--font-size-2xs);
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--color-hover-surface);
+  color: var(--color-text-secondary);
 }
 
 .browse-chub-import-btn {

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import { ApiError, callTool, createChat, exportCharacterCard, importCharacterCard } from '../api/client';
-import type { CharacterDetail, CharacterSummary } from '../api/types';
+import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
 import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
 import './CharactersView.css';
 
@@ -292,8 +292,11 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
 
   // Same shape as startChat, but kind: 'rp' (db/migrations/0049_chat_kind.sql) — the created chat
   // gets no tool access and no household_memory leakage by construction (chatSessions.ts), and
-  // opens into its own RP sidebar section/tab type rather than the general chat one. No Prompt
-  // Stack picker here — that lives in the RP chat's own settings panel once it's open.
+  // opens into its own RP sidebar section/tab type rather than the general chat one. The Prompt
+  // Stack picker itself still lives in the RP chat's own settings panel once it's open — this just
+  // auto-applies whichever preset the user has marked default (migration 0061), the same explicit
+  // signal a manual Apply click would send, so a fresh RP chat doesn't start with no stack at all
+  // unless the user genuinely has no default set.
   async function startRp() {
     if (!detail?.found) return;
     setStartingRp(true);
@@ -301,11 +304,27 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
     try {
       const chat = await createChat(apiKey, { title: detail.name, kind: 'rp' });
       await callTool('apply_character_to_chat', { characterId: detail.characterId, chatId: chat.chatId }, apiKey);
+      await applyDefaultStack(chat.chatId);
       onOpenRp(chat.chatId, detail.name);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to start RP');
     } finally {
       setStartingRp(false);
+    }
+  }
+
+  // Best-effort — same "won't block on this" shape removePreset's delete_prompt_preset call uses:
+  // a missing or failed default stack shouldn't stop the RP chat from opening, just leave it with
+  // no system prompt yet (the same state it started in before this feature existed).
+  async function applyDefaultStack(chatId: string) {
+    try {
+      const stacks = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
+      const defaultStack = stacks.find((s) => s.isDefault);
+      if (defaultStack) {
+        await callTool('apply_prompt_stack_to_chat', { chatId, presetId: defaultStack.presetId }, apiKey);
+      }
+    } catch {
+      // best-effort
     }
   }
 

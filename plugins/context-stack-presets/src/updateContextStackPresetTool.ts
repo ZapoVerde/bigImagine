@@ -66,6 +66,7 @@ export function createUpdateContextStackPresetTool(): RegisteredTool {
                 enabled: { type: 'boolean' },
                 customRole: { type: 'string', enum: ['system', 'user', 'assistant'] },
                 customContent: { type: 'string' },
+                label: { type: 'string', description: 'Optional display name for this slot. Cosmetic only.' },
               },
               required: ['slotType'],
               additionalProperties: false,
@@ -100,16 +101,16 @@ export function createUpdateContextStackPresetTool(): RegisteredTool {
         slotRows = [];
         for (const [position, slot] of args.slots.entries()) {
           const [row] = await ctx.db.query<SlotRow>(
-            `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content)
-             values ($1, $2, $3, $4, $5, $6, $7)
-             returning slot_type, marker_key, enabled, custom_role, custom_content`,
+            `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)
+             returning slot_type, marker_key, enabled, custom_role, custom_content, label`,
             slotInputToInsertParams(slot, args.presetId, position),
           );
           slotRows.push(row!);
         }
       } else {
         slotRows = await ctx.db.query<SlotRow>(
-          `select slot_type, marker_key, enabled, custom_role, custom_content
+          `select slot_type, marker_key, enabled, custom_role, custom_content, label
            from context_stack_slots where preset_id = $1 order by position`,
           [args.presetId],
         );

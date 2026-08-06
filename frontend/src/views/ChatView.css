@@ -71,6 +71,23 @@
   background: var(--color-hover-surface);
 }
 
+/* Not mobile-only, unlike chat-settings-summon above — the Prompt Inspector panel has no
+   persistent desktop rail of its own to toggle from (PromptInspectorPanel.css), so this header
+   button is the only way to open it on any screen size. */
+.chat-prompt-inspector-summon {
+  background: none;
+  border: none;
+  font-size: var(--font-size-base);
+  padding: 0.3rem 0.5rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.chat-prompt-inspector-summon:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
 .chat-title {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
@@ -442,6 +459,23 @@
   background: none;
   opacity: 1;
   text-decoration: underline;
+}
+
+.swipe-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.swipe-controls button:disabled {
+  opacity: 0.3;
+  cursor: default;
+  text-decoration: none;
+}
+
+.swipe-count {
+  font-size: var(--font-size-xs);
+  opacity: 0.65;
 }
 
 .message-edit {

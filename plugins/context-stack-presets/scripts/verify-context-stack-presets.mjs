@@ -40,6 +40,13 @@ function createFakePool() {
   const characters = [];
   const chatSessions = [];
   const chatMessages = [];
+  // users has no RLS of its own (0002's own comment) — just a plain array, one row per known test
+  // user, each starting with no default prompt stack (migration 0061).
+  const users = [
+    { user_id: '11111111-1111-1111-1111-111111111111', default_context_stack_preset_id: null },
+    { user_id: '22222222-2222-2222-2222-222222222222', default_context_stack_preset_id: null },
+    { user_id: '33333333-3333-3333-3333-333333333333', default_context_stack_preset_id: null },
+  ];
   let counter = 0;
   let tick = 0;
   const nextUpdatedAt = () => `2026-08-04T00:00:${String(++tick).padStart(2, '0')}Z`;
@@ -50,13 +57,13 @@ function createFakePool() {
   const standardId = 'preset-standard';
   presets.push({ preset_id: standardId, user_id: SYSTEM_USER_ID, name: 'Standard', is_builtin: true, updated_at: nextUpdatedAt() });
   slots.push(
-    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null },
-    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null },
-    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null },
+    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null },
+    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null, label: null },
+    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null },
   );
   const minimalId = 'preset-minimal';
   presets.push({ preset_id: minimalId, user_id: SYSTEM_USER_ID, name: 'Minimal', is_builtin: true, updated_at: nextUpdatedAt() });
-  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null });
+  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null });
 
   return {
     presets,
@@ -64,6 +71,7 @@ function createFakePool() {
     characters,
     chatSessions,
     chatMessages,
+    users,
     async connect() {
       let scopedUserId;
       return {
@@ -89,12 +97,12 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into context_stack_slots')) {
-            const [presetId, position, slotType, markerKey, enabled, customRole, customContent] = params;
+            const [presetId, position, slotType, markerKey, enabled, customRole, customContent, label] = params;
             const parent = presets.find((p) => p.preset_id === presetId);
             assert(!!parent && parent.user_id === scopedUserId, 'insert into context_stack_slots is scoped to the owning preset\'s user');
-            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent };
+            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent, label: label ?? null };
             slots.push(row);
-            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content }] };
+            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content, label: row.label }] };
           }
 
           if (sql.startsWith('select preset_id, name, is_builtin, updated_at from context_stack_presets')) {
@@ -106,13 +114,32 @@ function createFakePool() {
             return { rows: visible.map((p) => ({ preset_id: p.preset_id, name: p.name, is_builtin: p.is_builtin, updated_at: p.updated_at })) };
           }
 
+          if (sql.startsWith('select default_context_stack_preset_id from users')) {
+            const [userId] = params;
+            const user = users.find((u) => u.user_id === userId);
+            return { rows: user ? [{ default_context_stack_preset_id: user.default_context_stack_preset_id }] : [] };
+          }
+
+          if (sql.startsWith('select preset_id from context_stack_presets where preset_id = $1')) {
+            const [presetId, userId] = params;
+            const match = presets.find((p) => p.preset_id === presetId && (p.user_id === userId || p.is_builtin));
+            return { rows: match ? [{ preset_id: match.preset_id }] : [] };
+          }
+
+          if (sql.startsWith('update users set default_context_stack_preset_id')) {
+            const [userId, presetId] = params;
+            const user = users.find((u) => u.user_id === userId);
+            if (user) user.default_context_stack_preset_id = presetId;
+            return { rows: [] };
+          }
+
           if (sql.startsWith('select preset_id, slot_type') && sql.includes('preset_id = any')) {
             const [presetIds] = params;
             const matches = slots
               .filter((s) => presetIds.includes(s.preset_id))
               .slice()
               .sort((a, b) => (a.preset_id === b.preset_id ? a.position - b.position : a.preset_id < b.preset_id ? -1 : 1));
-            return { rows: matches.map(({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content }) => ({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content })) };
+            return { rows: matches.map(({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label }) => ({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label })) };
           }
 
           if (sql.startsWith('update context_stack_presets set')) {
@@ -139,7 +166,7 @@ function createFakePool() {
           if (sql.startsWith('select slot_type, marker_key') && sql.includes('order by position')) {
             const [presetId] = params;
             const matches = slots.filter((s) => s.preset_id === presetId).slice().sort((a, b) => a.position - b.position);
-            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content }) => ({ slot_type, marker_key, enabled, custom_role, custom_content })) };
+            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content, label }) => ({ slot_type, marker_key, enabled, custom_role, custom_content, label })) };
           }
 
           if (sql.startsWith('delete from context_stack_presets')) {
@@ -211,7 +238,7 @@ assert(info.id === 'context-stack-presets' && /^[a-z0-9_-]+$/.test(info.id), 'in
 
 const fakeSettings = createFakeSettingsStore();
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, notion: undefined, settings: fakeSettings });
-assert(pluginTools.length === 5, 'registerTools returns exactly five tools');
+assert(pluginTools.length === 6, 'registerTools returns exactly six tools');
 
 const registry = createToolRegistry(pluginTools);
 for (const name of [
@@ -220,6 +247,7 @@ for (const name of [
   'update_context_stack_preset',
   'delete_context_stack_preset',
   'apply_prompt_stack_to_chat',
+  'set_default_context_stack_preset',
 ]) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
@@ -366,6 +394,47 @@ assert(
   appliedWithPersona.systemText.includes('Jeremy: A software engineer who likes concise answers.'),
   'apply_prompt_stack_to_chat folds household persona_name/persona_description into the persona marker once both are set',
 );
+
+// --- set_default_context_stack_preset (migration 0061) ---
+const setDefaultTool = registry.get('set_default_context_stack_preset');
+
+const setOwnDefault = await db.withUserScope(userId, (session) =>
+  setDefaultTool.handler({ presetId: presetWithPersona.presetId }, { userId, db: session }),
+);
+assert(setOwnDefault.set === true, 'set_default_context_stack_preset accepts an owned preset');
+
+const afterSetOwn = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  afterSetOwn.find((p) => p.presetId === presetWithPersona.presetId)?.isDefault === true,
+  'get_context_stack_presets reports isDefault: true for the preset just marked default',
+);
+assert(
+  afterSetOwn.filter((p) => p.isDefault).length === 1,
+  'get_context_stack_presets reports isDefault: true for at most one preset',
+);
+
+const setBuiltinDefault = await db.withUserScope(userId, (session) =>
+  setDefaultTool.handler({ presetId: standard.presetId }, { userId, db: session }),
+);
+assert(setBuiltinDefault.set === true, 'set_default_context_stack_preset accepts a shared builtin, not just an owned preset');
+const afterSetBuiltin = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  afterSetBuiltin.find((p) => p.presetId === standard.presetId)?.isDefault === true &&
+    afterSetBuiltin.find((p) => p.presetId === presetWithPersona.presetId)?.isDefault === false,
+  'marking a new default replaces the previous one rather than stacking',
+);
+
+const setCrossUserDefault = await db.withUserScope(otherUserId, (session) =>
+  setDefaultTool.handler({ presetId: presetWithPersona.presetId }, { userId: otherUserId, db: session }),
+);
+assert(setCrossUserDefault.set === false, "set_default_context_stack_preset rejects another user's preset (not owned, not builtin)");
+const otherUserPresets = await db.withUserScope(otherUserId, (session) => getTool.handler({}, { userId: otherUserId, db: session }));
+assert(otherUserPresets.every((p) => !p.isDefault), "a rejected set leaves the other user's own default untouched (still none)");
+
+const clearedDefault = await db.withUserScope(userId, (session) => setDefaultTool.handler({}, { userId, db: session }));
+assert(clearedDefault.set === true && clearedDefault.presetId === null, 'set_default_context_stack_preset with no presetId clears the default');
+const afterClear = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(afterClear.every((p) => !p.isDefault), 'no preset reports isDefault: true once cleared');
 
 if (process.exitCode) {
   console.error('\ncontext-stack-presets verification FAILED');

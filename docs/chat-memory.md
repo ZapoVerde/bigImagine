@@ -90,13 +90,21 @@ detect-and-repair one:
   `chat_sync_points`/`chat_chunks`/`chat_memory_entries` rows whose restore point falls at or before
   that message. The branch is constructed correct from birth — there is nothing to detect, because
   nothing is mutating out from under it.
-- **An edit-and-rerun** (`truncateMessagesFrom`) still deletes forward messages from the *same*
-  `chat_id`, and that's where a real cascade matters. It's handled by the schema, not application
-  code: `chat_sync_points.last_message_id` is `on delete cascade` from `chat_messages`, and
+- **An edit** (`truncateMessagesFrom`) still deletes forward messages from the *same* `chat_id`,
+  and that's where a real cascade matters. It's handled by the schema, not application code:
+  `chat_sync_points.last_message_id` is `on delete cascade` from `chat_messages`, and
   `chat_chunks`/`chat_memory_entries` are `on delete cascade` from `chat_sync_points`. Deleting a
   message that was some sync point's restore point cascades through the whole chain automatically,
   in the same statement, inside the same transaction as the edit. `truncateMessagesFrom` itself
   didn't need to change at all.
+- **Rerun is no longer edit's cousin.** It used to also go through `truncateMessagesFrom` (delete
+  the reply, resend). Since `db/migrations/0059_chat_message_swipes.sql` it's swipe capability's
+  "no earlier stored variant, so regenerate" case (`chatSessions.ts`'s `recordSwipe`) — the
+  message's own `chat_messages` row is mutated in place, never deleted, so this cascade chain never
+  fires for it. That's also *why* it's safe to mutate in place at all: swiping only ever touches
+  whichever message is still the chat's last one, which by construction is always inside the live
+  window below and has never yet been chunked/summarized/extracted into canon — there's no derived
+  state anywhere pointing at that message's old content for the in-place swap to invalidate.
 
 One accepted imprecision: `chat_memory_entries` stores current content per `topic_key`, not a full
 version history, so a fork skips an entry entirely if it was last touched by a sync *after* the fork

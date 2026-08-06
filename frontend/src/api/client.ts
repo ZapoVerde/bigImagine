@@ -14,8 +14,10 @@ import type {
   NotificationSettings,
   PersonaSettings,
   ProfileModelsResult,
+  PromptPreview,
   ScreenLockSettings,
   StagedAttachment,
+  StoredChatMessage,
 } from './types';
 
 export class ApiError extends Error {
@@ -193,6 +195,13 @@ export function getChat(chatId: string, apiKey: string | null): Promise<ChatDeta
   return jsonRequest<ChatDetail>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey);
 }
 
+/** GET /v1/chats/:id/prompt-preview — the exact system-prompt breakdown and trimmed history an
+ *  'rp' chat's next turn would send, itemized (httpServer.ts's buildPromptPreview), for the Prompt
+ *  Inspector panel. 422s for a non-'rp' chat — the caller is expected to only offer this for RP. */
+export function getPromptPreview(chatId: string, apiKey: string | null): Promise<PromptPreview> {
+  return jsonRequest<PromptPreview>(`/v1/chats/${encodeURIComponent(chatId)}/prompt-preview`, apiKey);
+}
+
 export function updateChat(
   chatId: string,
   patch: {
@@ -221,10 +230,9 @@ export function deleteMessage(chatId: string, messageId: string, apiKey: string 
   );
 }
 
-/** Removes the given message and everything chronologically after it — the shared step behind
- *  both "edit" (truncate the edited message, then resend with new content) and "rerun" (truncate
- *  the reply being regenerated, then resend the now-shorter history unchanged). Caller is
- *  responsible for the resend; this only clears room for it. */
+/** Removes the given message and everything chronologically after it — "edit"'s primitive
+ *  (truncate the edited message, then resend with new content). Caller is responsible for the
+ *  resend; this only clears room for it. */
 export function truncateMessagesFrom(
   chatId: string,
   messageId: string,
@@ -234,6 +242,25 @@ export function truncateMessagesFrom(
     `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/truncate`,
     apiKey,
     { method: 'POST' },
+  );
+}
+
+export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier_swipe' };
+
+/** Swipe capability on the last LLM response — messageId must be the chat's current last message.
+ *  'prev'/'next' mostly just swap to an already-stored variant (no LLM call); 'next' past the
+ *  newest stored variant triggers a fresh in-place regeneration instead — this is also what
+ *  "Rerun" is now, so the Rerun button just calls this with direction: 'next'. */
+export function swipeMessage(
+  chatId: string,
+  messageId: string,
+  direction: 'prev' | 'next',
+  apiKey: string | null,
+): Promise<SwipeResult> {
+  return jsonRequest<SwipeResult>(
+    `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`,
+    apiKey,
+    { method: 'POST', body: { direction } },
   );
 }
 

@@ -31,6 +31,7 @@ export interface SlotRow {
   enabled: boolean;
   custom_role: string | null;
   custom_content: string | null;
+  label: string | null;
 }
 
 export interface SlotInput {
@@ -39,6 +40,8 @@ export interface SlotInput {
   enabled?: boolean;
   customRole?: 'system' | 'user' | 'assistant';
   customContent?: string;
+  /** Optional display name (migration 0060) — cosmetic only, ignored by assemblePromptStack. */
+  label?: string;
 }
 
 function isValidSlotInput(value: unknown): value is SlotInput {
@@ -46,6 +49,7 @@ function isValidSlotInput(value: unknown): value is SlotInput {
   const v = value as Record<string, unknown>;
   if (v.slotType !== 'marker' && v.slotType !== 'custom') return false;
   if (v.enabled !== undefined && typeof v.enabled !== 'boolean') return false;
+  if (v.label !== undefined && typeof v.label !== 'string') return false;
 
   if (v.slotType === 'marker') {
     return typeof v.markerKey === 'string' && v.markerKey !== '';
@@ -62,25 +66,28 @@ export function isSlotInputArray(value: unknown): value is SlotInput[] {
 }
 
 export function slotRowToWire(row: SlotRow): SlotInput {
+  const label = row.label ?? undefined;
   if (row.slot_type === 'custom') {
     return {
       slotType: 'custom',
       enabled: row.enabled,
       customRole: row.custom_role as 'system' | 'user' | 'assistant',
       customContent: row.custom_content!,
+      label,
     };
   }
-  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key! };
+  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key!, label };
 }
 
 export function slotInputToInsertParams(
   input: SlotInput,
   presetId: string,
   position: number,
-): [string, number, string, string | null, boolean, string | null, string | null] {
+): [string, number, string, string | null, boolean, string | null, string | null, string | null] {
   const enabled = input.enabled ?? true;
+  const label = input.label ?? null;
   if (input.slotType === 'marker') {
-    return [presetId, position, 'marker', input.markerKey!, enabled, null, null];
+    return [presetId, position, 'marker', input.markerKey!, enabled, null, null, label];
   }
-  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!];
+  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!, label];
 }

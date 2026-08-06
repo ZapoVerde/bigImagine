@@ -39,13 +39,19 @@
  *
  * DELETE /v1/chats/:id/messages/:messageId removes one message standalone (the Chat tab's delete
  * action); POST /v1/chats/:id/messages/:messageId/truncate removes that message and everything
- * chronologically after it — the shared primitive behind both "edit" (truncate the edited user
- * message, then POST /v1/chat/completions again with new content, ending up one message longer
- * than what's now persisted) and "rerun" (truncate the assistant reply being regenerated, then
- * resend the exact same, now-shorter history). handleChatCompletions tells those two resends
- * apart from a genuinely new turn purely by length — messages.length > priorMessageCount means a
- * new user message needs inserting; equal length means it's already accounted for, so only the
- * new assistant reply gets appended (otherwise a rerun would duplicate the user's message).
+ * chronologically after it — "edit"'s primitive (truncate the edited user message, then POST
+ * /v1/chat/completions again with new content, ending up one message longer than what's now
+ * persisted).
+ *
+ * POST /v1/chats/:id/messages/:messageId/swipe (body: { direction: 'prev' | 'next' }) — swipe
+ * capability on the last LLM response (docs/bi_principles.md), only ever valid for messageId ==
+ * this chat's current last message. cycleSwipe (io/chatSessions.ts) is a pure content swap between
+ * already-stored variants for most calls; 'next' past the newest stored variant is what "Rerun"
+ * actually is now (regenerateSwipe below, in place via recordSwipe, no truncate/resend) — the two
+ * are the same action from the store's point of view, so the frontend's Rerun button just sends
+ * 'next'. Deleting the current last turn naturally re-exposes whatever's now last with its own,
+ * never-pruned swipe history still intact — no restore logic needed for that (see migration
+ * 0059's own comment for why).
  *
  * handleChatCompletions also always prepends a current-date/time system message
  * (util/dateContext.ts, using the household_timezone admin setting) ahead of a chat's own custom
@@ -142,13 +148,13 @@ import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
-import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
+import { assemblePromptStack, type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
-import type { ChatParams, ChatSessionStore } from '../io/chatSessions.js';
+import type { ChatDetail, ChatParams, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -318,6 +324,45 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
+// GET /v1/chats/:id/prompt-preview (buildPromptPreview, below the turn-context assembly this
+// mirrors): one labeled, ordered item per piece of the exact prompt an 'rp' chat's next turn would
+// send — bi_principles.md §11/§18, letting a household member audit or hand-tune what the model
+// actually sees instead of only ever seeing the reply it produced from it.
+export interface PromptPreviewItem {
+  /** Raw marker vocabulary key (assemblePromptStack.ts's MarkerKey) when this item came from a
+   *  preset's marker slot — undefined for a custom slot, a date-context line, or a conversation
+   *  message. The frontend maps this to a friendly name; the orchestrator has no business owning
+   *  display copy. */
+  markerKey?: string;
+  /** A custom slot's own cosmetic label (migration 0060), when set. */
+  label?: string;
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  chars: number;
+  /** ~4 chars/token, the same provider-agnostic heuristic truncateForContext.ts already documents
+   *  and uses — bi_principles.md §6 rules out a real per-provider tokenizer at this seam. */
+  estimatedTokens: number;
+}
+
+function estimateTokens(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+function toPreviewItem(
+  role: PromptPreviewItem['role'],
+  content: string,
+  extra?: { markerKey?: string; label?: string },
+): PromptPreviewItem {
+  return {
+    markerKey: extra?.markerKey,
+    label: extra?.label,
+    role,
+    content,
+    chars: content.length,
+    estimatedTokens: estimateTokens(content.length),
+  };
+}
+
 // docs/chat-memory.md: the always-injected half of chat memory (small, unconditional — see
 // recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead).
 // household_memory is every user's own row (RLS already scopes it); chat_memory_entries is this
@@ -401,7 +446,14 @@ interface SlotDbRow {
   enabled: boolean;
   custom_role: string | null;
   custom_content: string | null;
+  label: string | null;
 }
+
+// PromptStackSlot plus the cosmetic label column (migration 0060) — assemblePromptStack's own
+// contract has no use for it (assembly doesn't care what a slot is called), but the prompt
+// inspector below (buildNarratorStackItems) needs it to label a slot the same way
+// PromptStacksView's own slotLabel() does.
+type PromptStackSlotWithLabel = PromptStackSlot & { label?: string };
 
 interface NarratorCharacterFieldsRow {
   name: string;
@@ -415,10 +467,10 @@ interface NarratorCharacterFieldsRow {
 // context_stack_slots read applyPromptStackToChatTool.ts does, just usable from core without
 // crossing the plugin/core dependency line (assemblePromptStack itself already lives in core,
 // util/assemblePromptStack.ts, moved here 2026-08-06 for exactly this reason).
-async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlot[]> {
+async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlotWithLabel[]> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<SlotDbRow>(
-      `select slot_type, marker_key, enabled, custom_role, custom_content
+      `select slot_type, marker_key, enabled, custom_role, custom_content, label
        from context_stack_slots where preset_id = $1 order by position`,
       [presetId],
     ),
@@ -429,6 +481,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
     enabled: row.enabled,
     customRole: (row.custom_role as 'system' | 'user' | 'assistant' | null) ?? undefined,
     customContent: row.custom_content ?? undefined,
+    label: row.label ?? undefined,
   }));
 }
 
@@ -444,14 +497,19 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // chat to a scene — there is no trusted scope to auto-fetch against yet. The tool itself stays
 // live for the model to call mid-turn when it does have a scene_id; this is a real gap (a chat<->
 // scene link doesn't exist), not an oversight, flagged rather than guessed at.
-async function assembleNarratorSystemText(
+// docs/bi_principles.md §18 ("every prompt is surfaced for manual tuning"): one labeled item per
+// enabled, non-empty slot, in preset order — the same population assemblePromptStack itself would
+// emit, just not yet collapsed into one joined string. Both assembleNarratorSystemText (the real
+// per-turn call) and buildPromptPreview (the read-only inspector below) call this, so a preview
+// can never drift from what a turn actually sends — there is exactly one place this assembly runs.
+async function buildNarratorStackItems(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
   characterId: string | null,
   presetId: string,
   memoryContext: string,
-): Promise<string> {
+): Promise<PromptPreviewItem[]> {
   const [slots, characterRows, persona] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
@@ -466,7 +524,7 @@ async function assembleNarratorSystemText(
   ]);
   // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
   // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
-  if (slots.length === 0) return '';
+  if (slots.length === 0) return [];
 
   const character = characterRows[0];
   const personaText = persona.description
@@ -484,10 +542,6 @@ async function assembleNarratorSystemText(
     memory_recall: memoryContext || undefined,
   };
 
-  const joined = assemblePromptStack(fields, slots)
-    .map((m) => m.content)
-    .join('\n\n');
-
   const snapshot: MacroSnapshot = {
     charName: character?.name,
     userName: persona.name || undefined,
@@ -495,7 +549,37 @@ async function assembleNarratorSystemText(
     description: character?.persona || undefined,
     scenario: character?.scenario || undefined,
   };
-  return interpolateMacros(joined, snapshot);
+
+  // Walks the same slots assemblePromptStack(fields, slots) would, in the same order, with the
+  // same enabled/non-empty filter — kept as its own loop (rather than calling that pure function
+  // and losing slot identity) purely so each emitted item can still carry the markerKey/label that
+  // produced it. assemblePromptStack itself has no reason to know that; a display concern doesn't
+  // belong in the platform's canonical prompt-assembly pure function.
+  const items: PromptPreviewItem[] = [];
+  for (const slot of slots) {
+    if (!slot.enabled) continue;
+    if (slot.slotType === 'custom') {
+      if (!slot.customContent) continue;
+      items.push(toPreviewItem(slot.customRole ?? 'system', interpolateMacros(slot.customContent, snapshot), { label: slot.label }));
+      continue;
+    }
+    const value = slot.markerKey ? fields[slot.markerKey as MarkerKey] : undefined;
+    if (!value) continue;
+    items.push(toPreviewItem('system', interpolateMacros(value, snapshot), { markerKey: slot.markerKey, label: slot.label }));
+  }
+  return items;
+}
+
+async function assembleNarratorSystemText(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  userId: string,
+  characterId: string | null,
+  presetId: string,
+  memoryContext: string,
+): Promise<string> {
+  const items = await buildNarratorStackItems(db, settings, userId, characterId, presetId, memoryContext);
+  return items.map((i) => i.content).join('\n\n');
 }
 
 // docs/turn-loop-plan.md §4: an optional, unconditional-when-set post-processing pass over the
@@ -548,6 +632,227 @@ async function trimToLiveWindow(messages: LlmMessage[], settings: OrchestratorSe
   return messages.length > liveMessages ? messages.slice(-liveMessages) : messages;
 }
 
+// Shared by handleChatCompletions and regenerateSwipe below — a persisted chat's system prompt
+// assembly (memory digest + either per-turn narrator assembly or the legacy frozen params.system,
+// macro-resolved for 'rp') is identical whichever of the two is producing the reply; only how the
+// result gets persisted differs (append a new turn vs. recordSwipe in place).
+async function assembleSessionTurnContext(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  userId: string,
+  chatId: string,
+  sessionKind: 'chat' | 'rp',
+  sessionCharacterId: string | null,
+  sessionPromptStackPresetId: string | null,
+  sessionParams: ChatParams,
+  messagesForLlm: LlmMessage[],
+  timezone: string,
+): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[] }> {
+  const [memoryContext, trimmed] = await Promise.all([
+    buildChatMemorySystemPrompt(db, userId, chatId, sessionKind),
+    trimToLiveWindow(messagesForLlm, settings),
+  ]);
+
+  if (sessionKind === 'rp' && sessionPromptStackPresetId) {
+    // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): re-run assemblePromptStack fresh
+    // every turn instead of replaying the frozen string apply_prompt_stack_to_chat baked once into
+    // params.system at Apply-click — a character-card/persona/memory-digest edit takes effect on
+    // the very next message, no re-apply needed. memory_recall is folded in as a field the preset's
+    // own slot ordering places, not appended after the fact.
+    // No formatCurrentDateContext here — unlike a 'chat'-kind session, an in-character narrator
+    // has no business knowing the real-world wall-clock time unless the prompt stack itself surfaces
+    // it (e.g. a scenario slot), so it's omitted for 'rp' rather than unconditionally prepended.
+    const narratorText = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext);
+    return { systemPrompt: narratorText, messagesForLlm: trimmed };
+  }
+
+  // No applied preset — a 'chat'-kind chat, or an 'rp' chat that's never been through Apply:
+  // unchanged legacy behavior, the frozen params.system, macro-resolved if 'rp'. Date context still
+  // applies to 'chat'-kind sessions (household assistant use), just not 'rp' ones (see above).
+  let system = sessionParams.system;
+  if (sessionKind === 'rp' && system?.includes('{{')) {
+    system = await resolveMacrosInSystemPrompt(system, db, settings, userId, sessionCharacterId);
+  }
+  const dateContext = sessionKind === 'rp' ? undefined : formatCurrentDateContext(timezone);
+  return {
+    systemPrompt: [dateContext, system, memoryContext].filter(Boolean).join('\n\n'),
+    messagesForLlm: trimmed,
+  };
+}
+
+export interface PromptPreview {
+  /** Everything folded into the system prompt, in the exact order it's sent — date context first,
+   *  then either the narrator preset's slots or the legacy system+memory pair. */
+  systemStack: PromptPreviewItem[];
+  /** The trimmed conversation history (trimToLiveWindow) that rides alongside systemStack in the
+   *  same call — the two together are the complete request body an actual turn would send. */
+  messages: PromptPreviewItem[];
+  totalChars: number;
+  totalEstimatedTokens: number;
+}
+
+// The read-only twin of assembleSessionTurnContext's 'rp' branch above: same memory/preset/legacy
+// logic, called against a chat's currently-persisted messages rather than a new incoming one, and
+// returning the itemized breakdown instead of a joined string — nothing here can drift from what a
+// real turn sends, since both paths call the same buildNarratorStackItems/resolveMacrosInSystemPrompt.
+// RP-only (docs/bi_principles.md's household-memory/canon scoping is what makes a 'chat'-kind
+// session's system prompt uninteresting to audit this way — it's just the frozen params.system).
+async function buildPromptPreview(
+  deps: HttpServerDeps,
+  userId: string,
+  chatId: string,
+): Promise<{ ok: true; preview: PromptPreview } | { ok: false; status: number; error: string }> {
+  const detail = await deps.chats.getChat(userId, chatId);
+  if (!detail) return { ok: false, status: 404, error: 'not found' };
+  const { session } = detail;
+  if (session.kind !== 'rp') {
+    return { ok: false, status: 422, error: 'prompt preview is only available for rp chats' };
+  }
+
+  const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));
+  const [memoryContext, trimmed] = await Promise.all([
+    buildChatMemorySystemPrompt(deps.db, userId, chatId, session.kind),
+    trimToLiveWindow(messagesForLlm, deps.settings),
+  ]);
+
+  // No date-context item — 'rp' turns no longer get formatCurrentDateContext prepended (see
+  // assembleSessionTurnContext's 'rp' branch above), and this preview must never show something an
+  // actual turn wouldn't send.
+  const systemStack: PromptPreviewItem[] = [];
+
+  if (session.promptStackPresetId) {
+    systemStack.push(
+      ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext)),
+    );
+  } else {
+    let system = session.params.system;
+    if (system?.includes('{{')) {
+      system = await resolveMacrosInSystemPrompt(system, deps.db, deps.settings, userId, session.characterId);
+    }
+    if (system) systemStack.push(toPreviewItem('system', system, { markerKey: 'system' }));
+    if (memoryContext) systemStack.push(toPreviewItem('system', memoryContext, { markerKey: 'memory_recall' }));
+  }
+
+  const messages = trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content));
+
+  const allChars = [...systemStack, ...messages].reduce((sum, i) => sum + i.chars, 0);
+  return {
+    ok: true,
+    preview: {
+      systemStack,
+      messages,
+      totalChars: allChars,
+      totalEstimatedTokens: estimateTokens(allChars),
+    },
+  };
+}
+
+// A chat's own profile override (a per-chat connection picker, distinct from the household-wide
+// one in Settings) swaps in a throwaway provider for that one named connection, built fresh per
+// turn the same way the Settings tab's model-catalog preview already does (server/adminServer.ts's
+// listModelsForProfile) — cheap, since every provider here is a stateless fetch wrapper
+// (io/llm/anthropic.ts, io/llm/openaiCompatible.ts). Unlike the household setting, this needs no
+// restart to take effect. An unknown profile name (stale override, a profile since removed from
+// BIGBRAIN_LLM_PROFILES) falls back to the household's active connection rather than failing the
+// whole turn, logging why per bb_principles.md §11. Shared by handleChatCompletions and
+// regenerateSwipe below — resolving which connection a chat's turn runs through doesn't depend on
+// whether the reply is being appended as a new turn or swapped in as a swipe.
+function resolveTurnLlm(
+  deps: HttpServerDeps,
+  sessionParams: ChatParams,
+  chatId: string | undefined,
+): { turnLlm: LlmProvider; turnDefaultModel: string } {
+  let turnLlm = deps.llm;
+  let turnDefaultModel = deps.modelName;
+  if (sessionParams.profile) {
+    const profile = deps.llmProfiles[sessionParams.profile];
+    if (profile) {
+      // A per-chat override builds its own throwaway provider (this function's own doc above) —
+      // gated the same as deps.llm (index.ts wraps that one once, at boot), since a call through
+      // an override is exactly as real a call as one through the household's active connection
+      // (bb_principles.md §14 doesn't carve out an exception for "which connection").
+      turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
+      turnDefaultModel = profile.model;
+    } else {
+      log.error(
+        `chat_id ${chatId} names unknown profile "${sessionParams.profile}" (not in BIGBRAIN_LLM_PROFILES) — falling back to the active connection`,
+      );
+    }
+  }
+  return { turnLlm, turnDefaultModel };
+}
+
+// Rerun's in-place regeneration path (docs/bi_principles.md: swipe capability on the last LLM
+// response) — the exact same turn-running logic handleChatCompletions's chat_id path uses
+// (connection resolution, memory/narrator system-prompt assembly, live-window trimming, runTurn,
+// the optional cleanup pass), just persisted via chats.recordSwipe instead of appendMessages, and
+// with no new user message to insert — messageId's own prior siblings in detail.messages are the
+// entire prompt. Only ever called once the caller (handleChatRoutes below) has confirmed messageId
+// is this chat's current last message; regenerating anything earlier would leave the turns after it
+// stale, since nothing here touches them.
+async function regenerateSwipe(
+  deps: HttpServerDeps,
+  userId: string,
+  chatId: string,
+  detail: ChatDetail,
+  messageId: string,
+): Promise<{ ok: true; message: StoredChatMessage } | { ok: false; error: string }> {
+  const { db, chats } = deps;
+  const { session } = detail;
+  const priorMessages = detail.messages.slice(0, -1);
+  const messagesForLlm: LlmMessage[] = priorMessages.map((m) => ({ role: m.role, content: m.content }));
+  const anchorMessageId = [...priorMessages].reverse().find((m) => m.role === 'user')?.messageId;
+
+  const sessionTools = session.toolNames !== null ? filterToolRegistry(deps.tools, session.toolNames) : deps.tools;
+  const { turnLlm } = resolveTurnLlm(deps, session.params, chatId);
+  const timezone = await getHouseholdTimezone(deps.settings);
+  const { systemPrompt, messagesForLlm: trimmed } = await assembleSessionTurnContext(
+    db,
+    deps.settings,
+    userId,
+    chatId,
+    session.kind,
+    session.characterId,
+    session.promptStackPresetId,
+    session.params,
+    messagesForLlm,
+    timezone,
+  );
+
+  let reply: string;
+  let focusedNoteId: string | undefined;
+  try {
+    ({ content: reply, focusedNoteId } = await runTurn({
+      userId,
+      taskId: chatId,
+      messages: trimmed,
+      systemPrompt,
+      model: session.params.model,
+      sampling: { temperature: session.params.temperature, topP: session.params.top_p, maxTokens: session.params.max_tokens },
+      llm: turnLlm,
+      db,
+      tools: sessionTools,
+      anchorMessageId,
+    }));
+  } catch (err) {
+    log.error(`swipe regenerate failed for chat ${chatId}`, err);
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (session.cleanupPresetId) {
+    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply);
+  }
+
+  const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
+  if (!updated) {
+    return { ok: false, error: 'message no longer exists' };
+  }
+  if (focusedNoteId !== undefined) {
+    await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
+  }
+  return { ok: true, message: updated };
+}
+
 async function serveStaticFile(res: ServerResponse, filePath: string): Promise<void> {
   try {
     const content = await readFile(filePath);
@@ -564,7 +869,7 @@ async function handleChatCompletions(
   res: ServerResponse,
   deps: HttpServerDeps,
 ): Promise<void> {
-  const { llm, db, tools, apiKeys, accessIdentity, chats, modelName } = deps;
+  const { db, tools, apiKeys, accessIdentity, chats } = deps;
 
   const userId = await authenticate(req, apiKeys, accessIdentity);
   if (!userId) {
@@ -644,31 +949,7 @@ async function handleChatCompletions(
     }
   }
 
-  // A chat's own profile override (a per-chat connection picker, distinct from the household-wide
-  // one in Settings) swaps in a throwaway provider for that one named connection, built fresh per
-  // turn the same way the Settings tab's model-catalog preview already does (server/adminServer.ts's
-  // listModelsForProfile) — cheap, since every provider here is a stateless fetch wrapper
-  // (io/llm/anthropic.ts, io/llm/openaiCompatible.ts). Unlike the household setting, this needs no
-  // restart to take effect. An unknown profile name (stale override, a profile since removed from
-  // BIGBRAIN_LLM_PROFILES) falls back to the household's active connection rather than failing the
-  // whole turn, logging why per bb_principles.md §11.
-  let turnLlm = llm;
-  let turnDefaultModel = modelName;
-  if (sessionParams.profile) {
-    const profile = deps.llmProfiles[sessionParams.profile];
-    if (profile) {
-      // A per-chat override builds its own throwaway provider (this function's own doc above) —
-      // gated the same as deps.llm (index.ts wraps that one once, at boot), since a call through
-      // an override is exactly as real a call as one through the household's active connection
-      // (bb_principles.md §14 doesn't carve out an exception for "which connection").
-      turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), db, deps.settings);
-      turnDefaultModel = profile.model;
-    } else {
-      log.error(
-        `chat_id ${body.chat_id} names unknown profile "${sessionParams.profile}" (not in BIGBRAIN_LLM_PROFILES) — falling back to the active connection`,
-      );
-    }
-  }
+  const { turnLlm, turnDefaultModel } = resolveTurnLlm(deps, sessionParams, body.chat_id);
 
   // The one deterministic gate bb_principles.md §2/§11 requires for images: fail the whole turn
   // visibly, before runTurn/llm.complete is ever called, rather than silently dropping the image
@@ -711,35 +992,20 @@ async function handleChatCompletions(
   // same as before this feature existed.
   let systemPrompt: string;
   if (body.chat_id) {
-    const [memoryContext, trimmed] = await Promise.all([
-      buildChatMemorySystemPrompt(db, userId, body.chat_id, sessionKind),
-      trimToLiveWindow(messagesForLlm, deps.settings),
-    ]);
-    messagesForLlm = trimmed;
-
-    if (sessionKind === 'rp' && sessionPromptStackPresetId) {
-      // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): re-run assemblePromptStack
-      // fresh every turn instead of replaying the frozen string apply_prompt_stack_to_chat baked
-      // once into params.system at Apply-click — a character-card/persona/memory-digest edit
-      // takes effect on the very next message, no re-apply needed. memory_recall is folded in as
-      // a field the preset's own slot ordering places, not appended after the fact.
-      const narratorText = await assembleNarratorSystemText(
-        db,
-        deps.settings,
-        userId,
-        sessionCharacterId,
-        sessionPromptStackPresetId,
-        memoryContext,
-      );
-      systemPrompt = [formatCurrentDateContext(timezone), narratorText].filter(Boolean).join('\n\n');
-    } else {
-      // No applied preset — a 'chat'-kind chat, or an 'rp' chat that's never been through Apply:
-      // unchanged legacy behavior, the frozen params.system, macro-resolved if 'rp'.
-      if (sessionKind === 'rp' && sessionParams.system?.includes('{{')) {
-        sessionParams = { ...sessionParams, system: await resolveMacrosInSystemPrompt(sessionParams.system, db, deps.settings, userId, sessionCharacterId) };
-      }
-      systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system, memoryContext].filter(Boolean).join('\n\n');
-    }
+    const assembled = await assembleSessionTurnContext(
+      db,
+      deps.settings,
+      userId,
+      body.chat_id,
+      sessionKind,
+      sessionCharacterId,
+      sessionPromptStackPresetId,
+      sessionParams,
+      messagesForLlm,
+      timezone,
+    );
+    systemPrompt = assembled.systemPrompt;
+    messagesForLlm = assembled.messagesForLlm;
   } else {
     systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
   }
@@ -1422,6 +1688,16 @@ async function handleChatRoutes(
     return;
   }
 
+  if (segments[1] === 'prompt-preview' && segments.length === 2 && req.method === 'GET') {
+    const result = await buildPromptPreview(deps, userId, chatId);
+    if (!result.ok) {
+      sendJson(res, result.status, { error: result.error });
+      return;
+    }
+    sendJson(res, 200, result.preview);
+    return;
+  }
+
   if (segments[1] === 'messages' && segments.length >= 3) {
     const messageId = decodeURIComponent(segments[2]!);
 
@@ -1433,6 +1709,47 @@ async function handleChatRoutes(
     if (segments.length === 4 && segments[3] === 'truncate' && req.method === 'POST') {
       const truncated = await deps.chats.truncateMessagesFrom(userId, chatId, messageId);
       sendJson(res, truncated ? 200 : 404, truncated ? { truncated: true } : { error: 'not found' });
+      return;
+    }
+    if (segments.length === 4 && segments[3] === 'swipe' && req.method === 'POST') {
+      const body = await readJsonBody(req);
+      const direction = (body as Record<string, unknown>)?.direction;
+      if (direction !== 'prev' && direction !== 'next') {
+        sendJson(res, 400, { error: 'expected { direction: "prev" | "next" }' });
+        return;
+      }
+
+      // Swiping only ever touches the chat's current last message (this module's own preamble) —
+      // enforced here, not left to cycleSwipe/recordSwipe, since an id belonging to an earlier
+      // turn is a client bug (a stale UI) rather than something the store should silently allow.
+      const detail = await deps.chats.getChat(userId, chatId);
+      const last = detail?.messages[detail.messages.length - 1];
+      if (!detail || !last || last.messageId !== messageId || last.role !== 'assistant') {
+        sendJson(res, 404, { error: "not found — messageId must be this chat's current last assistant reply" });
+        return;
+      }
+
+      const cycled = await deps.chats.cycleSwipe(userId, chatId, messageId, direction);
+      if (cycled.status === 'not_found') {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      if (cycled.status === 'switched') {
+        sendJson(res, 200, { message: cycled.message });
+        return;
+      }
+      if (cycled.status === 'no_earlier_swipe') {
+        sendJson(res, 200, { status: 'no_earlier_swipe' });
+        return;
+      }
+      // needs_regenerate: 'next' past the newest stored variant — this is "Rerun" (this module's
+      // own preamble on the swipe route).
+      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId);
+      if (!result.ok) {
+        sendJson(res, 500, { error: result.error });
+        return;
+      }
+      sendJson(res, 200, { message: result.message });
       return;
     }
   }

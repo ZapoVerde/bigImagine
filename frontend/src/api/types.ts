@@ -201,6 +201,10 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Present only once this message has been regenerated at least once (swipe capability on the
+   *  last LLM response). index is its current position among stored variants (0-based); count is
+   *  how many exist. Undefined means never swiped — content is the only version. */
+  swipes?: { index: number; count: number };
 }
 
 export interface ChatDetail {
@@ -296,6 +300,29 @@ export interface PromptPreset {
   updatedAt: string;
 }
 
+// orchestrator/src/server/httpServer.ts's buildPromptPreview (GET /v1/chats/:id/prompt-preview) —
+// the exact, itemized prompt an 'rp' chat's next turn would send, for the Prompt Inspector panel.
+export interface PromptPreviewItem {
+  /** Raw MarkerKey (assemblePromptStack.ts) when this item came from a preset's marker slot —
+   *  undefined for a custom slot, the date-context line, or a conversation message. Map to a
+   *  friendly name via markerLabels.ts's markerLabel(). */
+  markerKey?: string;
+  /** A custom slot's own cosmetic label (migration 0060), when set. */
+  label?: string;
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+  chars: number;
+  /** ~4 chars/token estimate — not a real per-provider tokenizer (bi_principles.md §6). */
+  estimatedTokens: number;
+}
+
+export interface PromptPreview {
+  systemStack: PromptPreviewItem[];
+  messages: PromptPreviewItem[];
+  totalChars: number;
+  totalEstimatedTokens: number;
+}
+
 // plugins/context-stack-presets/src/slotRows.ts's SlotInput — the wire shape a preset's ordered
 // slots array takes both ways (get/create/update all return this same shape). Not yet assignable
 // to any scene/character (docs/spec.md §7.4 "Deferred (not yet wired)") — this is a standalone
@@ -306,6 +333,8 @@ export interface ContextStackSlot {
   enabled?: boolean;
   customRole?: 'system' | 'user' | 'assistant';
   customContent?: string;
+  /** Optional display name (migration 0060) — cosmetic only. */
+  label?: string;
 }
 
 // plugins/context-stack-presets/src/getContextStackPresetsTool.ts
@@ -313,6 +342,9 @@ export interface ContextStackPreset {
   presetId: string;
   name: string;
   isBuiltin: boolean;
+  /** This user's chosen default (migration 0061) — auto-applied to every new RP chat by
+   *  CharactersView.tsx's startRp(), right after apply_character_to_chat. At most one true. */
+  isDefault: boolean;
   slots: ContextStackSlot[];
   updatedAt: string;
 }
@@ -357,6 +389,20 @@ export interface ChubCharacterSummary {
   name: string;
   tagline: string;
   avatarUrl: string;
+  starCount: number;
+  rating: number;
+  ratingCount: number;
+  nChats: number;
+  nMessages: number;
+  nFavorites: number;
+  nTokens: number;
+  forksCount: number;
+  topics: string[];
+  createdAt: string;
+  lastActivityAt: string;
+  verified: boolean;
+  recommended: boolean;
+  hasGallery: boolean;
 }
 
 export interface ChubSearchResult {

@@ -114,11 +114,32 @@
   padding: 0.05rem 0.5rem;
 }
 
+.promptstacks-row-badge-default {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .promptstacks-editor-header {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   flex-wrap: wrap;
+}
+
+.promptstacks-default-btn {
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.promptstacks-default-btn.active {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
 }
 
 .promptstacks-name-input {

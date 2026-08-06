@@ -50,15 +50,26 @@
  *   .listChats(userId, {search?, folderId?, kind?}) — summaries, updated_at desc
  *   .createChat(userId, {title?, folderId?, kind?, toolNames?}) — full new session row; kind
  *     defaults to 'chat', and an 'rp' chat defaults toolNames to [] unless overridden
- *   .getChat(userId, chatId) — {session, messages} or undefined
+ *   .getChat(userId, chatId) — {session, messages} or undefined; each message carries a `swipes`
+ *     {index, count} whenever it's ever been regenerated (see recordSwipe/cycleSwipe below),
+ *     undefined otherwise
  *   .updateChat(userId, chatId, patch) — updated row or undefined; bumps updated_at
  *   .deleteChat(userId, chatId) — true if a row was deleted
  *   .appendMessages(userId, chatId, messages) — inserts + bumps session updated_at
  *   .deleteMessage(userId, chatId, messageId) — removes exactly one message, false if not found
  *   .truncateMessagesFrom(userId, chatId, messageId) — removes that message and everything
  *     chronologically after it (edit/rerun's shared primitive), false if not found
+ *   .recordSwipe(userId, chatId, messageId, newContent) — regenerates messageId in place (same
+ *     message_id/created_at): stashes its current content as a swipe the first time it's ever
+ *     regenerated, stashes newContent as a fresh swipe, makes newContent active. Returns the
+ *     updated message or undefined if messageId isn't in this chat.
+ *   .cycleSwipe(userId, chatId, messageId, direction) — pure content swap to an existing sibling
+ *     swipe, no LLM call (db/migrations/0059_chat_message_swipes.sql). See ChatSessionStore's own
+ *     doc on the shape of the result.
  *   .forkChat(userId, chatId, forkFromMessageId, title?) — new session row branched from this
- *     chat at that message, or undefined if forkFromMessageId doesn't belong to it
+ *     chat at that message, or undefined if forkFromMessageId doesn't belong to it. Swipe history
+ *     is deliberately not carried into the fork — same accepted-imprecision trade this file's
+ *     preamble already documents for chat_memory_entries; only the active content comes along.
  *   .archiveChat(userId, chatId) — stamps archived_at (now), or undefined if not found
  *   .listFolders / .createFolder / .updateFolder / .deleteFolder — folder CRUD; deleting a
  *     folder cascades to child folders, chats fall back to no-folder (on delete set null)
@@ -138,7 +149,24 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Present only once this message has been regenerated at least once (docs/bi_principles.md:
+   *  swipe capability on the last LLM response). index is this message's current position among
+   *  its own stored variants (0-based); count is how many variants exist. Undefined means the
+   *  message has never been swiped — content is its only version. */
+  swipes?: { index: number; count: number };
 }
+
+/** Result of ChatSessionStore.cycleSwipe — a discriminated union rather than a single optional
+ *  return, since 'not found', 'nothing to move to', and 'move to a stored variant' are three
+ *  meaningfully different outcomes the caller (server/httpServer.ts) responds to differently. */
+export type CycleSwipeResult =
+  | { status: 'switched'; message: StoredChatMessage }
+  /** direction 'next' with nothing stored ahead of the active variant — caller must regenerate
+   *  via the LLM and persist the result with recordSwipe. */
+  | { status: 'needs_regenerate' }
+  /** direction 'prev' with nothing stored before the active variant. */
+  | { status: 'no_earlier_swipe' }
+  | { status: 'not_found' };
 
 export interface ChatDetail {
   session: ChatSessionRow;
@@ -187,11 +215,20 @@ export interface ChatSessionStore {
    *  one runTurn round and are never written to chat_messages), so there's no structural pairing
    *  to break. Used by the Chat tab's standalone delete action. */
   deleteMessage(userId: string, chatId: string, messageId: string): Promise<boolean>;
-  /** Removes the given message and every message chronologically after it — the shared primitive
-   *  behind both "edit" (truncate at the edited user message, then resend with new content) and
-   *  "rerun" (truncate at the assistant reply being regenerated, then resend unchanged). Returns
-   *  false if messageId doesn't exist in this chat (nothing to truncate from). */
+  /** Removes the given message and every message chronologically after it — "edit"'s primitive
+   *  (truncate at the edited user message, then resend with new content). Rerun/swipe no longer
+   *  uses this (see recordSwipe below) — it regenerates the existing message in place instead of
+   *  truncating it, so prior replies survive as swipe history. Returns false if messageId doesn't
+   *  exist in this chat (nothing to truncate from). */
   truncateMessagesFrom(userId: string, chatId: string, messageId: string): Promise<boolean>;
+  /** Regenerates messageId in place — same message_id and created_at, content replaced. The
+   *  message's prior content is preserved as a swipe the first time this is ever called for it
+   *  (so 'prev' can always return to the original reply), and newContent becomes both the row's
+   *  content and a fresh swipe of its own. Returns undefined if messageId isn't in this chat. */
+  recordSwipe(userId: string, chatId: string, messageId: string, newContent: string): Promise<StoredChatMessage | undefined>;
+  /** Cycles messageId's active content to an existing sibling swipe — a pure content swap, no LLM
+   *  call. See CycleSwipeResult's own doc for what each outcome means. */
+  cycleSwipe(userId: string, chatId: string, messageId: string, direction: 'prev' | 'next'): Promise<CycleSwipeResult>;
   /** Branches a new chat from this one at forkFromMessageId (inclusive) — see this file's own
    *  preamble for exactly what does and doesn't come along. Undefined if forkFromMessageId isn't a
    *  message in this chat. */
@@ -302,18 +339,47 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           [chatId],
         );
         if (!sessions[0]) return undefined;
-        const messages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string; created_at: string }>(
-          'select message_id, role, content, created_at from chat_messages where chat_id = $1 order by created_at, message_id',
+        const messages = await session.query<{
+          message_id: string;
+          role: 'user' | 'assistant';
+          content: string;
+          created_at: string;
+          active_swipe_id: string | null;
+        }>(
+          'select message_id, role, content, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
           [chatId],
         );
+        // Swipe metadata per message (docs/bi_principles.md: swipe capability on the last LLM
+        // response) — a message only ever has rows here once it's been regenerated at least once
+        // (recordSwipe below), so this is empty for the common case of an unswiped chat. Fetched
+        // as one extra query and joined in JS rather than a per-message subquery — chat sizes here
+        // are household-scale, not worth a lateral join for.
+        const swipesByMessage = new Map<string, { swipe_id: string }[]>();
+        if (messages.length > 0) {
+          const swipeRows = await session.query<{ message_id: string; swipe_id: string }>(
+            'select message_id, swipe_id from chat_message_swipes where message_id = any($1) order by message_id, created_at',
+            [messages.map((m) => m.message_id)],
+          );
+          for (const row of swipeRows) {
+            const list = swipesByMessage.get(row.message_id) ?? [];
+            list.push({ swipe_id: row.swipe_id });
+            swipesByMessage.set(row.message_id, list);
+          }
+        }
         return {
           session: toSessionRow(sessions[0]),
-          messages: messages.map((m) => ({
-            messageId: m.message_id,
-            role: m.role,
-            content: m.content,
-            createdAt: m.created_at,
-          })),
+          messages: messages.map((m) => {
+            const swipeRows = swipesByMessage.get(m.message_id);
+            return {
+              messageId: m.message_id,
+              role: m.role,
+              content: m.content,
+              createdAt: m.created_at,
+              swipes: swipeRows
+                ? { index: swipeRows.findIndex((s) => s.swipe_id === m.active_swipe_id), count: swipeRows.length }
+                : undefined,
+            };
+          }),
         };
       });
     },
@@ -410,6 +476,98 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         if (rows.length === 0) return false;
         await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
         return true;
+      });
+    },
+
+    async recordSwipe(userId, chatId, messageId, newContent) {
+      return db.withUserScope(userId, async (session) => {
+        const rows = await session.query<{ role: 'user' | 'assistant'; content: string; created_at: string; active_swipe_id: string | null }>(
+          'select role, content, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+          [messageId, chatId],
+        );
+        const current = rows[0];
+        if (!current) return undefined;
+
+        // First-ever regeneration of this message: stash the original content as swipe #0 before
+        // the new reply takes over, so 'prev' can always cycle back to what was there originally.
+        let originalSwipeId = current.active_swipe_id;
+        if (!originalSwipeId) {
+          const [inserted] = await session.query<{ swipe_id: string }>(
+            'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
+            [messageId, current.content],
+          );
+          originalSwipeId = inserted!.swipe_id;
+        }
+
+        const [newSwipe] = await session.query<{ swipe_id: string }>(
+          'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
+          [messageId, newContent],
+        );
+        await session.query('update chat_messages set content = $1, active_swipe_id = $2 where message_id = $3', [
+          newContent,
+          newSwipe!.swipe_id,
+          messageId,
+        ]);
+        await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
+
+        const swipeRows = await session.query<{ swipe_id: string }>(
+          'select swipe_id from chat_message_swipes where message_id = $1 order by created_at',
+          [messageId],
+        );
+        return {
+          messageId,
+          role: current.role,
+          content: newContent,
+          createdAt: current.created_at,
+          swipes: { index: swipeRows.findIndex((s) => s.swipe_id === newSwipe!.swipe_id), count: swipeRows.length },
+        };
+      });
+    },
+
+    async cycleSwipe(userId, chatId, messageId, direction) {
+      return db.withUserScope(userId, async (session) => {
+        const rows = await session.query<{ role: 'user' | 'assistant'; created_at: string; active_swipe_id: string | null }>(
+          'select role, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+          [messageId, chatId],
+        );
+        const current = rows[0];
+        if (!current) return { status: 'not_found' as const };
+
+        const swipeRows = await session.query<{ swipe_id: string; content: string }>(
+          'select swipe_id, content from chat_message_swipes where message_id = $1 order by created_at',
+          [messageId],
+        );
+        // Invariant: a message has either zero swipe rows (never regenerated) or two-plus (the
+        // original stashed alongside every regeneration since) — see recordSwipe above. Zero rows
+        // means there's nothing stored to move to in either direction; 'next' from there is what
+        // tells the caller to actually regenerate.
+        if (swipeRows.length === 0) {
+          return direction === 'next' ? { status: 'needs_regenerate' as const } : { status: 'no_earlier_swipe' as const };
+        }
+
+        const idx = swipeRows.findIndex((s) => s.swipe_id === current.active_swipe_id);
+        const targetIdx = direction === 'prev' ? idx - 1 : idx + 1;
+        if (targetIdx < 0) return { status: 'no_earlier_swipe' as const };
+        if (targetIdx >= swipeRows.length) return { status: 'needs_regenerate' as const };
+
+        const target = swipeRows[targetIdx]!;
+        await session.query('update chat_messages set content = $1, active_swipe_id = $2 where message_id = $3', [
+          target.content,
+          target.swipe_id,
+          messageId,
+        ]);
+        await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
+
+        return {
+          status: 'switched' as const,
+          message: {
+            messageId,
+            role: current.role,
+            content: target.content,
+            createdAt: current.created_at,
+            swipes: { index: targetIdx, count: swipeRows.length },
+          },
+        };
       });
     },
 

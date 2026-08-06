@@ -18,7 +18,8 @@
  * @api-declaration
  * info — plugin identity
  * registerTools(deps) — returns [create_context_stack_preset, get_context_stack_presets,
- *   update_context_stack_preset, delete_context_stack_preset, apply_prompt_stack_to_chat]
+ *   update_context_stack_preset, delete_context_stack_preset, apply_prompt_stack_to_chat,
+ *   set_default_context_stack_preset]
  *
  * @contract
  *   assertions:
@@ -34,6 +35,7 @@ import { createGetContextStackPresetsTool } from './getContextStackPresetsTool.j
 import { createUpdateContextStackPresetTool } from './updateContextStackPresetTool.js';
 import { createDeleteContextStackPresetTool } from './deleteContextStackPresetTool.js';
 import { createApplyPromptStackToChatTool } from './applyPromptStackToChatTool.js';
+import { createSetDefaultContextStackPresetTool } from './setDefaultContextStackPresetTool.js';
 
 export const info = {
   id: 'context-stack-presets',
@@ -48,5 +50,6 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createUpdateContextStackPresetTool(),
     createDeleteContextStackPresetTool(),
     createApplyPromptStackToChatTool(deps.settings),
+    createSetDefaultContextStackPresetTool(),
   ];
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, callTool } from '../api/client';
+import { markerLabel, MARKER_KEYS } from '../api/markerLabels';
 import type { ContextStackPreset, ContextStackSlot } from '../api/types';
 import './PromptStacksView.css';
 
@@ -7,30 +8,8 @@ interface PromptStacksViewProps {
   apiKey: string | null;
 }
 
-// plugins/context-stack-presets' marker vocabulary (docs/spec.md §7.4) — deliberately mirrors the
-// V2/V3 character-card field names plus BI's narrative additions, in the same order the shipped
-// "Standard" builtin assembles them.
-const MARKER_LABELS: Record<string, string> = {
-  system: 'System Prompt',
-  global_rules: 'Global Rules',
-  description: 'Description',
-  personality: 'Personality',
-  scenario: 'Scenario',
-  persona: 'User Persona',
-  location: 'Active Location',
-  canon_facts: 'Canon Facts',
-  mes_example: 'Example Messages',
-  memory_recall: 'Memory Recall',
-  recent_history: 'Recent History',
-  post_history_instructions: 'Post-History Instructions',
-};
-const MARKER_KEYS = Object.keys(MARKER_LABELS);
-
-function markerLabel(key: string): string {
-  return MARKER_LABELS[key] ?? key;
-}
-
 function slotLabel(slot: ContextStackSlot): string {
+  if (slot.label) return slot.label;
   return slot.slotType === 'marker' ? markerLabel(slot.markerKey ?? '') : `Custom block (${slot.customRole ?? 'system'})`;
 }
 
@@ -150,6 +129,17 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
     }
   }
 
+  // Builtins are settable too (users.default_context_stack_preset_id points at any preset_id
+  // regardless of owner, migration 0061) — unlike edit/delete, "default" isn't gated on isBuiltin.
+  async function toggleDefault(preset: ContextStackPreset) {
+    try {
+      await callTool('set_default_context_stack_preset', preset.isDefault ? {} : { presetId: preset.presetId }, apiKey);
+      await refresh(selectedId ?? undefined);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to update default prompt stack');
+    }
+  }
+
   function updateSlot(index: number, patch: Partial<ContextStackSlot>) {
     setDraftSlots((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
   }
@@ -258,6 +248,7 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
           >
             <span className="promptstacks-row-name">{preset.name}</span>
             {preset.isBuiltin && <span className="promptstacks-row-badge">built-in</span>}
+            {preset.isDefault && <span className="promptstacks-row-badge promptstacks-row-badge-default">default</span>}
           </div>
         ))}
       </div>
@@ -281,6 +272,13 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                 onChange={(e) => setDraftName(e.target.value)}
                 placeholder="Prompt stack name"
               />
+              <button
+                type="button"
+                className={`promptstacks-default-btn${selected.isDefault ? ' active' : ''}`}
+                onClick={() => toggleDefault(selected)}
+              >
+                {selected.isDefault ? 'Default ✓' : 'Set as default'}
+              </button>
               {isBuiltin ? (
                 <button type="button" onClick={() => duplicate(selected)}>
                   Duplicate to customize
@@ -357,6 +355,16 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                   </div>
                   {expandedIndex === idx && (
                     <div className="stack-slot-editor">
+                      <label>
+                        Label
+                        <input
+                          type="text"
+                          placeholder={slot.slotType === 'marker' ? markerLabel(slot.markerKey ?? '') : 'Custom block'}
+                          value={slot.label ?? ''}
+                          disabled={isBuiltin}
+                          onChange={(e) => updateSlot(idx, { label: e.target.value || undefined })}
+                        />
+                      </label>
                       {slot.slotType === 'marker' ? (
                         <label>
                           Field
