@@ -35,7 +35,12 @@
  * happened after the point it branched from. (One known imprecision, accepted for simplicity, same
  * spirit as Canonize's own wholesale-snapshot-restore: chat_memory_entries stores current content
  * per topic_key, not a full version history, so an entry last touched by a post-fork-point sync is
- * skipped entirely rather than copied in its pre-fork-point form.) archiveChat only stamps
+ * skipped entirely rather than copied in its pre-fork-point form.) canon_facts is the one exception
+ * to fork-point filtering: every fact belonging to the parent chat is duplicated in full (the
+ * user's explicit call — a fork always gets its own chat_id and a full content dup, not a
+ * point-in-time slice), status/proposed_at/approved_at preserved as-is; anchor_message_id remaps
+ * through the same idMap as the copied messages, or nulls out if that turn wasn't copied
+ * (db/migrations/0058_canon_facts_chat_scoped.sql). archiveChat only stamps
  * archived_at — orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory (triggered by
  * server/httpServer.ts right after) is what actually runs the end-of-chat long-term-memory
  * extraction; this store has no LLM/embeddings access to do that itself.
@@ -111,6 +116,12 @@ export interface ChatSessionRow {
   /** The last context_stack_presets row applied to this chat via apply_prompt_stack_to_chat, so
    *  the settings panel can show the current selection on reload. Null until first applied. */
   promptStackPresetId: string | null;
+  /** Which context_stack_presets row (if any) server/httpServer.ts's post-runTurn cleanup pass
+   *  runs for this chat (docs/turn-loop-plan.md §4, migration 0057) — resolved via {{message}}
+   *  (util/interpolateMacros.ts), not the narrator's own field set. Null (the default) means
+   *  cleanup is off; nothing sets this yet (no dedicated tool/UI in this pass — settable today
+   *  only via updateChat's patch, same as any other session field). */
+  cleanupPresetId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -158,6 +169,7 @@ export interface ChatSessionStore {
       params?: ChatParams;
       toolNames?: string[] | null;
       canvasNoteId?: string | null;
+      cleanupPresetId?: string | null;
     },
   ): Promise<ChatSessionRow | undefined>;
   deleteChat(userId: string, chatId: string): Promise<boolean>;
@@ -207,6 +219,7 @@ interface SessionDbRow {
   kind: 'chat' | 'rp';
   character_id: string | null;
   prompt_stack_preset_id: string | null;
+  cleanup_preset_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -225,13 +238,14 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     kind: row.kind,
     characterId: row.character_id,
     promptStackPresetId: row.prompt_stack_preset_id,
+    cleanupPresetId: row.cleanup_preset_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, created_at, updated_at';
 
 export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
   return {
@@ -328,6 +342,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           params.push(patch.canvasNoteId);
           sets.push(`canvas_note_id = $${params.length}`);
         }
+        if (patch.cleanupPresetId !== undefined) {
+          params.push(patch.cleanupPresetId);
+          sets.push(`cleanup_preset_id = $${params.length}`);
+        }
         const rows = await session.query<SessionDbRow>(
           `update chat_sessions set ${sets.join(', ')} where chat_id = $1 returning ${SESSION_COLUMNS}`,
           params,
@@ -414,8 +432,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         const newRows = await session.query<SessionDbRow>(
           `insert into chat_sessions
-             (user_id, title, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             (user_id, title, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
@@ -427,6 +445,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             parent.kind,
             parent.characterId,
             parent.promptStackPresetId,
+            parent.cleanupPresetId,
           ],
         );
         const newChatId = newRows[0]!.chat_id;
@@ -493,6 +512,59 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
               [newChatId, syncIdMap.get(e.sync_id), userId, e.topic_key, e.content],
             );
           }
+        }
+
+        // canon_facts: full-content duplication, not fork-point-filtered like sync_points/chunks/
+        // entries above — the user's explicit call ("every fork gets its own chat id and full
+        // content dup"). Every parent-chat canon fact comes along regardless of when it was
+        // proposed relative to forkFromMessageId, preserving status/proposed_at/approved_at exactly
+        // (not reset to a fresh proposal) — the fork inherits the parent's canon as of now, not as
+        // of the fork point. anchor_message_id remaps through the same idMap used for messages
+        // above where the anchor was among the copied messages; otherwise it's nulled (the anchored
+        // turn itself didn't come along, but the fact still belongs to this chat per
+        // db/migrations/0058_canon_facts_chat_scoped.sql's chat_id-mandatory rule).
+        const canonFacts = await session.query<{
+          scene_id: string | null;
+          category: string;
+          arc_tag: string | null;
+          summary: string;
+          detail: string;
+          vector_embed: string | null;
+          status: string;
+          linked_character_ids: string[];
+          linked_location_id: string | null;
+          anchor_message_id: string | null;
+          proposed_at: string;
+          approved_at: string | null;
+        }>(
+          `select scene_id, category, arc_tag, summary, detail, vector_embed::text as vector_embed,
+                  status, linked_character_ids, linked_location_id, anchor_message_id, proposed_at, approved_at
+           from canon_facts where chat_id = $1`,
+          [chatId],
+        );
+        for (const f of canonFacts) {
+          await session.query(
+            `insert into canon_facts
+               (user_id, scene_id, category, arc_tag, summary, detail, vector_embed, status,
+                linked_character_ids, linked_location_id, chat_id, anchor_message_id, proposed_at, approved_at)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+            [
+              userId,
+              f.scene_id,
+              f.category,
+              f.arc_tag,
+              f.summary,
+              f.detail,
+              f.vector_embed,
+              f.status,
+              f.linked_character_ids,
+              f.linked_location_id,
+              newChatId,
+              f.anchor_message_id ? (idMap.get(f.anchor_message_id) ?? null) : null,
+              f.proposed_at,
+              f.approved_at,
+            ],
+          );
         }
 
         return toSessionRow(newRows[0]!);

@@ -69,6 +69,22 @@
   color: var(--text-secondary, #888);
 }
 
+.canon-status-approved {
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--color-success, #3aa35b);
+}
+
+.canon-status-proposed {
+  text-transform: uppercase;
+  font-weight: 600;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint, #666);
+}
+
 .canon-category {
   text-transform: uppercase;
   font-weight: 600;

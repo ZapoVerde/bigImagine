@@ -239,3 +239,26 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `util/interpolateMacros.ts`'s new `message` field), not a second "instruction content" schema.
   Null (the default) means cleanup is off — the common case until a user opts in;
   `server/httpServer.ts` skips straight to persistence when unset, zero cost.
+- `0058_canon_facts_chat_scoped.sql` — tightens `canon_facts.chat_id` to `not null`, `on delete
+  cascade` (was nullable/`set null` since `0054`). The user's explicit call: "every fact needs a
+  chat id... there shouldn't be any facts that don't belong to a chat" — supersedes `0054`'s
+  "platform-global fact, no chat" branch entirely rather than just leaving it unused. `canon_facts`
+  was empty in the live DB when this was applied (extraction is still unwired), so no backfill was
+  needed. `on delete cascade` is a real narrowing of `bi_principles.md` §15's "reviewable, not
+  erased" (which still governs `rejected` rows staying on record within a chat's lifetime) —
+  deleting the chat itself now also removes its canon, since a fact can no longer fall back to
+  being globally visible. `anchor_message_id` stays nullable/`set null`: a fact can belong to a
+  chat as a whole without pinning to one turn. Paired with three tool-layer changes, all in the
+  same batch: `proposeCanonFactTool.ts`/`recallCanonFactsTool.ts` now require `ctx.chatId` and
+  `recall_canon_facts` scopes by it directly (dropping the original `scene_id`/`scene_presence`/
+  `linked_character_ids` scoping design — nothing populates `scene_presence` today, and
+  `{{user}}`'s near-universal presence made character-scoping a `plot` fact close to meaningless;
+  left as a real idea for later once active-location tracking is wired for real); and
+  `orchestrator/chatMemorySync.ts` auto-promotes each chat's `'proposed'` canon facts to
+  `'approved'` at that chat's own next sync tick, rather than waiting on a manual
+  `approve_canon_fact` call — `get_canon_fact_proposals`/`reject_canon_fact`/`CanonQueueView.tsx`
+  all widened to treat `'proposed'` and `'approved'` as the two live states of an audit/undo queue,
+  not a pre-commit gate. `io/chatSessions.ts`'s `forkChat` duplicates a parent chat's `canon_facts`
+  in full (not fork-point-filtered like `chat_sync_points`/`chat_chunks`/`chat_memory_entries`) —
+  every fork gets its own `chat_id` and a complete copy of the parent's canon, per the same explicit
+  call.

@@ -15,10 +15,14 @@
  * existing arc_tag, and a missing one on a plot proposal is rejected here before it ever reaches
  * SQL, mirroring isCreateNoteArgs-style arg validation.
  *
- * chat_id/anchor_message_id (db/migrations/0053_canon_facts_chat_anchor.sql) stamp which chat and
- * message this fact was proposed at, from ctx (never args) — the anchor recall_canon_facts's
- * as_of_message_id filters against for point-in-time recall. Null for a proposal made outside a
- * chat turn (e.g. an agent_routine dispatch), which just means the fact is always globally visible.
+ * chat_id/anchor_message_id (db/migrations/0054_canon_facts_chat_anchor.sql, tightened by
+ * 0058_canon_facts_chat_scoped.sql) stamp which chat and message this fact was proposed at, from
+ * ctx (never args) — the anchor recall_canon_facts's as_of_message_id filters against for
+ * point-in-time recall. Every fact must belong to a chat now (the user's explicit call — no more
+ * platform-global facts), so a proposal made outside a chat turn (ctx.chatId unset, e.g. an
+ * agent_routine dispatch with no chat context) is rejected before it ever reaches SQL, same as the
+ * plot/arc_tag check below. anchor_message_id can still be null — a fact can belong to the chat as
+ * a whole without pinning to one specific turn.
  *
  * @api-declaration
  * createProposeCanonFactTool(embeddings) — returns the propose_canon_fact RegisteredTool
@@ -102,6 +106,9 @@ export function createProposeCanonFactTool(embeddings: EmbeddingProvider): Regis
       if (args.category === 'plot' && !args.arc_tag?.trim()) {
         throw new Error('propose_canon_fact: category "plot" requires a non-empty arc_tag');
       }
+      if (!ctx.chatId) {
+        throw new Error('propose_canon_fact requires an active chat context — canon facts cannot be proposed outside a chat');
+      }
 
       const text = args.detail ? `${args.summary}\n${args.detail}` : args.summary;
       const [vector] = await embeddings.embed([text]);
@@ -123,8 +130,8 @@ export function createProposeCanonFactTool(embeddings: EmbeddingProvider): Regis
           args.linked_location_id ?? null,
           // Never from args — chat/anchor identity is trusted context, the same boundary user_id
           // already uses, not something the model gets to assert (db/migrations/
-          // 0053_canon_facts_chat_anchor.sql).
-          ctx.chatId ?? null,
+          // 0054_canon_facts_chat_anchor.sql). ctx.chatId is checked non-null above.
+          ctx.chatId,
           ctx.anchorMessageId ?? null,
         ],
       );

@@ -29,6 +29,7 @@ function createFakePool() {
   const chatMemoryEntries = new Map(); // `${chat_id}::${topic_key}` -> row
   const householdMemory = []; // { user_id, source_chat_id, content, source }
   const chatMemorySyncStatus = new Map(); // chat_id -> row (chat_memory_sync_status, migration 0055)
+  const canonFacts = []; // { fact_id, chat_id, user_id, status, approved_at } (canon_facts, migration 0058)
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
@@ -41,6 +42,7 @@ function createFakePool() {
     chatMemoryEntries,
     householdMemory,
     chatMemorySyncStatus,
+    canonFacts,
     now,
     async connect() {
       let scopedUserId;
@@ -214,6 +216,22 @@ function createFakePool() {
               consecutive_errors: 0,
             });
             return { rows: [] };
+          }
+
+          // canon_facts auto-promotion (chatMemorySync.ts's own step, run unconditionally at the
+          // top of runOneChatSync for whatever chat it's called for — migration
+          // 0058_canon_facts_chat_scoped.sql).
+          if (sql.includes('update canon_facts set status')) {
+            const [chatId] = params;
+            const promoted = [];
+            for (const f of canonFacts) {
+              if (f.chat_id === chatId && f.status === 'proposed') {
+                f.status = 'approved';
+                f.approved_at = now();
+                promoted.push({ fact_id: f.fact_id });
+              }
+            }
+            return { rows: promoted };
           }
 
           throw new Error(`fake pool got an unexpected query: ${sql}`);
@@ -425,6 +443,42 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     assert(status?.last_step === null && status?.last_error === null, 'a successful tick clears the previous step/error');
     assert(status?.consecutive_errors === 0, 'a successful tick resets consecutive_errors back to 0');
   }
+}
+
+// --- canon_facts auto-promote at the chat's own next due sync tick (db/migrations/
+// 0058_canon_facts_chat_scoped.sql) — a 'proposed' row flips to 'approved' as part of the same
+// per-chat transaction as the rest of that tick, not on any separate schedule. A fact belonging to
+// a chat that isn't due yet is left alone entirely — promotion only happens because
+// runOneChatSync actually ran for that chat, not on a standalone timer. ---
+{
+  const CANON_CHAT_ID = randomUUID();
+  pool.chatSessions.set(CANON_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(CANON_CHAT_ID, 'CANON', 8); // clears the due threshold
+
+  const proposedId = randomUUID();
+  const alreadyApprovedId = randomUUID();
+  pool.canonFacts.push(
+    { fact_id: proposedId, chat_id: CANON_CHAT_ID, user_id: USER, status: 'proposed', approved_at: null },
+    { fact_id: alreadyApprovedId, chat_id: CANON_CHAT_ID, user_id: USER, status: 'approved', approved_at: pool.now() },
+  );
+
+  const NOT_DUE_CANON_CHAT_ID = randomUUID();
+  pool.chatSessions.set(NOT_DUE_CANON_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(NOT_DUE_CANON_CHAT_ID, 'NOTDUE', 2); // well under the due threshold
+  const untouchedId = randomUUID();
+  pool.canonFacts.push({ fact_id: untouchedId, chat_id: NOT_DUE_CANON_CHAT_ID, user_id: USER, status: 'proposed', approved_at: null });
+
+  await runChatMemorySyncTick(deps);
+
+  const promoted = pool.canonFacts.find((f) => f.fact_id === proposedId);
+  assert(promoted?.status === 'approved', "a proposed canon fact auto-promotes at its chat's own due sync tick");
+  assert(promoted?.approved_at != null, 'promotion stamps approved_at');
+
+  const alreadyApproved = pool.canonFacts.find((f) => f.fact_id === alreadyApprovedId);
+  assert(alreadyApproved?.status === 'approved', 'an already-approved fact is left untouched, not re-stamped');
+
+  const untouched = pool.canonFacts.find((f) => f.fact_id === untouchedId);
+  assert(untouched?.status === 'proposed', "a fact belonging to a chat that isn't due yet is not promoted");
 }
 
 // --- archiveChatMemory: the one-shot end-of-chat long-term-memory extraction ---

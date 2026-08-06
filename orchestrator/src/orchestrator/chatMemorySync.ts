@@ -17,15 +17,16 @@
  * messages, past its live window, than chat_memory_sync_every_pairs allows" rather than a
  * next_run_at timestamp.
  *
- * One sync pass, per chat, does everything in a single withUserScope transaction: chunk the
- * newly-archived messages (chunkChatTranscript.ts), summarize+embed each chunk
- * (classifyChatChunk.ts + the embeddings provider), distill the chat's "key ideas" digest
- * (distillChatMemory.ts) against its own existing entries, then write one new chat_sync_points row
- * plus the chat_chunks/chat_memory_entries rows tied to it. A mid-pipeline failure rolls the whole
- * transaction back — the previous sync point is untouched, and the next poll tick just retries
- * from there (self-healing, same "advance state, don't double-count" caution
- * agentRoutineDispatch.ts's own doc explains, just via ROLLBACK instead of an explicit ordering
- * trick).
+ * One sync pass, per chat, does everything in a single withUserScope transaction: promote that
+ * chat's 'proposed' canon_facts to 'approved' (the settling-window auto-approve — see
+ * plugins/canonize/src/proposeCanonFactTool.ts), chunk the newly-archived messages
+ * (chunkChatTranscript.ts), summarize+embed each chunk (classifyChatChunk.ts + the embeddings
+ * provider), distill the chat's "key ideas" digest (distillChatMemory.ts) against its own existing
+ * entries, then write one new chat_sync_points row plus the chat_chunks/chat_memory_entries rows
+ * tied to it. A mid-pipeline failure rolls the whole transaction back, canon-fact promotion
+ * included — the previous sync point is untouched, and the next poll tick just retries from there
+ * (self-healing, same "advance state, don't double-count" caution agentRoutineDispatch.ts's own
+ * doc explains, just via ROLLBACK instead of an explicit ordering trick).
  *
  * Every attempt (ok, skipped, or error-with-which-step) is also recorded into
  * chat_memory_sync_status, one upserted row per chat, through a separate transaction from the
@@ -252,6 +253,26 @@ interface ExistingEntryRow {
 async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<SyncResult> {
   return runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
     deps.db.withUserScope(userId, async (session): Promise<SyncResult> => {
+      // Canon facts auto-approve at the chat's next sync tick (the user's explicit call — no
+      // manual approval gate) rather than at write time, giving a brief settling window before a
+      // proposal goes live. Runs first, unconditionally for any chat this function is called for
+      // — not gated behind the chunk-eligibility check below, so a quiet chat with only a couple
+      // of proposed facts still gets them promoted on schedule instead of waiting on enough new
+      // messages to trigger a real chunking pass. Same transaction as the rest of the tick: a
+      // failure later in this function rolls the promotion back too, and the (idempotent) retry
+      // next tick picks it back up.
+      const promoted = await step('promote_canon_facts', () =>
+        session.query<{ fact_id: string }>(
+          `update canon_facts set status = 'approved', approved_at = now()
+           where chat_id = $1 and status = 'proposed'
+           returning fact_id`,
+          [chatId],
+        ),
+      );
+      if (promoted.length > 0) {
+        log.info('chat-memory sync: auto-approved canon facts', { chatId, count: promoted.length });
+      }
+
       const allMessages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string }>(
         'select message_id, role, content from chat_messages where chat_id = $1 order by created_at, message_id',
         [chatId],
