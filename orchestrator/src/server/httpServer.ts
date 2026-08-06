@@ -95,7 +95,13 @@
  * GET /v1/admin/connections/:id/providers?model=ID lists the upstream inference providers
  * OpenRouter can route that model to (adminServer.ts's listProvidersForConnection) — 404 when the
  * connection kind has no such catalog (i.e. isn't OpenRouter), since there's nothing to pin
- * routing to either way.
+ * routing to either way. POST /v1/admin/connections/:id/test (adminServer.ts's testConnection)
+ * fires one cheap, capped-tokens real call through the saved connection and reports success/
+ * failure — always 200 with { ok, latencyMs, reply? | error? }, never a thrown error for a bad
+ * key/model, since that's exactly the failure mode this exists to surface; only the id-not-found
+ * case is a 404. POST .../create and PATCH .../:id both take apiKey OR copyApiKeyFrom (a source
+ * connection id whose key to reuse verbatim, io/llmConnections.ts's copyCiphertext) — several named
+ * connections sharing one underlying provider no longer means re-pasting the same key into each.
  *
  * Same admin gate, but no restart, for GET/POST /v1/admin/timezone — the household_timezone
  * setting behind the date-context line above. It's read fresh per chat turn rather than baked
@@ -195,6 +201,7 @@ import {
   setPersonaSettings,
   setPiaProxyUrl,
   setScreenLockSettings,
+  testConnection,
 } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
 import {
@@ -1222,7 +1229,7 @@ async function handleAdminCredentialsSet(
 // handleFolderRoutes above. GET/POST on the collection; GET/PATCH/DELETE plus two catalog-preview
 // sub-routes on one connection by id.
 async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
-  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers'
+  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test'
   const segments = rest.split('/').filter(Boolean);
 
   if (segments.length === 0) {
@@ -1243,8 +1250,8 @@ async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResp
         sendJson(res, 400, {
           error:
             'expected { name: non-empty string, kind: "anthropic" | "openai-compatible", model: non-empty string, ' +
-            'apiKey: non-empty string, baseUrl? (required for openai-compatible), supportsVision?, providerOrder?: string[], ' +
-            'allowFallbacks?, quantizations?: string[] }',
+            'apiKey OR copyApiKeyFrom (exactly one, both non-empty strings), baseUrl? (required for openai-compatible), ' +
+            'supportsVision?, providerOrder?: string[], allowFallbacks?, quantizations?: string[] }',
         });
         return;
       }
@@ -1321,6 +1328,16 @@ async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResp
       sendJson(res, 502, { error: 'failed to reach this connection to list its models' });
       return;
     }
+    if (!result) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'test' && req.method === 'POST') {
+    const result = await testConnection(deps.llmConnections, id);
     if (!result) {
       sendJson(res, 404, { error: 'not found' });
       return;

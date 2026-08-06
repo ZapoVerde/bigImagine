@@ -22,11 +22,17 @@
  * delete the active connection — the caller must activate a different one first, the same
  * "explicit successor" shape the old Settings fieldset's restart-required switch already implied.
  *
+ * LlmConnectionInit/Patch's copyApiKeyFrom lets create()/update() reuse another connection's key by
+ * id instead of typing a fresh one — several named connections sharing one underlying provider
+ * (e.g. multiple OpenRouter connections, one model each) no longer means re-pasting the same key
+ * into each. copyCiphertext() copies the ciphertext column directly; the plaintext never passes
+ * through this path.
+ *
  * @api-declaration
  * LlmConnectionRow — the redacted shape returned to callers (no apiKey plaintext or ciphertext)
  * createLlmConnectionStore(db, cipher) -> LlmConnectionStore
  *   .list() -> Promise<LlmConnectionRow[]>
- *   .create(init) -> Promise<LlmConnectionRow>
+ *   .create(init) -> Promise<LlmConnectionRow> — exactly one of init.apiKey/init.copyApiKeyFrom
  *   .update(id, patch) -> Promise<LlmConnectionRow | undefined> — undefined if id doesn't exist
  *   .remove(id) -> Promise<'ok' | 'not_found' | 'is_active'>
  *   .activate(id) -> Promise<boolean> — false if id doesn't exist
@@ -64,7 +70,15 @@ export interface LlmConnectionInit {
   name: string;
   kind: 'anthropic' | 'openai-compatible';
   model: string;
-  apiKey: string;
+  /** Exactly one of apiKey/copyApiKeyFrom must be given — see copyApiKeyFrom below. */
+  apiKey?: string;
+  /**
+   * Id of an existing connection whose key to reuse, instead of typing a fresh one — the two share
+   * a provider often enough (several named OpenRouter connections, one model each) that re-pasting
+   * the same key into every one of them was the friction that prompted this. Copies the ciphertext
+   * column directly; the plaintext key is never re-read or exposed to do this.
+   */
+  copyApiKeyFrom?: string;
   baseUrl?: string;
   supportsVision?: boolean;
   providerOrder?: string[];
@@ -77,6 +91,8 @@ export interface LlmConnectionPatch {
   model?: string;
   /** Undefined leaves the stored key untouched — only present when the admin is rotating it. */
   apiKey?: string;
+  /** Rotate this connection's key by copying another connection's, instead of typing one — see LlmConnectionInit.copyApiKeyFrom. Mutually exclusive with apiKey. */
+  copyApiKeyFrom?: string;
   baseUrl?: string | null;
   supportsVision?: boolean;
   providerOrder?: string[] | null;
@@ -149,6 +165,18 @@ function toProfile(row: ConnectionDbRow, cipher: FieldCipher): LlmProfile {
   };
 }
 
+// Backs LlmConnectionInit.create's/patch's copyApiKeyFrom — copies the ciphertext column directly
+// rather than decrypt-then-re-encrypt, so the plaintext key never passes through this code path at
+// all (it's already an independent AES-GCM ciphertext of the same plaintext; nothing about reusing
+// it verbatim across two rows weakens either row's own encryption).
+async function copyCiphertext(db: PostgresClient, sourceId: string): Promise<string> {
+  const rows = await db.withSystemScope((session) =>
+    session.query<{ api_key_ciphertext: string }>('select api_key_ciphertext from llm_connections where id = $1', [sourceId]),
+  );
+  if (!rows[0]) throw new Error(`copyApiKeyFrom names unknown connection id "${sourceId}"`);
+  return rows[0].api_key_ciphertext;
+}
+
 export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher): LlmConnectionStore {
   return {
     async list() {
@@ -159,6 +187,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
     },
 
     async create(init) {
+      const apiKeyCiphertext = init.copyApiKeyFrom
+        ? await copyCiphertext(db, init.copyApiKeyFrom)
+        : cipher.encrypt(init.apiKey!);
       const rows = await db.withSystemScope((session) =>
         session.query<ConnectionDbRow>(
           `insert into llm_connections
@@ -169,7 +200,7 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
             init.name,
             init.kind,
             init.model,
-            cipher.encrypt(init.apiKey),
+            apiKeyCiphertext,
             init.baseUrl ?? null,
             init.supportsVision ?? false,
             init.providerOrder ? JSON.stringify(init.providerOrder) : null,
@@ -190,7 +221,11 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
       }
       if (patch.name !== undefined) set('name', patch.name);
       if (patch.model !== undefined) set('model', patch.model);
-      if (patch.apiKey !== undefined) set('api_key_ciphertext', cipher.encrypt(patch.apiKey));
+      if (patch.copyApiKeyFrom !== undefined) {
+        set('api_key_ciphertext', await copyCiphertext(db, patch.copyApiKeyFrom));
+      } else if (patch.apiKey !== undefined) {
+        set('api_key_ciphertext', cipher.encrypt(patch.apiKey));
+      }
       if (patch.baseUrl !== undefined) set('base_url', patch.baseUrl);
       if (patch.supportsVision !== undefined) set('supports_vision', patch.supportsVision);
       if (patch.providerOrder !== undefined) set('provider_order', patch.providerOrder ? JSON.stringify(patch.providerOrder) : null);
@@ -224,17 +259,20 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
     },
 
     async activate(id) {
-      const rows = await db.withSystemScope((session) =>
-        session.query<{ id: string }>(
-          `with cleared as (
-             update llm_connections set is_active = false where is_active
-           )
-           update llm_connections set is_active = true, updated_at = now() where id = $1
-           returning id`,
+      // Two statements, not one UPDATE ... WITH cleared AS (...) — a single writable-CTE statement
+      // hit llm_connections_one_active (0062's partial unique index) in production, because both
+      // sub-updates run against the same query-start snapshot rather than seeing each other's
+      // effect. Sequential statements inside this one withSystemScope transaction do see each
+      // other (a normal command-counter bump between statements), so the constraint never sees two
+      // active rows even transiently.
+      return db.withSystemScope(async (session) => {
+        await session.query('update llm_connections set is_active = false where is_active and id != $1', [id]);
+        const rows = await session.query<{ id: string }>(
+          'update llm_connections set is_active = true, updated_at = now() where id = $1 returning id',
           [id],
-        ),
-      );
-      return rows.length > 0;
+        );
+        return rows.length > 0;
+      });
     },
 
     async resolveById(id) {

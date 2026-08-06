@@ -269,6 +269,17 @@
   cursor: default;
 }
 
+.connections-test-btn {
+  background: transparent !important;
+  border: 1px solid var(--color-border-subtle) !important;
+  color: var(--color-text-secondary) !important;
+}
+
+.connections-test-btn:hover:not(:disabled) {
+  background: var(--color-hover-surface) !important;
+  color: var(--color-text-primary) !important;
+}
+
 .saved-note {
   color: var(--color-success);
   font-size: var(--font-size-sm);

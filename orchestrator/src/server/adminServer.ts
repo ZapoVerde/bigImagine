@@ -57,6 +57,9 @@
  * listProvidersForConnection(connections, id, modelId) — the live list of upstream inference
  *   providers OpenRouter can route the named model to, undefined if the connection's kind has no
  *   listProviders capability (i.e. isn't OpenRouter)
+ * testConnection(connections, id) — a cheap, capped-tokens real call through this saved
+ *   connection; undefined only if the id doesn't exist, otherwise always a result (a bad key/model
+ *   surfaces as { ok: false, error }, not a thrown error)
  * getHouseholdTimezone(store) — the stored IANA zone name, or 'UTC' if never set
  * parseSetTimezoneBody(raw) — validates {value} is a real IANA zone name Intl recognizes;
  *   undefined on any malformed shape or unrecognized name
@@ -152,12 +155,17 @@ function isStringArray(value: unknown): value is string[] {
 
 export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { name, kind, model, apiKey, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
+  const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
     raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
   if (kind !== 'anthropic' && kind !== 'openai-compatible') return undefined;
   if (typeof model !== 'string' || !model) return undefined;
-  if (typeof apiKey !== 'string' || !apiKey) return undefined;
+  // Exactly one of apiKey/copyApiKeyFrom — a fresh key, or reuse another connection's by id
+  // (io/llmConnections.ts's copyCiphertext) instead of re-pasting the same key into every
+  // connection that shares one underlying provider.
+  const hasApiKey = typeof apiKey === 'string' && apiKey.length > 0;
+  const hasCopyFrom = typeof copyApiKeyFrom === 'string' && copyApiKeyFrom.length > 0;
+  if (hasApiKey === hasCopyFrom) return undefined;
   if (kind === 'openai-compatible' && (typeof baseUrl !== 'string' || !baseUrl)) return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
   if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
@@ -168,7 +176,8 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
     name: name.trim(),
     kind,
     model,
-    apiKey,
+    apiKey: hasApiKey ? (apiKey as string) : undefined,
+    copyApiKeyFrom: hasCopyFrom ? (copyApiKeyFrom as string) : undefined,
     baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
     supportsVision: typeof supportsVision === 'boolean' ? supportsVision : undefined,
     providerOrder: providerOrder as string[] | undefined,
@@ -183,11 +192,15 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
 // io/llmConnections.ts's own LlmConnectionPatch already expects.
 export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { name, model, apiKey, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
+  const { name, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
     raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
+  if (copyApiKeyFrom !== undefined && (typeof copyApiKeyFrom !== 'string' || !copyApiKeyFrom)) return undefined;
+  // Rotating the key at most one way per request — pick a fresh one or reuse another connection's,
+  // not both at once.
+  if (apiKey !== undefined && copyApiKeyFrom !== undefined) return undefined;
   if (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== 'string') return undefined;
   if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
   if (providerOrder !== undefined && providerOrder !== null && !isStringArray(providerOrder)) return undefined;
@@ -198,6 +211,7 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
   if (name !== undefined) patch.name = (name as string).trim();
   if (model !== undefined) patch.model = model as string;
   if (apiKey !== undefined) patch.apiKey = apiKey as string;
+  if (copyApiKeyFrom !== undefined) patch.copyApiKeyFrom = copyApiKeyFrom as string;
   if (baseUrl !== undefined) patch.baseUrl = baseUrl as string | null;
   if (supportsVision !== undefined) patch.supportsVision = supportsVision as boolean;
   if (providerOrder !== undefined) patch.providerOrder = providerOrder as string[] | null;
@@ -241,6 +255,36 @@ export async function listProvidersForConnection(
   if (!provider.listProviders) return undefined;
   const providers = await provider.listProviders(modelId);
   return { providers };
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  reply?: string;
+  error?: string;
+}
+
+// A one-off real call through this saved connection — a cheap, capped-tokens round trip so the
+// Connections tab's "Test" button can confirm the key/model/baseUrl actually work before an admin
+// leans on it, rather than finding out at the next real chat turn. Deliberately ungated, same as
+// this file's own listModelsForConnection/listProvidersForConnection preview calls just above —
+// bb_principles.md §14's gate exists to attribute and budget real per-turn spend to a household
+// user (llm_calls.user_id is a NOT NULL FK to users), and an admin diagnostic probe run from the
+// Connections tab has no such user to attribute to, same reasoning that already keeps the model/
+// provider catalog previews outside the gate. Undefined only for "no such connection" (404); a
+// reachable-but-failing connection is a normal { ok: false } result, not a thrown error, since a
+// bad key/model is exactly the thing this button exists to surface.
+export async function testConnection(connections: LlmConnectionStore, id: string): Promise<ConnectionTestResult | undefined> {
+  const profile = await connections.resolveById(id);
+  if (!profile) return undefined;
+  const provider = createLlmProviderForProfile(profile);
+  const start = Date.now();
+  try {
+    const turn = await provider.complete([{ role: 'user', content: 'Reply with exactly one word: ok' }], [], { maxTokens: 8 });
+    return { ok: true, latencyMs: Date.now() - start, reply: turn.message.content };
+  } catch (err) {
+    return { ok: false, latencyMs: Date.now() - start, error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 // UTC is a deliberate, safe default — not a real guess at where the household is, just a value

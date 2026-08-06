@@ -47,7 +47,7 @@ function createFakeLlmConnectionStore(seedRows = []) {
         name: init.name,
         kind: init.kind,
         model: init.model,
-        apiKey: init.apiKey,
+        apiKey: init.copyApiKeyFrom ? rows.get(init.copyApiKeyFrom)?.apiKey : init.apiKey,
         baseUrl: init.baseUrl ?? null,
         supportsVision: init.supportsVision ?? false,
         providerOrder: init.providerOrder ?? null,
@@ -62,7 +62,9 @@ function createFakeLlmConnectionStore(seedRows = []) {
     async update(id, patch) {
       const row = rows.get(id);
       if (!row) return undefined;
-      Object.assign(row, patch, { updatedAt: new Date().toISOString() });
+      const { copyApiKeyFrom, ...rest } = patch;
+      Object.assign(row, rest, { updatedAt: new Date().toISOString() });
+      if (copyApiKeyFrom) row.apiKey = rows.get(copyApiKeyFrom)?.apiKey;
       return toPublic(row);
     },
     async remove(id) {
@@ -678,6 +680,47 @@ const createOkBody = await createOkRes.json();
 assert(createOkRes.status === 201 && createOkBody.name === 'anthropic-direct', 'POST /v1/admin/connections with a valid body creates a connection');
 assert(!('apiKey' in createOkBody), 'the created connection response never echoes the apiKey back');
 
+const createBothKeyFieldsRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'bad-conn', kind: 'anthropic', model: 'claude-x', apiKey: 'sk-x', copyApiKeyFrom: 'conn-openrouter' }),
+});
+assert(createBothKeyFieldsRes.status === 400, 'POST /v1/admin/connections rejects a body giving both apiKey and copyApiKeyFrom');
+
+const createNoKeyFieldRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'bad-conn-2', kind: 'anthropic', model: 'claude-x' }),
+});
+assert(createNoKeyFieldRes.status === 400, 'POST /v1/admin/connections rejects a body giving neither apiKey nor copyApiKeyFrom');
+
+// The named-connections-per-provider request this exists for: a second OpenRouter connection
+// (different model) that reuses conn-openrouter's own key instead of re-pasting it.
+const createCopyKeyRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({
+    name: 'openrouter-gemini',
+    kind: 'openai-compatible',
+    model: 'google/gemini-x',
+    baseUrl: 'https://example.invalid/openrouter',
+    copyApiKeyFrom: 'conn-openrouter',
+  }),
+});
+const createCopyKeyBody = await createCopyKeyRes.json();
+assert(
+  createCopyKeyRes.status === 201 && createCopyKeyBody.name === 'openrouter-gemini',
+  'POST /v1/admin/connections accepts copyApiKeyFrom in place of apiKey',
+);
+assert(
+  llmConnections.rows.get(createCopyKeyBody.id).apiKey === llmConnections.rows.get('conn-openrouter').apiKey,
+  "the new connection's key is copied from the source connection, not left unset",
+);
+await fetch(`${base}/v1/admin/connections/${createCopyKeyBody.id}`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+}); // cleanup — not the active connection, so this always succeeds
+
 const patchRes = await fetch(`${base}/v1/admin/connections/${createOkBody.id}`, {
   method: 'PATCH',
   headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
@@ -836,6 +879,57 @@ assert(
   accessAdminWrongJwtRes.status === 401,
   'GET /v1/admin/connections with an unresolvable Access header and no admin key still returns 401',
 );
+
+// --- Admin connections/:id/test route (the "Test" button — a real, capped-tokens round trip) ---
+
+const testNoAuthRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/test`, { method: 'POST' });
+assert(testNoAuthRes.status === 401, 'POST /v1/admin/connections/:id/test with no auth header returns 401');
+
+const testUnknownConnRes = await fetch(`${base}/v1/admin/connections/not-a-real-id/test`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(testUnknownConnRes.status === 404, 'POST /v1/admin/connections/:id/test for an unknown id returns 404');
+
+const originalFetchTest = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  if (url !== 'https://example.invalid/openrouter/chat/completions') return originalFetchTest(url, init);
+  return {
+    ok: true,
+    json: async () => ({ choices: [{ message: { role: 'assistant', content: 'ok' } }] }),
+    text: async () => '',
+  };
+};
+try {
+  const testOkRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/test`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer the-admin-key' },
+  });
+  const testOkBody = await testOkRes.json();
+  assert(testOkRes.status === 200 && testOkBody.ok === true, 'POST /v1/admin/connections/:id/test against a reachable connection returns { ok: true }');
+  assert(testOkBody.reply === 'ok' && typeof testOkBody.latencyMs === 'number', 'a successful test reports the reply text and a latency');
+} finally {
+  globalThis.fetch = originalFetchTest;
+}
+
+const originalFetchTestFail = globalThis.fetch;
+globalThis.fetch = async (url, init) => {
+  if (url !== 'https://example.invalid/openrouter/chat/completions') return originalFetchTestFail(url, init);
+  throw new TypeError('fetch failed');
+};
+try {
+  const testFailRes = await fetch(`${base}/v1/admin/connections/conn-openrouter/test`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer the-admin-key' },
+  });
+  const testFailBody = await testFailRes.json();
+  assert(
+    testFailRes.status === 200 && testFailBody.ok === false && typeof testFailBody.error === 'string',
+    'POST /v1/admin/connections/:id/test against an unreachable connection returns 200 with { ok: false, error } — not a thrown route error',
+  );
+} finally {
+  globalThis.fetch = originalFetchTestFail;
+}
 
 // --- Chat/folder CRUD routes ---
 for (const [method, path] of [

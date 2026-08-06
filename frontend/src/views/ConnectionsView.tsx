@@ -7,20 +7,27 @@ import {
   adminListConnectionModels,
   adminListConnectionProviders,
   adminListConnections,
+  adminTestConnection,
   adminUpdateConnection,
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { LlmConnectionSummary } from '../api/types';
+import type { ConnectionTestResult, LlmConnectionSummary } from '../api/types';
 import './ConnectionsView.css';
 
 const NEW_ID = 'new';
 
+// keySource: '' means "leave the stored key unchanged" (edit only — never valid for a new
+// connection), 'new' means "use the apiKey field below", anything else is another connection's id
+// whose key to reuse (LlmConnectionInit/Patch.copyApiKeyFrom) — the escape hatch for several named
+// connections that share one underlying provider (e.g. three OpenRouter connections, one model
+// each) without re-pasting the same key into every one of them.
 interface Draft {
   name: string;
   kind: 'anthropic' | 'openai-compatible';
   model: string;
   apiKey: string;
+  keySource: string;
   baseUrl: string;
   supportsVision: boolean;
   providerPrimary: string;
@@ -35,6 +42,7 @@ function emptyDraft(): Draft {
     kind: 'openai-compatible',
     model: '',
     apiKey: '',
+    keySource: 'new',
     baseUrl: '',
     supportsVision: false,
     providerPrimary: '',
@@ -50,6 +58,7 @@ function draftFromConnection(c: LlmConnectionSummary): Draft {
     kind: c.kind,
     model: c.model,
     apiKey: '',
+    keySource: '',
     baseUrl: c.baseUrl ?? '',
     supportsVision: c.supportsVision,
     providerPrimary: c.providerOrder?.[0] ?? '',
@@ -64,7 +73,7 @@ function draftEqualsConnection(draft: Draft, c: LlmConnectionSummary): boolean {
     draft.name === c.name &&
     draft.kind === c.kind &&
     draft.model === c.model &&
-    draft.apiKey === '' &&
+    draft.keySource === '' &&
     draft.baseUrl === (c.baseUrl ?? '') &&
     draft.supportsVision === c.supportsVision &&
     draft.providerPrimary === (c.providerOrder?.[0] ?? '') &&
@@ -102,6 +111,8 @@ export default function ConnectionsView() {
   const [saved, setSaved] = useState(false);
   const [activating, setActivating] = useState(false);
   const [activateStatus, setActivateStatus] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
 
   const [draft, setDraft] = useState<Draft>(emptyDraft());
@@ -147,6 +158,7 @@ export default function ConnectionsView() {
     setModelsError('');
     setProviderOptions([]);
     setProvidersError('');
+    setTestResult(null);
     // Resync whenever a different connection is picked, or its own updatedAt moves (a save just
     // landed) — not on every unrelated connections refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -218,8 +230,12 @@ export default function ConnectionsView() {
       setError('Base URL is required for an OpenAI-compatible connection.');
       return;
     }
-    if (isNew && !draft.apiKey.trim()) {
-      setError('An API key is required to create a connection.');
+    if (draft.keySource === 'new' && !draft.apiKey.trim()) {
+      setError('An API key is required, or pick an existing connection to reuse its key.');
+      return;
+    }
+    if (isNew && !draft.keySource) {
+      setError('Pick an API key source: a new key, or reuse an existing connection’s.');
       return;
     }
     setSaving(true);
@@ -231,7 +247,8 @@ export default function ConnectionsView() {
             name: draft.name.trim(),
             kind: draft.kind,
             model: draft.model.trim(),
-            apiKey: draft.apiKey,
+            apiKey: draft.keySource === 'new' ? draft.apiKey : undefined,
+            copyApiKeyFrom: draft.keySource === 'new' ? undefined : draft.keySource,
             baseUrl: draft.kind === 'openai-compatible' ? draft.baseUrl.trim() : draft.baseUrl.trim() || undefined,
             supportsVision: draft.supportsVision,
             providerOrder: providerOrderFromDraft(draft),
@@ -247,7 +264,8 @@ export default function ConnectionsView() {
           {
             name: draft.name.trim(),
             model: draft.model.trim(),
-            ...(draft.apiKey.trim() ? { apiKey: draft.apiKey } : {}),
+            ...(draft.keySource === 'new' && draft.apiKey.trim() ? { apiKey: draft.apiKey } : {}),
+            ...(draft.keySource && draft.keySource !== 'new' ? { copyApiKeyFrom: draft.keySource } : {}),
             baseUrl: draft.baseUrl.trim() || null,
             supportsVision: draft.supportsVision,
             providerOrder: providerOrderFromDraft(draft) ?? null,
@@ -264,6 +282,19 @@ export default function ConnectionsView() {
       setError(err instanceof ApiError ? err.message : 'failed to save connection');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function test() {
+    if (!selected) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      setTestResult(await adminTestConnection(selected.id, adminKey));
+    } catch (err) {
+      setTestResult({ ok: false, latencyMs: 0, error: err instanceof ApiError ? err.message : 'failed to reach the orchestrator' });
+    } finally {
+      setTesting(false);
     }
   }
 
@@ -398,7 +429,23 @@ export default function ConnectionsView() {
 
             <label>
               Kind
-              <select value={draft.kind} onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Draft['kind'] }))}>
+              <select
+                value={draft.kind}
+                onChange={(e) => {
+                  const kind = e.target.value as Draft['kind'];
+                  setDraft((d) => ({
+                    ...d,
+                    kind,
+                    // A reuse-key pick that no longer matches the new kind (a key is provider-
+                    // specific) falls back to "enter a new key" rather than silently keeping a
+                    // stale, now-hidden option selected.
+                    keySource:
+                      d.keySource !== 'new' && d.keySource !== '' && !connections.some((c) => c.id === d.keySource && c.kind === kind)
+                        ? 'new'
+                        : d.keySource,
+                  }));
+                }}
+              >
                 <option value="openai-compatible">OpenAI-compatible (OpenRouter, DeepSeek, etc.)</option>
                 <option value="anthropic">Anthropic</option>
               </select>
@@ -416,13 +463,51 @@ export default function ConnectionsView() {
             )}
 
             <label>
-              API key {!isNew && <span className="connections-field-note">(leave blank to keep the current one)</span>}
-              <input
-                type="password"
-                value={draft.apiKey}
-                onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                placeholder={isNew ? 'required' : 'unchanged'}
-              />
+              API key
+              <select
+                value={draft.keySource}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setDraft((d) => {
+                    const source = connections.find((c) => c.id === value);
+                    return {
+                      ...d,
+                      keySource: value,
+                      // Convenience default, not a lock — only fills an empty Base URL, never
+                      // overwrites one the admin already typed.
+                      baseUrl: !d.baseUrl && source?.baseUrl ? source.baseUrl : d.baseUrl,
+                    };
+                  });
+                }}
+              >
+                {!isNew && <option value="">Leave unchanged</option>}
+                <option value="new">Enter a new key</option>
+                {connections.filter((c) => c.kind === draft.kind && c.id !== selected?.id).length > 0 && (
+                  <optgroup label="Reuse an existing connection's key">
+                    {connections
+                      .filter((c) => c.kind === draft.kind && c.id !== selected?.id)
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </optgroup>
+                )}
+              </select>
+              {draft.keySource === 'new' && (
+                <input
+                  type="password"
+                  value={draft.apiKey}
+                  onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+                  placeholder="required"
+                />
+              )}
+              {draft.keySource && draft.keySource !== 'new' && (
+                <div className="connections-field-note">
+                  Will reuse {connections.find((c) => c.id === draft.keySource)?.name ?? 'the selected connection'}&rsquo;s key — no
+                  need to re-enter it.
+                </div>
+              )}
             </label>
 
             <label>
@@ -534,8 +619,26 @@ export default function ConnectionsView() {
               <button onClick={save} disabled={!dirty || saving}>
                 {saving ? 'Saving…' : isNew ? 'Create connection' : 'Save changes'}
               </button>
+              {!isNew && (
+                <button
+                  type="button"
+                  className="connections-test-btn"
+                  onClick={test}
+                  disabled={isNew || dirty || testing}
+                  title={dirty ? 'Save your changes first — Test calls through the saved connection' : undefined}
+                >
+                  {testing ? 'Testing…' : 'Test'}
+                </button>
+              )}
               {saved && <span className="saved-note">Saved.</span>}
             </div>
+            {testResult && (
+              <div className={testResult.ok ? 'saved-note' : 'error-banner'}>
+                {testResult.ok
+                  ? `Reached the provider in ${testResult.latencyMs}ms — replied "${testResult.reply}".`
+                  : `Failed after ${testResult.latencyMs}ms: ${testResult.error}`}
+              </div>
+            )}
           </>
         )}
       </div>

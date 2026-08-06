@@ -8,6 +8,7 @@ import type {
   ChatParams,
   ChatSessionRow,
   ChatSummary,
+  ConnectionTestResult,
   CreateConnectionInput,
   CredentialSummary,
   Folder,
@@ -399,6 +400,14 @@ export async function adminListConnectionProviders(
     `/v1/admin/connections/${encodeURIComponent(id)}/providers?model=${encodeURIComponent(modelId)}`,
     adminKey,
   );
+}
+
+/** Fires one cheap, capped-tokens real call through this saved connection. Resolves with
+ *  { ok: false, error } rather than throwing when the provider call itself fails (bad key/model/
+ *  baseUrl) — that's exactly the failure this button exists to surface; only a genuine route error
+ *  (id not found, network failure reaching the orchestrator) throws. */
+export async function adminTestConnection(id: string, adminKey: string | null): Promise<ConnectionTestResult> {
+  return jsonRequest<ConnectionTestResult>(`/v1/admin/connections/${encodeURIComponent(id)}/test`, adminKey, { method: 'POST' });
 }
 
 /** The household's IANA timezone (defaults to "UTC" server-side until ever set) — used to tell

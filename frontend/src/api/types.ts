@@ -121,11 +121,15 @@ export interface LlmConnectionSummary {
 }
 
 // orchestrator/src/server/adminServer.ts parseCreateConnectionBody's expected shape (LlmConnectionInit)
+// — exactly one of apiKey/copyApiKeyFrom must be sent: a fresh key, or reuse an existing
+// connection's (by id) instead of re-pasting the same key into every connection that shares one
+// underlying provider.
 export interface CreateConnectionInput {
   name: string;
   kind: 'anthropic' | 'openai-compatible';
   model: string;
-  apiKey: string;
+  apiKey?: string;
+  copyApiKeyFrom?: string;
   baseUrl?: string;
   supportsVision?: boolean;
   providerOrder?: string[];
@@ -139,8 +143,10 @@ export interface CreateConnectionInput {
 export interface UpdateConnectionInput {
   name?: string;
   model?: string;
-  /** Omit to leave the stored key untouched — only send when actually rotating it. */
+  /** Omit to leave the stored key untouched — only send when actually rotating it. Mutually exclusive with copyApiKeyFrom. */
   apiKey?: string;
+  /** Rotate by copying another connection's key instead of typing one. Mutually exclusive with apiKey. */
+  copyApiKeyFrom?: string;
   baseUrl?: string | null;
   supportsVision?: boolean;
   providerOrder?: string[] | null;
@@ -157,6 +163,17 @@ export interface ProfileModelsResult {
 // orchestrator/src/server/adminServer.ts ModelProvidersResult — OpenRouter-only routing table
 export interface ModelProvidersResult {
   providers: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[];
+}
+
+// orchestrator/src/server/adminServer.ts ConnectionTestResult — a real, capped-tokens round trip
+// through one saved connection. ok: false means the call reached the route fine but the provider
+// call itself failed (bad key/model/baseUrl) — not a thrown error, since that's the point of the
+// button.
+export interface ConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  reply?: string;
+  error?: string;
 }
 
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions
