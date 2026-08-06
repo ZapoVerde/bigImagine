@@ -27,6 +27,12 @@
  * agentRoutineDispatch.ts's own doc explains, just via ROLLBACK instead of an explicit ordering
  * trick).
  *
+ * Every attempt (ok, skipped, or error-with-which-step) is also recorded into
+ * chat_memory_sync_status, one upserted row per chat, through a separate transaction from the
+ * work itself — so a rollback of the sync work never erases the record that it failed
+ * (bi_principles.md §11: the failure logging already existed here, this is just the read surface
+ * for it). server/adminServer.ts's getChatMemorySyncStatus is the read side.
+ *
  * The connection this pipeline's calls run through, and each of the three prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
@@ -75,6 +81,73 @@ const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation ur
 const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
 const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
 const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_memory_entries already persists state across syncs
+
+// Tags which named stage of runOneChatSync threw, so chat_memory_sync_status (bi_principles.md
+// §11 — the read surface for this pipeline's existing log-only failure seams) can record *which*
+// step broke, not just that something did.
+class SyncStepError extends Error {
+  readonly step: string;
+  constructor(step: string, cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.step = step;
+    this.cause = cause;
+  }
+}
+
+async function step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    throw new SyncStepError(name, err);
+  }
+}
+
+type SyncResult =
+  | { status: 'skipped' }
+  | { status: 'ok'; chunksAdded: number; entriesUpdated: number };
+
+// Written through deps.db directly (a fresh transaction), never the `session` runOneChatSync ran
+// its own work through — so this record survives even when that work's transaction rolled back.
+async function recordSyncStatus(
+  db: PostgresClient,
+  userId: string,
+  chatId: string,
+  outcome: SyncResult | { status: 'error'; step: string; error: string },
+): Promise<void> {
+  await db.withUserScope(userId, (session) => {
+    if (outcome.status === 'error') {
+      return session.query(
+        `insert into chat_memory_sync_status (chat_id, user_id, last_attempt_at, last_status, last_step, last_error, consecutive_errors)
+         values ($1, $2, now(), 'error', $3, $4, 1)
+         on conflict (chat_id) do update set
+           last_attempt_at = excluded.last_attempt_at, last_status = 'error',
+           last_step = excluded.last_step, last_error = excluded.last_error,
+           consecutive_errors = chat_memory_sync_status.consecutive_errors + 1`,
+        [chatId, userId, outcome.step, outcome.error],
+      );
+    }
+    if (outcome.status === 'skipped') {
+      return session.query(
+        `insert into chat_memory_sync_status (chat_id, user_id, last_attempt_at, last_status)
+         values ($1, $2, now(), 'skipped')
+         on conflict (chat_id) do update set
+           last_attempt_at = excluded.last_attempt_at, last_status = 'skipped',
+           last_step = null, last_error = null`,
+        [chatId, userId],
+      );
+    }
+    return session.query(
+      `insert into chat_memory_sync_status
+         (chat_id, user_id, last_attempt_at, last_status, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors)
+       values ($1, $2, now(), 'ok', now(), $3, $4, 0)
+       on conflict (chat_id) do update set
+         last_attempt_at = excluded.last_attempt_at, last_status = 'ok', last_step = null, last_error = null,
+         last_success_at = excluded.last_success_at, last_chunks_added = excluded.last_chunks_added,
+         last_entries_updated = excluded.last_entries_updated, consecutive_errors = 0`,
+      [chatId, userId, outcome.chunksAdded, outcome.entriesUpdated],
+    );
+  });
+}
 
 export interface ChatMemorySyncDeps {
   db: PostgresClient;
@@ -176,9 +249,9 @@ interface ExistingEntryRow {
   content: string;
 }
 
-async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<void> {
-  await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-    deps.db.withUserScope(userId, async (session) => {
+async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<SyncResult> {
+  return runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
+    deps.db.withUserScope(userId, async (session): Promise<SyncResult> => {
       const allMessages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string }>(
         'select message_id, role, content from chat_messages where chat_id = $1 order by created_at, message_id',
         [chatId],
@@ -195,7 +268,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       const toArchiveCount = eligibleCount - (eligibleCount % MESSAGES_PER_CHUNK);
       if (toArchiveCount < MESSAGES_PER_CHUNK) {
         log.info('chat-memory sync: nothing eligible to archive yet, skipping', { chatId, unsynced: unsynced.length });
-        return;
+        return { status: 'skipped' };
       }
       const toArchive: ChatTranscriptMessage[] = unsynced.slice(0, toArchiveCount).map((m) => ({
         messageId: m.message_id,
@@ -203,61 +276,75 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         content: m.content,
       }));
 
-      const [existingChunkCount] = await session.query<{ n: string }>(
-        'select count(*)::text as n from chat_chunks where chat_id = $1',
-        [chatId],
-      );
-      const startOrdinal = Number(existingChunkCount?.n ?? '0');
-      const chunks = chunkChatTranscript(toArchive, startOrdinal);
+      const chunks = await step('chunk', async () => {
+        const [existingChunkCount] = await session.query<{ n: string }>(
+          'select count(*)::text as n from chat_chunks where chat_id = $1',
+          [chatId],
+        );
+        const startOrdinal = Number(existingChunkCount?.n ?? '0');
+        return chunkChatTranscript(toArchive, startOrdinal);
+      });
 
-      const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt)));
-      const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
+      const { summaries, vectors } = await step('summarize_embed', async () => {
+        const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt)));
+        const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
+        return { summaries, vectors };
+      });
 
       const nextOrdinal = (lastSynced[0]?.ordinal ?? -1) + 1;
-      const [syncPoint] = await session.query<{ sync_id: string }>(
-        `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id) values ($1, $2, $3, $4)
-         returning sync_id`,
-        [chatId, userId, nextOrdinal, toArchive[toArchive.length - 1]!.messageId],
-      );
-      const syncId = syncPoint!.sync_id;
-
-      for (const [i, chunk] of chunks.entries()) {
-        await session.query(
-          `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed)
-           values ($1, $2, $3, $4, $5, $6, $7)`,
-          [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!)],
+      const syncId = await step('sync_point', async () => {
+        const [syncPoint] = await session.query<{ sync_id: string }>(
+          `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id) values ($1, $2, $3, $4)
+           returning sync_id`,
+          [chatId, userId, nextOrdinal, toArchive[toArchive.length - 1]!.messageId],
         );
-      }
+        return syncPoint!.sync_id;
+      });
 
-      const existingEntries = await session.query<ExistingEntryRow>(
-        'select topic_key, content from chat_memory_entries where chat_id = $1',
-        [chatId],
-      );
-      const drafts: ChatMemoryEntryDraft[] = existingEntries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
+      await step('insert_chunks', async () => {
+        for (const [i, chunk] of chunks.entries()) {
+          await session.query(
+            `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed)
+             values ($1, $2, $3, $4, $5, $6, $7)`,
+            [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!)],
+          );
+        }
+      });
 
-      // Widen beyond just this tick's brand-new chunks: re-read the trailing digest-horizon of
-      // chat_chunks.summary (oldest first), so a cross-sync-boundary idea gets more than one
-      // chunk's worth of chance to register before it ages out — this platform's analogue of
-      // Canonize's own bridge-summary horizon re-read.
-      const horizonRows = await session.query<{ summary: string }>(
-        'select summary from chat_chunks where chat_id = $1 order by ordinal desc limit $2',
-        [chatId, sync.digestHorizonChunks],
-      );
-      const horizonSummaries = horizonRows.map((r) => r.summary).reverse();
-
-      const updates = await distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt);
-
-      for (const entry of updates) {
-        await session.query(
-          `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
-           values ($1, $2, $3, $4, $5)
-           on conflict (chat_id, topic_key) do update set
-             sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
-          [chatId, syncId, userId, entry.topicKey, entry.content],
+      const updates = await step('distill', async () => {
+        const existingEntries = await session.query<ExistingEntryRow>(
+          'select topic_key, content from chat_memory_entries where chat_id = $1',
+          [chatId],
         );
-      }
+        const drafts: ChatMemoryEntryDraft[] = existingEntries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
+
+        // Widen beyond just this tick's brand-new chunks: re-read the trailing digest-horizon of
+        // chat_chunks.summary (oldest first), so a cross-sync-boundary idea gets more than one
+        // chunk's worth of chance to register before it ages out — this platform's analogue of
+        // Canonize's own bridge-summary horizon re-read.
+        const horizonRows = await session.query<{ summary: string }>(
+          'select summary from chat_chunks where chat_id = $1 order by ordinal desc limit $2',
+          [chatId, sync.digestHorizonChunks],
+        );
+        const horizonSummaries = horizonRows.map((r) => r.summary).reverse();
+
+        return distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt);
+      });
+
+      await step('upsert_entries', async () => {
+        for (const entry of updates) {
+          await session.query(
+            `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
+             values ($1, $2, $3, $4, $5)
+             on conflict (chat_id, topic_key) do update set
+               sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
+            [chatId, syncId, userId, entry.topicKey, entry.content],
+          );
+        }
+      });
 
       log.info('chat-memory sync: synced chat', { chatId, chunksAdded: chunks.length, entriesUpdated: updates.length });
+      return { status: 'ok', chunksAdded: chunks.length, entriesUpdated: updates.length };
     }),
   );
 }
@@ -269,9 +356,13 @@ export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<v
     const due = await findDueChats(deps.db, userId, sync.syncEveryMessages, sync.liveWindowMessages);
     for (const chatId of due) {
       try {
-        await runOneChatSync(deps, sync, userId, chatId);
+        const result = await runOneChatSync(deps, sync, userId, chatId);
+        await recordSyncStatus(deps.db, userId, chatId, result);
       } catch (err) {
         log.error('chat-memory sync: sync failed for one chat, will retry next tick', { chatId, err });
+        const step = err instanceof SyncStepError ? err.step : 'unknown';
+        const message = err instanceof Error ? err.message : String(err);
+        await recordSyncStatus(deps.db, userId, chatId, { status: 'error', step, error: message });
       }
     }
   }

@@ -1,8 +1,8 @@
 # Inline Prompt Macros — Staged Implementation Plan
 
-*Created 2026-08-05, revised 2026-08-05. Governed by `bi_principles.md`; scoped against `spec.md`
+*Created 2026-08-05, revised 2026-08-06. Governed by `bi_principles.md`; scoped against `spec.md`
 §5 (The Agentic Interaction Loop), §7.3 (Triggeryze), and §7.4 (Context Stack Presets). Status:
-**(Stage 1 partially live)** — see §1.1. Written in response to an assessment
+**(Stage 1 live)** — see §1.1 and §4. Written in response to an assessment
 of SillyTavern's `{{macro}}` system (`stacks/sillytavern/st-source/public/scripts/macros/`) as a
 candidate to port.*
 
@@ -17,10 +17,11 @@ aren't off the table; they're staged behind Triggeryze's own design, below.*
 ## 1. What this is
 
 SillyTavern resolves `{{char}}`, `{{time}}`, `{{setvar::x::y}}`, `{{random::a::b}}` and ~65 other
-`{{...}}` macros **inline**, inside the text of any field, at render time. BigImagine currently has
-no equivalent: `assemblePromptStack()` (`plugins/context-stack-presets/src/assemblePromptStack.ts`)
-inserts whole slot values verbatim — a character's `description` or a preset's `custom` slot text
-is never scanned for embedded placeholders.
+`{{...}}` macros **inline**, inside the text of any field, at render time. BigImagine's own Stage 1
+subset of that range is now live (§1.1) — `assemblePromptStack()`
+(`plugins/context-stack-presets/src/assemblePromptStack.ts`) still inserts whole slot values
+verbatim, tokens included, but `orchestrator/src/util/interpolateMacros.ts` scans an RP chat's
+final system-prompt text for `{{...}}` and substitutes fresh on every turn (§4).
 
 This document lays out a staged path to adding that range, starting with the deterministic core
 that has no open design questions, and pushing anything that depends on not-yet-built platform
@@ -48,11 +49,13 @@ pass. Concretely:
   the character card's own description field (confusingly named; maps to `fields.description`),
   orthogonal to the household's persona.
 
-**Not yet live:** the actual inline `{{...}}` scanning engine Stage 1 describes below (`{{char}}`,
-`{{trim}}`, etc., substituted *inside* arbitrary slot text) — nothing in the codebase scans a
-string for `{{...}}` yet. `{{user}}`/`{{persona}}` are covered today only as whole-slot values, not
-as tokens usable inside e.g. a custom slot's free text or a character's `scenario` field. That gap
-is exactly what Stage 1 below still closes.
+**Live (`orchestrator/src/util/interpolateMacros.ts`, `server/httpServer.ts`):** the Stage 1
+`{{...}}` scanning engine itself — `{{char}}`, `{{user}}`, `{{persona}}`, `{{description}}`,
+`{{scenario}}`, `{{trim}}`, `{{reverse}}`, `{{newline}}`, `{{noop}}`, usable inline inside a
+character's own fields or a chat's freely hand-edited `system` prompt text, not just as a
+whole-slot marker. See §4 below for exactly where and when it runs — the shape that actually
+shipped there deliberately differs from this document's original speculative framing (§4 is
+corrected to match), though the substance §2 requires is unchanged.
 
 ---
 
@@ -91,22 +94,24 @@ way. It has visible teeth wherever "now" can change between calls: time, randomn
 
 ## 3. Staged rollout
 
-### Stage 1 — Deterministic core (build first)
+### Stage 1 — Deterministic core (live)
 
 **Categories:** `NAMES`, `CHARACTER`, `UTILITY` — `{{char}}`, `{{user}}`, `{{persona}}`,
 `{{description}}`, `{{scenario}}`, `{{trim}}`, `{{reverse}}`, `{{newline}}`, `{{noop}}`.
 
-Pure lookups and text transforms against the `fields` object `assemblePromptStack` already
-receives — no new data source, no timing sensitivity, no open design question. The full version of
-this stage is a single interpolation pass that scans a slot's text for `{{...}}` and substitutes
-from `fields`, run before `assemblePromptStack(fields, slots)`, keeping the assembler itself
-untouched and still a pure function per §17. Ships the mechanism (§2) and the parser/substitution
-engine that every later stage reuses — nothing here is thrown away when Stage 2 or 3 lands.
+Pure lookups and text transforms — no timing sensitivity, no open design question. Shipped as
+`interpolateMacros(text, snapshot)` (`orchestrator/src/util/interpolateMacros.ts`), a single
+non-recursive regex pass with a closed registry for the 9 tokens above; an unrecognized token
+(a typo, or a later-stage macro not yet implemented) passes through verbatim rather than being
+deleted. Ships the mechanism (§2) and the substitution engine every later stage reuses — nothing
+here gets thrown away when Stage 2 or 3 lands.
 
-`{{user}}`/`{{persona}}`'s *data source* (the household persona settings) and their *whole-slot*
-form already shipped ahead of the rest of this stage — see §1.1. What's left of Stage 1 is the
-actual `{{...}}`-scanning engine, which subsumes that whole-slot form as one case (a slot whose
-entire text is a single `{{persona}}` token) rather than replacing it.
+One deliberate deviation from this section's original framing (which assumed the pass would scan
+`fields` and run inside `assemblePromptStack`'s caller): it instead scans the chat's *final*,
+already-persisted system-prompt string, in `server/httpServer.ts`, fresh on every turn — see §4 for
+why, and for how that's still §2-compliant. `{{user}}`/`{{persona}}`'s data source (the household
+persona settings) and their whole-slot marker form (§1.1) are unchanged by this — a slot whose
+entire text is a single `{{persona}}` token is just one more string the same pass resolves.
 
 ### Stage 2 — Turn-scoped snapshot (time, randomness)
 
@@ -168,25 +173,42 @@ mean guessing at a storage shape this document isn't positioned to settle.
 
 ---
 
-## 4. Where the resolution pass lives
+## 4. Where the resolution pass lives (as built)
 
-Not yet designed in code, but its shape is constrained by what already exists, across all three
-stages:
+This section originally assumed the resolution pass would need a Director-Pass-shaped turn-loop
+caller that didn't exist yet (`spec.md` §7.4: `assemblePromptStack` "has no caller in the actual
+turn loop"). That's still true for multi-character *scenes* — untouched by this build — but it
+turned out not to block Stage 1: a single-character **RP chat** already runs through exactly one
+request handler per turn (`server/httpServer.ts`'s `handleChatCompletions`), and that request
+boundary already *is* the per-turn boundary §2 asks for. No new caller had to be invented.
 
-- It runs **before** `assemblePromptStack(fields, slots)`, not inside it — the assembler stays a
-  pure function of its two arguments per §17; it must not itself do string-scanning/interpolation
-  keyed off external state like the clock, an RNG, or the variables table.
-- It produces the turn-scoped snapshot described in §2 (trivial at Stage 1, real at Stage 2, backed
-  by Triggeryze's table at Stage 3), then does a single interpolation pass over every string in
-  `fields` (and over `custom` slot content) before handing the result to `assemblePromptStack`.
-  That interpolation step is itself a pure function: `(fields, snapshot) => fields'`, snapshot
-  supplied by the caller, no IO, no clock reads, no RNG calls, no DB reads inside it.
-- Whatever resolves the turn's scene state today (`spec.md` §7.4 notes this caller doesn't exist
-  yet — `assemblePromptStack` currently has "no caller in the actual turn loop") is the natural
-  owner of building the snapshot, since it already sits at the point in the loop (`spec.md` §5,
-  between steps 2 and 4) where scene state is read once per turn. At Stage 3 that same caller reads
-  Triggeryze's variables table as part of building the snapshot — it still only reads; the writes
-  live in `evaluate_rules`, downstream, in the background step.
+What actually shipped:
+
+- `interpolateMacros(text, snapshot)` (`orchestrator/src/util/interpolateMacros.ts`) is the pure
+  function §17 requires — no IO, no clock reads, no RNG calls, no DB reads inside it. Its shape
+  ended up simpler than originally planned: it substitutes into one flat string (the chat's
+  already-assembled system-prompt text), not into `assemblePromptStack`'s `fields`/`slots`
+  arguments separately. `assemblePromptStack` itself is untouched — `apply_prompt_stack_to_chat`
+  still bakes a template into `chat_sessions.params.system` with `{{...}}` tokens left verbatim; a
+  character field or a hand-typed custom slot both end up as substrings of that one persisted
+  string by the time this pass ever sees them, so scanning the flat string catches both without
+  needing to touch the plugin at all.
+- The caller is `handleChatCompletions` itself, immediately before `sessionParams.system` is folded
+  into the outgoing `systemPrompt` — run fresh on **every** turn, not baked once at Apply time. This
+  was a deliberate correction from the plan's first draft: baking at Apply time is timing-safe for
+  Stage 1's macros (§2 says so explicitly), but it would have had to be ripped out for Stage 2
+  anyway, and it left `{{user}}`/`{{persona}}`/`{{char}}` silently stale whenever the household
+  persona or a character card was edited mid-chat — exactly the live-read guarantee
+  `bi_principles.md` §13 requires elsewhere. Resolving fresh every turn fixes both at once.
+- Building the snapshot means one cheap `characters` row lookup (by the chat's `character_id`) plus
+  `getPersonaSettings` (`server/adminServer.ts`, already used elsewhere) — gated on the chat being
+  `kind: 'rp'` and its system text actually containing `{{`, so an ordinary household chat (which
+  could legitimately contain literal `{{...}}`-looking text) is never scanned, and an RP chat with
+  no macros in it pays for none of the extra reads.
+- Stage 2 extends `MacroSnapshot` with a clock read and an RNG roll, computed at the same call site,
+  the same way. Stage 3 extends it again with a Triggeryze variables read — still only reads at this
+  seam; the writes live in `evaluate_rules`, downstream, in the background step, unchanged from this
+  section's original design.
 
 ---
 

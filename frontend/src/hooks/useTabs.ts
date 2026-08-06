@@ -8,6 +8,7 @@ export type TabType =
   | 'documents'
   | 'settings'
   | 'canon'
+  | 'reviewpanel'
   | 'promptstacks'
   | 'characters'
   | 'browse-chub';
@@ -32,6 +33,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   documents: 'Documents',
   settings: 'Settings',
   canon: 'Canon',
+  reviewpanel: 'Review Panel',
   promptstacks: 'Prompt Stacks',
   characters: 'Characters',
   'browse-chub': 'Browse Chub',

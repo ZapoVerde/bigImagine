@@ -16,6 +16,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'browse-chub', label: 'Browse Chub' },
   { type: 'settings', label: 'Settings' },
   { type: 'canon', label: 'Canon' },
+  { type: 'reviewpanel', label: 'Review Panel' },
 ];
 
 // What a legacy 'blank' tab shows until the user picks what it's for. The tab strip's (+) button

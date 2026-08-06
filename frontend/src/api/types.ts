@@ -177,6 +177,25 @@ export interface ChatMemorySettings {
   householdMemoryPromptIsDefault: boolean;
 }
 
+// orchestrator/src/server/adminServer.ts getChatMemorySyncStatus() — one row per chat, the
+// review panel's confirmation that the background sync loop (chunk/embed/distill) actually ran,
+// not an editing surface (that's CanonQueueView, for canon facts specifically).
+export interface ChatMemorySyncStatusRow {
+  chatId: string;
+  chatTitle: string;
+  lastAttemptAt: string;
+  lastStatus: 'ok' | 'skipped' | 'error';
+  lastStep: string | null;
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  lastChunksAdded: number | null;
+  lastEntriesUpdated: number | null;
+  consecutiveErrors: number;
+  canonProposedCount: number;
+  canonApprovedCount: number;
+  canonLastProposedAt: string | null;
+}
+
 export interface StoredChatMessage {
   messageId: string;
   role: 'user' | 'assistant';

@@ -135,6 +135,8 @@ function createFakeChatSessionStore() {
         params: {},
         toolNames: null,
         canvasNoteId: null,
+        kind: init.kind ?? 'chat',
+        characterId: init.characterId ?? null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -155,6 +157,8 @@ function createFakeChatSessionStore() {
       if (patch.params !== undefined) row.params = patch.params;
       if (patch.toolNames !== undefined) row.toolNames = patch.toolNames;
       if (patch.canvasNoteId !== undefined) row.canvasNoteId = patch.canvasNoteId;
+      if (patch.kind !== undefined) row.kind = patch.kind;
+      if (patch.characterId !== undefined) row.characterId = patch.characterId;
       row.updatedAt = new Date().toISOString();
       return row;
     },
@@ -239,8 +243,13 @@ function assert(cond, message) {
 
 function createFakePool() {
   const inserts = [];
+  // docs/prompt-macros.md's Stage 1: seeded directly by a test (push({character_id, user_id,
+  // name, persona, scenario})) rather than through any insert path — nothing in this suite creates
+  // characters, it only needs to read one back for {{char}}/{{description}}/{{scenario}}.
+  const characters = [];
   return {
     inserts,
+    characters,
     async connect() {
       let scopedUserId;
       return {
@@ -253,6 +262,11 @@ function createFakePool() {
           if (sql.includes('insert into unstructured_notes')) {
             inserts.push({ scopedUserId, params });
             return { rows: [{ note_id: 'fake-note-id-1' }] };
+          }
+          if (sql.startsWith('select name, persona, scenario from characters')) {
+            const [characterId, userId] = params;
+            const character = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+            return { rows: character ? [{ name: character.name, persona: character.persona, scenario: character.scenario }] : [] };
           }
           // bb_principles.md §14's gate (io/llm/llmGate.ts) logs every LLM call it makes,
           // 'chat'-kind included — every runTurn/generateChatTitle call this file drives goes
@@ -1158,6 +1172,122 @@ server.close();
   }
 
   server3.close();
+}
+
+// --- Part 5b: docs/prompt-macros.md's Stage 1 — {{...}} macros resolved fresh every turn ---
+{
+  const capturedRp = [];
+  const capturingLlmRp = {
+    name: 'capturing-rp',
+    async complete(messages, toolDefs) {
+      capturedRp.push({ messages, toolDefs });
+      return { message: { role: 'assistant', content: 'reply' }, toolCalls: [] };
+    },
+  };
+  const poolRp = createFakePool();
+  const dbRp = createPostgresClient(poolRp);
+  const settingsRp = createFakeSettingsStore();
+  const chatsRp = createFakeChatSessionStore();
+  const apiKeysRp = createApiKeyStore('good-key-rp:66666666-6666-6666-6666-666666666666');
+  const userIdRp = '66666666-6666-6666-6666-666666666666';
+  const serverRp = startHttpServer({
+    llm: capturingLlmRp,
+    db: dbRp,
+    tools: createToolRegistry([echoTool]),
+    apiKeys: apiKeysRp,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chatsRp,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: settingsRp,
+    llmProfiles,
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => serverRp.once('listening', resolve));
+  const baseRp = `http://127.0.0.1:${serverRp.address().port}`;
+  const authRp = { authorization: 'Bearer good-key-rp' };
+
+  poolRp.characters.push(
+    { character_id: 'char-ava', user_id: userIdRp, name: 'Ava', persona: 'A grizzled tavern keeper.', scenario: 'A dusty roadside inn.' },
+    { character_id: 'char-kess', user_id: userIdRp, name: 'Kess', persona: 'A wandering bard.', scenario: 'A moonlit forest camp.' },
+  );
+  await settingsRp.set('persona_name', 'Jeremy');
+  await settingsRp.set('persona_description', 'A traveling merchant.');
+
+  const macroTemplate =
+    '{{char}} lives with {{user}}. {{persona}} {{description}} set in {{scenario}}. {{noop}}gone{{newline}}{{reverse::cba}}zzz{{trim}}   padded {{getvar::x}}';
+
+  const rpChat = await chatsRp.createChat(userIdRp, {});
+  await chatsRp.updateChat(userIdRp, rpChat.chatId, { kind: 'rp', characterId: 'char-ava', params: { system: macroTemplate } });
+
+  // A chat's first exchange also fires generateChatTitle's own llm.complete() call (same instance,
+  // Part 5's own note above) — capturedRp.length is snapshotted before each request rather than
+  // hardcoding indices, so this suite doesn't have to hand-count how many extra calls each
+  // first-exchange auto-title adds.
+  let before = capturedRp.length;
+  const rpRes = await fetch(`${baseRp}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authRp, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: rpChat.chatId }),
+  });
+  assert(rpRes.status === 200, 'an RP chat with macro tokens in its system prompt succeeds');
+  const rpSystem = capturedRp[before].messages[0].content;
+  assert(rpSystem.includes('Ava lives with Jeremy.'), '{{char}} and {{user}} resolve to the linked character and household persona names');
+  assert(rpSystem.includes('Jeremy: A traveling merchant.'), '{{persona}} resolves to the composed household persona');
+  assert(rpSystem.includes('A grizzled tavern keeper.'), '{{description}} resolves to the linked character.persona field');
+  assert(rpSystem.includes('set in A dusty roadside inn.'), '{{scenario}} resolves to the linked character.scenario field');
+  assert(rpSystem.includes('gone\nabczzzpadded'), '{{noop}}/{{newline}}/{{reverse::cba}}/{{trim}} all resolve/collapse correctly in sequence');
+  assert(rpSystem.includes('{{getvar::x}}'), 'an unrecognized macro token (a not-yet-built Stage 3 one) passes through unchanged rather than being deleted');
+
+  // --- Staleness fix: a persona edit takes effect on the very next turn, no re-apply ---
+  await settingsRp.set('persona_name', 'Sam');
+  before = capturedRp.length;
+  const rpRes2 = await fetch(`${baseRp}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authRp, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi again' }], chat_id: rpChat.chatId }),
+  });
+  assert(rpRes2.status === 200, 'a second turn on the same chat succeeds');
+  const rpSystem2 = capturedRp[before].messages[0].content;
+  assert(
+    rpSystem2.includes('Ava lives with Sam.'),
+    'a persona_name change is reflected on the very next turn with no re-apply — params.system itself was never rewritten between turns',
+  );
+
+  // --- Per-character correctness: {{char}} resolves to *this* chat's own linked character ---
+  const rpChat2 = await chatsRp.createChat(userIdRp, {});
+  await chatsRp.updateChat(userIdRp, rpChat2.chatId, { kind: 'rp', characterId: 'char-kess', params: { system: '{{char}} says hello.' } });
+  before = capturedRp.length;
+  const rpRes3 = await fetch(`${baseRp}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authRp, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: rpChat2.chatId }),
+  });
+  assert(rpRes3.status === 200, 'a second RP chat, linked to a different character, succeeds');
+  const rpSystem3 = capturedRp[before].messages[0].content;
+  assert(
+    rpSystem3.includes('Kess says hello.') && !rpSystem3.includes('Ava'),
+    "{{char}} resolves per chat's own linked character, not a value shared across chats/characters",
+  );
+
+  // --- Scope guard: a non-'rp' chat's literal {{...}}-looking text is left alone ---
+  const plainChat = await chatsRp.createChat(userIdRp, {});
+  await chatsRp.updateChat(userIdRp, plainChat.chatId, { params: { system: 'Explain what {{char}} means in templating syntax.' } });
+  before = capturedRp.length;
+  const plainRes = await fetch(`${baseRp}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authRp, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: plainChat.chatId }),
+  });
+  assert(plainRes.status === 200, "a 'chat'-kind session with literal {{...}}-looking text succeeds");
+  const plainSystem = capturedRp[before].messages[0].content;
+  assert(
+    plainSystem.includes('{{char}} means in templating syntax'),
+    "a 'chat'-kind (non-RP) session's system prompt is never scanned for macros — literal {{...}} text a household member typed stays untouched",
+  );
+
+  serverRp.close();
 }
 
 // --- Part 6: Canvas — a tool call's focusHint persists as chat_sessions.canvas_note_id ---

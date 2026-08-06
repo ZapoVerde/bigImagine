@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/httpServer.ts
- * @stamp 2026-07-23
+ * @stamp 2026-08-05
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
@@ -51,6 +51,13 @@
  * (util/dateContext.ts, using the household_timezone admin setting) ahead of a chat's own custom
  * system prompt, for every turn regardless of chat_id — an LLM has no reliable sense of "today"
  * on its own, and date-taking tools need it.
+ *
+ * docs/prompt-macros.md's Stage 1: an 'rp' chat's system prompt is scanned for `{{char}}`/
+ * `{{user}}`/`{{persona}}`/`{{description}}`/`{{scenario}}`/etc. (util/interpolateMacros.ts) fresh
+ * on every turn, right here, before it's folded into systemPrompt — never baked once at
+ * apply_prompt_stack_to_chat time, so a persona or character-card edit takes effect on the very
+ * next message with no re-apply needed (bi_principles.md §13). This is deliberately the one and
+ * only per-turn resolution pass Stage 2/3 will extend, not a stopgap.
  *
  * A third, admin-only surface (adminServer.ts): GET/POST /v1/admin/credentials read/write
  * provider_credentials (io/providerCredentials.ts), called by the SPA's Settings tab. Gated by
@@ -134,6 +141,7 @@ import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
+import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
@@ -151,6 +159,7 @@ import {
   getActiveProfileSetting,
   getCanonSettings,
   getChatMemorySettings,
+  getChatMemorySyncStatus,
   getHouseholdTimezone,
   getNotificationSettings,
   getPersonaSettings,
@@ -350,6 +359,41 @@ async function buildChatMemorySystemPrompt(
   });
 }
 
+// docs/prompt-macros.md's Stage 1 — only called when the caller already knows systemText contains
+// at least one `{{`, so this always does its reads for real, never a wasted round-trip. Character
+// fields (name/persona/scenario) are read live rather than trusted from whatever
+// apply_prompt_stack_to_chat baked in at Apply time, same reasoning as household persona settings
+// below: a card edited after Apply should be reflected on the very next turn.
+async function resolveMacrosInSystemPrompt(
+  systemText: string,
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  userId: string,
+  characterId: string | null,
+): Promise<string> {
+  const [character, persona] = await Promise.all([
+    characterId
+      ? db.withUserScope(userId, (session) =>
+          session.query<{ name: string; persona: string; scenario: string }>(
+            'select name, persona, scenario from characters where character_id = $1 and user_id = $2',
+            [characterId, userId],
+          ),
+        )
+      : Promise.resolve([]),
+    getPersonaSettings(settings),
+  ]);
+  const characterRow = character[0];
+
+  const snapshot: MacroSnapshot = {
+    charName: characterRow?.name,
+    userName: persona.name || undefined,
+    persona: persona.description ? (persona.name ? `${persona.name}: ${persona.description}` : persona.description) : persona.name || undefined,
+    description: characterRow?.persona || undefined,
+    scenario: characterRow?.scenario || undefined,
+  };
+  return interpolateMacros(systemText, snapshot);
+}
+
 // The other half: raw history older than the live window is never sent at all — only reachable via
 // recall_chat_history. Same knob (chat_memory_live_window_pairs) orchestrator/src/orchestrator/
 // chatMemorySync.ts's own sync pipeline uses for where the live window ends, read live so the two
@@ -423,6 +467,10 @@ async function handleChatCompletions(
   let sessionTitle: string | undefined;
   let priorMessageCount = 0;
   let sessionKind: 'chat' | 'rp' = 'chat';
+  // Which character (if any) this chat is linked to (applyCharacterToChatTool.ts) — only read
+  // here for docs/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
+  // everything else about the turn is indifferent to it.
+  let sessionCharacterId: string | null = null;
   // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
   // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
   // use even when this turn doesn't add a fresh chat_messages row of its own.
@@ -438,6 +486,7 @@ async function handleChatCompletions(
     sessionTitle = detail.session.title;
     priorMessageCount = detail.messages.length;
     sessionKind = detail.session.kind;
+    sessionCharacterId = detail.session.characterId;
     existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
@@ -496,6 +545,19 @@ async function handleChatCompletions(
   // traffic gets it too). household_timezone is read live, not cached at boot, so changing it in
   // Settings takes effect on the very next turn, no restart.
   const timezone = await getHouseholdTimezone(deps.settings);
+
+  // docs/prompt-macros.md's Stage 1: resolved fresh every turn (not baked at apply_prompt_stack_
+  // to_chat time) specifically so a persona/character-card edit takes effect on the very next
+  // message with no re-apply needed — bi_principles.md §13's live-read, no-restart guarantee
+  // applied to {{user}}/{{char}}/{{persona}} the same way it already applies to every other
+  // Settings-backed value. Gated to 'rp' chats (a household 'chat'-kind session could legitimately
+  // contain literal `{{...}}`-looking text, e.g. discussing templating syntax, that has no
+  // business being rewritten) and to a cheap .includes('{{') check, so the common case — an RP
+  // chat whose system prompt has no macros in it — pays for none of the extra reads below.
+  if (sessionKind === 'rp' && sessionParams.system?.includes('{{')) {
+    sessionParams = { ...sessionParams, system: await resolveMacrosInSystemPrompt(sessionParams.system, db, deps.settings, userId, sessionCharacterId) };
+  }
+
   let systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
 
   // docs/chat-memory.md: only the persisted-session path (bigBrain's own frontend, which the
@@ -831,6 +893,13 @@ async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResp
   // every one of these live.
   const settings = await getChatMemorySettings(deps.settings);
   sendJson(res, 200, { ...settings, profileNames: Object.keys(deps.llmProfiles) });
+}
+
+// The review panel's actual data (bi_principles.md §11) — read-only, no POST counterpart, since
+// this reports what the background sync loop (orchestrator/chatMemorySync.ts) already did rather
+// than configuring anything.
+async function handleChatMemorySyncStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { chats: await getChatMemorySyncStatus(deps.db) });
 }
 
 // docs/canonize-plan.md §6 — canon settings are live-read (recall_canon_facts reads
@@ -1544,6 +1613,14 @@ async function handleRequest(
       return;
     }
     await handleChatMemorySettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-sync-status') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatMemorySyncStatusGet(res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/canon-settings') {

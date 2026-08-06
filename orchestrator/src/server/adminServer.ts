@@ -105,6 +105,7 @@ import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChat
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
+import type { PostgresClient } from '../io/postgres.js';
 
 export interface SetCredentialBody {
   name: CredentialName;
@@ -556,5 +557,93 @@ export function parseSetCanonSettingsBody(raw: unknown): SetCanonSettingsBody | 
 export async function setCanonSettings(store: OrchestratorSettingsStore, body: SetCanonSettingsBody): Promise<void> {
   if (body.recallTopK !== undefined) await store.set('canon_recall_top_k', String(body.recallTopK));
   if (body.extractionPrompt !== undefined) await store.set('canon_extraction_prompt', body.extractionPrompt);
+}
+
+// --- Chat-memory sync status (bi_principles.md §11) ---
+// The read side of orchestrator/chatMemorySync.ts's chat_memory_sync_status table (migration
+// 0055) — the review panel's actual purpose per the user: confirmation that each background
+// pipeline stage (chunk/embed/distill) is actually working, not an editing surface. Unlike every
+// other function in this file, this reads chat-scoped Postgres tables directly rather than the
+// settings store, so it needs the same "roster every user, then query each one under its own RLS
+// scope" shape chatMemorySync.ts's own tick loop uses (there is no single userId an admin key
+// resolves to, and withSystemScope alone can't read a user_id-scoped, RLS-forced table).
+
+export interface ChatMemorySyncStatusRow {
+  chatId: string;
+  chatTitle: string;
+  lastAttemptAt: string;
+  lastStatus: 'ok' | 'skipped' | 'error';
+  lastStep: string | null;
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  lastChunksAdded: number | null;
+  lastEntriesUpdated: number | null;
+  consecutiveErrors: number;
+  canonProposedCount: number;
+  canonApprovedCount: number;
+  canonLastProposedAt: string | null;
+}
+
+interface ChatMemorySyncStatusQueryRow {
+  chat_id: string;
+  chat_title: string;
+  last_attempt_at: string;
+  last_status: 'ok' | 'skipped' | 'error';
+  last_step: string | null;
+  last_error: string | null;
+  last_success_at: string | null;
+  last_chunks_added: number | null;
+  last_entries_updated: number | null;
+  consecutive_errors: number;
+  canon_proposed_count: string;
+  canon_approved_count: string;
+  canon_last_proposed_at: string | null;
+}
+
+export async function getChatMemorySyncStatus(db: PostgresClient): Promise<ChatMemorySyncStatusRow[]> {
+  const users = await db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
+  const rows: ChatMemorySyncStatusRow[] = [];
+  for (const { user_id: userId } of users) {
+    const userRows = await db.withUserScope(userId, (session) =>
+      session.query<ChatMemorySyncStatusQueryRow>(
+        `select
+           s.chat_id, cs.title as chat_title, s.last_attempt_at, s.last_status, s.last_step, s.last_error,
+           s.last_success_at, s.last_chunks_added, s.last_entries_updated, s.consecutive_errors,
+           coalesce(cf.proposed_count, 0)::text as canon_proposed_count,
+           coalesce(cf.approved_count, 0)::text as canon_approved_count,
+           cf.last_proposed_at as canon_last_proposed_at
+         from chat_memory_sync_status s
+         join chat_sessions cs on cs.chat_id = s.chat_id
+         left join (
+           select chat_id,
+                  count(*) filter (where status = 'proposed') as proposed_count,
+                  count(*) filter (where status = 'approved') as approved_count,
+                  max(proposed_at) as last_proposed_at
+           from canon_facts
+           where chat_id is not null
+           group by chat_id
+         ) cf on cf.chat_id = s.chat_id
+         order by (s.last_status = 'error') desc, s.last_attempt_at desc`,
+      ),
+    );
+    for (const r of userRows) {
+      rows.push({
+        chatId: r.chat_id,
+        chatTitle: r.chat_title,
+        lastAttemptAt: r.last_attempt_at,
+        lastStatus: r.last_status,
+        lastStep: r.last_step,
+        lastError: r.last_error,
+        lastSuccessAt: r.last_success_at,
+        lastChunksAdded: r.last_chunks_added,
+        lastEntriesUpdated: r.last_entries_updated,
+        consecutiveErrors: r.consecutive_errors,
+        canonProposedCount: Number(r.canon_proposed_count),
+        canonApprovedCount: Number(r.canon_approved_count),
+        canonLastProposedAt: r.canon_last_proposed_at,
+      });
+    }
+  }
+  return rows;
 }
 

@@ -1,0 +1,88 @@
+.review-panel-view {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.review-panel-view.loading {
+  color: var(--color-text-muted);
+}
+
+.review-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.review-refresh {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.review-refresh:hover {
+  background: var(--color-hover-surface);
+}
+
+.review-summary {
+  margin: 0.75rem 0 1rem;
+  color: var(--color-text-secondary);
+}
+
+.review-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.review-table th,
+.review-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.review-row-error {
+  cursor: pointer;
+}
+
+.review-row-error:hover {
+  background: var(--color-hover-surface);
+}
+
+.review-row-detail td {
+  white-space: pre-wrap;
+  color: var(--color-text-secondary);
+  background: var(--color-danger-bg);
+}
+
+.review-badge-ok {
+  color: var(--color-success);
+}
+
+.review-badge-error {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.review-badge-skipped {
+  color: var(--color-text-faint);
+}
+
+.review-consecutive {
+  color: var(--color-danger);
+  font-size: 0.85em;
+}
+
+.review-panel-view .error-banner {
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.75rem;
+  font-size: 0.9rem;
+  margin-top: 0.6rem;
+}

@@ -19,6 +19,7 @@ import ChatView from './views/ChatView';
 import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
 import PromptStacksView from './views/PromptStacksView';
+import ReviewPanelView from './views/ReviewPanelView';
 import SettingsView from './views/SettingsView';
 
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
@@ -185,6 +186,7 @@ export default function App() {
             )}
             {tab.type === 'documents' && <DocumentsView apiKey={apiKey} />}
             {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
+            {tab.type === 'reviewpanel' && <ReviewPanelView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
             {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} onOpenRp={openRp} />}
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}

@@ -3,6 +3,7 @@ import type {
   ChatCompletionResponse,
   ChatDetail,
   ChatMemorySettings,
+  ChatMemorySyncStatusRow,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -504,6 +505,16 @@ export async function adminGetChatMemorySettings(adminKey: string | null): Promi
   const res = await fetch('/v1/admin/chat-memory-settings', { headers: authHeaders(adminKey) });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<ChatMemorySettings>;
+}
+
+/** The review panel's data source — read-only confirmation that the background sync loop
+ *  (chunk/embed/distill) actually ran per chat, not a settings/editing endpoint. No POST
+ *  counterpart. */
+export async function adminGetChatMemorySyncStatus(adminKey: string | null): Promise<ChatMemorySyncStatusRow[]> {
+  const res = await fetch('/v1/admin/chat-memory-sync-status', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { chats: ChatMemorySyncStatusRow[] };
+  return body.chats;
 }
 
 export async function adminSetChatMemorySettings(

@@ -209,3 +209,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `as_of_message_id` arg filters facts to only those anchored at or before a given chat message, so
   "what did the story know as of turn N" is a plain filtered read, not a separate snapshot to keep
   in sync. Omitting `as_of_message_id` is byte-for-byte the pre-migration behavior.
+- `0055_chat_memory_sync_status.sql` — adds `chat_memory_sync_status`, one upserted row per chat
+  recording the rolling background sync loop's (`orchestrator/chatMemorySync.ts`) last attempt:
+  ok/skipped/error, which step failed and why, and the counts it last produced. `on delete cascade`
+  (unlike `canon_facts` — this is derived health data, not a record that must never be lost). The
+  read side for the frontend's new Review Panel (`frontend/src/views/ReviewPanelView.tsx`,
+  `GET /v1/admin/chat-memory-sync-status`) — confirmation that each pipeline stage is actually
+  working, per `bi_principles.md` §11, not an editing surface (canon-fact approve/reject stays on
+  `CanonQueueView`, untouched by this migration).
