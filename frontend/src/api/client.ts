@@ -223,6 +223,9 @@ export function updateChat(
     params?: ChatParams;
     tool_names?: string[] | null;
     canvas_note_id?: string | null;
+    /** The context_stack_presets row the turn-loop cleanup pass runs for this chat; null turns
+     *  the pass off. Same preset selection shape as the Prompt stack picker. */
+    cleanup_preset_id?: string | null;
   },
   apiKey: string | null,
 ): Promise<ChatSessionRow> {

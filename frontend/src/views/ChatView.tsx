@@ -168,6 +168,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     tool_names?: string[] | null;
     folder_id?: string | null;
     title?: string;
+    cleanup_preset_id?: string | null;
   } | null>(null);
   const [allToolNames, setAllToolNames] = useState<string[]>([]);
   // Mobile-only: chat and Canvas are full flex-1 panes side by side (ChatView.css), which is fine
@@ -495,6 +496,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     tool_names?: string[] | null;
     folder_id?: string | null;
     title?: string;
+    cleanup_preset_id?: string | null;
   }) {
     if (!activeChat) {
       // No chat exists yet — stash the draft, send() applies it right after createChat().
@@ -805,6 +807,7 @@ interface ChatSettingsProps {
     tool_names?: string[] | null;
     folder_id?: string | null;
     title?: string;
+    cleanup_preset_id?: string | null;
   }) => Promise<void>;
 }
 
@@ -904,21 +907,22 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     }
   }
 
-  // Prompt stack picker — RP chats only (db/migrations/0049_chat_kind.sql). Loaded lazily off
-  // session.kind rather than unconditionally like presets above, since a general chat never shows
-  // this field at all and has no use for the list.
+  // Prompt-stack pickers — the same get_context_stack_presets list backs both the RP-only Prompt
+  // stack selector below and the Cleanup Preset selector (which applies to any chat kind), so it's
+  // loaded whenever a session exists rather than gated on session.kind.
   const [stacks, setStacks] = useState<ContextStackPreset[]>([]);
   const [selectedStackId, setSelectedStackId] = useState(session?.promptStackPresetId ?? '');
+  const [selectedCleanupId, setSelectedCleanupId] = useState(session?.cleanupPresetId ?? '');
   const [applyingStack, setApplyingStack] = useState(false);
   const [stackError, setStackError] = useState('');
 
   useEffect(() => {
-    if (session?.kind !== 'rp') return;
+    if (!session) return;
     callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey)
       .then(setStacks)
       .catch((err) => setStackError(err instanceof ApiError ? err.message : 'failed to load prompt stacks'));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.kind]);
+  }, [session?.chatId]);
 
   // Only updates the local system-prompt textarea from the tool's response — the tool has already
   // persisted params.system (and prompt_stack_preset_id) server-side, same as
@@ -962,6 +966,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
       params,
       tool_names: allSelected ? null : [...selectedTools],
       folder_id: folderId || null,
+      cleanup_preset_id: selectedCleanupId || null,
     });
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2000);
@@ -1058,6 +1063,22 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
           {stackError && <div className="error-banner">{stackError}</div>}
         </label>
       )}
+
+      <label>
+        Cleanup Preset
+        <select value={selectedCleanupId} onChange={(e) => setSelectedCleanupId(e.target.value)}>
+          <option value="">(none)</option>
+          {stacks.map((s) => (
+            <option key={s.presetId} value={s.presetId}>
+              {s.name}
+            </option>
+          ))}
+        </select>
+        <span className="model-connection-note">
+          Post-processes each reply before it's saved — pick the built-in "Cleanup Pass" preset or a
+          customized copy (Prompt Stacks → Cleanup Pass → Duplicate to customize). Saved with Save settings.
+        </span>
+      </label>
 
       <div className="settings-row">
         <label>

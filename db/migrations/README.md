@@ -306,3 +306,13 @@ Already applied by hand, not run automatically (see the file for the exact comma
   zero special-casing. The one deliberate adaptation from CNZ: their "Keys:" keyword-list
   instruction is dropped from both ported prompts — `docs/spec.md`'s vector recall already replaces
   keyword-lorebook matching entirely, so there's nothing that would ever read a generated key.
+- `0066_cleanup_preset_seed.sql` — seeds the builtin **"Cleanup Pass"** context_stack_presets row
+  (`is_builtin = true`, system user) plus its one custom-system slot carrying the actual cleanup
+  prompt text (docs/vistalyze_integration/cleanup_prompt.md §2.3): the banned-construction/AI-cliché
+  slop list, the location/date/time header-reconstruction rule, and the `<details>` inner-thoughts
+  formatting rule, with `{{message}}` embedded where the raw turn goes. The builtin is the
+  read-only default on the Prompt Stacks page; per bi_principles.md §18 the user duplicates it to
+  customize — the slop list is just the slot's `customContent` textarea, no separate table or UI.
+  Companion to 0057's `chat_sessions.cleanup_preset_id` column; null (unset) chat references keep
+  cleanup off. Guarded on the preset name so re-runs can't double-seed after a duplicate.
+

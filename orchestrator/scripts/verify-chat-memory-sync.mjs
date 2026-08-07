@@ -75,6 +75,13 @@ function createFakePool() {
             return { rows: due };
           }
 
+          // runOneChatSync's per-chat kind read (chatMemorySync.ts) — the seeded sessions here are
+          // all 'chat'-kind (the household-digest lane), so absent a stored kind, default 'chat'.
+          if (sql.startsWith('select kind from chat_sessions')) {
+            const sess = chatSessions.get(params[0]);
+            return { rows: sess ? [{ kind: sess.kind ?? 'chat' }] : [] };
+          }
+
           // runOneChatSync's own full-transcript read
           if (sql.includes('select message_id, role, content from chat_messages')) {
             const rows = chatMessages

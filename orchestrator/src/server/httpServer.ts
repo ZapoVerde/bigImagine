@@ -135,6 +135,10 @@
  *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
+ * runCleanupPass(db, userId, chatId, cleanupPresetId, turnLlm, reply, historyMessages) — the
+ *   fail-open post-turn cleanup LLM call (docs/vistalyze_integration/cleanup_prompt.md §4), with
+ *   the last 2 turn pairs of historyMessages prepended for header/cast context (§3.2); exported
+ *   only so orchestrator/scripts/verify-cleanup-pass.mjs can exercise it against stubs
  *
  * @contract
  *   assertions:
@@ -639,26 +643,47 @@ async function assembleNarratorSystemText(
 // Runs through the same gated llm.complete() (kind: 'chat', same taskId as the main turn — this
 // is part of the turn the user is waiting on, not a background job, so it should never be
 // throttled by agent_routine caps and gets the standard retry/backoff for free from llmGate.ts).
-// On exhausted-retry failure: logged, the raw reply is kept unchanged — per the user's explicit
-// call, cleanup failing never blocks or degrades the turn itself.
-async function runCleanupPass(
+// Exported only so orchestrator/scripts/verify-cleanup-pass.mjs can prove the fail-open contract
+// against a stub db/llm without booting a server.
+//
+// docs/vistalyze_integration/cleanup_prompt.md §3.2: historyMessages carries the turn's active
+// history (already trimToLiveWindow'd by the caller), and its last 2 turn pairs (≤4 messages) are
+// prepended to the cleanup call ahead of the preset slots — the cleanup model's only source for
+// the ongoing conversation's voice, header (location/date/time), and cast state, since no trusted
+// chat→scene/location/presence link exists yet. The user's explicit call: the location and cast
+// must be updatable from previous context, not just from the raw reply. Roles are preserved; the
+// slice is bounded here so the "2 pairs" contract lives in exactly one place.
+//
+// docs/vistalyze_integration/cleanup_prompt.md §1's fail-open contract covers the whole function,
+// not just the LLM call: a slot-load failure (preset deleted mid-turn, DB hiccup), an empty
+// enabled-slot set, a provider timeout, or empty output all log and keep the raw reply unchanged.
+// Cleanup failing never blocks or degrades the turn itself.
+export async function runCleanupPass(
   db: PostgresClient,
   userId: string,
   chatId: string,
   cleanupPresetId: string,
   turnLlm: LlmProvider,
   reply: string,
+  historyMessages: LlmMessage[],
 ): Promise<string> {
-  const slots = await loadPromptStackSlots(db, userId, cleanupPresetId);
-  const messages = assemblePromptStack({}, slots).map((m) => ({
-    ...m,
-    content: interpolateMacros(m.content, { message: reply }),
-  }));
-  if (messages.length === 0) return reply;
-
   try {
+    const slots = await loadPromptStackSlots(db, userId, cleanupPresetId);
+    const presetMessages = assemblePromptStack({}, slots).map((m) => ({
+      ...m,
+      content: interpolateMacros(m.content, { message: reply }),
+    }));
+    if (presetMessages.length === 0) {
+      log.warn(`cleanup pass preset ${cleanupPresetId} resolved to no messages for chat ${chatId}, keeping the raw reply`);
+      return reply;
+    }
+    const messages = [...historyMessages.slice(-4), ...presetMessages];
+
     const turn = await runWithCallContext({ taskId: chatId, kind: 'chat', userId }, () => turnLlm.complete(messages, []));
-    return turn.message.content || reply;
+    // Whitespace-only output counts as empty under the fail-open contract — never let a cleanup
+    // call blank out the user's turn.
+    const cleaned = turn.message.content;
+    return cleaned && cleaned.trim() ? cleaned : reply;
   } catch (err) {
     log.error(`cleanup pass failed for chat ${chatId}, keeping the raw reply`, err);
     return reply;
@@ -883,7 +908,7 @@ async function regenerateSwipe(
   }
 
   if (session.cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply);
+    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply, trimmed);
   }
 
   const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
@@ -1104,7 +1129,7 @@ async function handleChatCompletions(
   // no chat_id, or a chat that hasn't opted into a cleanup preset.
   const cleanupPresetId = sessionDetail?.session.cleanupPresetId;
   if (body.chat_id && cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply);
+    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply, messagesForLlm);
   }
 
   if (body.chat_id) {
@@ -1673,6 +1698,7 @@ function isChatPatchBody(value: unknown): value is {
   params?: ChatParams;
   tool_names?: string[] | null;
   canvas_note_id?: string | null;
+  cleanup_preset_id?: string | null;
 } {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -1689,6 +1715,12 @@ function isChatPatchBody(value: unknown): value is {
   if (v.canvas_note_id !== undefined && v.canvas_note_id !== null && typeof v.canvas_note_id !== 'string') {
     return false;
   }
+  if (v.cleanup_preset_id !== undefined && v.cleanup_preset_id !== null && typeof v.cleanup_preset_id !== 'string') {
+    return false;
+  }
+  // '' is never a valid preset id — rejecting it here (instead of letting it reach Postgres's
+  // uuid cast and 500) keeps a malformed patch a 400 like every other bad field.
+  if (v.cleanup_preset_id === '') return false;
   return true;
 }
 
@@ -1744,7 +1776,7 @@ async function handleChatRoutes(
     if (req.method === 'POST') {
       const body = await readJsonBody(req);
       if (!isChatPatchBody(body)) {
-        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id? }' });
+        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id?, cleanup_preset_id? }' });
         return;
       }
       const updated = await deps.chats.updateChat(userId, chatId, {
@@ -1753,6 +1785,7 @@ async function handleChatRoutes(
         params: body.params,
         toolNames: body.tool_names,
         canvasNoteId: body.canvas_note_id,
+        cleanupPresetId: body.cleanup_preset_id,
       });
       if (!updated) {
         sendJson(res, 404, { error: 'not found' });

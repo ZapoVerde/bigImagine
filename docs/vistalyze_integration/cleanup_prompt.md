@@ -77,6 +77,23 @@ It is surfaced the same way every other prompt in this system already is: as a *
 
 **Assigning to a chat**: The Chat Settings "Cleanup Preset" selector (§5 item 5) points a chat's `cleanup_preset_id` at either the builtin default or a user's customized duplicate — the same selection shape the pre-existing `prompt_stack_preset_id` selector already uses.
 
+### 2.4 Header Wire Format (Canonical)
+
+This is the exact, load-bearing format the builtin preset's rule 2 enforces — anything downstream that parses a cleaned reply (the post-cleanup heuristic extraction pass, `docs/vistalyze_integration/segway.md`) must match this precisely, not a paraphrase of it:
+
+```
+[ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]
+Present: Character A, Character B, Character C
+```
+
+* Always exactly two lines, the first two lines of the message, nothing before them.
+* `TimeOfDay` — a plain phrase ("Early Morning", "Late Evening"), not a clock time.
+* `Era` — "AD"/"BC" by default, or the story's own established custom calendar era if one exists (e.g. "41st Millennium", "3 ABY").
+* `Location` — `General Area - Specific Room` when a specific room/spot is known, else just the general area.
+* `Present` — the explicit, comma-separated roster of every character physically in the room at the end of the turn. Reconstructed from context (never invented) when missing, same as the rest of the header.
+
+No weather/atmosphere field — dropped from an earlier draft of this prompt; it isn't part of the format this doc's design is actually built around.
+
 ---
 
 ## 3. Prompt Construction & Input Assembly

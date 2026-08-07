@@ -330,10 +330,25 @@ function createFakePool() {
           if (sql.includes('insert into llm_calls')) {
             return { rows: [] };
           }
+          // turn_metrics recording (db/migrations/0041_turn_metrics.sql) fires for every gated
+          // complete() call too — its own recorder catches/logs failures, so the tests pass either
+          // way, but the fake pool's catch-all would still spam ERROR lines per turn. Accept the
+          // insert like llm_calls; nothing here asserts on its contents (verify-loop.mjs's job).
+          if (sql.includes('insert into turn_metrics')) {
+            return { rows: [] };
+          }
           // docs/chat-memory.md: handleChatCompletions' buildChatMemorySystemPrompt reads both of
           // these on every persisted-session turn now — empty is a legitimate, common answer (no
           // household memory or per-chat digest yet), nothing here asserts on their contents.
-          if (sql.includes('select content from household_memory') || sql.includes('select content from chat_memory_entries')) {
+          // 'from chat_memory_entries' (not the narrower 'select content from …') so the rp-lane
+          // bridge read — `select topic_key, content from chat_memory_entries …` — matches too.
+          if (sql.includes('select content from household_memory') || sql.includes('from chat_memory_entries')) {
+            return { rows: [] };
+          }
+          // ...and the rp-lane's approved 'plot' canon-facts recall (httpServer.ts's
+          // buildChatMemorySystemPrompt, the distinct-on-arc_tag query) — no approved plot facts
+          // is a legitimate, common state; nothing here asserts on its contents either.
+          if (sql.includes('from canon_facts')) {
             return { rows: [] };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);

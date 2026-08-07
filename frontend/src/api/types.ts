@@ -216,6 +216,10 @@ export interface ChatSessionRow {
   characterId: string | null;
   /** The last context_stack_presets row applied via apply_prompt_stack_to_chat, if any. */
   promptStackPresetId: string | null;
+  /** The context_stack_presets row the turn-loop cleanup pass runs for this chat, if any
+   *  (orchestrator/src/server/httpServer.ts's post-runTurn runCleanupPass). Null (the default)
+   *  means the cleanup pass is off for this chat. */
+  cleanupPresetId: string | null;
   createdAt: string;
   updatedAt: string;
 }
