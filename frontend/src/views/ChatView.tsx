@@ -310,7 +310,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
-        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent })));
+        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes })));
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load chat'));
     refreshLocationImage(chatId);
