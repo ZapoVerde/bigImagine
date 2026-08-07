@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/loop.ts
- * @stamp 2026-07-21
+ * @stamp 2026-08-07
  * @architectural-role Orchestrator — the minimal agentic loop (docs/spec.md §4, steps 2-8;
  * write-time hint and read-time render tick deliberately not implemented yet, per the build
  * order — both are additive to this path)
@@ -8,8 +8,8 @@
  * Sequences calls to the LLM and to tool handlers. Owns no state and does no direct IO of its
  * own — every side effect goes through the LlmProvider or PostgresClient it's given. The only
  * decision this file makes is mechanical (which tool name the LLM asked for, how many rounds to
- * allow); it never interprets what a message or tool result *means* — that's the LLM's job
- * alone, per bb_principles.md §2.
+ * allow, when a blank final reply is worth re-asking); it never interprets what a message or
+ * tool result *means* — that's the LLM's job alone, per bb_principles.md §2.
  *
  * Each tool call gets its own withUserScope transaction — simplest correct thing for a single
  * request scoped to one user_id throughout (bb_principles.md §4); nothing here batches multiple
@@ -43,10 +43,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { log, runWithRequestId } from '../io/logger.js';
-import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
-import { createMetricsAccumulator, recordTurnMetrics, type RoundMetric, type TurnMetricsAccumulator } from '../io/turnMetrics.js';
+import { createMetricsAccumulator, recordTurnMetrics, type TurnMetricsAccumulator } from '../io/turnMetrics.js';
 import type { ToolRegistry } from './toolRegistry.js';
 import { describeToolCall } from './describeToolCall.js';
 import { setTurnStatus, clearTurnStatus } from './turnStatus.js';
@@ -87,6 +87,60 @@ export interface RunTurnOptions {
    *  calling runTurn specifically so this id is available here, not one turn stale. Only
    *  meaningful alongside a chat taskId; omitted for stateless/non-chat turns. */
   anchorMessageId?: string;
+}
+
+/** Automatic retry budget when the LLM's final reply comes back blank (empty or whitespace-only
+ *  content, no tool calls): one initial attempt plus up to this many retries, then runTurn fails
+ *  the turn visibly rather than persisting a silent empty reply. Each retry re-sends the exact
+ *  same message history — the blank reply is never pushed into it, so a provider that keeps
+ *  returning empty is costing real, metered usage instead of quietly polluting the context. */
+const MAX_EMPTY_REPLY_RETRIES = 3;
+
+function isBlankReply(content: string): boolean {
+  return content.trim() === '';
+}
+
+/** One round's LLM completion with the blank-reply retry: llm.complete() called once, metered as
+ *  its own round, and re-called up to MAX_EMPTY_REPLY_RETRIES more times when the completion is a
+ *  final reply (no tool calls) with blank content. A retry that instead comes back with tool calls
+ *  is accepted as-is — the caller's loop continues with them. Throws once the retry budget is
+ *  spent on a still-blank final reply, so the failure is loud (surfaced to the chat client) rather
+ *  than a silent empty message. */
+async function completeWithBlankRetry(
+  opts: RunTurnOptions,
+  messages: LlmMessage[],
+  round: number,
+  metrics: TurnMetricsAccumulator,
+): Promise<LlmTurn> {
+  const { llm, tools, model, sampling, userId } = opts;
+  let attempts = 0;
+  for (;;) {
+    const llmStart = Date.now();
+    const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
+    attempts++;
+    metrics.rounds.push({
+      round,
+      llmDurationMs: Date.now() - llmStart,
+      promptTokens: turn.usage?.promptTokens ?? null,
+      completionTokens: turn.usage?.completionTokens ?? null,
+      totalTokens: turn.usage?.totalTokens ?? null,
+      toolCalls: [],
+    });
+    const isFinalReply = turn.toolCalls.length === 0;
+    if (isFinalReply && isBlankReply(turn.message.content) && attempts <= MAX_EMPTY_REPLY_RETRIES) {
+      log.warn(`runTurn blank reply, retrying`, {
+        userId,
+        round,
+        attempt: attempts,
+        maxRetries: MAX_EMPTY_REPLY_RETRIES,
+      });
+      continue;
+    }
+    if (isFinalReply && isBlankReply(turn.message.content)) {
+      throw new Error(`runTurn: LLM returned an empty reply after ${MAX_EMPTY_REPLY_RETRIES} retries`);
+    }
+    return turn;
+  }
 }
 
 export interface RunTurnResult {
@@ -131,7 +185,7 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
 }
 
 async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulator): Promise<RunTurnResult> {
-  const { userId, systemPrompt, model, sampling, llm, db, tools, maxToolRounds = 10 } = opts;
+  const { userId, systemPrompt, db, tools, maxToolRounds = 10 } = opts;
   // taskId is the chat_id for a live conversation (RunTurnOptions.taskId's own doc comment) — only
   // meaningful to thread through to tools as chatId when this turn actually is one.
   const chatId = (opts.taskKind ?? 'chat') === 'chat' ? opts.taskId : undefined;
@@ -140,22 +194,12 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
   messages.push(...opts.messages);
 
-  log.info(`runTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
+  log.info(`runTurn start`, { userId, provider: opts.llm.name, model: opts.model, historyLength: opts.messages.length });
 
   let focusedNoteId: string | undefined;
 
   for (let round = 0; round < maxToolRounds; round++) {
-    const llmStart = Date.now();
-    const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
-    const roundMetric: RoundMetric = {
-      round,
-      llmDurationMs: Date.now() - llmStart,
-      promptTokens: turn.usage?.promptTokens ?? null,
-      completionTokens: turn.usage?.completionTokens ?? null,
-      totalTokens: turn.usage?.totalTokens ?? null,
-      toolCalls: [],
-    };
-    metrics.rounds.push(roundMetric);
+    const turn = await completeWithBlankRetry(opts, messages, round, metrics);
 
     messages.push({
       ...turn.message,
@@ -182,7 +226,7 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
           return { error: err instanceof Error ? err.message : String(err) };
         }
       });
-      roundMetric.toolCalls.push({
+      metrics.rounds[metrics.rounds.length - 1].toolCalls.push({
         name: call.name,
         durationMs: Date.now() - toolStart,
         outcome: resultPayload && typeof resultPayload === 'object' && 'error' in resultPayload ? 'error' : 'ok',

@@ -131,6 +131,20 @@
   letter-spacing: normal;
 }
 
+/* "fired" badge — this group is a captured background prompt's actual sent text (cleanup pass,
+   title generation, …), unlike the live Main Prompt preview. */
+.prompt-inspector-captured {
+  margin-left: 0.5rem;
+  padding: 0.05rem 0.4rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  font-weight: var(--font-weight-regular, normal);
+  text-transform: none;
+  letter-spacing: normal;
+  font-size: 0.75em;
+  color: var(--color-accent);
+}
+
 .prompt-inspector-empty {
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);

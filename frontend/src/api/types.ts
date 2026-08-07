@@ -357,6 +357,11 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1) — attached
+   *  server-side for 'rp' chats whose stored text contains {{...}} tokens (chiefly a character's
+   *  seeded greeting). Render this when present; always re-send `content` (verbatim) so the
+   *  per-turn resolution pass keeps resolving against the live persona. */
+  resolvedContent?: string;
   /** Present only once this message has been regenerated at least once (swipe capability on the
    *  last LLM response). index is its current position among stored variants (0-based); count is
    *  how many exist. Undefined means never swiped — content is the only version. */
@@ -472,7 +477,7 @@ export interface PromptPreset {
 }
 
 // orchestrator/src/server/httpServer.ts's buildPromptPreview (GET /v1/chats/:id/prompt-preview) —
-// the exact, itemized prompt an 'rp' chat's next turn would send, for the Prompt Inspector panel.
+// the exact, itemized prompts an 'rp' chat fires, for the Prompt Inspector panel.
 export interface PromptPreviewItem {
   /** Raw MarkerKey (assemblePromptStack.ts) when this item came from a preset's marker slot —
    *  undefined for a custom slot, the date-context line, or a conversation message. Map to a
@@ -487,9 +492,24 @@ export interface PromptPreviewItem {
   estimatedTokens: number;
 }
 
+/** One prompt this chat fires: the main turn prompt (captured at send time — the exact text the
+ *  last turn sent; only a live next-turn reconstruction when no capture exists yet) or a captured
+ *  background prompt (cleanup pass, title generation, … — io/promptTrace.ts records the exact
+ *  text at send time, since those aren't reconstructable from persisted state afterwards). */
+export interface PromptPreviewGroup {
+  /** Stable kind tag: 'main', 'cleanup', 'title', … */
+  kind: string;
+  /** Human heading, e.g. 'Main Prompt' / 'Cleanup Prompt'. */
+  title: string;
+  /** True = actual text fired during a turn; false = live reconstruction of the next turn. */
+  captured: boolean;
+  /** Items in send order — header/system items first, then conversation messages. */
+  items: PromptPreviewItem[];
+}
+
 export interface PromptPreview {
-  systemStack: PromptPreviewItem[];
-  messages: PromptPreviewItem[];
+  /** Every prompt the chat fires, in order: Main Prompt first, then captured background prompts. */
+  groups: PromptPreviewGroup[];
   totalChars: number;
   totalEstimatedTokens: number;
 }
@@ -513,9 +533,13 @@ export interface ContextStackPreset {
   presetId: string;
   name: string;
   isBuiltin: boolean;
-  /** This user's chosen default (migration 0061) — auto-applied to every new RP chat by
-   *  CharactersView.tsx's startRp(), right after apply_character_to_chat. At most one true. */
+  /** This user's chosen prompt-stack default (migration 0061) — auto-applied to every new RP chat
+   *  by CharactersView.tsx's startRp(), right after apply_character_to_chat. At most one true. */
   isDefault: boolean;
+  /** This user's chosen cleanup default (migration 0071) — auto-applied to every new RP chat's
+   *  cleanup_preset_id by startRp(), alongside the prompt-stack default. Independent of
+   *  isDefault: one preset can be both, or two presets can each own one. At most one true. */
+  isCleanupDefault: boolean;
   slots: ContextStackSlot[];
   updatedAt: string;
 }

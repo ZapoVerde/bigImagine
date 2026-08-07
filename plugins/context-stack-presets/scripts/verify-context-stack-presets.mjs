@@ -41,11 +41,11 @@ function createFakePool() {
   const chatSessions = [];
   const chatMessages = [];
   // users has no RLS of its own (0002's own comment) — just a plain array, one row per known test
-  // user, each starting with no default prompt stack (migration 0061).
+  // user, each starting with no defaults of either kind (migrations 0061 + 0071).
   const users = [
-    { user_id: '11111111-1111-1111-1111-111111111111', default_context_stack_preset_id: null },
-    { user_id: '22222222-2222-2222-2222-222222222222', default_context_stack_preset_id: null },
-    { user_id: '33333333-3333-3333-3333-333333333333', default_context_stack_preset_id: null },
+    { user_id: '11111111-1111-1111-1111-111111111111', default_context_stack_preset_id: null, default_cleanup_preset_id: null },
+    { user_id: '22222222-2222-2222-2222-222222222222', default_context_stack_preset_id: null, default_cleanup_preset_id: null },
+    { user_id: '33333333-3333-3333-3333-333333333333', default_context_stack_preset_id: null, default_cleanup_preset_id: null },
   ];
   let counter = 0;
   let tick = 0;
@@ -114,16 +114,27 @@ function createFakePool() {
             return { rows: visible.map((p) => ({ preset_id: p.preset_id, name: p.name, is_builtin: p.is_builtin, updated_at: p.updated_at })) };
           }
 
-          if (sql.startsWith('select default_context_stack_preset_id from users')) {
+          if (sql.startsWith('select default_context_stack_preset_id')) {
             const [userId] = params;
             const user = users.find((u) => u.user_id === userId);
-            return { rows: user ? [{ default_context_stack_preset_id: user.default_context_stack_preset_id }] : [] };
+            return {
+              rows: user
+                ? [{ default_context_stack_preset_id: user.default_context_stack_preset_id, default_cleanup_preset_id: user.default_cleanup_preset_id }]
+                : [],
+            };
           }
 
           if (sql.startsWith('select preset_id from context_stack_presets where preset_id = $1')) {
             const [presetId, userId] = params;
             const match = presets.find((p) => p.preset_id === presetId && (p.user_id === userId || p.is_builtin));
             return { rows: match ? [{ preset_id: match.preset_id }] : [] };
+          }
+
+          if (sql.startsWith('update users set default_cleanup_preset_id')) {
+            const [userId, presetId] = params;
+            const user = users.find((u) => u.user_id === userId);
+            if (user) user.default_cleanup_preset_id = presetId;
+            return { rows: [] };
           }
 
           if (sql.startsWith('update users set default_context_stack_preset_id')) {
@@ -395,7 +406,7 @@ assert(
   'apply_prompt_stack_to_chat folds household persona_name/persona_description into the persona marker once both are set',
 );
 
-// --- set_default_context_stack_preset (migration 0061) ---
+// --- set_default_context_stack_preset (migrations 0061 prompt + 0071 cleanup) ---
 const setDefaultTool = registry.get('set_default_context_stack_preset');
 
 const setOwnDefault = await db.withUserScope(userId, (session) =>
@@ -435,6 +446,51 @@ const clearedDefault = await db.withUserScope(userId, (session) => setDefaultToo
 assert(clearedDefault.set === true && clearedDefault.presetId === null, 'set_default_context_stack_preset with no presetId clears the default');
 const afterClear = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
 assert(afterClear.every((p) => !p.isDefault), 'no preset reports isDefault: true once cleared');
+
+// --- set_default_context_stack_preset kind: 'cleanup' (migration 0071) ---
+const setCleanupDefault = await db.withUserScope(userId, (session) =>
+  setDefaultTool.handler({ presetId: presetWithPersona.presetId, kind: 'cleanup' }, { userId, db: session }),
+);
+assert(setCleanupDefault.set === true && setCleanupDefault.kind === 'cleanup', "set_default_context_stack_preset kind 'cleanup' accepts an owned preset");
+const afterSetCleanup = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  afterSetCleanup.find((p) => p.presetId === presetWithPersona.presetId)?.isCleanupDefault === true,
+  'get_context_stack_presets reports isCleanupDefault: true for the preset just marked cleanup-default',
+);
+assert(
+  afterSetCleanup.filter((p) => p.isCleanupDefault).length === 1,
+  'get_context_stack_presets reports isCleanupDefault: true for at most one preset',
+);
+assert(
+  afterSetCleanup.every((p) => !p.isDefault),
+  "a cleanup default is independent of the prompt default — the cleared prompt default stays clear",
+);
+
+const setCleanupBuiltin = await db.withUserScope(userId, (session) =>
+  setDefaultTool.handler({ presetId: standard.presetId, kind: 'cleanup' }, { userId, db: session }),
+);
+assert(setCleanupBuiltin.set === true, "set_default_context_stack_preset kind 'cleanup' accepts a shared builtin, not just an owned preset");
+const afterSetCleanupBuiltin = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  afterSetCleanupBuiltin.find((p) => p.presetId === standard.presetId)?.isCleanupDefault === true &&
+    afterSetCleanupBuiltin.find((p) => p.presetId === presetWithPersona.presetId)?.isCleanupDefault === false,
+  'marking a new cleanup default replaces the previous one rather than stacking',
+);
+
+const setCrossUserCleanup = await db.withUserScope(otherUserId, (session) =>
+  setDefaultTool.handler({ presetId: presetWithPersona.presetId, kind: 'cleanup' }, { userId: otherUserId, db: session }),
+);
+assert(setCrossUserCleanup.set === false, "set_default_context_stack_preset kind 'cleanup' rejects another user's preset (not owned, not builtin)");
+const otherUserAfterCleanupReject = await db.withUserScope(otherUserId, (session) => getTool.handler({}, { userId: otherUserId, db: session }));
+assert(
+  otherUserAfterCleanupReject.every((p) => !p.isCleanupDefault),
+  "a rejected cleanup set leaves the other user's own cleanup default untouched (still none)",
+);
+
+const clearedCleanup = await db.withUserScope(userId, (session) => setDefaultTool.handler({ kind: 'cleanup' }, { userId, db: session }));
+assert(clearedCleanup.set === true && clearedCleanup.presetId === null, "set_default_context_stack_preset kind 'cleanup' with no presetId clears the cleanup default");
+const afterClearCleanup = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(afterClearCleanup.every((p) => !p.isCleanupDefault), 'no preset reports isCleanupDefault: true once cleared');
 
 if (process.exitCode) {
   console.error('\ncontext-stack-presets verification FAILED');

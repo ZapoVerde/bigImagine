@@ -91,6 +91,12 @@ interface DisplayMessage {
   messageId?: string;
   role: 'user' | 'assistant';
   content: string;
+  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1) — served by
+   *  GET /v1/chats/:id as resolvedContent for 'rp' chats whose stored text contains {{...}} tokens
+   *  (chiefly a character's seeded greeting). Render this when present; `content` stays verbatim
+   *  and is what gets re-sent, so the server's per-turn resolution stays fresh against the live
+   *  persona. */
+  resolvedContent?: string;
   /** Swipe capability on the last LLM response — present only once this message has been
    *  regenerated at least once. See api/types.ts's StoredChatMessage for the shape. */
   swipes?: { index: number; count: number };
@@ -254,11 +260,22 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
+  // RP-chat header hamburger menu — folds the prompt-inspector and branch-map toggles plus
+  // file/image attach under one control (see the header below). Non-RP chats keep their single
+  // branch-map button and the input-row paper clip instead.
+  const [chatMenuOpen, setChatMenuOpen] = useState(false);
+  // Selection-mode bulk delete (hamburger → "Delete messages"): a tickbox on every message, and
+  // ticking any entry selects everything below it, so the selected set is always a trailing
+  // suffix — exactly what the server's truncateMessagesFrom removes in one call. RP-chat only,
+  // like the menu itself.
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionStart, setSelectionStart] = useState<number | null>(null);
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
 
   const historyRef = useRef<HTMLDivElement | null>(null);
+  const chatMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     listFolders(apiKey).then(setFolders).catch(() => {});
@@ -276,6 +293,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setMobileShowCanvas(false);
       setPromptInspectorOpen(false);
       setBranchMapOpen(false);
+      setChatMenuOpen(false);
+      setSelectionMode(false);
+      setSelectionStart(null);
       setError(null);
       setEditingId(null);
       return;
@@ -284,15 +304,48 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setMobileShowCanvas(false);
     setPromptInspectorOpen(false);
     setBranchMapOpen(false);
+    setChatMenuOpen(false);
+    setSelectionMode(false);
+    setSelectionStart(null);
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
-        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content })));
+        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent })));
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load chat'));
     refreshLocationImage(chatId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
+
+  // Close the header hamburger menu on outside click or Escape. Only mounted while the menu is
+  // open, so the listeners cost nothing when it isn't.
+  useEffect(() => {
+    if (!chatMenuOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (chatMenuRef.current && !chatMenuRef.current.contains(e.target as Node)) {
+        setChatMenuOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setChatMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [chatMenuOpen]);
+
+  // Escape exits selection mode too, same as it closes the hamburger menu.
+  useEffect(() => {
+    if (!selectionMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setSelectionMode(false);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selectionMode]);
 
   // endpoint.md §6.4: refresh the chat's active-location background image. Best-effort — a
   // failure just leaves the previous image (or none), never surfaces an error banner for what is
@@ -329,7 +382,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // a tool's focusHint — shows up without a separate request.
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
-    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, swipes: m.swipes })));
+    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes })));
     setActiveChat(detail.session);
     refreshLocationImage(chatId);
   }
@@ -408,24 +461,47 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     });
   }
 
+  /** Resend mode: the chat's last message is the user's own (its AI reply was deleted or never
+   *  arrived) and there's nothing new typed or staged — the Send button lights up and pressing it
+   *  re-runs that turn instead of sending a new message. The history is sent as-is, no user
+   *  message appended, which httpServer.ts's isNewTurn check reads as "no new turn": the user
+   *  message is not duplicated and the fresh assistant reply lands under it. */
+  function resendMode(): boolean {
+    const lastMsg = messages[messages.length - 1];
+    return (
+      !sending &&
+      !selectionMode &&
+      lastMsg?.role === 'user' &&
+      !draft.trim() &&
+      stagedFiles.length === 0 &&
+      stagedImages.length === 0
+    );
+  }
+
   async function send() {
     const text = draft.trim();
-    if ((!text && stagedFiles.length === 0 && stagedImages.length === 0) || sending) return;
+    const resendLast = resendMode();
+    if (sending) return;
+    if (!resendLast && !text && stagedFiles.length === 0 && stagedImages.length === 0) return;
 
     // A file/image-only send (no typed text) still needs non-empty, readable content for the
     // message that actually gets persisted — neither a file's extracted text nor an image's bytes
     // are ever stored (see attachFiles/StagedAttachment/StagedImage), so history would otherwise
     // show a blank bubble forever.
     const stagedCount = stagedFiles.length + stagedImages.length;
-    const displayText =
-      text ||
-      (stagedFiles.length === 1 && stagedImages.length === 0
-        ? `Sent ${stagedFiles[0]!.filename}`
-        : `Sent ${stagedCount} file${stagedCount === 1 ? '' : 's'}`);
+    const displayText = resendLast
+      ? messages[messages.length - 1]!.content
+      : text ||
+        (stagedFiles.length === 1 && stagedImages.length === 0
+          ? `Sent ${stagedFiles[0]!.filename}`
+          : `Sent ${stagedCount} file${stagedCount === 1 ? '' : 's'}`);
 
     setError(null);
     setSending(true);
-    const nextMessages: DisplayMessage[] = [...messages, { role: 'user', content: displayText }];
+    // Resend re-runs the existing history as-is; a normal send appends this turn's user message.
+    const nextMessages: DisplayMessage[] = resendLast
+      ? messages
+      : [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
     setDraft('');
     // Strip the client-only id (StagingBar's key/promotion-tracking field) before it goes over
@@ -479,7 +555,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       const result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
       if ('message' in result) {
         setMessages((prev) =>
-          prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, swipes: result.message.swipes } : m)),
+          prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes } : m)),
         );
       }
       // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
@@ -535,6 +611,37 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setMessages((prev) => prev.filter((m) => m.messageId !== messageId));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to delete message');
+    }
+  }
+
+  // --- Selection-mode bulk delete (hamburger → "Delete messages") ---
+  // Ticking a message selects everything below it too, so the selection is always a trailing
+  // suffix of the conversation; un-ticking works symmetrically (clears that message and all
+  // below it). Deleting = one truncateMessagesFrom call at the first selected message.
+  function toggleSelect(index: number) {
+    if (messages[index] && !messages[index].messageId) return; // pending message — not selectable
+    setSelectionStart((s) => {
+      if (s !== null && index >= s) return index === s ? null : s; // uncheck: clears index..end
+      return index;
+    });
+  }
+
+  function cancelSelectionMode() {
+    setSelectionMode(false);
+    setSelectionStart(null);
+  }
+
+  async function confirmSelectionDelete() {
+    if (!activeChat || selectionStart === null) return;
+    const firstId = messages[selectionStart]?.messageId;
+    if (!firstId) return;
+    setError(null);
+    try {
+      await truncateMessagesFrom(activeChat.chatId, firstId, apiKey);
+      await refreshActiveMessages(activeChat.chatId);
+      cancelSelectionMode();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to delete messages');
     }
   }
 
@@ -635,25 +742,81 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             </button>
           )}
           {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
-          {activeChat?.kind === 'rp' && (
-            <button
-              type="button"
-              className="chat-prompt-inspector-summon"
-              title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
-              onClick={() => setPromptInspectorOpen((v) => !v)}
-            >
-              🧾
-            </button>
-          )}
-          {activeChat && (
-            <button
-              type="button"
-              className="chat-branch-map-summon"
-              title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
-              onClick={() => setBranchMapOpen((v) => !v)}
-            >
-              🌳
-            </button>
+          {activeChat?.kind === 'rp' ? (
+            <div className="chat-menu-wrap" ref={chatMenuRef}>
+              <button
+                type="button"
+                className="chat-menu-button"
+                title="Chat menu"
+                aria-haspopup="menu"
+                aria-expanded={chatMenuOpen}
+                onClick={() => setChatMenuOpen((v) => !v)}
+              >
+                ☰
+              </button>
+              {chatMenuOpen && (
+                <div className="chat-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
+                    onClick={() => {
+                      setPromptInspectorOpen((v) => !v);
+                      setChatMenuOpen(false);
+                    }}
+                  >
+                    🧾 {promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect prompt'}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
+                    onClick={() => {
+                      setBranchMapOpen((v) => !v);
+                      setChatMenuOpen(false);
+                    }}
+                  >
+                    🌳 {branchMapOpen ? 'Hide branch map' : 'Branch map'}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Attach a file or image"
+                    disabled={attaching}
+                    onClick={() => {
+                      fileInputRef.current?.click();
+                      setChatMenuOpen(false);
+                    }}
+                  >
+                    📎 Attach file or image
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    title="Select messages to delete"
+                    disabled={messages.length === 0 || sending}
+                    onClick={() => {
+                      setSelectionMode(true);
+                      setSelectionStart(null);
+                      setChatMenuOpen(false);
+                    }}
+                  >
+                    🗑 Delete messages
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            activeChat && (
+              <button
+                type="button"
+                className="chat-branch-map-summon"
+                title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
+                onClick={() => setBranchMapOpen((v) => !v)}
+              >
+                🌳
+              </button>
+            )
           )}
           {activeChat?.canvasNoteId && (
             <button
@@ -704,10 +867,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             const hasMoreSwipesAhead = m.swipes ? m.swipes.index < m.swipes.count - 1 : false;
             const swipeNextDisabled = sending || swipingId === m.messageId || (isOpeningGreeting && !hasMoreSwipesAhead);
             const swipePrevDisabled = sending || swipingId === m.messageId || !m.swipes || m.swipes.index === 0;
+            // The last reply's bottom action bar (below) is always visible, unlike the per-message
+            // hover row — arrow shown only when a swipe exists in that direction, Rerun standing in
+            // for the next-arrow when there's nothing ahead to swipe to.
+            const busy = sending || swipingId === m.messageId;
+            const hasPrevSwipe = !!m.swipes && m.swipes.index > 0;
+            const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
+            const showCounter = !!m.swipes && m.swipes.count > 1;
+            const showRerun = !isOpeningGreeting && !hasMoreSwipesAhead;
             // Mobile: a left/right drag on the bubble browses swipes the same way the ‹/› buttons
             // do (see touchSwipeStartRef above) — only wired up when there's actually more than one
             // stored variant to browse between.
-            const swipeGestureEnabled = isLastAssistant && m.messageId && m.swipes && m.swipes.count > 1;
+            const swipeGestureEnabled = isLastAssistant && m.messageId && m.swipes && m.swipes.count > 1 && !selectionMode;
             const handleSwipeTouchStart = swipeGestureEnabled
               ? (e: React.TouchEvent<HTMLDivElement>) => {
                   const t = e.touches[0];
@@ -733,12 +904,22 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                 }
               : undefined;
             return (
-              <div
-                key={m.messageId ?? `pending-${i}`}
-                className={`chat-bubble ${m.role}`}
-                onTouchStart={handleSwipeTouchStart}
-                onTouchEnd={handleSwipeTouchEnd}
-              >
+              <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}`}>
+                {selectionMode && (
+                  <label className="chat-select-box" title={m.role === 'user' ? 'Select this message and everything below it' : 'Select this reply and everything below it'}>
+                    <input
+                      type="checkbox"
+                      checked={selectionStart !== null && i >= selectionStart}
+                      disabled={!m.messageId}
+                      onChange={() => toggleSelect(i)}
+                    />
+                  </label>
+                )}
+                <div
+                  className={`chat-bubble ${m.role}`}
+                  onTouchStart={handleSwipeTouchStart}
+                  onTouchEnd={handleSwipeTouchEnd}
+                >
                 {editingId === m.messageId ? (
                   <div className="message-edit">
                     <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={3} autoFocus />
@@ -764,44 +945,89 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                         remarkRehypeOptions={{ allowDangerousHtml: true }}
                         rehypePlugins={[rehypeRaw, [rehypeSanitize, defaultSchema]]}
                       >
-                        {m.content}
+                        {/* resolvedContent is the display copy of a macro-bearing message (the
+                            seeded greeting's {{user}} etc., resolved against the live persona on
+                            the server); content stays verbatim and is what re-sends, so the
+                            per-turn resolution stays fresh. */}
+                        {m.resolvedContent ?? m.content}
                       </ReactMarkdown>
                     </div>
-                    {m.messageId && (
-                      <div className="message-actions">
-                        <button onClick={() => copyMessage(m.content, m.messageId)}>
-                          {copiedId === m.messageId ? 'Copied' : 'Copy'}
-                        </button>
-                        {m.role === 'user' && <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>}
-                        {m.role === 'assistant' && isLastAssistant && (
-                          <span className="swipe-controls">
-                            {m.swipes && m.swipes.count > 1 && (
-                              <>
-                                <button onClick={() => swipe(m.messageId!, 'prev')} disabled={swipePrevDisabled} title="Previous reply">
-                                  ‹
-                                </button>
-                                <span className="swipe-count">
-                                  {m.swipes.index + 1}/{m.swipes.count}
-                                </span>
-                              </>
-                            )}
+                    {m.messageId && !selectionMode &&
+                      (isLastAssistant && m.role === 'assistant' ? (
+                        <div className="last-chat-actions">
+                          {hasPrevSwipe && (
                             <button
-                              onClick={() => swipe(m.messageId!, 'next')}
-                              disabled={swipeNextDisabled}
-                              title={hasMoreSwipesAhead ? 'Next reply' : isOpeningGreeting ? 'No more greetings' : 'Regenerate this reply'}
+                              type="button"
+                              className="last-chat-arrow"
+                              title="Previous reply"
+                              disabled={busy}
+                              onClick={() => swipe(m.messageId!, 'prev')}
                             >
-                              {swipingId === m.messageId ? '…' : hasMoreSwipesAhead || isOpeningGreeting ? '›' : 'Rerun'}
+                              ‹
                             </button>
-                          </span>
-                        )}
-                        <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
-                          Fork from here
-                        </button>
-                        <button onClick={() => removeMessage(m.messageId!)}>Delete</button>
-                      </div>
-                    )}
+                          )}
+                          <button
+                            type="button"
+                            className="last-chat-icon"
+                            title={copiedId === m.messageId ? 'Copied' : 'Copy'}
+                            onClick={() => copyMessage(m.content, m.messageId)}
+                          >
+                            {copiedId === m.messageId ? '✓' : '📋'}
+                          </button>
+                          {showRerun && (
+                            <button
+                              type="button"
+                              className="last-chat-icon"
+                              title="Regenerate this reply"
+                              disabled={busy}
+                              onClick={() => swipe(m.messageId!, 'next')}
+                            >
+                              {swipingId === m.messageId ? '…' : '↻'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="last-chat-icon"
+                            title="Branch a new chat from this point, leaving this one untouched"
+                            onClick={() => forkFrom(m.messageId!)}
+                          >
+                            🌿
+                          </button>
+                          <button type="button" className="last-chat-icon" title="Delete" onClick={() => removeMessage(m.messageId!)}>
+                            🗑
+                          </button>
+                          {showCounter && (
+                            <span className="last-chat-counter">
+                              [{m.swipes!.index + 1}/{m.swipes!.count}]
+                            </span>
+                          )}
+                          {hasNextSwipe && (
+                            <button
+                              type="button"
+                              className="last-chat-arrow"
+                              title="Next reply"
+                              disabled={busy}
+                              onClick={() => swipe(m.messageId!, 'next')}
+                            >
+                              ›
+                            </button>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="message-actions">
+                          <button onClick={() => copyMessage(m.content, m.messageId)}>
+                            {copiedId === m.messageId ? 'Copied' : 'Copy'}
+                          </button>
+                          {m.role === 'user' && <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>}
+                          <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
+                            Fork from here
+                          </button>
+                          <button onClick={() => removeMessage(m.messageId!)}>Delete</button>
+                        </div>
+                      ))}
                   </>
                 )}
+                </div>
               </div>
             );
           })}
@@ -810,6 +1036,25 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
         <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
         <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
+
+        {selectionMode && (
+          <div className="chat-delete-bar">
+            <span className="chat-delete-count">
+              {selectionStart === null ? 0 : messages.length - selectionStart} selected
+            </span>
+            <button
+              type="button"
+              className="chat-delete-confirm"
+              disabled={selectionStart === null}
+              onClick={confirmSelectionDelete}
+            >
+              Delete
+            </button>
+            <button type="button" onClick={cancelSelectionMode}>
+              Cancel
+            </button>
+          </div>
+        )}
 
         <form
           className="chat-input"
@@ -828,15 +1073,19 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               e.target.value = '';
             }}
           />
-          <button
-            type="button"
-            className="chat-attach-button"
-            title="Attach a file or image"
-            disabled={attaching}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            📎
-          </button>
+          {/* RP chats attach from the header hamburger menu instead — the input row keeps just
+              the textarea + Send, with the paper clip reserved for non-RP chats. */}
+          {activeChat?.kind !== 'rp' && (
+            <button
+              type="button"
+              className="chat-attach-button"
+              title="Attach a file or image"
+              disabled={attaching}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              📎
+            </button>
+          )}
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -852,11 +1101,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           />
           <button
             type="submit"
-            className="chat-send-button"
-            disabled={sending || (!draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0)}
+            className={`chat-send-button${resendMode() ? ' chat-send-resend' : ''}`}
+            disabled={
+              sending ||
+              selectionMode ||
+              (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0)
+            }
+            title={resendMode() ? 'Resend your last message' : undefined}
           >
-            <span className="chat-send-label">Send</span>
-            <span className="chat-send-icon" aria-hidden="true">➤</span>
+            <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
+            <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
           </button>
         </form>
       </div>
@@ -1175,12 +1429,14 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
           {stacks.map((s) => (
             <option key={s.presetId} value={s.presetId}>
               {s.name}
+              {s.isCleanupDefault ? ' (default)' : ''}
             </option>
           ))}
         </select>
         <span className="model-connection-note">
           Post-processes each reply before it's saved — pick the built-in "Cleanup Pass" preset or a
-          customized copy (Prompt Stacks → Cleanup Pass → Duplicate to customize). Saved with Save settings.
+          customized copy (Prompt Stacks → Cleanup Pass → Duplicate to customize). The preset marked
+          "default" is auto-applied to new RP chats. Saved with Save settings.
         </span>
       </label>
 

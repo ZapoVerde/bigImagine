@@ -356,3 +356,22 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `GET /v1/chat-background-settings` (same no-restart shape as `household_timezone`), written by
   the admin-gated SettingsView toggle. Stored as text `'true'`/`'false'`, default false when
   unset — matching SillyTavern-Vistalyze's own `parallaxEnabled=false` default.
+- `0070_cleanup_preset_prev_turns.sql` — rewrites the builtin **"Cleanup Pass"** preset's
+  custom/system slot text to embed the `{{prev_turns, 2}}` macro (cleanup_prompt.md §3.2): the
+  previous-turns contract moved from hardcoded message prepending to a prompt-controlled textual
+  macro (N turn pairs, default 2), expanded by `runCleanupPass` via `interpolateMacros`'s
+  `resolveArg` hook. The 0066 seed predates the macro, so its "recent conversation history
+  provided before this prompt" wording stopped being true once the prepend was removed; 0070
+  replaces it with a `PREVIOUS TURNS:` transcript block and points rule 2's header-reconstruction
+  at it. Creates the builtin preset when missing (0066 was never applied to the live DB — only
+  fresh volumes run it) and updates it in place when present; never touches user-owned presets.
+  Idempotent — re-running converges to the same slot text.
+- `0071_default_cleanup_preset.sql` — adds `users.default_cleanup_preset_id` (nullable FK to
+  `context_stack_presets`, `on delete set null`), the sibling of 0061: the *cleanup* default,
+  auto-applied by CharactersView.tsx `startRp()` to every new RP chat's `cleanup_preset_id`
+  alongside the default prompt stack. `set_default_context_stack_preset`'s new `kind` argument
+  (`'prompt' | 'cleanup'`) picks which of the two columns it writes; `get_context_stack_presets`
+  reports both (`isDefault`/`isCleanupDefault`). Same design as 0061 — on users, never as a flag
+  on preset rows, so a builtin default stays household-safe. Idempotent (a plain add-column;
+  re-running on an already-migrated DB errors only if the column already exists — the usual
+  hand-apply one-shot).

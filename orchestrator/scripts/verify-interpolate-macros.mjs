@@ -30,8 +30,12 @@ assert(interpolateMacros('{{user}}', {}) === '', 'user resolves to empty string 
 assert(interpolateMacros('a{{noop}}b', snapshot) === 'ab', 'noop contributes nothing');
 assert(interpolateMacros('{{newline}}', snapshot) === '\n', 'newline (no arg) is a single \\n');
 assert(interpolateMacros('{{newline::3}}', snapshot) === '\n\n\n', 'newline::N repeats N times');
+assert(interpolateMacros('{{newline, 3}}', snapshot) === '\n\n\n', 'comma-form numeric argument {{newline, 3}} is equivalent to {{newline::3}}');
+assert(interpolateMacros('{{newline,3}}', snapshot) === '\n\n\n', 'comma form tolerates a missing space after the comma');
+assert(interpolateMacros('{{newline , 3}}', snapshot) === '\n\n\n', 'comma form tolerates a space before the comma too');
 assert(interpolateMacros('{{reverse::abc}}', snapshot) === 'cba', 'reverse reverses its argument');
 assert(interpolateMacros('{{reverse::}}', snapshot) === '', 'reverse of an empty argument is empty, not the literal token');
+assert(interpolateMacros('{{newline, x}}', snapshot) === '{{newline, x}}', 'a non-numeric comma argument fails the pattern and passes through verbatim');
 
 assert(interpolateMacros('a{{trim}}b', snapshot) === 'ab', 'trim with no surrounding whitespace just removes the token');
 assert(interpolateMacros('a   {{trim}}   b', snapshot) === 'ab', 'trim collapses whitespace on both sides of the token');
@@ -50,6 +54,24 @@ assert(
   'message resolves to the raw just-generated turn text, for cleanup preset resolution',
 );
 assert(interpolateMacros('{{message}}', {}) === '', 'message resolves to empty string, not the literal token, when unset (narrator/character resolution)');
+
+// --- resolveArg hook (cleanup-pass-only macros like {{prev_turns, N}}) --------------------------
+assert(
+  interpolateMacros('{{prev_turns, 2}}', {}, (name, arg) => (name === 'prev_turns' ? `HISTORY(${arg})` : undefined)) === 'HISTORY(2)',
+  'resolveArg supplies {{prev_turns, N}} with its numeric argument',
+);
+assert(
+  interpolateMacros('{{prev_turns}}', {}, (name, arg) => (name === 'prev_turns' ? `HISTORY(${arg ?? 'none'})` : undefined)) === 'HISTORY(none)',
+  'resolveArg sees an undefined argument when {{prev_turns}} has no count',
+);
+assert(
+  interpolateMacros('{{prev_turns, 2}} {{char}}', { charName: 'Ava' }, (name, arg) => (name === 'prev_turns' ? 'HIST' : undefined)) === 'HIST Ava',
+  'resolveArg only claims its own tokens; everything else falls through to the registry',
+);
+assert(
+  interpolateMacros('{{prev_turns, 2}}', {}) === '{{prev_turns, 2}}',
+  'without a resolver, {{prev_turns, N}} is unrecognized and passes through verbatim (narrator/character context)',
+);
 
 if (process.exitCode) {
   console.error('\ninterpolateMacros verification FAILED');

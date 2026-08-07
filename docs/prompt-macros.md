@@ -104,7 +104,10 @@ Pure lookups and text transforms — no timing sensitivity, no open design quest
 non-recursive regex pass with a closed registry for the 9 tokens above; an unrecognized token
 (a typo, or a later-stage macro not yet implemented) passes through verbatim rather than being
 deleted. Ships the mechanism (§2) and the substitution engine every later stage reuses — nothing
-here gets thrown away when Stage 2 or 3 lands.
+here gets thrown away when Stage 2 or 3 lands. An unset source resolves to empty, not to a
+hardcoded fallback: `{{user}}` with no `persona_name` configured substitutes to `''` (so a
+greeting written against it renders with a leading space, e.g. `, welcome!`) — deliberately no
+"User" fallback, same fail-visible shape as every other empty field on the platform.
 
 One deliberate deviation from this section's original framing (which assumed the pass would scan
 `fields` and run inside `assemblePromptStack`'s caller): it instead scans the chat's *final*,
@@ -205,6 +208,22 @@ What actually shipped:
   `kind: 'rp'` and its system text actually containing `{{`, so an ordinary household chat (which
   could legitimately contain literal `{{...}}`-looking text) is never scanned, and an RP chat with
   no macros in it pays for none of the extra reads.
+- **Message history is resolved at the same seam, against the same snapshot** — the one thing this
+  section's original framing missed: a character's `first_mes`/alternate greetings (seeded verbatim
+  into `chat_messages` by `apply_character_to_chat`/`apply_prompt_stack_to_chat`) carry `{{user}}`
+  more often than any other field in real cards, and stored messages are re-sent as-is by the
+  frontend every turn — so the literal token reached the LLM (and got echoed into replies) even
+  though the system prompt resolved perfectly. `assembleSessionTurnContext` (and the Prompt
+  Inspector's live fallback) now interpolates each message whose content contains `{{` against the
+  same frozen snapshot, gated the same way ('rp' + `.includes('{{')`); the canonical message is
+  never rewritten, only the wire copy the LLM sees.
+- **The chat UI resolves the same tokens for display without baking them into the wire copy**:
+  GET `/v1/chats/:id` (and the swipe routes) attach `resolvedContent` — a per-read derived copy —
+  to every 'rp' message whose stored text contains `{{`, and the frontend renders that while
+  continuing to re-send the verbatim `content`. This keeps §2's live-read guarantee intact: a
+  persona edit updates the greeting on the next read/turn with no re-apply, because the canonical
+  store never holds resolved text. (Derived working state per `bi_principles.md` §1, never
+  persisted.)
 - Stage 2 extends `MacroSnapshot` with a clock read and an RNG roll, computed at the same call site,
   the same way. Stage 3 extends it again with a Triggeryze variables read — still only reads at this
   seam; the writes live in `evaluate_rules`, downstream, in the background step, unchanged from this

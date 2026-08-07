@@ -159,6 +159,14 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1), attached by
+   *  server/httpServer.ts's GET /v1/chats/:id (and the swipe routes) for 'rp' chats whose stored
+   *  text contains `{{...}}` tokens — chiefly a character's seeded greeting, which
+   *  apply_character_to_chat/apply_prompt_stack_to_chat insert verbatim. The canonical `content`
+   *  stays verbatim: this is derived working state (bi_principles.md §1), never persisted, and
+   *  clients must keep re-sending `content`, not this, so the per-turn resolution pass keeps
+   *  re-resolving against the live persona (a persona edit shows up on the very next read). */
+  resolvedContent?: string;
   /** Present only once this message has been regenerated at least once (docs/bi_principles.md:
    *  swipe capability on the last LLM response). index is this message's current position among
    *  its own stored variants (0-based); count is how many variants exist. Undefined means the

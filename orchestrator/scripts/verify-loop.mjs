@@ -240,6 +240,65 @@ assert(
   assert(m.rounds[0].tool_calls.length === 1, 'the completed round\'s tool call is preserved in the failure-path row');
 }
 
+// A blank final reply (empty or whitespace-only content, no tool calls) is auto-retried up to
+// MAX_EMPTY_REPLY_RETRIES (3) before runTurn accepts a real one; each attempt is metered as its
+// own round. A blank message *with* tool calls is a normal tool-call turn, never retried — the
+// existing cases above already prove that path stays untouched.
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createStubLlmProvider([
+    { message: { role: 'assistant', content: '' }, toolCalls: [] },
+    { message: { role: 'assistant', content: '   ' }, toolCalls: [] },
+    { message: { role: 'assistant', content: 'finally a reply' }, toolCalls: [] },
+  ]);
+  const result = await runTurn({
+    userId: 'x',
+    taskId: 'task-empty-retry',
+    messages: [{ role: 'user', content: 'hi' }],
+    llm,
+    db,
+    tools: createToolRegistry([]),
+  });
+  assert(result.content === 'finally a reply', 'a blank final reply is retried until a non-blank one comes back');
+  const m = pool.turnMetricsInserts[0];
+  assert(m.roundCount === 3, 'each blank-reply attempt is metered as its own round');
+  assert(m.outcome === 'ok', 'a retried-but-successful turn still records outcome ok');
+}
+
+// Spend the whole retry budget on blanks and runTurn fails the turn loudly instead of persisting
+// a silent empty reply — the error surfaces to the chat client (httpServer's 500 path), which is
+// what the frontend's error banner shows.
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createStubLlmProvider([
+    { message: { role: 'assistant', content: '' }, toolCalls: [] },
+    { message: { role: 'assistant', content: '' }, toolCalls: [] },
+    { message: { role: 'assistant', content: '' }, toolCalls: [] },
+    { message: { role: 'assistant', content: '' }, toolCalls: [] },
+  ]);
+  let threw = false;
+  let errorMsg = '';
+  try {
+    await runTurn({
+      userId: 'x',
+      taskId: 'task-empty-exhausted',
+      messages: [{ role: 'user', content: 'hi' }],
+      llm,
+      db,
+      tools: createToolRegistry([]),
+    });
+  } catch (err) {
+    threw = true;
+    errorMsg = err instanceof Error ? err.message : String(err);
+  }
+  assert(threw, 'runTurn throws once the blank-reply retry budget is spent');
+  assert(errorMsg.includes('empty reply after 3 retries'), 'the thrown error names the exhausted retry budget');
+  const m = pool.turnMetricsInserts[0];
+  assert(m.outcome === 'error' && m.roundCount === 4, 'the exhausted-budget failure is recorded as an error turn with all 4 attempts metered');
+}
+
 if (process.exitCode) {
   console.error('\nloop verification FAILED');
   process.exit(1);

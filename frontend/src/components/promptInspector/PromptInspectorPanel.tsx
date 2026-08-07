@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ApiError, getPromptPreview } from '../../api/client';
 import { markerLabel } from '../../api/markerLabels';
-import type { PromptPreview, PromptPreviewItem } from '../../api/types';
+import type { PromptPreview, PromptPreviewGroup, PromptPreviewItem } from '../../api/types';
 import './PromptInspectorPanel.css';
 
 interface PromptInspectorPanelProps {
@@ -14,11 +14,15 @@ interface PromptInspectorPanelProps {
   onClose: () => void;
 }
 
-// docs/bi_principles.md §11/§18: an 'rp' chat's next turn is assembled fresh, server-side, and
-// nothing about it is normally visible except the reply it produced. This panel is the read-only
-// window onto that assembly — the exact system-prompt stack (one item per marker/custom slot, in
-// the order they're actually sent) plus the trimmed conversation history riding alongside it, each
-// with a rough token estimate so a household member can see what's actually eating context.
+// docs/bi_principles.md §11/§18: an 'rp' chat's turn prompts are assembled fresh, server-side, and
+// nothing about them is normally visible except the reply they produced. This panel is the
+// read-only window onto them — one collapsible section per prompt the chat fired, in order: Main
+// Prompt (the exact text the last turn sent — captured at send time server-side, io/promptTrace.ts
+// kind 'main' — shown as ONE collapsed block holding the complete text; see PromptGroupSection),
+// then each captured background prompt (cleanup pass, chat title generation, …) with its full
+// actual text. Every block carries a rough token estimate so a household member can see what's
+// actually eating context. ChatView bumps refreshToken once per completed turn, so the panel
+// always shows the last turn that was sent.
 export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onClose }: PromptInspectorPanelProps) {
   const [preview, setPreview] = useState<PromptPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +44,7 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
 
   async function copyFullPrompt() {
     if (!preview) return;
-    const full = [...preview.systemStack, ...preview.messages].map((i) => i.content).join('\n\n');
+    const full = preview.groups.flatMap((g) => g.items).map((i) => i.content).join('\n\n');
     try {
       await navigator.clipboard.writeText(full);
     } catch {
@@ -84,8 +88,9 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
               <span className="prompt-inspector-stats-secondary">{preview.totalChars.toLocaleString()} characters</span>
             </div>
 
-            <PromptStackSection title="System Prompt" items={preview.systemStack} />
-            <PromptStackSection title={`Conversation History — ${preview.messages.length} message${preview.messages.length === 1 ? '' : 's'}`} items={preview.messages} />
+            {preview.groups.map((group, i) => (
+              <PromptGroupSection key={`${group.kind}-${i}`} group={group} />
+            ))}
           </>
         )}
       </div>
@@ -99,30 +104,59 @@ function itemLabel(item: PromptPreviewItem): string {
   return item.role === 'user' ? 'User' : item.role === 'assistant' ? 'Assistant' : 'System';
 }
 
-// Every item defaults open (<details open>) — the point of this panel is reviewing the complete,
-// literal text that goes out, not a summary of it. Collapsing one down is still one click away for
-// scanning structure in a long stack.
-function PromptStackSection({ title, items }: { title: string; items: PromptPreviewItem[] }) {
-  const sectionTokens = items.reduce((sum, i) => sum + i.estimatedTokens, 0);
+// One collapsible section per prompt: the group title (Main Prompt / Cleanup Prompt / …), a
+// "fired" badge when this is a captured prompt's actual sent text, and the prompt's text as
+// collapsible blocks. The Main Prompt — the full system stack plus the entire trimmed conversation
+// history — is deliberately rendered as a SINGLE collapsed block holding the complete text (the
+// user's call: it "completely collapses"; the cleanup/background groups stay visible below without
+// scrolling past the whole history, and the full text is one click away). Every other group keeps
+// one item per header/slot/message, each defaulting open — those are short enough that reviewing
+// the complete literal text inline is the point.
+function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
+  // Same ceil-of-total rule as the panel header's totalEstimatedTokens — sum the chars, then one
+  // ceil — so section tokens always add up to exactly the header total (summing per-item ceils
+  // would over-report by up to one token per item).
+  const totalChars = group.items.reduce((sum, i) => sum + i.chars, 0);
+  const sectionTokens = Math.ceil(totalChars / 4);
   return (
     <section className="prompt-inspector-section">
       <h3 className="prompt-inspector-section-title">
-        <span>{title}</span>
-        {items.length > 0 && <span className="prompt-inspector-section-tokens">{sectionTokens.toLocaleString()} tk</span>}
+        <span>{group.title}</span>
+        {group.captured && (
+          <span className="prompt-inspector-captured" title="Actual text sent to the model during a turn">
+            fired
+          </span>
+        )}
+        {group.items.length > 0 && <span className="prompt-inspector-section-tokens">{sectionTokens.toLocaleString()} tk</span>}
       </h3>
-      {items.length === 0 && <p className="prompt-inspector-empty">Nothing here.</p>}
-      {items.map((item, i) => (
-        <details key={i} className="prompt-inspector-item" open>
+      {group.items.length === 0 && <p className="prompt-inspector-empty">Nothing here.</p>}
+      {group.kind === 'main' && group.items.length > 0 ? (
+        // The whole main prompt as one block: system-stack items and history messages joined in
+        // send order — exactly the text the model saw. Collapsed by default, per the section
+        // comment above.
+        <details className="prompt-inspector-item">
           <summary>
-            <span className="prompt-inspector-item-label">{itemLabel(item)}</span>
-            <span className={`prompt-inspector-item-role prompt-inspector-item-role-${item.role}`}>{item.role}</span>
+            <span className="prompt-inspector-item-label">Complete prompt text</span>
             <span className="prompt-inspector-item-tokens">
-              {item.estimatedTokens.toLocaleString()} tk · {item.chars.toLocaleString()} ch
+              {sectionTokens.toLocaleString()} tk · {totalChars.toLocaleString()} ch
             </span>
           </summary>
-          <pre className="prompt-inspector-item-content">{item.content}</pre>
+          <pre className="prompt-inspector-item-content">{group.items.map((i) => i.content).join('\n\n')}</pre>
         </details>
-      ))}
+      ) : (
+        group.items.map((item, i) => (
+          <details key={i} className="prompt-inspector-item" open>
+            <summary>
+              <span className="prompt-inspector-item-label">{itemLabel(item)}</span>
+              <span className={`prompt-inspector-item-role prompt-inspector-item-role-${item.role}`}>{item.role}</span>
+              <span className="prompt-inspector-item-tokens">
+                {item.estimatedTokens.toLocaleString()} tk · {item.chars.toLocaleString()} ch
+              </span>
+            </summary>
+            <pre className="prompt-inspector-item-content">{item.content}</pre>
+          </details>
+        ))
+      )}
     </section>
   );
 }

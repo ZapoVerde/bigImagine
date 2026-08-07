@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/util/interpolateMacros.ts
- * @stamp 2026-08-05
+ * @stamp 2026-08-07
  * @architectural-role Pure Function — Stage 1 inline `{{...}}` macro substitution
  * @description
  * docs/prompt-macros.md's Stage 1: `{{char}}`, `{{user}}`, `{{persona}}`, `{{description}}`,
@@ -24,13 +24,29 @@
  * the way this file's own doc comment above anticipated: a new optional field plus a new switch
  * case, no change to the function's signature or its caller's shape.
  *
+ * Macro arguments: the `{{name::arg}}` form (SillyTavern's convention) is the core syntax, and
+ * `{{name, N}}` is accepted as an alternative for numeric arguments only (a comma, with optional
+ * surrounding spaces, followed by digits — the form the cleanup pass's `{{prev_turns, 2}}` uses). Both forms land in the same
+ * `arg` slot, so `{{newline::3}}` and `{{newline, 3}}` are equivalent. A token whose argument
+ * matches neither form (e.g. `{{foo, bar}}`) fails the whole pattern and passes through verbatim.
+ *
+ * Cleanup-only macros: the registry below is the closed core. `{{prev_turns, N}}` is deliberately
+ * NOT in it — it needs the turn's history messages, which only the cleanup call site has, so
+ * server/httpServer.ts's runCleanupPass supplies it through the optional `resolveArg` hook (pure:
+ * the resolver is an input, resolved deterministically like everything else). The cleanup-pass
+ * resolver sees every token and returns undefined for ones it doesn't own; interpolation then
+ * falls through to the registry. Outside the cleanup pass (no resolver), `{{prev_turns, N}}` is an
+ * unrecognized token and passes through verbatim — diagnosable, never silently deleted.
+ *
  * @api-declaration
  * MacroSnapshot — the turn-scoped values macros resolve against
- * interpolateMacros(text, snapshot) — substitutes every recognized `{{...}}` token in text
+ * interpolateMacros(text, snapshot, resolveArg?) — substitutes every recognized `{{...}}` token in
+ *   text; `resolveArg(name, arg)` (optional, cleanup-pass only) supplies values for tokens that
+ *   need call-site data like history, returning undefined to fall through to the registry
  *
  * @contract
  *   assertions:
- *     purity:          pure
+ *     purity:          pure (deterministic given text, snapshot and resolver — no IO, no state)
  *     state_ownership: []
  *     external_io:     []
  */
@@ -53,7 +69,7 @@ export interface MacroSnapshot {
   message?: string;
 }
 
-const TOKEN_PATTERN = /\{\{(\w+)(?:::([^}]*))?\}\}/g;
+const TOKEN_PATTERN = /\{\{(\w+)(?:::([^}]*)|[ \t]*,[ \t]*(\d+))?\}\}/g;
 const TRIM_PATTERN = /\s*\{\{trim\}\}\s*/g;
 
 function resolveToken(name: string, arg: string | undefined, snapshot: MacroSnapshot): string | undefined {
@@ -83,9 +99,14 @@ function resolveToken(name: string, arg: string | undefined, snapshot: MacroSnap
   }
 }
 
-export function interpolateMacros(text: string, snapshot: MacroSnapshot): string {
-  const substituted = text.replace(TOKEN_PATTERN, (match, name, arg) => {
-    const resolved = resolveToken(name, arg, snapshot);
+export function interpolateMacros(
+  text: string,
+  snapshot: MacroSnapshot,
+  resolveArg?: (name: string, arg: string | undefined) => string | undefined,
+): string {
+  const substituted = text.replace(TOKEN_PATTERN, (match, name, arg, commaArg) => {
+    const effectiveArg = arg ?? commaArg;
+    const resolved = resolveArg?.(name, effectiveArg) ?? resolveToken(name, effectiveArg, snapshot);
     return resolved ?? match;
   });
   // {{trim}} is structural, not a value substitution — handled as its own pass so it can collapse

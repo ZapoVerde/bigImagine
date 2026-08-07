@@ -162,7 +162,7 @@ provider).
 ### 4.3 The Test-Step Modal (close gap #2: the image is never shown)
 
 The frontend currently renders the result as one text line (`Rendered a probe image in Xms —
-<url>`, `ImageConnectionsSection.tsx:461-465`). A Test that generates an image the admin cannot
+<url>`, `ImageConnectionEditor.tsx:432-452`). A Test that generates an image the admin cannot
 see is half a feature. Replace the text line with a **test-step result panel**:
 
 * The generated test image, rendered via `<img src={testResult.imageUrl}>`.
@@ -179,7 +179,7 @@ see is half a feature. Replace the text line with a **test-step result panel**:
   prefix/negative + the `image_prompt_template` setting; include the sent prompt in the result.
   The function signature gains the settings store (or the template value).
 * **`frontend/src/api/types.ts`**: `ImageConnectionTestResult.prompt?: string`.
-* **`frontend/src/components/connections/ImageConnectionsSection.tsx`**: test-step result panel
+* **`frontend/src/components/connections/ImageConnectionEditor.tsx`**: test-step result panel
   (image + prompt + latency + link).
 
 ---
@@ -212,7 +212,7 @@ see is half a feature. Replace the text line with a **test-step result panel**:
 * **`frontend/src/views/ChatView.css`**: `.vistalyze-fade-out` / `.vistalyze-fade-in` (§3.2).
 * **`frontend/src/views/SettingsView.tsx`**: "Chat Background" fieldset with the parallax toggle
   (§2.2).
-* **`frontend/src/components/connections/ImageConnectionsSection.tsx`**: test-step result panel
+* **`frontend/src/components/connections/ImageConnectionEditor.tsx`**: test-step result panel
   (§4.3).
 
 ### 5.4 Verification

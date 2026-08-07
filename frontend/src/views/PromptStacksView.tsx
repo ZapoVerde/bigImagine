@@ -129,11 +129,16 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
     }
   }
 
-  // Builtins are settable too (users.default_context_stack_preset_id points at any preset_id
-  // regardless of owner, migration 0061) — unlike edit/delete, "default" isn't gated on isBuiltin.
-  async function toggleDefault(preset: ContextStackPreset) {
+  // Builtins are settable too (users.default_*_preset_id points at any preset_id regardless of
+  // owner, migrations 0061/0071) — unlike edit/delete, "default" isn't gated on isBuiltin. Two
+  // independent default slots per user: the prompt stack (isDefault) and the cleanup preset
+  // (isCleanupDefault); the picker below chooses which of the two this preset becomes — one
+  // preset can be both, or two presets can each own one. Setting the same kind again clears it
+  // (the same toggle shape the single-button default had).
+  async function setDefault(preset: ContextStackPreset, kind: 'prompt' | 'cleanup') {
+    const isKindDefault = kind === 'cleanup' ? preset.isCleanupDefault : preset.isDefault;
     try {
-      await callTool('set_default_context_stack_preset', preset.isDefault ? {} : { presetId: preset.presetId }, apiKey);
+      await callTool('set_default_context_stack_preset', isKindDefault ? { kind } : { presetId: preset.presetId, kind }, apiKey);
       await refresh(selectedId ?? undefined);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to update default prompt stack');
@@ -272,13 +277,21 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                 onChange={(e) => setDraftName(e.target.value)}
                 placeholder="Prompt stack name"
               />
-              <button
-                type="button"
-                className={`promptstacks-default-btn${selected.isDefault ? ' active' : ''}`}
-                onClick={() => toggleDefault(selected)}
-              >
-                {selected.isDefault ? 'Default ✓' : 'Set as default'}
-              </button>
+              <details className="promptstacks-default-menu">
+                <summary
+                  className={`promptstacks-default-btn${selected.isDefault || selected.isCleanupDefault ? ' active' : ''}`}
+                >
+                  {selected.isDefault || selected.isCleanupDefault ? 'Default ✓' : 'Set as default'}
+                </summary>
+                <div className="promptstacks-default-options">
+                  <button type="button" onClick={() => setDefault(selected, 'prompt')}>
+                    {selected.isDefault ? 'Clear as default prompt stack' : 'Set as default prompt stack'}
+                  </button>
+                  <button type="button" onClick={() => setDefault(selected, 'cleanup')}>
+                    {selected.isCleanupDefault ? 'Clear as default cleanup' : 'Set as default cleanup'}
+                  </button>
+                </div>
+              </details>
               {isBuiltin ? (
                 <button type="button" onClick={() => duplicate(selected)}>
                   Duplicate to customize

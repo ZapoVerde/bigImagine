@@ -13,10 +13,11 @@
  * back onto their preset in JS. A join would repeat every preset column once per slot row for no
  * benefit, since slots are grouped right back into arrays either way.
  *
- * isDefault (db/migrations/0061_default_context_stack_preset.sql) is a third, tiny query — this
- * caller's own users.default_context_stack_preset_id, compared against each preset_id in JS —
- * kept separate from the "presets first" query above rather than folded into it as a join, since
- * it's a single scalar read against a different table, not a per-row join key.
+ * isDefault / isCleanupDefault (db/migrations/0061_default_context_stack_preset.sql and
+ * 0071_default_cleanup_preset.sql) are a third, tiny query — this caller's own
+ * users.default_context_stack_preset_id + users.default_cleanup_preset_id, compared against each
+ * preset_id in JS — kept separate from the "presets first" query above rather than folded into it
+ * as a join, since it's a pair of scalar reads against a different table, not per-row join keys.
  *
  * @api-declaration
  * createGetContextStackPresetsTool() — returns the get_context_stack_presets RegisteredTool
@@ -69,17 +70,19 @@ export function createGetContextStackPresetsTool(): RegisteredTool {
         else slotsByPreset.set(row.preset_id, [row]);
       }
 
-      const [userRow] = await ctx.db.query<{ default_context_stack_preset_id: string | null }>(
-        'select default_context_stack_preset_id from users where user_id = $1',
-        [ctx.userId],
-      );
+      const [userRow] = await ctx.db.query<{
+        default_context_stack_preset_id: string | null;
+        default_cleanup_preset_id: string | null;
+      }>('select default_context_stack_preset_id, default_cleanup_preset_id from users where user_id = $1', [ctx.userId]);
       const defaultPresetId = userRow?.default_context_stack_preset_id ?? null;
+      const defaultCleanupPresetId = userRow?.default_cleanup_preset_id ?? null;
 
       return presetRows.map((p) => ({
         presetId: p.preset_id,
         name: p.name,
         isBuiltin: p.is_builtin,
         isDefault: p.preset_id === defaultPresetId,
+        isCleanupDefault: p.preset_id === defaultCleanupPresetId,
         slots: (slotsByPreset.get(p.preset_id) ?? []).map(slotRowToWire),
         updatedAt: p.updated_at,
       }));

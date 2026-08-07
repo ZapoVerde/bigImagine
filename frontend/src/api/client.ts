@@ -237,9 +237,11 @@ export async function reportBrokenLocationImage(locationId: string, apiKey: stri
   });
 }
 
-/** GET /v1/chats/:id/prompt-preview — the exact system-prompt breakdown and trimmed history an
- *  'rp' chat's next turn would send, itemized (httpServer.ts's buildPromptPreview), for the Prompt
- *  Inspector panel. 422s for a non-'rp' chat — the caller is expected to only offer this for RP. */
+/** GET /v1/chats/:id/prompt-preview — the exact prompts an 'rp' chat's last turn fired: the main
+ *  prompt captured at send time (falling back to a live next-turn preview when nothing has been
+ *  captured yet) plus any background prompts (cleanup, title, …), itemized
+ *  (httpServer.ts's buildPromptPreview), for the Prompt Inspector panel. 422s for a non-'rp' chat
+ *  — the caller is expected to only offer this for RP. */
 export function getPromptPreview(chatId: string, apiKey: string | null): Promise<PromptPreview> {
   return jsonRequest<PromptPreview>(`/v1/chats/${encodeURIComponent(chatId)}/prompt-preview`, apiKey);
 }

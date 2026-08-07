@@ -189,7 +189,7 @@ export default function App() {
             {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
             {tab.type === 'reviewpanel' && <ReviewPanelView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
-            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenChat={openChat} onOpenRp={openRp} />}
+            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenRp={openRp} />}
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}

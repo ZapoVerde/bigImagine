@@ -20,7 +20,9 @@
  *     external_io:     [LLM, via the LlmProvider passed in]
  */
 
-import type { LlmProvider, ToolDefinition } from './types.js';
+import type { LlmMessage, LlmProvider, ToolDefinition } from './types.js';
+import { getCallContext } from './callContext.js';
+import { recordPromptTrace, type PromptTraceItem } from '../promptTrace.js';
 
 const setTitleTool: ToolDefinition = {
   name: 'set_title',
@@ -39,16 +41,38 @@ const setTitleTool: ToolDefinition = {
 };
 
 export async function generateChatTitle(llm: LlmProvider, userMessage: string, assistantReply: string): Promise<string> {
+  // A background prompt fired once per chat — recorded into the Prompt Inspector's trace (io/
+  // promptTrace.ts) before it goes out, keyed by the active call context's taskId (= the chatId the
+  // caller wrapped this in, httpServer.ts). Outside such a context (a verify stub calling this
+  // directly) there's nothing to key on, so the trace is skipped — recording is purely best-effort
+  // debug data, never a reason to fail.
+  const messages: LlmMessage[] = [
+    {
+      role: 'system',
+      content:
+        'Summarize this exchange as a short chat title: 3-6 words, no quotes, no trailing ' +
+        'punctuation, a plain description of the topic. Always answer by calling set_title.',
+    },
+    { role: 'user', content: `User: ${userMessage}\n\nAssistant: ${assistantReply}` },
+  ];
+  const ctx = getCallContext();
+  if (ctx?.taskId) {
+    recordPromptTrace(ctx.taskId, {
+      kind: 'title',
+      title: 'Chat Title Generation',
+      // Roles are system/user by construction (the two literals above) — LlmMessage is wider.
+      items: messages.map((m) => ({
+        role: m.role as PromptTraceItem['role'],
+        content: m.content,
+        chars: m.content.length,
+        estimatedTokens: Math.ceil(m.content.length / 4),
+      })),
+      capturedAt: Date.now(),
+    });
+  }
+
   const turn = await llm.complete(
-    [
-      {
-        role: 'system',
-        content:
-          'Summarize this exchange as a short chat title: 3-6 words, no quotes, no trailing ' +
-          'punctuation, a plain description of the topic. Always answer by calling set_title.',
-      },
-      { role: 'user', content: `User: ${userMessage}\n\nAssistant: ${assistantReply}` },
-    ],
+    messages,
     [setTitleTool],
     { forceTool: 'set_title' },
   );

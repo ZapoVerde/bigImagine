@@ -16,6 +16,7 @@ import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createFieldCipher } from '../dist/io/fieldCipher.js';
 import { CREDENTIAL_NAMES } from '../dist/io/providerCredentials.js';
+import { clearPromptTrace } from '../dist/io/promptTrace.js';
 import { randomBytes } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
@@ -246,11 +247,17 @@ function createFakeChatSessionStore() {
   const sessions = new Map();
   const messagesByChat = new Map();
   const folders = new Map();
+  // Swipe variants per message id (alternate greetings, regenerations) — seeded directly by a
+  // test (set(messageId, ['variant 1', 'variant 2'])) and consumed by the minimal cycleSwipe
+  // below, which exists so the swipe routes' display-decoration can be exercised end to end.
+  const swipesByMessage = new Map();
+  const activeSwipeIdx = new Map();
   let counter = 0;
   const newId = (prefix) => `${prefix}-${++counter}`;
 
   return {
     sessions,
+    swipesByMessage,
     async listChats(userId, opts = {}) {
       let rows = [...sessions.values()].filter((s) => s.userId === userId);
       if (opts.search) {
@@ -278,6 +285,8 @@ function createFakeChatSessionStore() {
         canvasNoteId: null,
         kind: init.kind ?? 'chat',
         characterId: init.characterId ?? null,
+        promptStackPresetId: init.promptStackPresetId ?? null,
+        cleanupPresetId: null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -300,6 +309,7 @@ function createFakeChatSessionStore() {
       if (patch.canvasNoteId !== undefined) row.canvasNoteId = patch.canvasNoteId;
       if (patch.kind !== undefined) row.kind = patch.kind;
       if (patch.characterId !== undefined) row.characterId = patch.characterId;
+      if (patch.promptStackPresetId !== undefined) row.promptStackPresetId = patch.promptStackPresetId;
       row.updatedAt = new Date().toISOString();
       return row;
     },
@@ -334,6 +344,35 @@ function createFakeChatSessionStore() {
       if (idx === -1) return false;
       arr.splice(idx, 1);
       return true;
+    },
+    async cycleSwipe(userId, chatId, messageId, direction) {
+      // Minimal mirror of io/chatSessions.ts's cycleSwipe over swipesByMessage — enough for the
+      // swipe routes' display-decoration test: no swipes -> needs_regenerate/no_earlier_swipe,
+      // seeded variants -> 'switched' with the target variant's content.
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return { status: 'not_found' };
+      const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
+      if (!target) return { status: 'not_found' };
+      const swipes = swipesByMessage.get(messageId) ?? [];
+      if (swipes.length === 0) {
+        return direction === 'next' ? { status: 'needs_regenerate' } : { status: 'no_earlier_swipe' };
+      }
+      const currentIdx = activeSwipeIdx.get(messageId) ?? 0;
+      const targetIdx = direction === 'prev' ? currentIdx - 1 : currentIdx + 1;
+      if (targetIdx < 0) return { status: 'no_earlier_swipe' };
+      if (targetIdx >= swipes.length) return { status: 'needs_regenerate' };
+      target.content = swipes[targetIdx];
+      activeSwipeIdx.set(messageId, targetIdx);
+      return {
+        status: 'switched',
+        message: {
+          messageId,
+          role: 'assistant',
+          content: swipes[targetIdx],
+          createdAt: target.createdAt,
+          swipes: { index: targetIdx, count: swipes.length },
+        },
+      };
     },
     async truncateMessagesFrom(userId, chatId, messageId) {
       const row = sessions.get(chatId);
@@ -388,9 +427,15 @@ function createFakePool() {
   // name, persona, scenario})) rather than through any insert path — nothing in this suite creates
   // characters, it only needs to read one back for {{char}}/{{description}}/{{scenario}}.
   const characters = [];
+  // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): a test seeding an rp chat with a
+  // promptStackPresetId can push({preset_id, slots: [...]}) here so buildNarratorStackItems's
+  // context_stack_slots read resolves. Slots are shaped like context_stack_slots rows minus the
+  // id/position columns.
+  const slotsByPreset = new Map();
   return {
     inserts,
     characters,
+    slotsByPreset,
     async connect() {
       let scopedUserId;
       return {
@@ -408,6 +453,22 @@ function createFakePool() {
             const [characterId, userId] = params;
             const character = characters.find((c) => c.character_id === characterId && c.user_id === userId);
             return { rows: character ? [{ name: character.name, persona: character.persona, scenario: character.scenario }] : [] };
+          }
+          // buildNarratorStackItems's wider read (per-turn narrator assembly) — same characters
+          // array, just more columns (system_prompt/example_dialogue may be undefined for rows
+          // this suite seeds with only the macro-relevant fields).
+          if (sql.startsWith('select name, system_prompt, persona, scenario, example_dialogue from characters')) {
+            const [characterId, userId] = params;
+            const character = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+            return {
+              rows: character
+                ? [{ name: character.name, system_prompt: character.system_prompt, persona: character.persona, scenario: character.scenario, example_dialogue: character.example_dialogue }]
+                : [],
+            };
+          }
+          // buildNarratorStackItems's context_stack_slots read — see slotsByPreset above.
+          if (sql.includes('from context_stack_slots where preset_id')) {
+            return { rows: slotsByPreset.get(params[0]) ?? [] };
           }
           // bb_principles.md §14's gate (io/llm/llmGate.ts) logs every LLM call it makes,
           // 'chat'-kind included — every runTurn/generateChatTitle call this file drives goes
@@ -1755,7 +1816,304 @@ server.close();
     "a 'chat'-kind (non-RP) session's system prompt is never scanned for macros — literal {{...}} text a household member typed stays untouched",
   );
 
+  // --- Message-history resolution: a stored greeting's {{user}} resolves at turn time too ---
+  // apply_character_to_chat/apply_prompt_stack_to_chat seed a character's first_mes verbatim into
+  // chat_messages, and the frontend re-sends the full history each turn — so without this pass the
+  // literal {{user}} (which ST cards put in greetings more than anywhere else) reached the LLM.
+  {
+    // The original Stage-1 tests above left persona_name at 'Sam' (their own staleness check) —
+    // this block sets its own baseline so the assertions don't depend on earlier sub-tests' state.
+    await settingsRp.set('persona_name', 'Jeremy');
+    const greetingChat = await chatsRp.createChat(userIdRp, {});
+    await chatsRp.updateChat(userIdRp, greetingChat.chatId, {
+      kind: 'rp',
+      characterId: 'char-ava',
+      params: { system: '{{user}} is here.' },
+    });
+    const greeting = '{{user}}, welcome to my tavern!';
+    await chatsRp.appendMessages(userIdRp, greetingChat.chatId, [{ role: 'assistant', content: greeting }]);
+
+    const sendTurn = async () => {
+      before = capturedRp.length;
+      const res = await fetch(`${baseRp}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { ...authRp, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          messages: [
+            { role: 'assistant', content: greeting },
+            { role: 'user', content: 'hi' },
+          ],
+          chat_id: greetingChat.chatId,
+        }),
+      });
+      assert(res.status === 200, 'an RP chat whose stored greeting contains {{user}} succeeds');
+      return capturedRp[before].messages;
+    };
+
+    let sent = await sendTurn();
+    const greetingSent = sent.find((m) => m.role === 'assistant')?.content ?? '';
+    assert(
+      greetingSent.includes('Jeremy, welcome to my tavern!') && !greetingSent.includes('{{user}}'),
+      'a stored greeting containing {{user}} resolves to the persona name in the history sent to the LLM',
+    );
+
+    // Same staleness guarantee as the system prompt: a persona edit re-resolves the greeting on
+    // the very next turn, no re-apply.
+    await settingsRp.set('persona_name', 'Sam');
+    sent = await sendTurn();
+    const greetingSent2 = sent.find((m) => m.role === 'assistant')?.content ?? '';
+    assert(
+      greetingSent2.includes('Sam, welcome to my tavern!'),
+      'a persona_name change re-resolves the stored greeting on the very next turn',
+    );
+    await settingsRp.set('persona_name', 'Jeremy');
+
+    // Display side: GET /v1/chats/:id carries the resolved copy as resolvedContent while the
+    // canonical content stays verbatim (the client re-sends content, keeping resolution fresh).
+    const detail = await (await fetch(`${baseRp}/v1/chats/${greetingChat.chatId}`, { headers: authRp })).json();
+    const stored = detail.messages[0];
+    assert(stored.content === greeting, 'the canonical stored greeting stays verbatim in GET /v1/chats/:id');
+    assert(
+      stored.resolvedContent === 'Jeremy, welcome to my tavern!',
+      'GET /v1/chats/:id attaches the display-resolved copy as resolvedContent',
+    );
+
+    // And a 'chat'-kind chat's message history is never scanned, same scope guard as its system prompt.
+    const plainChat2 = await chatsRp.createChat(userIdRp, {});
+    const plainGreeting = 'Explain {{user}} as a template token, please.';
+    await chatsRp.appendMessages(userIdRp, plainChat2.chatId, [{ role: 'assistant', content: plainGreeting }]);
+    before = capturedRp.length;
+    const plainRes2 = await fetch(`${baseRp}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'assistant', content: plainGreeting },
+          { role: 'user', content: 'hi' },
+        ],
+        chat_id: plainChat2.chatId,
+      }),
+    });
+    assert(plainRes2.status === 200, "a 'chat'-kind session with literal {{...}}-looking history succeeds");
+    const plainSent = capturedRp[before].messages;
+    assert(
+      plainSent.some((m) => m.content.includes(plainGreeting)),
+      "a 'chat'-kind session's message history is never scanned for macros — literal {{...}} text stays untouched",
+    );
+    const plainDetail = await (await fetch(`${baseRp}/v1/chats/${plainChat2.chatId}`, { headers: authRp })).json();
+    assert(
+      plainDetail.messages[0].resolvedContent === undefined,
+      "a 'chat'-kind chat's GET response carries no resolvedContent — only 'rp' chats get display resolution",
+    );
+  }
+
+  // --- Message-history resolution on the narrator path too (an RP chat with an applied preset) ---
+  // assembleSessionTurnContext's 'rp' + preset branch (per-turn narrator assembly) must resolve
+  // history macros the same way the legacy branch does — same snapshot, same gating.
+  {
+    poolRp.characters.push({
+      character_id: 'char-lyn',
+      user_id: userIdRp,
+      name: 'Lyn',
+      system_prompt: 'You are Lyn, a forest guide. {{user}} hired you.',
+      persona: 'A quiet woods-woman.',
+      scenario: 'A foggy forest trail.',
+    });
+    poolRp.slotsByPreset.set('preset-narr', [
+      { slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null },
+      { slot_type: 'marker', marker_key: 'scenario', enabled: true, custom_role: null, custom_content: null, label: null },
+      { slot_type: 'custom', marker_key: null, enabled: true, custom_role: 'system', custom_content: '{{user}} is the employer.', label: null },
+    ]);
+    const narrChat = await chatsRp.createChat(userIdRp, { kind: 'rp' });
+    await chatsRp.updateChat(userIdRp, narrChat.chatId, {
+      kind: 'rp',
+      characterId: 'char-lyn',
+      promptStackPresetId: 'preset-narr',
+      params: { system: 'stale baked copy — the narrator path must ignore this' },
+    });
+    const narrGreeting = '{{user}}, the trail is wet today.';
+    await chatsRp.appendMessages(userIdRp, narrChat.chatId, [{ role: 'assistant', content: narrGreeting }]);
+    before = capturedRp.length;
+    const narrRes = await fetch(`${baseRp}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'assistant', content: narrGreeting },
+          { role: 'user', content: 'lead on' },
+        ],
+        chat_id: narrChat.chatId,
+      }),
+    });
+    assert(narrRes.status === 200, 'an RP chat with an applied preset and a macro-bearing greeting succeeds');
+    const narrSent = capturedRp[before].messages;
+    const narrSystem = narrSent[0].content;
+    assert(
+      narrSystem.includes('Lyn, a forest guide') && narrSystem.includes('Jeremy hired you') && narrSystem.includes('Jeremy is the employer'),
+      'narrator path: {{user}}/{{char}} resolve inside the per-turn assembled system prompt slots',
+    );
+    const narrGreetingSent = narrSent.find((m) => m.role === 'assistant')?.content ?? '';
+    assert(
+      narrGreetingSent.includes('Jeremy, the trail is wet today.') && !narrGreetingSent.includes('{{user}}'),
+      'narrator path: a stored greeting containing {{user}} resolves in the history sent to the LLM',
+    );
+  }
+
+  // --- Swipe display decoration: alternate greetings carry resolvedContent too ---
+  // The swipe routes return one message the client swaps into view in place (a card's alternate
+  // greetings load in as that opening message's swipe history), so its display copy is resolved
+  // against the live persona the same way GET /v1/chats/:id does.
+  {
+    const swipeChat = await chatsRp.createChat(userIdRp, { kind: 'rp' });
+    await chatsRp.updateChat(userIdRp, swipeChat.chatId, { kind: 'rp', characterId: 'char-ava' });
+    const greeting1 = '{{user}}, welcome to my tavern!';
+    const greeting2 = '{{user}}, you again!';
+    const [seeded] = await chatsRp.appendMessages(userIdRp, swipeChat.chatId, [{ role: 'assistant', content: greeting1 }]);
+    chatsRp.swipesByMessage.set(seeded.messageId, [greeting1, greeting2]);
+    const swipeRes = await fetch(`${baseRp}/v1/chats/${swipeChat.chatId}/messages/${seeded.messageId}/swipe`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({ direction: 'next' }),
+    });
+    assert(swipeRes.status === 200, 'swiping the greeting to a stored alternate succeeds');
+    const swiped = (await swipeRes.json()).message;
+    assert(
+      swiped.content === greeting2,
+      'the swiped alternate greeting keeps its verbatim content in the swipe response',
+    );
+    assert(
+      swiped.resolvedContent === 'Jeremy, you again!',
+      'the swipe response carries the display-resolved copy as resolvedContent',
+    );
+  }
+
   serverRp.close();
+}
+
+// --- Part 5c: the Prompt Inspector's "Main Prompt" is the exact text the last turn sent ----------
+// io/promptTrace.ts kind 'main': handleChatCompletions records the prompt (system prompt + trimmed
+// history, in send order) immediately before the llm call, and GET /v1/chats/:id/prompt-preview
+// surfaces that capture as the first group — so the inspector always shows the last turn that was
+// sent (the user's spec for the panel), never a live reconstruction of the next one. The live
+// reconstruction is only the fallback before anything has fired.
+{
+  const capturedMain = [];
+  const capturingMainLlm = {
+    name: 'capturing-main',
+    async complete(messages, toolDefs) {
+      // Snapshot the content, not the array reference — runTurn pushes the assistant reply into
+      // the same messages array after complete() returns, which would otherwise show up here as a
+      // phantom 3rd/5th message and break the "exact text sent" comparison below.
+      capturedMain.push({ messages: messages.map((m) => ({ role: m.role, content: m.content })), toolDefs });
+      return { message: { role: 'assistant', content: 'reply' }, toolCalls: [] };
+    },
+  };
+  const poolMain = createFakePool();
+  const dbMain = createPostgresClient(poolMain);
+  const settingsMain = createFakeSettingsStore();
+  const chatsMain = createFakeChatSessionStore();
+  const apiKeysMain = createApiKeyStore('good-key-main:77777777-7777-7777-7777-777777777777');
+  const userIdMain = '77777777-7777-7777-7777-777777777777';
+  const serverMain = startHttpServer({
+    llm: capturingMainLlm,
+    db: dbMain,
+    tools: createToolRegistry([echoTool]),
+    apiKeys: apiKeysMain,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chatsMain,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: settingsMain,
+    llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => serverMain.once('listening', resolve));
+  const baseMain = `http://127.0.0.1:${serverMain.address().port}`;
+  const authMain = { authorization: 'Bearer good-key-main' };
+
+  const rpMain = await chatsMain.createChat(userIdMain, {});
+  await chatsMain.updateChat(userIdMain, rpMain.chatId, { kind: 'rp', params: { system: 'You are the narrator.' } });
+
+  // The prompt trace is module-level in-memory state keyed by chatId, and every fake store in this
+  // suite hands out the same ids (chat-1, chat-2, …) — earlier parts already recorded traces for
+  // these ids, which would leak into this part's assertions. Clear them so this part starts with a
+  // blank trace, as a real freshly-restarted server would for a never-sent chat.
+  clearPromptTrace(rpMain.chatId);
+
+  // Fresh chat, nothing fired yet: the preview falls back to the live next-turn reconstruction.
+  const freshPreviewRes = await fetch(`${baseMain}/v1/chats/${rpMain.chatId}/prompt-preview`, { headers: authMain });
+  assert(freshPreviewRes.status === 200, 'GET /v1/chats/:id/prompt-preview works for an rp chat that has not sent a turn yet');
+  const freshPreview = await freshPreviewRes.json();
+  assert(
+    freshPreview.groups[0].kind === 'main' &&
+      freshPreview.groups[0].captured === false &&
+      freshPreview.groups[0].items.length === 1 &&
+      freshPreview.groups[0].items[0].role === 'system',
+    "before anything is sent, the Main Prompt group is the live (uncaptured) reconstruction — here just the system prompt, no history",
+  );
+
+  // Turn 1: the trace captures the exact prompt before the call, and the preview reflects it.
+  let before = capturedMain.length;
+  const turn1Res = await fetch(`${baseMain}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authMain, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'first hello' }], chat_id: rpMain.chatId }),
+  });
+  assert(turn1Res.status === 200, 'an rp chat turn succeeds (Part 5c)');
+  const turn1Sent = capturedMain[before].messages; // [system, user 'first hello'] — the exact array runTurn handed to the llm
+  const preview1Res = await fetch(`${baseMain}/v1/chats/${rpMain.chatId}/prompt-preview`, { headers: authMain });
+  const preview1 = await preview1Res.json();
+  const main1 = preview1.groups[0];
+  assert(
+    main1.kind === 'main' &&
+      main1.captured === true &&
+      main1.items.length === turn1Sent.length &&
+      main1.items.every((item, i) => item.role === turn1Sent[i].role && item.content === turn1Sent[i].content),
+    "after a turn, the Main Prompt group is the captured exact text that turn sent (same roles, content, order as the llm call)",
+  );
+  assert(
+    preview1.groups.filter((g) => g.kind === 'main').length === 1,
+    "the trace's 'main' entry is surfaced once — as the first group, never duplicated among the background prompts",
+  );
+
+  // Turn 2, with the full history replayed the way the frontend sends it: the preview updates to
+  // turn 2's exact prompt — including turn 1's reply — proving it always shows the last turn.
+  before = capturedMain.length;
+  const turn2Res = await fetch(`${baseMain}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authMain, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      messages: [
+        { role: 'user', content: 'first hello' },
+        { role: 'assistant', content: 'reply' },
+        { role: 'user', content: 'second hello' },
+      ],
+      chat_id: rpMain.chatId,
+    }),
+  });
+  assert(turn2Res.status === 200, 'a second turn on the same chat succeeds (Part 5c)');
+  const turn2Sent = capturedMain[before].messages;
+  const preview2Res = await fetch(`${baseMain}/v1/chats/${rpMain.chatId}/prompt-preview`, { headers: authMain });
+  const preview2 = await preview2Res.json();
+  const main2 = preview2.groups[0];
+  assert(
+    main2.kind === 'main' &&
+      main2.captured === true &&
+      main2.items.length === turn2Sent.length &&
+      main2.items.every((item, i) => item.role === turn2Sent[i].role && item.content === turn2Sent[i].content) &&
+      main2.items.at(-1).content === 'second hello',
+    "every turn the preview updates: the Main Prompt group is now turn 2's exact sent text (history + new message), not turn 1's",
+  );
+
+  // A non-'rp' chat is still refused by the preview endpoint.
+  const plainMain = await chatsMain.createChat(userIdMain, {});
+  await chatsMain.updateChat(userIdMain, plainMain.chatId, { params: { system: 'household stuff' } });
+  const plainPreviewRes = await fetch(`${baseMain}/v1/chats/${plainMain.chatId}/prompt-preview`, { headers: authMain });
+  assert(plainPreviewRes.status === 422, "prompt-preview stays rp-only — a 'chat'-kind session 422s");
+
+  serverMain.close();
 }
 
 // --- Part 6: Canvas — a tool call's focusHint persists as chat_sessions.canvas_note_id ---

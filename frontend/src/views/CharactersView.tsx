@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
-import { ApiError, callTool, createChat, exportCharacterCard, importCharacterCard } from '../api/client';
+import { ApiError, callTool, createChat, exportCharacterCard, importCharacterCard, updateChat } from '../api/client';
 import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
 import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
 import './CharactersView.css';
 
 interface CharactersViewProps {
   apiKey: string | null;
-  onOpenChat: (chatId?: string, title?: string) => void;
-  /** RP always opens with a real chatId already created below — unlike onOpenChat, never optional. */
+  /** RP always opens with a real chatId already created below — the roster starts roleplay
+   *  sessions only, never plain chats. */
   onOpenRp: (chatId: string, title?: string) => void;
 }
 
@@ -42,7 +42,7 @@ function draftFromDetail(detail: CharacterDetail): Draft {
 // explicitly wherever the selection changes, rather than driven off a useEffect keyed on
 // selectedId, since saving an *already-selected* character needs a fresh fetch too and a same-value
 // setSelectedId wouldn't retrigger an effect.
-export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: CharactersViewProps) {
+export default function CharactersView({ apiKey, onOpenRp }: CharactersViewProps) {
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterDetail | null>(null);
@@ -51,7 +51,6 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [startingChat, setStartingChat] = useState(false);
   const [startingRp, setStartingRp] = useState(false);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -273,30 +272,14 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
     if (files.length > 0) await handleImportFiles(files);
   }
 
-  // Always a brand-new chat, never the one currently open elsewhere — see plan's own note on why
-  // this can't silently overwrite an in-progress conversation.
-  async function startChat() {
-    if (!detail?.found) return;
-    setStartingChat(true);
-    setError(null);
-    try {
-      const chat = await createChat(apiKey, { title: detail.name });
-      await callTool('apply_character_to_chat', { characterId: detail.characterId, chatId: chat.chatId }, apiKey);
-      onOpenChat(chat.chatId, detail.name);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to start chat');
-    } finally {
-      setStartingChat(false);
-    }
-  }
-
-  // Same shape as startChat, but kind: 'rp' (db/migrations/0049_chat_kind.sql) — the created chat
-  // gets no tool access and no household_memory leakage by construction (chatSessions.ts), and
-  // opens into its own RP sidebar section/tab type rather than the general chat one. The Prompt
-  // Stack picker itself still lives in the RP chat's own settings panel once it's open — this just
-  // auto-applies whichever preset the user has marked default (migration 0061), the same explicit
-  // signal a manual Apply click would send, so a fresh RP chat doesn't start with no stack at all
-  // unless the user genuinely has no default set.
+  // Creates a kind: 'rp' chat (db/migrations/0049_chat_kind.sql) — the only kind a character
+  // starts from here now. The created chat gets no tool access and no household_memory leakage
+  // by construction (chatSessions.ts), and opens into its own RP sidebar section/tab type rather
+  // than the general chat one. The Prompt Stack picker itself still lives in the RP chat's own
+  // settings panel once it's open — this just auto-applies whichever preset the user has marked
+  // default (migration 0061), the same explicit signal a manual Apply click would send, so a
+  // fresh RP chat doesn't start with no stack at all unless the user genuinely has no default
+  // set.
   async function startRp() {
     if (!detail?.found) return;
     setStartingRp(true);
@@ -315,13 +298,20 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
 
   // Best-effort — same "won't block on this" shape removePreset's delete_prompt_preset call uses:
   // a missing or failed default stack shouldn't stop the RP chat from opening, just leave it with
-  // no system prompt yet (the same state it started in before this feature existed).
+  // no system prompt yet (the same state it started in before this feature existed). Applies both
+  // defaults the user has named: the prompt stack (migration 0061, apply_prompt_stack_to_chat)
+  // and the cleanup preset (migration 0071 — a plain chat patch, the same write ChatView's
+  // Cleanup Preset dropdown saves). Either can be absent independently.
   async function applyDefaultStack(chatId: string) {
     try {
       const stacks = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
       const defaultStack = stacks.find((s) => s.isDefault);
       if (defaultStack) {
         await callTool('apply_prompt_stack_to_chat', { chatId, presetId: defaultStack.presetId }, apiKey);
+      }
+      const defaultCleanup = stacks.find((s) => s.isCleanupDefault);
+      if (defaultCleanup) {
+        await updateChat(chatId, { cleanup_preset_id: defaultCleanup.presetId }, apiKey);
       }
     } catch {
       // best-effort
@@ -483,9 +473,6 @@ export default function CharactersView({ apiKey, onOpenChat, onOpenRp }: Charact
 
             {!creatingNew && detail?.found && (
               <div className="characters-start-chat">
-                <button type="button" className="characters-start-chat-btn" onClick={startChat} disabled={startingChat}>
-                  {startingChat ? 'Starting…' : 'Start chat with this character'}
-                </button>
                 <button type="button" className="characters-start-chat-btn" onClick={startRp} disabled={startingRp}>
                   {startingRp ? 'Starting…' : 'Start RP'}
                 </button>

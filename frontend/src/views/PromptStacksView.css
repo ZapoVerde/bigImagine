@@ -142,6 +142,56 @@
   color: var(--color-accent);
 }
 
+/* "Set as default" now pops a two-option picker (prompt-stack default vs cleanup default,
+   migrations 0061/0071) — a native <details> menu so open/close and outside-click dismissal
+   need no state. */
+.promptstacks-default-menu {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.promptstacks-default-menu summary.promptstacks-default-btn {
+  list-style: none;
+  cursor: pointer;
+}
+
+.promptstacks-default-menu summary.promptstacks-default-btn::-webkit-details-marker {
+  display: none;
+}
+
+.promptstacks-default-options {
+  position: absolute;
+  top: calc(100% + 0.3rem);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 14rem;
+  padding: 0.25rem;
+  border: 1px solid var(--color-border, var(--color-border-subtle));
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface, var(--color-bg-canvas));
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.promptstacks-default-options button {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: left;
+  white-space: nowrap;
+  padding: 0.35rem 0.5rem;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.promptstacks-default-options button:hover {
+  background: var(--color-hover-surface, rgba(255, 255, 255, 0.06));
+}
+
 .promptstacks-name-input {
   flex: 1;
   min-width: 10rem;

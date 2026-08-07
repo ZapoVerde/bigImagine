@@ -135,9 +135,12 @@
  *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
- * runCleanupPass(db, userId, chatId, cleanupPresetId, turnLlm, reply, historyMessages) — the
- *   fail-open post-turn cleanup LLM call (docs/vistalyze_integration/cleanup_prompt.md §4), with
- *   the last 2 turn pairs of historyMessages prepended for header/cast context (§3.2); exported
+ * runCleanupPass(db, userId, chatId, cleanupPresetId, turnLlm, reply, historyMessages, settings?) —
+ *   the fail-open post-turn cleanup LLM call (docs/vistalyze_integration/cleanup_prompt.md §4), with
+ *   the last 2 turn pairs of historyMessages prepended for header/cast context (§3.2) unless the
+ *   preset text opts into {{prev_turns, N}} — the macro's expansion (default 2 pairs); the
+ *   optional settings store feeds {{user}}/{{char}} resolution (persona_name + the chat's linked
+ *   character); exported
  *   only so orchestrator/scripts/verify-cleanup-pass.mjs can exercise it against stubs
  *
  * @contract
@@ -159,6 +162,7 @@ import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { generateLocationImage } from '../orchestrator/generateLocationImage.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
+import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceItem } from '../io/promptTrace.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
@@ -173,7 +177,7 @@ import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
-import type { ChatDetail, ChatParams, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
+import type { ChatDetail, ChatParams, ChatSessionRow, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -381,6 +385,16 @@ function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4);
 }
 
+// One captured group per prompt kind, the most recent capture of each (the trace keeps several
+// turns' worth; the inspector shows the latest per kind — cleanup re-fires every turn, and only
+// the last one is the useful one to audit). Map keeps first-seen order with last value winning,
+// which is exactly "first-seen order, latest content".
+function latestPerKind<T extends { kind: string }>(entries: T[]): T[] {
+  const byKind = new Map<string, T>();
+  for (const entry of entries) byKind.set(entry.kind, entry);
+  return [...byKind.values()];
+}
+
 function toPreviewItem(
   role: PromptPreviewItem['role'],
   content: string,
@@ -469,18 +483,19 @@ async function buildChatMemorySystemPrompt(
   });
 }
 
-// docs/prompt-macros.md's Stage 1 — only called when the caller already knows systemText contains
-// at least one `{{`, so this always does its reads for real, never a wasted round-trip. Character
-// fields (name/persona/scenario) are read live rather than trusted from whatever
+// docs/prompt-macros.md's Stage 1 — the turn-scoped snapshot (docs §2) both the system-prompt and
+// the message-history resolution passes share, built fresh per turn so a persona/card edit takes
+// effect on the very next turn with no re-apply (bi_principles.md §13's live-read guarantee).
+// Character fields (name/persona/scenario) are read live rather than trusted from whatever
 // apply_prompt_stack_to_chat baked in at Apply time, same reasoning as household persona settings
-// below: a card edited after Apply should be reflected on the very next turn.
-async function resolveMacrosInSystemPrompt(
-  systemText: string,
+// below. Callers gate on their text actually containing '{{' so this never runs for a macro-free
+// turn — a wasted round-trip here is a real one (two reads per turn).
+async function buildMacroSnapshot(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
   characterId: string | null,
-): Promise<string> {
+): Promise<MacroSnapshot> {
   const [character, persona] = await Promise.all([
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -493,14 +508,20 @@ async function resolveMacrosInSystemPrompt(
     getPersonaSettings(settings),
   ]);
   const characterRow = character[0];
-
-  const snapshot: MacroSnapshot = {
+  return {
     charName: characterRow?.name,
     userName: persona.name || undefined,
     persona: persona.description ? (persona.name ? `${persona.name}: ${persona.description}` : persona.description) : persona.name || undefined,
     description: characterRow?.persona || undefined,
     scenario: characterRow?.scenario || undefined,
   };
+}
+
+// docs/prompt-macros.md's Stage 1 — only called when the caller already knows systemText contains
+// at least one `{{`, so it always substitutes for real, never a wasted pass. The snapshot is
+// built by the caller (buildMacroSnapshot) so a turn that also resolves message history reuses
+// one frozen snapshot for both (docs §2's "resolved once, at the top of the turn").
+async function resolveMacrosInSystemPrompt(systemText: string, snapshot: MacroSnapshot): Promise<string> {
   return interpolateMacros(systemText, snapshot);
 }
 
@@ -665,17 +686,82 @@ async function assembleNarratorSystemText(
 // against a stub db/llm without booting a server.
 //
 // docs/vistalyze_integration/cleanup_prompt.md §3.2: historyMessages carries the turn's active
-// history (already trimToLiveWindow'd by the caller), and its last 2 turn pairs (≤4 messages) are
-// prepended to the cleanup call ahead of the preset slots — the cleanup model's only source for
-// the ongoing conversation's voice, header (location/date/time), and cast state, since no trusted
-// chat→scene/location/presence link exists yet. The user's explicit call: the location and cast
-// must be updatable from previous context, not just from the raw reply. Roles are preserved; the
-// slice is bounded here so the "2 pairs" contract lives in exactly one place.
+// history (already trimToLiveWindow'd by the caller). A preset whose text references
+// {{prev_turns, N}} opts into text-form history: the macro expands to the last N turn pairs as
+// labeled User:/Assistant: lines, interpolated through interpolateMacros's resolveArg hook
+// (util/interpolateMacros.ts), N defaulting to 2 when the argument is omitted — the pair count is
+// prompt-controlled, not hardcoded. A preset that never references it keeps the legacy behavior:
+// the last 2 turn pairs prepended as messages, so a preset written before the macro existed
+// doesn't silently lose the history it was built against. Either way the cleanup model's source
+// for the ongoing conversation's voice, header (location/date/time), and cast state is previous
+// context — the user's explicit call: location and cast must be updatable from previous context,
+// not just from the raw reply. The built-in "Cleanup Pass" preset ships with {{prev_turns, 2}}.
+//
+// The interpolation snapshot is `{ message: reply }` plus {{user}}/{{char}}: the household
+// persona_name setting and the chat's linked character's name, resolved live per cleanup call
+// (resolveCleanupMacroSnapshot below) so an edit after Apply is reflected on the next turn. Both
+// are fail-soft — a lookup failure degrades them to empty rather than skipping the pass, which
+// would be a cosmetic macro costing the whole cleanup.
 //
 // docs/vistalyze_integration/cleanup_prompt.md §1's fail-open contract covers the whole function,
 // not just the LLM call: a slot-load failure (preset deleted mid-turn, DB hiccup), an empty
 // enabled-slot set, a provider timeout, or empty output all log and keep the raw reply unchanged.
 // Cleanup failing never blocks or degrades the turn itself.
+
+/** {{prev_turns, N}}'s expansion — the last N turn pairs of the active history, rendered as
+ *  labeled User:/Assistant: lines, oldest first. "Pair" is the last 2N messages (a turn pair is
+ *  one user + one assistant message; a history that ends mid-pair renders the messages it has,
+ *  labeled by their actual role). Pure and deterministic (bi_principles.md §8): given the same
+ *  history and pair count the text is byte-identical, so the same history yields the same
+ *  expansion at every macro occurrence within one preset. */
+function formatPreviousTurns(history: LlmMessage[], pairs: number): string {
+  const kept = pairs > 0 ? history.slice(-pairs * 2) : [];
+  return kept
+    .map((m) => `${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role}: ${m.content}`)
+    .join('\n');
+}
+
+/** The {{prev_turns, N}} argument: a non-negative integer pair count; 2 (cleanup_prompt.md §3.2's
+ *  default pair count) when the argument is missing or unparsable. */
+function parsePrevTurnPairs(arg: string | undefined): number {
+  if (arg === undefined) return 2;
+  const n = Number(arg);
+  return Number.isInteger(n) && n >= 0 ? n : 2;
+}
+
+/** The cleanup snapshot's non-message fields — {{user}} from the household persona_name setting
+ *  and {{char}} from the chat's linked character's name (cleanup_prompt.md §3.1). Read live per
+ *  cleanup call, same reasoning as resolveMacrosInSystemPrompt: a persona/card edited after Apply
+ *  should be reflected on the very next cleanup. Fail-soft by design — this is cosmetic macro
+ *  context, so a lookup failure logs and degrades to empty names rather than taking the whole
+ *  cleanup pass down with it (the fail-open contract covers the cleanup call, not its decoration). */
+async function resolveCleanupMacroSnapshot(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore | undefined,
+  userId: string,
+  chatId: string,
+): Promise<{ userName?: string; charName?: string }> {
+  try {
+    const [characterRows, persona] = await Promise.all([
+      db.withUserScope(userId, (session) =>
+        session.query<{ name: string }>(
+          `select c.name from chat_sessions s
+           join characters c on c.character_id = s.character_id and c.user_id = s.user_id
+           where s.chat_id = $1 and s.user_id = $2`,
+          [chatId, userId],
+        ),
+      ),
+      settings ? getPersonaSettings(settings) : Promise.resolve({ name: '', description: '' }),
+    ]);
+    return { userName: persona.name || undefined, charName: characterRows[0]?.name };
+  } catch (err) {
+    // bi_principles.md §11: log the seam — macro names are decoration, never a reason to skip
+    // the cleanup pass itself.
+    log.debug('cleanup pass: user/char macro lookup failed, resolving without them', { chatId, err });
+    return {};
+  }
+}
+
 export async function runCleanupPass(
   db: PostgresClient,
   userId: string,
@@ -684,18 +770,50 @@ export async function runCleanupPass(
   turnLlm: LlmProvider,
   reply: string,
   historyMessages: LlmMessage[],
+  settings?: OrchestratorSettingsStore,
 ): Promise<string> {
   try {
     const slots = await loadPromptStackSlots(db, userId, cleanupPresetId);
-    const presetMessages = assemblePromptStack({}, slots).map((m) => ({
-      ...m,
-      content: interpolateMacros(m.content, { message: reply }),
-    }));
-    if (presetMessages.length === 0) {
+    // A preset that references {{prev_turns, N}} opts into text-form history (pair count
+    // prompt-controlled, resolved below). A preset that never mentions it keeps the legacy
+    // behavior — the last 2 turn pairs prepended as messages — so a preset written before the
+    // macro existed doesn't silently lose the history it was built against. Enabled-only: a
+    // macro sitting in a disabled slot is not an opt-in.
+    const usesPrevTurns = slots.some(
+      (s) => s.enabled !== false && typeof s.customContent === 'string' && s.customContent.includes('{{prev_turns'),
+    );
+    const assembled = assemblePromptStack({}, slots);
+    if (assembled.length === 0) {
       log.warn(`cleanup pass preset ${cleanupPresetId} resolved to no messages for chat ${chatId}, keeping the raw reply`);
       return reply;
     }
-    const messages = [...historyMessages.slice(-4), ...presetMessages];
+    // {{user}}/{{char}} are decoration, resolved after the empty-slot check so a preset that
+    // resolves to nothing never pays for the persona/character reads.
+    const macroSnapshot = await resolveCleanupMacroSnapshot(db, settings, userId, chatId);
+    const presetMessages = assembled.map((m) => ({
+      ...m,
+      content: interpolateMacros(m.content, { message: reply, ...macroSnapshot }, (name, arg) =>
+        name === 'prev_turns' ? formatPreviousTurns(historyMessages, parsePrevTurnPairs(arg)) : undefined,
+      ),
+    }));
+    const messages = usesPrevTurns ? presetMessages : [...historyMessages.slice(-4), ...presetMessages];
+
+    // Record the exact text before it goes out — the cleanup prompt embeds {{message}} = the raw
+    // pre-cleanup reply, which is discarded when cleanup rewrites it, so this trace (io/promptTrace.ts)
+    // is the only place the full cleanup prompt ever exists. Record before the call, success or not.
+    // Roles are system/user/assistant by construction (preset slots + conversation history) — the
+    // LlmMessage type is wider ('tool'), which never occurs here.
+    recordPromptTrace(chatId, {
+      kind: 'cleanup',
+      title: 'Cleanup Prompt',
+      items: messages.map((m) => ({
+        role: m.role as PromptTraceItem['role'],
+        content: m.content,
+        chars: m.content.length,
+        estimatedTokens: estimateTokens(m.content.length),
+      })),
+      capturedAt: Date.now(),
+    });
 
     const turn = await runWithCallContext({ taskId: chatId, kind: 'chat', userId }, () => turnLlm.complete(messages, []));
     // Whitespace-only output counts as empty under the fail-open contract — never let a cleanup
@@ -808,6 +926,23 @@ async function assembleSessionTurnContext(
     trimToLiveWindow(messagesForLlm, settings),
   ]);
 
+  // docs/prompt-macros.md's Stage 1, extended to message history: an RP chat's stored messages —
+  // chiefly the character's seeded greeting, which apply_character_to_chat/apply_prompt_stack_to_chat
+  // insert verbatim — can carry the same {{...}} tokens as its system text, and they'd otherwise
+  // reach the LLM literally (and get echoed back into replies). Resolved here, at the same seam and
+  // against the same frozen snapshot as the system text (docs §2: resolved once at the top of the
+  // turn), never by rewriting the canonical message. Display-only resolution is a separate concern
+  // served by GET /v1/chats/:id's resolvedContent (handleChatRoutes). Gated exactly like the
+  // system pass below: 'rp' chats only (a 'chat'-kind session could legitimately discuss literal
+  // `{{...}}`-looking text), and only when something actually contains '{{' — so a macro-free turn
+  // pays for none of the reads.
+  const systemNeedsMacros = sessionKind === 'rp' && !sessionPromptStackPresetId && !!sessionParams.system?.includes('{{');
+  const historyNeedsMacros = sessionKind === 'rp' && trimmed.some((m) => m.content.includes('{{'));
+  let macroSnapshot: MacroSnapshot | undefined;
+  if (systemNeedsMacros || historyNeedsMacros) {
+    macroSnapshot = await buildMacroSnapshot(db, settings, userId, sessionCharacterId);
+  }
+
   if (sessionKind === 'rp' && sessionPromptStackPresetId) {
     // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): re-run assemblePromptStack fresh
     // every turn instead of replaying the frozen string apply_prompt_stack_to_chat baked once into
@@ -817,43 +952,87 @@ async function assembleSessionTurnContext(
     // No formatCurrentDateContext here — unlike a 'chat'-kind session, an in-character narrator
     // has no business knowing the real-world wall-clock time unless the prompt stack itself surfaces
     // it (e.g. a scenario slot), so it's omitted for 'rp' rather than unconditionally prepended.
+    // buildNarratorStackItems reads the character/persona once more for its own slot snapshot —
+    // near-simultaneous with the turn-level buildMacroSnapshot above, so Stage 1's deterministic
+    // lookups make the two byte-identical; a Stage 2 clock/RNG would want them merged into one.
     const narratorText = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext);
-    return { systemPrompt: narratorText, messagesForLlm: trimmed };
+    return { systemPrompt: narratorText, messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot) };
   }
 
   // No applied preset — a 'chat'-kind chat, or an 'rp' chat that's never been through Apply:
   // unchanged legacy behavior, the frozen params.system, macro-resolved if 'rp'. Date context still
   // applies to 'chat'-kind sessions (household assistant use), just not 'rp' ones (see above).
   let system = sessionParams.system;
-  if (sessionKind === 'rp' && system?.includes('{{')) {
-    system = await resolveMacrosInSystemPrompt(system, db, settings, userId, sessionCharacterId);
+  if (sessionKind === 'rp' && system?.includes('{{') && macroSnapshot) {
+    system = await resolveMacrosInSystemPrompt(system, macroSnapshot);
   }
   const dateContext = sessionKind === 'rp' ? undefined : formatCurrentDateContext(timezone);
   return {
     systemPrompt: [dateContext, system, memoryContext].filter(Boolean).join('\n\n'),
-    messagesForLlm: trimmed,
+    messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
   };
 }
 
+// The message-history half of the turn-scoped resolution pass above (and the Prompt Inspector's
+// live fallback): substitute the turn's snapshot into every message whose text actually contains
+// '{{', returning the original array untouched when nothing needs it. Per-message `includes('{{')`
+// skips the regex for macro-free history; the array itself is never rewritten — new objects only
+// for the messages that change, so callers holding the originals (chat persistence, the canon
+// anchor) keep seeing verbatim content.
+function resolveMacrosInMessages(messages: LlmMessage[], needsMacros: boolean, snapshot: MacroSnapshot | undefined): LlmMessage[] {
+  if (!needsMacros || !snapshot) return messages;
+  return messages.map((m) => (m.content.includes('{{') ? { ...m, content: interpolateMacros(m.content, snapshot) } : m));
+}
+
+// Display-only single-message twin of handleChatRoutes' GET /v1/chats/:id decoration: the swipe
+// routes return one StoredChatMessage (a stored alternate greeting, or a regenerated reply) that
+// the client swaps into view in place, so it carries the same derived resolvedContent contract —
+// canonical content untouched, display copy resolved against the live persona.
+async function decorateMessageForDisplay(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  userId: string,
+  session: Pick<ChatSessionRow, 'kind' | 'characterId'>,
+  message: StoredChatMessage,
+): Promise<StoredChatMessage> {
+  if (session.kind !== 'rp' || !message.content.includes('{{')) return message;
+  const snapshot = await buildMacroSnapshot(db, settings, userId, session.characterId);
+  return { ...message, resolvedContent: interpolateMacros(message.content, snapshot) };
+}
+
+export interface PromptPreviewGroup {
+  /** Stable kind tag: 'main' (the last turn's main prompt, captured at send time — see below),
+   *  or a captured background prompt's tag ('cleanup', 'title', …) from io/promptTrace.ts. */
+  kind: string;
+  /** Human heading shown in the inspector, e.g. 'Main Prompt' / 'Cleanup Prompt'. */
+  title: string;
+  /** True when this group is the actual text fired during a turn (captured at send time); false
+   *  only for the main prompt's fallback — a live reconstruction of what the next turn would
+   *  send, shown while no turn has been captured yet (fresh chat, or trace lost to a restart). */
+  captured: boolean;
+  /** The prompt's items in send order — system-stack/header items first, then conversation
+   *  messages, each with a rough token estimate. */
+  items: PromptPreviewItem[];
+}
+
 export interface PromptPreview {
-  /** Everything folded into the system prompt, in the exact order it's sent — date context first,
-   *  then either the narrator preset's slots or the legacy system+memory pair. */
-  systemStack: PromptPreviewItem[];
-  /** The trimmed conversation history (trimToLiveWindow) that rides alongside systemStack in the
-   *  same call — the two together are the complete request body an actual turn would send. */
-  messages: PromptPreviewItem[];
+  /** One group per prompt this chat fires, in order: the last turn's main prompt (captured at
+   *  send time, falling back to a live preview), then any captured background prompts from the
+   *  last turns (cleanup pass, title generation, …). */
+  groups: PromptPreviewGroup[];
   totalChars: number;
   totalEstimatedTokens: number;
 }
 
-// The read-only twin of assembleSessionTurnContext's 'rp' branch above: same memory/preset/legacy
-// logic, called against a chat's currently-persisted messages rather than a new incoming one, and
-// returning the itemized breakdown instead of a joined string — nothing here can drift from what a
-// real turn sends, since both paths call the same buildNarratorStackItems/resolveMacrosInSystemPrompt.
-// RP-only (docs/bi_principles.md's household-memory/canon scoping is what makes a 'chat'-kind
-// session's system prompt uninteresting to audit this way — it's just the frozen params.system).
-async function buildPromptPreview(
-  deps: HttpServerDeps,
+// The read-only twin of assembleSessionTurnContext's 'rp' branch above. After a turn has fired,
+// the 'main' entry handleChatCompletions/regenerateSwipe recorded in io/promptTrace.ts IS the
+// exact text that turn sent — the inspector's primary path. The live assembly below (same
+// memory/preset/legacy logic, same buildNarratorStackItems/resolveMacrosInSystemPrompt) is only
+// the fallback for when no capture exists yet; it can never drift from what a real turn sends
+// since both paths share that assembly. RP-only (docs/bi_principles.md's household-memory/canon
+// scoping is what makes a 'chat'-kind session's system prompt uninteresting to audit this way —
+// it's just the frozen params.system).
+async function buildPromptPreview(  deps: HttpServerDeps,
   userId: string,
   chatId: string,
 ): Promise<{ ok: true; preview: PromptPreview } | { ok: false; status: number; error: string }> {
@@ -864,38 +1043,95 @@ async function buildPromptPreview(
     return { ok: false, status: 422, error: 'prompt preview is only available for rp chats' };
   }
 
-  const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));
-  const [memoryContext, trimmed] = await Promise.all([
-    buildChatMemorySystemPrompt(deps.db, userId, chatId, session.kind),
-    trimToLiveWindow(messagesForLlm, deps.settings),
-  ]);
+  // io/promptTrace.ts's contract, applied to the main prompt too: the trace now holds 'main'
+  // entries — the exact text handleChatCompletions/regenerateSwipe record just before the llm
+  // call — and those are "the last turn that was sent", which is what the inspector exists to
+  // show. Prefer the latest one; the live assembly below is the fallback for a chat that hasn't
+  // fired a turn yet, or a restart that wiped the in-memory trace (and it stays useful while
+  // composing, before the first send — bi_principles.md §13's live-read applied to this surface).
+  // Either way the group's items stay granular (one per system-stack slot and history message) so
+  // the frontend can render them individually, or join them into one block, as it prefers.
+  const trace = getPromptTrace(chatId);
+  const capturedMain = [...trace].reverse().find((e) => e.kind === 'main');
 
-  // No date-context item — 'rp' turns no longer get formatCurrentDateContext prepended (see
-  // assembleSessionTurnContext's 'rp' branch above), and this preview must never show something an
-  // actual turn wouldn't send.
-  const systemStack: PromptPreviewItem[] = [];
-
-  if (session.promptStackPresetId) {
-    systemStack.push(
-      ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext)),
-    );
+  let mainGroup: PromptPreviewGroup;
+  if (capturedMain) {
+    mainGroup = {
+      kind: 'main',
+      title: 'Main Prompt',
+      captured: true,
+      items: capturedMain.items.map((i) => ({
+        role: i.role,
+        content: i.content,
+        chars: i.chars,
+        estimatedTokens: i.estimatedTokens,
+      })),
+    };
   } else {
-    let system = session.params.system;
-    if (system?.includes('{{')) {
-      system = await resolveMacrosInSystemPrompt(system, deps.db, deps.settings, userId, session.characterId);
+    const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));
+    let [memoryContext, trimmed] = await Promise.all([
+      buildChatMemorySystemPrompt(deps.db, userId, chatId, session.kind),
+      trimToLiveWindow(messagesForLlm, deps.settings),
+    ]);
+
+    // No date-context item — 'rp' turns no longer get formatCurrentDateContext prepended (see
+    // assembleSessionTurnContext's 'rp' branch above), and this preview must never show something
+    // an actual turn wouldn't send.
+    const systemStack: PromptPreviewItem[] = [];
+
+    // Same shared-snapshot shape as assembleSessionTurnContext — one frozen snapshot for the
+    // system text (legacy branch only) and the message history (both branches; a real turn's
+    // narrator path resolves messages the same way), docs/prompt-macros.md §2.
+    const systemNeedsMacros = !session.promptStackPresetId && !!session.params.system?.includes('{{');
+    const historyNeedsMacros = trimmed.some((m) => m.content.includes('{{'));
+    const macroSnapshot = systemNeedsMacros || historyNeedsMacros
+      ? await buildMacroSnapshot(deps.db, deps.settings, userId, session.characterId)
+      : undefined;
+
+    if (session.promptStackPresetId) {
+      systemStack.push(
+        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext)),
+      );
+    } else {
+      let system = session.params.system;
+      if (system?.includes('{{') && macroSnapshot) {
+        system = await resolveMacrosInSystemPrompt(system, macroSnapshot);
+      }
+      if (system) systemStack.push(toPreviewItem('system', system, { markerKey: 'system' }));
+      if (memoryContext) systemStack.push(toPreviewItem('system', memoryContext, { markerKey: 'memory_recall' }));
     }
-    if (system) systemStack.push(toPreviewItem('system', system, { markerKey: 'system' }));
-    if (memoryContext) systemStack.push(toPreviewItem('system', memoryContext, { markerKey: 'memory_recall' }));
+    trimmed = resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot);
+
+    const messages = trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content));
+    mainGroup = { kind: 'main', title: 'Main Prompt', captured: false, items: [...systemStack, ...messages] };
   }
 
-  const messages = trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content));
+  // One group per prompt this chat fires. Main first (the captured last turn, or the live preview),
+  // then every captured background prompt — the cleanup pass, title generation, … — in fire order.
+  // 'main' entries in the trace are already surfaced as the first group, so they're filtered out
+  // here rather than shown a second time.
+  const groups: PromptPreviewGroup[] = [
+    mainGroup,
+    ...latestPerKind(trace)
+      .filter((e) => e.kind !== 'main')
+      .map((entry) => ({
+        kind: entry.kind,
+        title: entry.title,
+        captured: true,
+        items: entry.items.map((i) => ({
+          role: i.role,
+          content: i.content,
+          chars: i.chars,
+          estimatedTokens: i.estimatedTokens,
+        })),
+      })),
+  ];
 
-  const allChars = [...systemStack, ...messages].reduce((sum, i) => sum + i.chars, 0);
+  const allChars = groups.reduce((sum, g) => sum + g.items.reduce((s, i) => s + i.chars, 0), 0);
   return {
     ok: true,
     preview: {
-      systemStack,
-      messages,
+      groups,
       totalChars: allChars,
       totalEstimatedTokens: estimateTokens(allChars),
     },
@@ -973,6 +1209,19 @@ async function regenerateSwipe(
     timezone,
   );
 
+  // Same Prompt Inspector capture as handleChatCompletions (io/promptTrace.ts, kind 'main') — a
+  // swipe re-runs the last turn, so its regenerated prompt is the newest "Main Prompt" the
+  // inspector should show. Recorded before the call, success or not, like the cleanup pass.
+  recordPromptTrace(chatId, {
+    kind: 'main',
+    title: 'Main Prompt',
+    items: [
+      ...(systemPrompt ? [toPreviewItem('system', systemPrompt)] : []),
+      ...trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content)),
+    ],
+    capturedAt: Date.now(),
+  });
+
   let reply: string;
   let focusedNoteId: string | undefined;
   try {
@@ -994,7 +1243,7 @@ async function regenerateSwipe(
   }
 
   if (session.cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply, trimmed);
+    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply, trimmed, deps.settings);
   }
 
   const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
@@ -1194,6 +1443,26 @@ async function handleChatCompletions(
     anchorMessageId = inserted?.messageId;
   }
 
+  // The Prompt Inspector's "Main Prompt" is the exact text this turn sends, captured at send time
+  // (io/promptTrace.ts) — the same record-before-the-call rule as the cleanup pass in
+  // runCleanupPass. runTurn prepends systemPrompt to messagesForLlm; that final array is what the
+  // model sees, so that's what the trace records. This is what lets the inspector show "the last
+  // turn that was sent" (bi_principles.md §18) instead of a live reconstruction of the next one.
+  // Persisted chats only — no chat_id is stateless Open WebUI traffic with nothing to trace
+  // against. Images ride on LlmMessage.images (util/attachmentContext.ts), never in content, so
+  // this never embeds base64 blobs into the trace.
+  if (body.chat_id) {
+    recordPromptTrace(body.chat_id, {
+      kind: 'main',
+      title: 'Main Prompt',
+      items: [
+        ...(systemPrompt ? [toPreviewItem('system', systemPrompt)] : []),
+        ...messagesForLlm.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content)),
+      ],
+      capturedAt: Date.now(),
+    });
+  }
+
   let reply: string;
   let focusedNoteId: string | null | undefined;
   try {
@@ -1232,7 +1501,7 @@ async function handleChatCompletions(
   // no chat_id, or a chat that hasn't opted into a cleanup preset.
   const cleanupPresetId = sessionDetail?.session.cleanupPresetId;
   if (body.chat_id && cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply, messagesForLlm);
+    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply, messagesForLlm, deps.settings);
   }
 
   if (body.chat_id) {
@@ -2057,6 +2326,19 @@ async function handleChatRoutes(
         sendJson(res, 404, { error: 'not found' });
         return;
       }
+      // Display-side macro resolution (docs/prompt-macros.md's Stage 1, bi_principles.md §1): the
+      // chat UI renders a message's resolvedContent — a per-read derived copy — so a character's
+      // seeded greeting shows "Jeremy, …" instead of the literal {{user}} token, while the
+      // canonical content stays verbatim and the client keeps re-sending it, so the per-turn
+      // resolution pass (assembleSessionTurnContext) keeps re-resolving against the live persona —
+      // a persona edit updates the greeting on the very next read with no re-apply. Gated like
+      // every other macro pass: 'rp' chats only, and only when a message actually contains '{{'.
+      if (detail.session.kind === 'rp' && detail.messages.some((m) => m.content.includes('{{'))) {
+        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.characterId);
+        detail.messages = detail.messages.map((m) =>
+          m.content.includes('{{') ? { ...m, resolvedContent: interpolateMacros(m.content, snapshot) } : m,
+        );
+      }
       sendJson(res, 200, detail);
       return;
     }
@@ -2083,6 +2365,7 @@ async function handleChatRoutes(
     }
     if (req.method === 'DELETE') {
       const deleted = await deps.chats.deleteChat(userId, chatId);
+      if (deleted) clearPromptTrace(chatId);
       sendJson(res, deleted ? 200 : 404, deleted ? { deleted: true } : { error: 'not found' });
       return;
     }
@@ -2206,7 +2489,7 @@ async function handleChatRoutes(
         return;
       }
       if (cycled.status === 'switched') {
-        sendJson(res, 200, { message: cycled.message });
+        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, cycled.message) });
         return;
       }
       if (cycled.status === 'no_earlier_swipe') {
@@ -2230,7 +2513,7 @@ async function handleChatRoutes(
         sendJson(res, 500, { error: result.error });
         return;
       }
-      sendJson(res, 200, { message: result.message });
+      sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
       // endpoint.md §5: fire the location-image generation pass only once the reply is actually
       // sent — a provider round-trip has no place in the request path, so the trigger rides the
       // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.

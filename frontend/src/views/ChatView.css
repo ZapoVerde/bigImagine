@@ -66,9 +66,11 @@
   will-change: transform;
 }
 
-.chat-main > :not(.chat-location-background) {
-  position: relative;
-  z-index: 1;
+/* The header's dropdown menu must float above the history pane below it — both are z-index:1
+   siblings and the later history would otherwise paint over the menu, which lives inside the
+   header's own stacking context. */
+.chat-main > .chat-header {
+  z-index: 2;
 }
 
 .chat-header {
@@ -116,10 +118,16 @@
   background: var(--color-hover-surface);
 }
 
-/* Not mobile-only, unlike chat-settings-summon above — the Prompt Inspector panel has no
-   persistent desktop rail of its own to toggle from (PromptInspectorPanel.css), so this header
-   button is the only way to open it on any screen size. */
-.chat-prompt-inspector-summon {
+/* RP-chat header hamburger menu — one control folding the prompt-inspector and branch-map
+   toggles plus file/image attach (the input-row paper clip is hidden for RP chats). The
+   inspect/tree buttons this replaces had no persistent rail to toggle from (PromptInspectorPanel
+   / BranchMapPanel are both opt-in overlays), so the menu is the only way to reach them. */
+.chat-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-menu-button {
   background: none;
   border: none;
   font-size: var(--font-size-base);
@@ -128,12 +136,48 @@
   flex-shrink: 0;
 }
 
-.chat-prompt-inspector-summon:hover {
+.chat-menu-button:hover {
   color: var(--color-text-primary);
   background: var(--color-hover-surface);
 }
 
-/* Not mobile-only either, same reasoning as chat-prompt-inspector-summon above — BranchMapPanel
+.chat-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 20;
+  min-width: 13rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.35rem;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0.4rem 1.4rem rgba(0, 0, 0, 0.28);
+}
+
+.chat-menu button {
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 0.5rem 0.7rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.chat-menu button:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+}
+
+.chat-menu button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Not mobile-only either, same reasoning as the chat-menu-button above — BranchMapPanel
    has no persistent rail of its own. Offered on every chat, not just 'rp'. */
 .chat-branch-map-summon {
   background: none;
@@ -573,21 +617,132 @@
   text-decoration: underline;
 }
 
-.swipe-controls {
+/* --- Last reply's bottom action bar ---
+   Bigger than the per-message hover row and always visible (no hover needed — works on mobile
+   where hover doesn't exist). Swipe arrows appear only when a swipe exists in that direction,
+   Rerun stands in for the next-arrow when there's nothing ahead, and the [n/N] counter shows
+   only when there's more than one variant. Icon-only buttons keep the bar compact at phone
+   width while staying tappable (bi_principles.md §19). */
+.last-chat-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.last-chat-actions button {
+  background: none;
+  border: none;
+  padding: 0.45rem 0.6rem;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: inherit;
+  opacity: 0.75;
+  border-radius: var(--radius-sm);
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
+  justify-content: center;
+  min-width: 2.4rem;
 }
 
-.swipe-controls button:disabled {
+.last-chat-actions button:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+  opacity: 1;
+}
+
+.last-chat-actions button:disabled {
   opacity: 0.3;
   cursor: default;
-  text-decoration: none;
 }
 
-.swipe-count {
-  font-size: var(--font-size-xs);
-  opacity: 0.65;
+.last-chat-actions .last-chat-arrow {
+  font-size: 1.4rem;
+}
+
+.last-chat-counter {
+  font-size: var(--font-size-sm);
+  opacity: 0.7;
+  white-space: nowrap;
+  margin: 0 0.1rem;
+}
+
+/* --- Selection-mode bulk delete (hamburger → "Delete messages") ---
+   Every message becomes a checkbox + bubble row; only the wrapper is a flex child of the
+   history column, so bubbles keep their old left/right alignment. Ticking any entry selects
+   everything below it too — the selection is always a trailing suffix, which is exactly what
+   the server's truncateMessagesFrom removes in one call. */
+.chat-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.chat-message.user {
+  align-self: flex-end;
+}
+
+.chat-select-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 2.4rem;
+  height: 2.4rem;
+  margin-top: 0.3rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.chat-select-box:hover {
+  background: var(--color-hover-surface);
+}
+
+.chat-select-box input {
+  width: 1.2rem;
+  height: 1.2rem;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* Delete / Cancel bar that appears between the history and the input row while selecting. */
+.chat-delete-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  background: var(--color-bg-panel);
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.chat-delete-count {
+  flex: 1;
+  font-size: var(--font-size-sm);
+  opacity: 0.8;
+}
+
+.chat-delete-bar button {
+  min-height: 2.5rem;
+  padding: 0.55rem 1rem;
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+
+.chat-delete-bar button.chat-delete-confirm {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.chat-delete-bar button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .message-edit {
@@ -636,6 +791,18 @@
 .chat-input button:hover {
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
+}
+
+/* Resend state: the chat's last message is the user's own (its AI reply was deleted) and the
+   draft/staging are empty — the button lights up to signal pressing it re-runs that turn instead
+   of sending something new (see ChatView's resendMode()). */
+.chat-input button.chat-send-resend,
+.chat-input button.chat-send-resend:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent-hover);
+  box-shadow:
+    0 0 0 2px var(--color-accent-subtle),
+    0 0 14px var(--color-accent);
 }
 
 .chat-input button.chat-attach-button {
@@ -698,5 +865,19 @@
 
   .chat-send-icon {
     display: inline;
+  }
+
+  /* Mobile: square 2.5rem tap targets for the last-reply action bar — same hit area as the
+     input row's attach/send buttons, since hover no longer makes up for a small target. */
+  .last-chat-actions button {
+    width: 2.5rem;
+    height: 2.5rem;
+    padding: 0;
+  }
+
+  /* Same bump for the selection-mode tickboxes. */
+  .chat-select-box {
+    width: 2.5rem;
+    height: 2.5rem;
   }
 }
