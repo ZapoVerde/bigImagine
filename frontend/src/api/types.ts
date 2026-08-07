@@ -352,6 +352,27 @@ export interface ChatMemorySyncStatusRow {
   canonLastProposedAt: string | null;
 }
 
+// GET /v1/chats/:id/sync-status — one chat's slice of the rolling sync loop's status record
+// (orchestrator/src/io/chatSessions.ts getChatSyncStatus), the RP chat header menu's "Sync
+// status" panel. Same field set as the admin Review Panel's row minus the chat-identifying
+// columns, plus the unsynced-vs-due message counts so the panel can say when the next tick will
+// actually do something. lastStatus is null until the chat has had its first sync attempt.
+export interface ChatSyncStatus {
+  lastAttemptAt: string | null;
+  lastStatus: 'ok' | 'skipped' | 'error' | null;
+  lastStep: string | null;
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  lastChunksAdded: number | null;
+  lastEntriesUpdated: number | null;
+  consecutiveErrors: number;
+  canonProposedCount: number;
+  canonApprovedCount: number;
+  canonLastProposedAt: string | null;
+  unsyncedMessages: number;
+  dueAfterMessages: number;
+}
+
 export interface StoredChatMessage {
   messageId: string;
   role: 'user' | 'assistant';

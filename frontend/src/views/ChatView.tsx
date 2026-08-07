@@ -44,6 +44,7 @@ import type {
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import PromptInspectorPanel from '../components/promptInspector/PromptInspectorPanel';
 import BranchMapPanel from '../components/branchMap/BranchMapPanel';
+import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPanel';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
@@ -264,6 +265,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // file/image attach under one control (see the header below). Non-RP chats keep their single
   // branch-map button and the input-row paper clip instead.
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
+  // Sync Status panel (RP chat ☰ menu → "Sync status"): this chat's slice of the rolling memory
+  // sync loop's status record — when the last attempt/success landed, what it did, and when the
+  // next one is due. Mounted only while open, same conditional-render shape as the other panels.
+  const [syncStatusOpen, setSyncStatusOpen] = useState(false);
   // Selection-mode bulk delete (hamburger → "Delete messages"): a tickbox on every message, and
   // ticking any entry selects everything below it, so the selected set is always a trailing
   // suffix — exactly what the server's truncateMessagesFrom removes in one call. RP-chat only,
@@ -294,6 +299,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setPromptInspectorOpen(false);
       setBranchMapOpen(false);
       setChatMenuOpen(false);
+      setSyncStatusOpen(false);
       setSelectionMode(false);
       setSelectionStart(null);
       setError(null);
@@ -305,6 +311,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setPromptInspectorOpen(false);
     setBranchMapOpen(false);
     setChatMenuOpen(false);
+    setSyncStatusOpen(false);
     setSelectionMode(false);
     setSelectionStart(null);
     getChat(chatId, apiKey)
@@ -781,6 +788,21 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   <button
                     type="button"
                     role="menuitem"
+                    title={
+                      syncStatusOpen
+                        ? 'Hide sync status'
+                        : 'When the background memory sync last ran for this chat, and when the next one is due'
+                    }
+                    onClick={() => {
+                      setSyncStatusOpen((v) => !v);
+                      setChatMenuOpen(false);
+                    }}
+                  >
+                    🔄 {syncStatusOpen ? 'Hide sync status' : 'Sync status'}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
                     title="Attach a file or image"
                     disabled={attaching}
                     onClick={() => {
@@ -1132,6 +1154,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           chatId={activeChat.chatId}
           onOpenChat={onOpenChat ?? (() => {})}
           onClose={() => setBranchMapOpen(false)}
+        />
+      )}
+
+      {syncStatusOpen && activeChat?.kind === 'rp' && (
+        <ChatSyncStatusPanel
+          apiKey={apiKey}
+          chatId={activeChat.chatId}
+          archived={!!activeChat.archivedAt}
+          onClose={() => setSyncStatusOpen(false)}
         />
       )}
 

@@ -166,7 +166,7 @@ import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceIt
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
-import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
+import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -2280,6 +2280,15 @@ function isChatPatchBody(value: unknown): value is {
   return true;
 }
 
+// chat_memory_live_window_pairs / chat_memory_sync_every_pairs are stored as text and read live
+// every sync tick by chatMemorySync.ts's resolveSyncSettings — this mirrors that parse (same
+// positive-int-or-fallback shape) so the "when is the next sync due" math the UI shows never
+// drifts from the loop's own.
+function pairsSetting(raw: string | undefined, fallback: number): number {
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 async function handleChatRoutes(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2434,6 +2443,28 @@ async function handleChatRoutes(
       return;
     }
     sendJson(res, 200, { nodes });
+    return;
+  }
+
+  // Per-chat slice of the rolling sync loop's status record (io/chatSessions.ts's
+  // getChatSyncStatus) — the RP chat header menu's "Sync status" panel. User-scoped like every
+  // other chat route (a user's own chat's sync history is no more sensitive than the chat
+  // itself), unlike the cross-user Review Panel endpoint /v1/admin/chat-memory-sync-status.
+  // dueAfterMessages is computed from the same DB-backed settings the loop reads live every tick,
+  // falling back to the loop's own defaults when unset.
+  if (segments[1] === 'sync-status' && segments.length === 2 && req.method === 'GET') {
+    const [livePairsRaw, syncEveryPairsRaw] = await Promise.all([
+      deps.settings.get('chat_memory_live_window_pairs'),
+      deps.settings.get('chat_memory_sync_every_pairs'),
+    ]);
+    const livePairs = pairsSetting(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
+    const syncEveryPairs = pairsSetting(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
+    const sync = await deps.chats.getChatSyncStatus(userId, chatId, (livePairs + syncEveryPairs) * 2);
+    if (!sync) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, { sync });
     return;
   }
 

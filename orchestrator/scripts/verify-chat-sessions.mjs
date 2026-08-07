@@ -25,6 +25,8 @@ function createFakePool() {
   const folders = new Map(); // folder_id -> row
   const locations = []; // {location_id, user_id, name, status, anchor_chat_id, anchor_swipe_id, ...}
   const characters = []; // {character_id, user_id, name, status, anchor_chat_id, anchor_swipe_id}
+  const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
+  const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
@@ -35,6 +37,8 @@ function createFakePool() {
     folders,
     locations,
     characters,
+    syncStatus,
+    canonCounts,
     async connect() {
       let scopedUserId;
       return {
@@ -43,6 +47,43 @@ function createFakePool() {
           if (sql.includes('set_config')) {
             scopedUserId = params[0];
             return { rows: [] };
+          }
+
+          // getChatSyncStatus (chatSessions.ts) — the per-chat slice of the rolling sync loop's
+          // status record. Branches sit here, before the generic chat_sessions/canon_facts/
+          // chat_sync_points stubs below, because the status query embeds a `from canon_facts
+          // where chat_id` subquery and the unsynced query embeds a `from chat_sync_points where
+          // chat_id` subquery that those empty-rows stubs would otherwise swallow.
+          if (sql.includes('from chat_memory_sync_status s')) {
+            const chatId = params[0];
+            const row = syncStatus.get(chatId);
+            if (!row || row.user_id !== scopedUserId) return { rows: [] };
+            const canon = canonCounts.get(chatId) ?? { proposed: 0, approved: 0, last_proposed_at: null };
+            return {
+              rows: [
+                {
+                  last_attempt_at: row.last_attempt_at,
+                  last_status: row.last_status,
+                  last_step: row.last_step,
+                  last_error: row.last_error,
+                  last_success_at: row.last_success_at,
+                  last_chunks_added: row.last_chunks_added,
+                  last_entries_updated: row.last_entries_updated,
+                  consecutive_errors: row.consecutive_errors,
+                  canon_proposed_count: String(canon.proposed),
+                  canon_approved_count: String(canon.approved),
+                  canon_last_proposed_at: canon.last_proposed_at,
+                },
+              ],
+            };
+          }
+          if (sql.includes('select count(*)::text as unsynced')) {
+            const chatId = params[0];
+            // No chat_sync_points rows exist in this pool (the stub below returns []), so the
+            // anchor is always null and every message counts — exactly what real Postgres returns
+            // for a never-synced chat, which is all these tests exercise.
+            const count = messages.filter((m) => m.chat_id === chatId && m.user_id === scopedUserId).length;
+            return { rows: [{ unsynced: String(count) }] };
           }
 
           // chat_sessions
@@ -695,6 +736,77 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     branchCharacters.length === 1 && branchCharacters[0].name === 'Goblin Merchant' && branchCharacters[0].status === 'transient',
     'the fork point\'s inactive character is resurrected into the branch as transient',
   );
+}
+
+// --- getChatSyncStatus: the per-chat slice of the rolling sync loop's status record ---
+// (chatSessions.ts's getChatSyncStatus, read side of the RP chat header menu's Sync Status
+// panel — same columns as server/adminServer.ts's cross-user table, narrowed to one chat and
+// scoped by the owner's RLS, no admin key involved. Uses its own dedicated chat — `created` was
+// deleted by the deleteChat tests above.)
+const syncChat = await store.createChat(USER_A, { title: 'Sync status chat' });
+await store.appendMessages(USER_A, syncChat.chatId, [
+  { role: 'user', content: 'first unsynced message' },
+  { role: 'assistant', content: 'second unsynced message' },
+]);
+pool.syncStatus.set(syncChat.chatId, {
+  user_id: USER_A,
+  last_attempt_at: '2026-08-07T12:00:00.000Z',
+  last_status: 'ok',
+  last_step: null,
+  last_error: null,
+  last_success_at: '2026-08-07T12:00:00.000Z',
+  last_chunks_added: 2,
+  last_entries_updated: 1,
+  consecutive_errors: 0,
+});
+pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_at: '2026-08-07T11:00:00.000Z' });
+{
+  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 32);
+  assert(sync !== undefined, 'getChatSyncStatus finds an existing chat');
+  assert(sync.lastStatus === 'ok', 'an ok status row reads back as ok');
+  assert(sync.lastChunksAdded === 2 && sync.lastEntriesUpdated === 1, 'last run chunk/entry counts round-trip');
+  assert(sync.consecutiveErrors === 0, 'a healthy chat carries zero consecutive errors');
+  assert(sync.canonProposedCount === 3 && sync.canonApprovedCount === 2, 'canon proposed/approved counts round-trip');
+  assert(sync.canonLastProposedAt === '2026-08-07T11:00:00.000Z', 'last canon proposal timestamp round-trips');
+  assert(sync.unsyncedMessages === 2, 'unsynced counts the chat\'s messages past its last sync point');
+  assert(sync.dueAfterMessages === 32, 'the caller-supplied due threshold is echoed through');
+}
+{
+  const sync = await store.getChatSyncStatus(USER_B, syncChat.chatId, 32);
+  assert(sync === undefined, "another user's getChatSyncStatus can't see the chat (RLS scoping)");
+}
+{
+  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 32);
+  assert(sync !== undefined, 'a chat that never synced still gets a status read');
+  assert(sync.lastStatus === null, 'a never-synced chat has a null last status, not a fabricated one');
+  assert(sync.lastAttemptAt === null && sync.lastSuccessAt === null, 'a never-synced chat has no attempt/success timestamps');
+  assert(
+    sync.consecutiveErrors === 0 && sync.canonProposedCount === 0 && sync.canonApprovedCount === 0,
+    'a never-synced chat carries zero errors and zero canon facts',
+  );
+  assert(sync.unsyncedMessages === 1, 'a never-synced chat counts all its messages as unsynced');
+}
+{
+  pool.syncStatus.set(defaultTitled.chatId, {
+    user_id: USER_A,
+    last_attempt_at: '2026-08-07T12:30:00.000Z',
+    last_status: 'error',
+    last_step: 'summarize_embed',
+    last_error: 'embeddings provider unreachable',
+    last_success_at: '2026-08-07T12:00:00.000Z',
+    last_chunks_added: null,
+    last_entries_updated: null,
+    consecutive_errors: 3,
+  });
+  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 32);
+  assert(sync.lastStatus === 'error' && sync.lastStep === 'summarize_embed', 'an error row names the exact step that failed');
+  assert(sync.lastError === 'embeddings provider unreachable', 'an error row carries the underlying error message');
+  assert(sync.consecutiveErrors === 3, 'consecutive failures round-trip');
+  assert(sync.lastSuccessAt === '2026-08-07T12:00:00.000Z', 'the last success timestamp survives an error status');
+}
+{
+  const sync = await store.getChatSyncStatus(USER_A, 'nonexistent-chat', 32);
+  assert(sync === undefined, 'getChatSyncStatus on a nonexistent chat returns undefined');
 }
 
 if (process.exitCode) {

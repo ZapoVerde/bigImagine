@@ -252,12 +252,17 @@ function createFakeChatSessionStore() {
   // below, which exists so the swipe routes' display-decoration can be exercised end to end.
   const swipesByMessage = new Map();
   const activeSwipeIdx = new Map();
+  // Sync-status reads (GET /v1/chats/:id/sync-status) — seeded by a test with the same shape
+  // io/chatSessions.ts's getChatSyncStatus returns, so the route's dispatch + settings plumbing
+  // can be exercised end to end without the real store's DB.
+  const syncStatusByChat = new Map();
   let counter = 0;
   const newId = (prefix) => `${prefix}-${++counter}`;
 
   return {
     sessions,
     swipesByMessage,
+    syncStatusByChat,
     async listChats(userId, opts = {}) {
       let rows = [...sessions.values()].filter((s) => s.userId === userId);
       if (opts.search) {
@@ -312,6 +317,26 @@ function createFakeChatSessionStore() {
       if (patch.promptStackPresetId !== undefined) row.promptStackPresetId = patch.promptStackPresetId;
       row.updatedAt = new Date().toISOString();
       return row;
+    },
+    async getChatSyncStatus(userId, chatId, dueAfterMessages) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const entry = syncStatusByChat.get(chatId);
+      return {
+        lastAttemptAt: entry?.lastAttemptAt ?? null,
+        lastStatus: entry?.lastStatus ?? null,
+        lastStep: entry?.lastStep ?? null,
+        lastError: entry?.lastError ?? null,
+        lastSuccessAt: entry?.lastSuccessAt ?? null,
+        lastChunksAdded: entry?.lastChunksAdded ?? null,
+        lastEntriesUpdated: entry?.lastEntriesUpdated ?? null,
+        consecutiveErrors: entry?.consecutiveErrors ?? 0,
+        canonProposedCount: entry?.canonProposedCount ?? 0,
+        canonApprovedCount: entry?.canonApprovedCount ?? 0,
+        canonLastProposedAt: entry?.canonLastProposedAt ?? null,
+        unsyncedMessages: (messagesByChat.get(chatId) ?? []).length,
+        dueAfterMessages,
+      };
     },
     async deleteChat(userId, chatId) {
       const row = sessions.get(chatId);
@@ -1322,6 +1347,55 @@ assert(
 
 const missingChatRes = await fetch(`${base}/v1/chats/does-not-exist`, { headers: auth });
 assert(missingChatRes.status === 404, 'GET /v1/chats/:id for an unknown id returns 404');
+
+// --- GET /v1/chats/:id/sync-status: the RP chat header menu's per-chat sync readout ---
+// (io/chatSessions.ts getChatSyncStatus behind the route; user-scoped like every other chat
+// route, unlike the admin-gated cross-user Review Panel endpoint.)
+chats.syncStatusByChat.set(createdChat.chatId, {
+  lastAttemptAt: '2026-08-07T12:00:00.000Z',
+  lastStatus: 'ok',
+  lastStep: null,
+  lastError: null,
+  lastSuccessAt: '2026-08-07T12:00:00.000Z',
+  lastChunksAdded: 2,
+  lastEntriesUpdated: 1,
+  consecutiveErrors: 0,
+  canonProposedCount: 3,
+  canonApprovedCount: 2,
+  canonLastProposedAt: '2026-08-07T11:00:00.000Z',
+});
+{
+  const res = await fetch(`${base}/v1/chats/${createdChat.chatId}/sync-status`, { headers: auth });
+  assert(res.status === 200, 'GET /v1/chats/:id/sync-status returns 200 for an existing chat');
+  const body = await res.json();
+  assert(body.sync.lastStatus === 'ok' && body.sync.lastChunksAdded === 2, 'the sync payload carries the stored status row');
+  assert(
+    body.sync.canonProposedCount === 3 && body.sync.canonApprovedCount === 2,
+    'the sync payload carries the chat\'s canon fact counts',
+  );
+  assert(body.sync.unsyncedMessages === 0, 'a chat with no messages has nothing unsynced');
+  assert(body.sync.dueAfterMessages === 32, 'dueAfterMessages defaults to (liveWindow+syncEvery pairs) × 2');
+}
+{
+  const res = await fetch(`${base}/v1/chats/does-not-exist/sync-status`, { headers: auth });
+  assert(res.status === 404, 'GET /v1/chats/:id/sync-status 404s for a nonexistent chat');
+}
+{
+  // The two pair-settings are read live by the route, same keys the sync loop itself resolves
+  // every tick — a Settings-tab change moves the "when is the next sync due" math with no restart.
+  await settings.set('chat_memory_live_window_pairs', '12');
+  await settings.set('chat_memory_sync_every_pairs', '4');
+  const res = await fetch(`${base}/v1/chats/${createdChat.chatId}/sync-status`, { headers: auth });
+  const body = await res.json();
+  assert(body.sync.dueAfterMessages === 32, 'dueAfterMessages honors DB-backed settings live (12+4 pairs × 2)');
+  // Leave the settings store as the suite found it.
+  await settings.set('chat_memory_live_window_pairs', undefined);
+  await settings.set('chat_memory_sync_every_pairs', undefined);
+}
+{
+  const res = await fetch(`${base}/v1/chats/${createdChat.chatId}/sync-status`);
+  assert(res.status === 401, 'GET /v1/chats/:id/sync-status requires auth');
+}
 
 const createFolderRes = await fetch(`${base}/v1/folders`, {
   method: 'POST',

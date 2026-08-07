@@ -99,8 +99,8 @@ import { curateLorebook } from '../io/chatMemory/curateLorebook.js';
 import { curatePeople } from '../io/chatMemory/curatePeople.js';
 
 const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation urgency — minutes-scale is fine
-const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
-const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
+export const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
+export const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
 const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_memory_entries already persists state across syncs
 
 // Tags which named stage of runOneChatSync threw, so chat_memory_sync_status (bi_principles.md

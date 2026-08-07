@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatSessions.ts
- * @stamp 2026-07-25
+ * @stamp 2026-08-07
  * @architectural-role IO Wrapper — persisted chat sessions, messages, and folders
  * @description
  * The Postgres-backed store behind the frontend Chat tab's history sidebar
@@ -74,6 +74,10 @@
  *     comes along (each copied assistant message does get its own canonical swipe row, mirroring
  *     the parent's active swipe, so the branch's transient location/character records can be
  *     resurrected against it — docs/vistalyze_integration/segway.md §2.7).
+ *   .getChatSyncStatus(userId, chatId, dueAfterMessages) — this chat's slice of the rolling
+ *     sync loop's status record (chat_memory_sync_status, bi_principles.md §11): last
+ *     attempt/status/error, last success, chunks/entries added, canon counts, and
+ *     unsynced-vs-due message counts. Undefined only if the chat doesn't exist.
  *   .archiveChat(userId, chatId) — stamps archived_at (now), or undefined if not found
  *   .listFolders / .createFolder / .updateFolder / .deleteFolder — folder CRUD; deleting a
  *     folder cascades to child folders, chats fall back to no-folder (on delete set null)
@@ -191,6 +195,31 @@ export interface ChatDetail {
   messages: StoredChatMessage[];
 }
 
+/** One chat's view of the rolling sync loop (orchestrator/chatMemorySync.ts) — the per-chat slice
+ *  of server/adminServer.ts's getChatMemorySyncStatus, read under the chat owner's own RLS scope,
+ *  so an RP chat's header menu can show it without an admin key (the cross-user Review Panel
+ *  table stays admin-gated; a single user's own chat row is no more sensitive than the chat
+ *  itself). `lastStatus` is null until the chat has had its first sync attempt (a fresh chat has
+ *  no chat_memory_sync_status row yet). `unsyncedMessages`/`dueAfterMessages` mirror
+ *  findDueChats' own arithmetic — messages past the last sync point's anchor message, vs. the
+ *  liveWindow+syncEvery message threshold — so the UI can say whether the next tick will actually
+ *  do something. */
+export interface ChatSyncStatus {
+  lastAttemptAt: string | null;
+  lastStatus: 'ok' | 'skipped' | 'error' | null;
+  lastStep: string | null;
+  lastError: string | null;
+  lastSuccessAt: string | null;
+  lastChunksAdded: number | null;
+  lastEntriesUpdated: number | null;
+  consecutiveErrors: number;
+  canonProposedCount: number;
+  canonApprovedCount: number;
+  canonLastProposedAt: string | null;
+  unsyncedMessages: number;
+  dueAfterMessages: number;
+}
+
 export interface FolderRow {
   folderId: string;
   name: string;
@@ -221,6 +250,13 @@ export interface ChatSessionStore {
     init?: { title?: string; folderId?: string; kind?: 'chat' | 'rp'; toolNames?: string[] | null },
   ): Promise<ChatSessionRow>;
   getChat(userId: string, chatId: string): Promise<ChatDetail | undefined>;
+  /** This chat's slice of the rolling sync loop's status record — same read surface as the admin
+   *  Review Panel, but user-scoped and single-chat, so the RP chat's header menu can show it
+   *  without an admin key (bi_principles.md §11's read surface, per-chat). dueAfterMessages is the
+   *  liveWindow+syncEvery message threshold the loop's own due-check uses — computed by the caller
+   *  from DB-backed settings, since this store reads no settings. Undefined only if chatId doesn't
+   *  exist. */
+  getChatSyncStatus(userId: string, chatId: string, dueAfterMessages: number): Promise<ChatSyncStatus | undefined>;
   updateChat(
     userId: string,
     chatId: string,
@@ -457,6 +493,78 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
                 : undefined,
             };
           }),
+        };
+      });
+    },
+
+    async getChatSyncStatus(userId, chatId, dueAfterMessages) {
+      return db.withUserScope(userId, async (session) => {
+        const exists = await session.query<{ chat_id: string }>('select chat_id from chat_sessions where chat_id = $1', [chatId]);
+        if (!exists[0]) return undefined;
+
+        // The chat's chat_memory_sync_status row (bi_principles.md §11) plus its canon-fact counts
+        // — same columns/aggregates as server/adminServer.ts's cross-user getChatMemorySyncStatus,
+        // narrowed to this one chat and scoped by the owner's RLS.
+        const [status] = await session.query<{
+          last_attempt_at: string | null;
+          last_status: 'ok' | 'skipped' | 'error' | null;
+          last_step: string | null;
+          last_error: string | null;
+          last_success_at: string | null;
+          last_chunks_added: number | null;
+          last_entries_updated: number | null;
+          consecutive_errors: number;
+          canon_proposed_count: string;
+          canon_approved_count: string;
+          canon_last_proposed_at: string | null;
+        }>(
+          `select s.last_attempt_at, s.last_status, s.last_step, s.last_error, s.last_success_at,
+                  s.last_chunks_added, s.last_entries_updated, s.consecutive_errors,
+                  coalesce(cf.proposed_count, 0)::text as canon_proposed_count,
+                  coalesce(cf.approved_count, 0)::text as canon_approved_count,
+                  cf.last_proposed_at as canon_last_proposed_at
+           from chat_memory_sync_status s
+           left join (
+             select chat_id,
+                    count(*) filter (where status = 'proposed') as proposed_count,
+                    count(*) filter (where status = 'approved') as approved_count,
+                    max(proposed_at) as last_proposed_at
+             from canon_facts
+             where chat_id = $1
+             group by chat_id
+           ) cf on cf.chat_id = s.chat_id
+           where s.chat_id = $1`,
+          [chatId],
+        );
+
+        // Mirrors findDueChats' candidate filter (orchestrator/chatMemorySync.ts): messages past
+        // the last sync point's anchor message — or all of them if never synced. count(*) is
+        // bigint (string via pg), cast to text like the canon counts above.
+        const [counts] = await session.query<{ unsynced: string }>(
+          `select count(*)::text as unsynced
+           from chat_messages m
+           left join chat_sync_points sp on sp.chat_id = m.chat_id
+             and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = m.chat_id)
+           left join chat_messages anchor on anchor.message_id = sp.last_message_id
+           where m.chat_id = $1
+             and (anchor.created_at is null or m.created_at > anchor.created_at)`,
+          [chatId],
+        );
+
+        return {
+          lastAttemptAt: status?.last_attempt_at ?? null,
+          lastStatus: status?.last_status ?? null,
+          lastStep: status?.last_step ?? null,
+          lastError: status?.last_error ?? null,
+          lastSuccessAt: status?.last_success_at ?? null,
+          lastChunksAdded: status?.last_chunks_added ?? null,
+          lastEntriesUpdated: status?.last_entries_updated ?? null,
+          consecutiveErrors: status?.consecutive_errors ?? 0,
+          canonProposedCount: Number(status?.canon_proposed_count ?? 0),
+          canonApprovedCount: Number(status?.canon_approved_count ?? 0),
+          canonLastProposedAt: status?.canon_last_proposed_at ?? null,
+          unsyncedMessages: Number(counts?.unsynced ?? 0),
+          dueAfterMessages,
         };
       });
     },
