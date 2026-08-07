@@ -1,0 +1,190 @@
+# Feature Specification: Turn Loop Cleanup Pass
+
+**Status**: Designed  
+**Scope**: Addition and handling of the secondary LLM Cleanup Pass prompt in the turn loop.  
+**Governing Principles**: `bi_principles.md` §2 (LLM Reasons), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts/Presets).
+
+---
+
+## 1. Overview & Goal
+
+The **Cleanup Pass** is an optional, post-processing LLM call executed immediately after the main LLM completes a turn (`runTurn`) and before the final assistant message is persisted to database storage.
+
+Its purpose is to accept the raw generated reply (`{{message}}`), alongside optional trailing turn history, and run it through a dedicated **Cleanup Preset** (`context_stack_presets`) to:
+1. Strip banned constructions, AI clichés, and formatting slop.
+2. Reconstruct or enforce required location/date/time headers.
+3. Reconstruct or format internal thought/reasoning suffixes (`<details>` blocks).
+
+**Key Design Contract**: The Cleanup Pass is **fail-open**. If the cleanup pass throws an error, times out, or returns empty output, the engine logs the error and gracefully falls back to the raw generated reply. Cleanup failure must **never** block or degrade the user's turn.
+
+The prompt itself — including the banned-construction/slop list — is not hardcoded: it ships as a built-in, named preset on the **Prompt Stacks** page, viewable and duplicate-to-edit exactly like any other prompt stack (see §2.3).
+
+---
+
+## 2. Data Model & Schema
+
+### 2.1 Database Schema (`chat_sessions`)
+Added via `db/migrations/0057_cleanup_preset.sql`:
+
+```sql
+ALTER TABLE chat_sessions 
+  ADD COLUMN cleanup_preset_id uuid REFERENCES context_stack_presets(preset_id) ON DELETE SET NULL;
+```
+
+* `cleanup_preset_id = NULL` (default): Cleanup pass is **disabled** for this chat.
+* `cleanup_preset_id = <uuid>`: Cleanup pass is **enabled** using the specified preset.
+
+### 2.2 Application Types
+
+#### `orchestrator/src/io/chatSessions.ts` & `frontend/src/api/types.ts`
+```typescript
+export interface ChatSessionRow {
+  // ... existing fields ...
+  cleanupPresetId: string | null;
+}
+
+export interface ChatParams {
+  // ... existing fields ...
+  cleanupPresetId?: string | null;
+}
+```
+
+#### `orchestrator/src/util/interpolateMacros.ts`
+```typescript
+export interface MacroSnapshot {
+  charName?: string;
+  userName?: string;
+  persona?: string;
+  description?: string;
+  scenario?: string;
+  /** The raw generated text from the main turn, available during the Cleanup Pass. */
+  message?: string; 
+}
+```
+
+### 2.3 Built-in Cleanup Preset — Where the Prompt is Viewed, Edited & the Slop List Lives
+
+Per `bi_principles.md` §18 (Every Prompt is Surfaced for Manual Tuning), the Cleanup Pass prompt — including the banned-construction/AI-clichés slop list — must ship with a sensible default but must never live only in source.
+
+It is surfaced the same way every other prompt in this system already is: as a **named, built-in preset on the Prompt Stacks page** (`frontend/src/views/PromptStacksView.tsx`), seeded by a new migration `db/migrations/0066_cleanup_preset_seed.sql` that follows the exact `is_builtin = true` pattern migration `0042` used for the "Standard" and "Minimal" presets.
+
+* A new builtin preset named **"Cleanup Pass"** (owned by the system user, `is_builtin = true`).
+* A single `custom` slot (`custom_role = 'system'`) whose `custom_content` holds the actual instruction text: the banned-word/phrase slop list, the header-reconstruction rule, and the thought-suffix formatting rule. This *is* the literal prompt sent to the cleanup LLM call (§3.1) — the slop list is not a separate table, config value, or JSON array; it's just text inside this one slot.
+
+**Viewing / editing the prompt**: Same mechanism as any other preset. Open Prompt Stacks, select "Cleanup Pass". Being builtin it's read-only there; a user who wants to tune it clicks **Duplicate to customize**, which creates a normal (non-builtin) preset copy they can freely edit — same "edit locally, commit one `update_context_stack_preset` call on Save" flow every other preset already uses.
+
+**Maintaining the slop list**: There is no separate slop-list UI or table. It's the `customContent` textarea of that one slot — add, remove, or reword banned constructions directly as plain text, the same way any other custom prompt block is edited.
+
+**Assigning to a chat**: The Chat Settings "Cleanup Preset" selector (§5 item 5) points a chat's `cleanup_preset_id` at either the builtin default or a user's customized duplicate — the same selection shape the pre-existing `prompt_stack_preset_id` selector already uses.
+
+---
+
+## 3. Prompt Construction & Input Assembly
+
+The Cleanup Pass is driven by a standard `context_stack_presets` row. Its slots are typically `custom` system/user blocks that contain instruction rules and embed the `{{message}}` macro variable.
+
+### 3.1 Macro Interpolation
+When assembling the cleanup prompt:
+1. `MacroSnapshot` is populated with `message: rawReply` (the uncleaned output from `runTurn`).
+2. `interpolateMacros(text, snapshot)` replaces `{{message}}` with the literal raw reply text.
+3. Standard character and persona macros (`{{char}}`, `{{user}}`, `{{persona}}`) are also resolved.
+
+### 3.2 Input Message Array Construction
+The messages array passed to `turnLlm.complete()` during cleanup consists of:
+1. **Trailing Context Messages (Optional)**: Up to 2 previous turn pairs (4 messages) from the active history, giving the cleanup model context on the ongoing conversation's voice and header state.
+2. **Cleanup Preset Slots**: The interpolated `LlmMessage[]` generated by `assemblePromptStack({}, cleanupSlots)`.
+
+---
+
+## 4. Execution Sequence (`runCleanupPass`)
+
+The cleanup pass logic is encapsulated in a helper function invoked inside `orchestrator/src/server/httpServer.ts`.
+
+### 4.1 Function Signature
+```typescript
+async function runCleanupPass(
+  db: PostgresClient,
+  userId: string,
+  chatId: string,
+  cleanupPresetId: string,
+  turnLlm: LlmProvider,
+  rawReply: string,
+  historyMessages: LlmMessage[]
+): Promise<string>
+```
+
+### 4.2 Detailed Execution Flow
+
+```text
+[ Main Turn Complete ] ──> `rawReply` generated by `runTurn`
+          │
+          ▼
+ Is `cleanupPresetId` set on chat?
+    ├── NO  ──> Return `rawReply`
+    └── YES ──> Continue to Cleanup Pass
+          │
+          ▼
+ 1. Load slots for `cleanupPresetId` via `loadPromptStackSlots(db, userId, cleanupPresetId)`
+    └── If slots are empty ──> Log warning, Return `rawReply`
+          │
+          ▼
+ 2. Build `MacroSnapshot` with `{ message: rawReply, charName, userName, ... }`
+          │
+          ▼
+ 3. Assemble cleanup messages:
+    ├── Trailing history (last 2 turn pairs)
+    └── Interpolated cleanup preset slots (with {{message}} replaced)
+          │
+          ▼
+ 4. Execute LLM Call:
+    `runWithCallContext({ taskId: chatId, kind: 'chat', userId }, ...)`
+    `turnLlm.complete(cleanupMessages, [])`
+          │
+          ├── SUCCESS ──> Return `turn.message.content` (Cleaned Text)
+          └── FAILURE ──> Log error, Return `rawReply` (Fail-Open)
+```
+
+### 4.3 Call Context & Gate Accounting
+* **Kind**: `kind: 'chat'` (it runs within the turn budget, not as a background agent routine).
+* **Metering**: The call is logged to `llm_calls` under the same `request_id` and `chat_id` as the turn.
+* **Concurrency**: Admitted through the interactive concurrency lane via `llmGate.ts`.
+
+---
+
+## 5. File-by-File Required Changes
+
+### 1. `db/migrations/0066_cleanup_preset_seed.sql`
+* Seed the builtin **"Cleanup Pass"** preset (§2.3): one `context_stack_presets` row (`is_builtin = true`, system user) plus one `custom` slot row carrying the slop-list/header/thought-suffix instruction text — same shape migration `0042`'s "Standard"/"Minimal" seed block used.
+
+### 2. `orchestrator/src/io/chatSessions.ts`
+* Update `SESSION_COLUMNS` to include `cleanup_preset_id`.
+* Update `SessionDbRow`, `ChatSessionRow`, and `toSessionRow()` to map `cleanup_preset_id` $\rightarrow$ `cleanupPresetId`.
+* Update `updateChat()` to accept `cleanupPresetId` in its patch object.
+
+### 3. `orchestrator/src/util/interpolateMacros.ts`
+* Add `message?: string` to `MacroSnapshot`.
+* Add `case 'message': return snapshot.message ?? '';` to `resolveToken()`.
+
+### 4. `orchestrator/src/server/httpServer.ts`
+* Add `runCleanupPass()` helper function.
+* Update `handleChatCompletions()`:
+  * Extract `session.cleanupPresetId`.
+  * Post-`runTurn`, invoke `runCleanupPass()` if `cleanupPresetId` is present.
+  * Pass the resulting cleaned string to `chats.appendMessages()` and the response payload.
+* Update `regenerateSwipe()`:
+  * Invoke `runCleanupPass()` before calling `chats.recordSwipe()`.
+
+### 5. `frontend/src/api/types.ts`
+* Add `cleanupPresetId?: string | null` to `ChatSessionRow` and `ChatParams`.
+
+### 6. `frontend/src/views/ChatView.tsx` (`ChatSettings` component)
+* Add a **Cleanup Preset** selector to the Chat Settings rail (`chat-settings-rail`), allowing users to select an existing prompt stack preset as the chat's cleanup pass.
+
+---
+
+## 6. Verification & Verification Script
+
+A new test script `orchestrator/scripts/verify-cleanup-pass.mjs` will verify:
+1. **Pass-Through**: When `cleanupPresetId` is `null`, `runCleanupPass` returns the raw reply without invoking the LLM.
+2. **Substitution**: `{{message}}` in a custom slot correctly receives `rawReply`.
+3. **Fail-Open Resilience**: When the cleanup LLM call fails (e.g., stub provider throws), `runCleanupPass` swallows the error, logs it, and returns the original `rawReply`.
