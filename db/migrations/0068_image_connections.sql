@@ -47,7 +47,12 @@ create table image_connections (
   model                       text not null,
   api_key_ciphertext          text,
   base_url                    text,
-  aspect_ratio                text not null default '16:9',
+  -- Explicit output resolution in pixels, per connection — every adapter sends width/height
+  -- (neither this subsystem nor the upstream VLZ stack ever sends an aspect-ratio string to a
+  -- provider; VLZ's own background renders default to 16:9 landscape, and the pre-2026-08-13
+  -- aspect_ratio string was just an indirection to these same pixels).
+  width                       integer not null default 1344,
+  height                      integer not null default 768,
   sampling_steps              integer not null default 30,
   cfg_scale                   numeric not null default 7.0,
   sampler_name                text,

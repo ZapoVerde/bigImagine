@@ -126,9 +126,9 @@ connection's own adapter — no dry runs, no "config looks OK" checks.** This is
 made load-bearing:
 
 * `runware`, `fal-ai`, `comfyui`, `openai-images`: a genuine provider call
-  (`createImageGenProvider(profile).generate(...)`) with the connection's model, aspect ratio,
-  steps, CFG, sampler, key, and base URL. A bad key or unreachable endpoint surfaces as
-  `{ ok: false, error }` with measured latency — never a throw, never a silent success.
+  (`createImageGenProvider(profile).generate(...)`) with the connection's model, explicit
+  width/height pixels, steps, CFG, sampler, key, and base URL. A bad key or unreachable endpoint
+  surfaces as `{ ok: false, error }` with measured latency — never a throw, never a silent success.
 * `pollinations`: the adapter's `generate()` is URL construction (the URL *is* the render
   request, `io/imageGen/pollinations.ts`). It is NOT keyless — the connection's token rides as
   the `token` query param (Pollinations requires a key since 2025), and the adapter throws a

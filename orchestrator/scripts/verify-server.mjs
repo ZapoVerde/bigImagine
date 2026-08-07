@@ -155,7 +155,8 @@ function createFakeImageConnectionStore(seedRows = []) {
       model: row.model,
       apiKey: row.apiKey ?? null,
       baseUrl: row.baseUrl ?? null,
-      aspectRatio: row.aspectRatio ?? '16:9',
+      width: row.width ?? 1344,
+      height: row.height ?? 768,
       samplingSteps: row.samplingSteps ?? 30,
       cfgScale: row.cfgScale ?? 7,
       samplerName: row.samplerName ?? null,
@@ -178,7 +179,8 @@ function createFakeImageConnectionStore(seedRows = []) {
         model: init.model,
         apiKey: init.apiKey ?? null,
         baseUrl: init.baseUrl ?? null,
-        aspectRatio: init.aspectRatio ?? '16:9',
+        width: init.width ?? 1344,
+        height: init.height ?? 768,
         samplingSteps: init.samplingSteps ?? 30,
         cfgScale: init.cfgScale ?? 7,
         samplerName: init.samplerName ?? null,
@@ -570,7 +572,8 @@ const server = startHttpServer({
       model: 'flux',
       apiKey: 'fake-poll-token',
       baseUrl: null,
-      aspectRatio: '16:9',
+      width: 1344,
+      height: 768,
       samplingSteps: 30,
       cfgScale: 7,
       samplerName: null,
@@ -1096,6 +1099,10 @@ assert(
   imgCreateKeylessRes.status === 201 && imgCreateKeylessBody.name === 'local-comfyui' && imgCreateKeylessBody.hasApiKey === false,
   'POST /v1/admin/image-connections accepts a keyless connection (a local comfyui endpoint)',
 );
+assert(
+  imgCreateKeylessBody.width === 1344 && imgCreateKeylessBody.height === 768,
+  'POST /v1/admin/image-connections without width/height defaults to the 1344×768 connection default',
+);
 
 const imgCreateWithKeyRes = await fetch(`${base}/v1/admin/image-connections`, {
   method: 'POST',
@@ -1112,11 +1119,11 @@ assert(imgCreateWithKeyBody.apiKey === undefined, 'the created image connection 
 const imgPatchRes = await fetch(`${base}/v1/admin/image-connections/${imgCreateWithKeyBody.id}`, {
   method: 'PATCH',
   headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
-  body: JSON.stringify({ aspectRatio: '1:1', masterNegativePrompt: 'blurry' }),
+  body: JSON.stringify({ width: 1024, height: 1024, masterNegativePrompt: 'blurry' }),
 });
 const imgPatchBody = await imgPatchRes.json();
 assert(
-  imgPatchRes.status === 200 && imgPatchBody.aspectRatio === '1:1' && imgPatchBody.masterNegativePrompt === 'blurry',
+  imgPatchRes.status === 200 && imgPatchBody.width === 1024 && imgPatchBody.height === 1024 && imgPatchBody.masterNegativePrompt === 'blurry',
   'PATCH /v1/admin/image-connections/:id updates only the given fields',
 );
 

@@ -1584,7 +1584,7 @@ async function handleAdminImageConnectionRoutes(req: IncomingMessage, res: Serve
         sendJson(res, 400, {
           error:
             'expected { name: non-empty string, kind: "runware" | "fal-ai" | "pollinations" | "comfyui" | "openai-images", ' +
-            'model: non-empty string, apiKey?, baseUrl?, aspectRatio?, samplingSteps?, cfgScale?, samplerName?, ' +
+            'model: non-empty string, apiKey?, baseUrl?, width? (64-8192), height? (64-8192), samplingSteps?, cfgScale?, samplerName?, ' +
             'masterPositiveStylePrefix?, masterNegativePrompt?, workflowParameters? }',
         });
         return;

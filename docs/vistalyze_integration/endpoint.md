@@ -31,7 +31,9 @@ Created via Migration 0068 (0066 and 0067 are already taken by `0066_cleanup_pre
 * **Model**: Model identifier string passed to the vendor API (for example, runware:100@1 or fal-ai/flux/dev).
 * **API Key Ciphertext**: Write-only API key, encrypted at rest using the server field cipher. Nullable only for a local ComfyUI endpoint — every cloud provider (Runware, fal.ai, Pollinations, OpenAI) requires one; Pollinations stopped being keyless in 2025 (anonymous requests are watermarked and rate-limited).
 * **Base URL**: Endpoint URL (required for local endpoints like ComfyUI or custom proxies; optional for cloud APIs with fixed default endpoints).
-* **Aspect Ratio / Dimensions**: Default output resolution or aspect ratio string (for example, "16:9" or "1024x576").
+* **Width / Height**: The connection's explicit output resolution in pixels (integer defaults
+  1344×768 — a 16:9 landscape, matching VLZ's own background renders). Every provider adapter
+  sends these pixels; no aspect-ratio string is ever sent to a vendor API.
 * **Sampling Steps**: Integer specifying default inference steps.
 * **CFG Scale**: Numeric value specifying default guidance scale.
 * **Sampler Name**: Text string specifying sampler algorithm.

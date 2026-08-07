@@ -49,7 +49,6 @@
 import { log } from '../io/logger.js';
 import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
-import { parseAspectRatio } from '../io/imageGen/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { synthesizeImagePrompt } from '../util/synthesizeImagePrompt.js';
@@ -163,16 +162,16 @@ export async function generateLocationImage(
     });
 
     // §5.1.5-6 execute the provider adapter; the URL comes back, image bytes never touch this
-    // process (endpoint.md §1.1 stateless media).
-    const { width, height } = parseAspectRatio(profile.aspectRatio);
+    // process (endpoint.md §1.1 stateless media). Dimensions are the connection's own explicit
+    // output pixels (image_connections.width/height).
     const imageUrl = await createImageGenProvider(profile).generate({
       prompt: positive,
       negativePrompt: negative,
       model: profile.model,
       apiKey: profile.apiKey,
       baseUrl: profile.baseUrl,
-      width,
-      height,
+      width: profile.width,
+      height: profile.height,
       seed: row.seed,
       steps: profile.samplingSteps,
       cfgScale: profile.cfgScale,

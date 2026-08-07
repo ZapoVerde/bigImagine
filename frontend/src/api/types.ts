@@ -178,7 +178,7 @@ export interface ConnectionTestResult {
 
 // orchestrator/src/io/imageConnections.ts ImageConnectionRow — the Connections tab's image section
 // list/detail shape. No apiKey field (write-only, same as LlmConnectionSummary); hasApiKey instead,
-// since keyless providers (pollinations, local comfyui) legitimately have none.
+// since a local comfyui endpoint legitimately has none (every cloud provider requires one).
 export interface ImageConnectionSummary {
   id: string;
   name: string;
@@ -186,7 +186,8 @@ export interface ImageConnectionSummary {
   model: string;
   hasApiKey: boolean;
   baseUrl: string | null;
-  aspectRatio: string;
+  width: number;
+  height: number;
   samplingSteps: number;
   cfgScale: number;
   samplerName: string | null;
@@ -205,7 +206,8 @@ export interface CreateImageConnectionInput {
   model: string;
   apiKey?: string;
   baseUrl?: string;
-  aspectRatio?: string;
+  width?: number;
+  height?: number;
   samplingSteps?: number;
   cfgScale?: number;
   samplerName?: string;
@@ -224,7 +226,8 @@ export interface UpdateImageConnectionInput {
   /** Omit to leave the stored key untouched — only send when actually rotating it. */
   apiKey?: string;
   baseUrl?: string | null;
-  aspectRatio?: string;
+  width?: number;
+  height?: number;
   samplingSteps?: number;
   cfgScale?: number;
   samplerName?: string | null;

@@ -60,7 +60,8 @@ export interface ImageConnectionRow {
   model: string;
   hasApiKey: boolean;
   baseUrl: string | null;
-  aspectRatio: string;
+  width: number;
+  height: number;
   samplingSteps: number;
   cfgScale: number;
   samplerName: string | null;
@@ -77,7 +78,8 @@ export interface ImageConnectionProfile {
   model: string;
   apiKey: string | null;
   baseUrl: string | null;
-  aspectRatio: string;
+  width: number;
+  height: number;
   samplingSteps: number;
   cfgScale: number;
   samplerName: string | null;
@@ -98,7 +100,8 @@ export interface ImageConnectionInit {
    *  included, requires a key). */
   apiKey?: string;
   baseUrl?: string;
-  aspectRatio?: string;
+  width?: number;
+  height?: number;
   samplingSteps?: number;
   cfgScale?: number;
   samplerName?: string;
@@ -114,7 +117,8 @@ export interface ImageConnectionPatch {
   /** Undefined leaves the stored key untouched — only present when the admin is rotating it. */
   apiKey?: string;
   baseUrl?: string | null;
-  aspectRatio?: string;
+  width?: number;
+  height?: number;
   samplingSteps?: number;
   cfgScale?: number;
   samplerName?: string | null;
@@ -140,7 +144,8 @@ interface ImageConnectionDbRow {
   model: string;
   api_key_ciphertext: string | null;
   base_url: string | null;
-  aspect_ratio: string;
+  width: number;
+  height: number;
   sampling_steps: number;
   cfg_scale: number;
   sampler_name: string | null;
@@ -151,7 +156,7 @@ interface ImageConnectionDbRow {
   updated_at: string;
 }
 
-const ROW_COLUMNS = `id, name, kind, model, api_key_ciphertext, base_url, aspect_ratio, sampling_steps,
+const ROW_COLUMNS = `id, name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps,
   cfg_scale, sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters,
   is_active, updated_at`;
 
@@ -163,7 +168,8 @@ function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
     model: row.model,
     hasApiKey: row.api_key_ciphertext !== null,
     baseUrl: row.base_url,
-    aspectRatio: row.aspect_ratio,
+    width: row.width,
+    height: row.height,
     samplingSteps: row.sampling_steps,
     cfgScale: row.cfg_scale,
     samplerName: row.sampler_name,
@@ -181,7 +187,8 @@ function toProfile(row: ImageConnectionDbRow, cipher: FieldCipher): ImageConnect
     model: row.model,
     apiKey: row.api_key_ciphertext !== null ? cipher.decrypt(row.api_key_ciphertext) : null,
     baseUrl: row.base_url,
-    aspectRatio: row.aspect_ratio,
+    width: row.width,
+    height: row.height,
     samplingSteps: row.sampling_steps,
     cfgScale: row.cfg_scale,
     samplerName: row.sampler_name,
@@ -204,9 +211,9 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
       const rows = await db.withSystemScope((session) =>
         session.query<ImageConnectionDbRow>(
           `insert into image_connections
-             (name, kind, model, api_key_ciphertext, base_url, aspect_ratio, sampling_steps, cfg_scale,
+             (name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps, cfg_scale,
               sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            returning ${ROW_COLUMNS}`,
           [
             init.name,
@@ -214,7 +221,8 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
             init.model,
             init.apiKey ? cipher.encrypt(init.apiKey) : null,
             init.baseUrl ?? null,
-            init.aspectRatio ?? '16:9',
+            init.width ?? 1344,
+            init.height ?? 768,
             init.samplingSteps ?? 30,
             init.cfgScale ?? 7.0,
             init.samplerName ?? null,
@@ -239,7 +247,8 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
       if (patch.model !== undefined) set('model', patch.model);
       if (patch.apiKey !== undefined) set('api_key_ciphertext', patch.apiKey ? cipher.encrypt(patch.apiKey) : null);
       if (patch.baseUrl !== undefined) set('base_url', patch.baseUrl);
-      if (patch.aspectRatio !== undefined) set('aspect_ratio', patch.aspectRatio);
+      if (patch.width !== undefined) set('width', patch.width);
+      if (patch.height !== undefined) set('height', patch.height);
       if (patch.samplingSteps !== undefined) set('sampling_steps', patch.samplingSteps);
       if (patch.cfgScale !== undefined) set('cfg_scale', patch.cfgScale);
       if (patch.samplerName !== undefined) set('sampler_name', patch.samplerName);

@@ -19,7 +19,6 @@ import { createFieldCipher } from '../dist/io/fieldCipher.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createImageConnectionStore } from '../dist/io/imageConnections.js';
 import { generateLocationImage } from '../dist/orchestrator/generateLocationImage.js';
-import { parseAspectRatio } from '../dist/io/imageGen/types.js';
 import { generateRunwareImage } from '../dist/io/imageGen/runware.js';
 import { testImageConnection } from '../dist/server/adminServer.js';
 import { createOrchestratorSettingsStore } from '../dist/io/orchestratorSettings.js';
@@ -82,7 +81,7 @@ function createFakePool() {
             return { rows: row ? [{ api_key_ciphertext: row.api_key_ciphertext }] : [] };
           }
           if (sql.startsWith('insert into image_connections')) {
-            const [name, kind, model, apiKeyCiphertext, baseUrl, aspectRatio, samplingSteps, cfgScale, samplerName, prefix, negative, workflow] = params;
+            const [name, kind, model, apiKeyCiphertext, baseUrl, width, height, samplingSteps, cfgScale, samplerName, prefix, negative, workflow] = params;
             const row = {
               id: `img-conn-${++connCounter}`,
               name,
@@ -90,7 +89,8 @@ function createFakePool() {
               model,
               api_key_ciphertext: apiKeyCiphertext,
               base_url: baseUrl,
-              aspect_ratio: aspectRatio,
+              width,
+              height,
               sampling_steps: samplingSteps,
               cfg_scale: cfgScale,
               sampler_name: samplerName,
@@ -202,6 +202,8 @@ const settings = createOrchestratorSettingsStore(db);
 const USER = 'user-1';
 
 // --- store CRUD: create with a key (encrypted write-only), create keyless, list redacted ---
+// width/height are the connection's explicit output pixels; unset on create → the 1344×768
+// default (a 16:9 landscape, matching VLZ's own background renders).
 const withKey = await imageConnections.create({
   name: 'runware-prod',
   kind: 'runware',
@@ -213,6 +215,7 @@ assert(
   pool.imageConnections.find((c) => c.id === withKey.id)?.api_key_ciphertext !== 'sk-runware-secret',
   'the stored api_key_ciphertext is encrypted, not the plaintext key',
 );
+assert(withKey.width === 1344 && withKey.height === 768, 'create without width/height falls back to the 1344×768 default');
 
 const keyless = await imageConnections.create({ name: 'local-comfyui', kind: 'comfyui', model: 'anything', baseUrl: 'http://127.0.0.1:8188' });
 assert(keyless.hasApiKey === false, 'a keyless connection (a local comfyui endpoint) is created without a key');
@@ -231,18 +234,14 @@ assert(active?.kind === 'runware' && active.apiKey === 'sk-runware-secret', 'res
 const profileById = await imageConnections.resolveById(keyless.id);
 assert(profileById?.apiKey === null, 'resolveById of a keyless connection yields apiKey null');
 
-// --- update: rotate key + change a field ---
-const patched = await imageConnections.update(keyless.id, { aspectRatio: '1:1', masterNegativePrompt: 'blurry' });
-assert(patched?.aspectRatio === '1:1' && patched.masterNegativePrompt === 'blurry', 'update applies the given field changes');
+// --- update: rotate key + change dimensions ---
+const patched = await imageConnections.update(keyless.id, { width: 1024, height: 1024, masterNegativePrompt: 'blurry' });
+assert(patched?.width === 1024 && patched.height === 1024 && patched.masterNegativePrompt === 'blurry', 'update applies the given field changes');
 
 // --- remove: refuses the active row, deletes a non-active one ---
 assert((await imageConnections.remove(withKey.id)) === 'is_active', 'remove refuses the active connection');
 assert((await imageConnections.remove(keyless.id)) === 'ok', 'remove deletes a non-active connection');
 assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an unknown id reports not_found');
-
-// --- parseAspectRatio (pure) ---
-assert(parseAspectRatio('16:9').width === 1344 && parseAspectRatio('16:9').height === 768, '16:9 parses to native Flux/SDXL pixels');
-assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').height === 1024, 'an unknown ratio falls back to square');
 
 // --- io/imageGen/runware.ts: the wire shape must match the live REST contract ---
 // Pins the proven request contract (Authorization: Bearer header, ARRAY body, taskType

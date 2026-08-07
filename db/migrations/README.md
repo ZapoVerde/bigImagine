@@ -334,8 +334,9 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Vistalyze image-generation subsystem). A new `image_connections` table mirrors
   `llm_connections` (0062): household-wide, no RLS, admin-managed rows for image backends
   (runware/fal-ai/pollinations/comfyui/openai-images) with `api_key_ciphertext` (nullable —
-  keyless providers like Pollinations have none, unlike LLM keys), per-connection generation
-  defaults (aspect_ratio/sampling_steps/cfg_scale/sampler_name), master positive/negative prompt
+  only a local ComfyUI endpoint has none, every cloud provider requires a key), per-connection
+  generation defaults (width/height in pixels/sampling_steps/cfg_scale/sampler_name), master
+  positive/negative prompt
   fragments, and a ComfyUI `workflow_parameters` jsonb graph. `is_active` + the partial unique
   index is the single active pointer, read live by `resolveActive()` on every generation call —
   no boot-time singleton, no restart on switch (the spec's §2.2 "Active Image Connection Pointer"

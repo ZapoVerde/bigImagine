@@ -23,7 +23,8 @@ interface Draft {
   model: string;
   apiKey: string;
   baseUrl: string;
-  aspectRatio: string;
+  width: string;
+  height: string;
   samplingSteps: string;
   cfgScale: string;
   samplerName: string;
@@ -39,7 +40,8 @@ function emptyDraft(): Draft {
     model: 'fal-ai/z-image/turbo',
     apiKey: '',
     baseUrl: '',
-    aspectRatio: '16:9',
+    width: '1344',
+    height: '768',
     samplingSteps: '30',
     cfgScale: '7',
     samplerName: '',
@@ -56,7 +58,8 @@ function draftFromConnection(c: ImageConnectionSummary): Draft {
     model: c.model,
     apiKey: '',
     baseUrl: c.baseUrl ?? '',
-    aspectRatio: c.aspectRatio,
+    width: String(c.width),
+    height: String(c.height),
     samplingSteps: String(c.samplingSteps),
     cfgScale: String(c.cfgScale),
     samplerName: c.samplerName ?? '',
@@ -73,7 +76,8 @@ function draftEqualsConnection(draft: Draft, c: ImageConnectionSummary): boolean
     draft.model === c.model &&
     draft.apiKey === '' &&
     draft.baseUrl === (c.baseUrl ?? '') &&
-    draft.aspectRatio === c.aspectRatio &&
+    draft.width === String(c.width) &&
+    draft.height === String(c.height) &&
     draft.samplingSteps === String(c.samplingSteps) &&
     draft.cfgScale === String(c.cfgScale) &&
     draft.samplerName === (c.samplerName ?? '') &&
@@ -183,7 +187,8 @@ export default function ImageConnectionsSection({ adminKey }: { adminKey: string
             model: draft.model.trim(),
             apiKey: draft.apiKey.trim() || undefined,
             baseUrl: draft.baseUrl.trim() || undefined,
-            aspectRatio: draft.aspectRatio.trim() || undefined,
+            width: Number(draft.width) || undefined,
+            height: Number(draft.height) || undefined,
             samplingSteps: Number(draft.samplingSteps) || undefined,
             cfgScale: Number(draft.cfgScale) || undefined,
             samplerName: draft.samplerName.trim() || undefined,
@@ -203,7 +208,8 @@ export default function ImageConnectionsSection({ adminKey }: { adminKey: string
             model: draft.model.trim(),
             ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
             baseUrl: draft.baseUrl.trim() || null,
-            aspectRatio: draft.aspectRatio.trim() || '16:9',
+            width: Number(draft.width) || 1344,
+            height: Number(draft.height) || 768,
             samplingSteps: Number(draft.samplingSteps) || 30,
             cfgScale: Number(draft.cfgScale) || 7,
             samplerName: draft.samplerName.trim() || null,
@@ -386,11 +392,24 @@ export default function ImageConnectionsSection({ adminKey }: { adminKey: string
               )}
 
               <label>
-                Aspect ratio
+                Width
                 <input
-                  value={draft.aspectRatio}
-                  onChange={(e) => setDraft((d) => ({ ...d, aspectRatio: e.target.value }))}
-                  placeholder="e.g. 16:9, 1:1, 9:16"
+                  type="number"
+                  min="64"
+                  max="8192"
+                  value={draft.width}
+                  onChange={(e) => setDraft((d) => ({ ...d, width: e.target.value }))}
+                />
+              </label>
+
+              <label>
+                Height
+                <input
+                  type="number"
+                  min="64"
+                  max="8192"
+                  value={draft.height}
+                  onChange={(e) => setDraft((d) => ({ ...d, height: e.target.value }))}
                 />
               </label>
 

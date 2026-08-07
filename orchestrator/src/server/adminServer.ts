@@ -122,7 +122,6 @@ import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
 import type { ImageConnectionInit, ImageConnectionKind, ImageConnectionPatch, ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
-import { parseAspectRatio } from '../io/imageGen/types.js';
 import { synthesizeImagePrompt } from '../util/synthesizeImagePrompt.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
@@ -354,7 +353,8 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     model,
     apiKey,
     baseUrl,
-    aspectRatio,
+    width,
+    height,
     samplingSteps,
     cfgScale,
     samplerName,
@@ -367,7 +367,12 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
   if (typeof model !== 'string' || !model) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
-  if (aspectRatio !== undefined && typeof aspectRatio !== 'string') return undefined;
+  if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 64 || width > 8192)) {
+    return undefined;
+  }
+  if (height !== undefined && (typeof height !== 'number' || !Number.isInteger(height) || height < 64 || height > 8192)) {
+    return undefined;
+  }
   if (samplingSteps !== undefined && (typeof samplingSteps !== 'number' || !Number.isInteger(samplingSteps) || samplingSteps <= 0)) {
     return undefined;
   }
@@ -382,7 +387,8 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     model,
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
     baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
-    aspectRatio: typeof aspectRatio === 'string' ? aspectRatio : undefined,
+    width: typeof width === 'number' ? width : undefined,
+    height: typeof height === 'number' ? height : undefined,
     samplingSteps: typeof samplingSteps === 'number' ? samplingSteps : undefined,
     cfgScale: typeof cfgScale === 'number' ? cfgScale : undefined,
     samplerName: typeof samplerName === 'string' ? samplerName : undefined,
@@ -403,7 +409,8 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
     model,
     apiKey,
     baseUrl,
-    aspectRatio,
+    width,
+    height,
     samplingSteps,
     cfgScale,
     samplerName,
@@ -418,7 +425,12 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   // "clear the key" — keyless connections are created without one, not rotated to nothing).
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
   if (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== 'string') return undefined;
-  if (aspectRatio !== undefined && typeof aspectRatio !== 'string') return undefined;
+  if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 64 || width > 8192)) {
+    return undefined;
+  }
+  if (height !== undefined && (typeof height !== 'number' || !Number.isInteger(height) || height < 64 || height > 8192)) {
+    return undefined;
+  }
   if (samplingSteps !== undefined && (typeof samplingSteps !== 'number' || !Number.isInteger(samplingSteps) || samplingSteps <= 0)) {
     return undefined;
   }
@@ -438,7 +450,8 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   if (model !== undefined) patch.model = model as string;
   if (apiKey !== undefined) patch.apiKey = apiKey as string;
   if (baseUrl !== undefined) patch.baseUrl = baseUrl as string | null;
-  if (aspectRatio !== undefined) patch.aspectRatio = aspectRatio as string;
+  if (width !== undefined) patch.width = width as number;
+  if (height !== undefined) patch.height = height as number;
   if (samplingSteps !== undefined) patch.samplingSteps = samplingSteps as number;
   if (cfgScale !== undefined) patch.cfgScale = cfgScale as number;
   if (samplerName !== undefined) patch.samplerName = samplerName as string | null;
@@ -537,7 +550,6 @@ export async function testImageConnection(
     stylePrefix: profile.masterPositiveStylePrefix ?? '',
     negativePrompt: profile.masterNegativePrompt ?? '',
   });
-  const { width, height } = parseAspectRatio(profile.aspectRatio);
   const start = Date.now();
   try {
     const imageUrl = await createImageGenProvider(profile).generate({
@@ -546,8 +558,8 @@ export async function testImageConnection(
       model: profile.model,
       apiKey: profile.apiKey,
       baseUrl: profile.baseUrl,
-      width,
-      height,
+      width: profile.width,
+      height: profile.height,
       seed: null,
       steps: profile.samplingSteps,
       cfgScale: profile.cfgScale,
