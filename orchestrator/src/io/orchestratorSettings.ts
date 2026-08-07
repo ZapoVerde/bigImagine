@@ -116,6 +116,14 @@
  * built-in default" (llmGate.ts's own DEFAULT_* constants), not "unlimited"/"no retry" — same
  * fallback shape as the agent_routine caps above.
  *
+ * chat_background_parallax (docs/vistalyze_integration/parallax_fade_teststep.md §2.2, migration
+ * 0069) is the toggle for the ChatView location-background's parallax pan (frontend module
+ * components/chat/backgroundParallax.ts): stored as text 'true'/'false', default false when
+ * unset — matching SillyTavern-Vistalyze's own parallaxEnabled=false default. Read live by the
+ * frontend at chat load via GET /v1/chat-background-settings, same no-restart shape as
+ * household_timezone (the value is fetched fresh, never baked in at boot), written by the
+ * admin-gated SettingsView "Chat Background" toggle.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -164,6 +172,8 @@ export const SETTING_NAMES = [
   'llm_gate_max_retries',
   'llm_gate_retry_base_ms',
   'llm_gate_retry_max_ms',
+  'image_prompt_template',
+  'chat_background_parallax',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

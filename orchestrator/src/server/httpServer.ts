@@ -155,12 +155,15 @@ import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { runWithCallContext } from '../io/llm/callContext.js';
 import type { LlmConnectionStore } from '../io/llmConnections.js';
+import type { ImageConnectionStore } from '../io/imageConnections.js';
+import { generateLocationImage } from '../orchestrator/generateLocationImage.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { archiveChatMemory } from '../orchestrator/chatMemorySync.js';
+import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
@@ -182,7 +185,9 @@ import {
   getCanonSettings,
   getChatMemorySettings,
   getChatMemorySyncStatus,
+  getChatBackgroundSettings,
   getHouseholdTimezone,
+  getImageSettings,
   getNotificationSettings,
   getPersonaSettings,
   getPiaProxyUrl,
@@ -191,24 +196,31 @@ import {
   listModelsForConnection,
   listProvidersForConnection,
   parseCreateConnectionBody,
+  parseCreateImageConnectionBody,
   parseSetCanonSettingsBody,
   parseSetChatMemorySettingsBody,
+  parseSetChatBackgroundSettingsBody,
   parseSetCredentialBody,
+  parseSetImageSettingsBody,
   parseSetNotificationSettingsBody,
   parseSetPersonaSettingsBody,
   parseSetPiaProxyUrlBody,
   parseSetScreenLockSettingsBody,
   parseSetTimezoneBody,
   parseUpdateConnectionBody,
+  parseUpdateImageConnectionBody,
   setCanonSettings,
   setChatMemorySettings,
+  setChatBackgroundSettings,
   setCredential,
   setHouseholdTimezone,
+  setImageSettings,
   setNotificationSettings,
   setPersonaSettings,
   setPiaProxyUrl,
   setScreenLockSettings,
   testConnection,
+  testImageConnection,
 } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
 import {
@@ -236,6 +248,10 @@ export interface HttpServerDeps {
    *  io/llmConnections.ts) — backs the Connections tab's CRUD (GET/POST/PATCH/DELETE
    *  /v1/admin/connections) and its per-connection model/provider catalog preview routes. */
   llmConnections: LlmConnectionStore;
+  /** The admin-managed image-generation connection registry (db/migrations/0068_image_connections.sql,
+   *  io/imageConnections.ts) — backs the Connections tab's image section CRUD and the
+   *  generateLocationImage pass's active-connection resolution (endpoint.md §3/§5). */
+  imageConnections: ImageConnectionStore;
   modelName: string;
   port: number;
   /** Defaults to a real process.exit(0) — restart: unless-stopped relaunches the container, which
@@ -541,10 +557,12 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 //
 // canon_facts is deliberately left unset here even when a preset enables that slot:
 // recall_canon_facts (plugins/canonize/src/recallCanonFactsTool.ts) scopes by scene_id via
-// scene_presence/scenes.active_location_id, and chat_sessions has no scene_id column linking a
-// chat to a scene — there is no trusted scope to auto-fetch against yet. The tool itself stays
-// live for the model to call mid-turn when it does have a scene_id; this is a real gap (a chat<->
-// scene link doesn't exist), not an oversight, flagged rather than guessed at.
+// scene_presence/scenes.active_location_id. chat_sessions.scene_id now exists (migration 0067)
+// and is kept stamped by the post-cleanup scraper (orchestrator/locationAndPresenceScraper.ts),
+// so the cheap "this chat's current scene" read segway.md §2.2 promised is available here — but
+// wiring scene context into the narrator stack is deferred to the location-tracker plan
+// (docs/vistalyze_integration/location.md); until then the tool itself stays live for the model
+// to call mid-turn when it does have a scene_id.
 // docs/bi_principles.md §18 ("every prompt is surfaced for manual tuning"): one labeled item per
 // enabled, non-empty slot, in preset order — the same population assemblePromptStack itself would
 // emit, just not yet collapsed into one joined string. Both assembleNarratorSystemText (the real
@@ -699,6 +717,74 @@ async function trimToLiveWindow(messages: LlmMessage[], settings: OrchestratorSe
   const pairs = raw ? Number(raw) : NaN;
   const liveMessages = (Number.isInteger(pairs) && pairs > 0 ? pairs : 8) * 2;
   return messages.length > liveMessages ? messages.slice(-liveMessages) : messages;
+}
+
+// endpoint.md §5's decoupled image-generation trigger: fires generateLocationImage without
+// awaiting it, invoked from the response 'finish' event so the reply the user is waiting on is
+// already sent before a provider round-trip starts. Fail-open inside generateLocationImage, so a
+// failed render can never surface as an unhandled rejection here.
+function fireLocationImageGeneration(deps: HttpServerDeps, userId: string, chatId: string | undefined, locationId: string): void {
+  void generateLocationImage(
+    { db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections },
+    userId,
+    locationId,
+    chatId,
+  );
+}
+
+// endpoint.md §6.4's chat-background read: chat_sessions.scene_id (the segway.md §2.2 cache
+// pointer) -> scenes.active_location_id -> locations.image_url, scoped to the requesting user and
+// §2.6-eligible (a demoted alternate-timeline location reads back as absent — the same filter the
+// model-facing getters apply). Returns null when the chat has no scene, its scene has no location,
+// the location is ineligible, or it has no rendered image yet — the client then shows no
+// background rather than a stale one.
+async function resolveChatLocationImage(
+  db: PostgresClient,
+  userId: string,
+  chatId: string,
+): Promise<{ locationId: string; name: string; imageUrl: string } | null> {
+  return db.withUserScope(userId, async (session) => {
+    const rows = await session.query<{ location_id: string; name: string; image_url: string | null }>(
+      `select l.location_id, l.name, l.image_url
+       from chat_sessions cs
+       join scenes s on s.scene_id = cs.scene_id
+       join locations l on l.location_id = s.active_location_id and l.user_id = $1
+       where cs.chat_id = $2
+         and l.image_url is not null
+         and (
+           l.status = 'permanent' or l.status is null or
+           (l.status = 'transient' and l.anchor_swipe_id in (
+             select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
+           ))
+         )
+       order by cs.updated_at desc
+       limit 1`,
+      [userId, chatId],
+    );
+    const row = rows[0];
+    return row && row.image_url ? { locationId: row.location_id, name: row.name, imageUrl: row.image_url } : null;
+  });
+}
+
+// endpoint.md §5.2's broken-link expiry recovery: the browser's Chat View hit an HTTP error (404/
+// expired CDN link) loading a location's background image and notifies the server, which clears
+// image_url so the next visit's cache check sees a miss and re-renders a fresh URL. Only the URL
+// is cleared — the location row, its description, and its environment are untouched, and
+// image_generated_at is left alone (the cleared URL alone is what flips §5.1.2's cache check to
+// a miss; the timestamp is stale-but-harmless and the re-render overwrites it).
+async function handleLocationImageBroken(_req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string, url: URL): Promise<void> {
+  const rest = url.pathname.slice('/v1/locations/'.length); // '<id>/image-broken'
+  const segments = rest.split('/').filter(Boolean);
+  if (segments.length !== 2 || segments[1] !== 'image-broken') {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  const locationId = decodeURIComponent(segments[0]!);
+  await deps.db.withUserScope(userId, (session) =>
+    session.query('update locations set image_url = null where location_id = $1 and user_id = $2', [locationId, userId]),
+  );
+  log.info('location image cleared after a client-side load failure (endpoint.md §5.2)', { locationId });
+  sendJson(res, 200, { cleared: true });
 }
 
 // Shared by handleChatCompletions and regenerateSwipe below — a persisted chat's system prompt
@@ -864,7 +950,7 @@ async function regenerateSwipe(
   chatId: string,
   detail: ChatDetail,
   messageId: string,
-): Promise<{ ok: true; message: StoredChatMessage } | { ok: false; error: string }> {
+): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; error: string }> {
   const { db, chats } = deps;
   const { session } = detail;
   const priorMessages = detail.messages.slice(0, -1);
@@ -915,10 +1001,22 @@ async function regenerateSwipe(
   if (!updated) {
     return { ok: false, error: 'message no longer exists' };
   }
+  // Stage 2 (docs/vistalyze_integration/segway.md §4): post-cleanup heuristic extraction against
+  // the regenerated text — recordSwipe above just made its swipe active, which is the anchor the
+  // scraper's transient rows attach to. Fail-open inside the scraper: never blocks the turn. The
+  // returned locationId feeds endpoint.md §5's decoupled image-generation trigger (fired by the
+  // caller after the response is sent — never awaited inline here).
+  const locationId = await scrapeTurnPresence(
+    { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+    userId,
+    chatId,
+    messageId,
+    reply,
+  );
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
   }
-  return { ok: true, message: updated };
+  return { ok: true, message: updated, locationId };
 }
 
 async function serveStaticFile(res: ServerResponse, filePath: string): Promise<void> {
@@ -959,6 +1057,11 @@ async function handleChatCompletions(
     sendJson(res, 400, { error: 'expected { messages: [{role, content}, ...] }' });
     return;
   }
+
+  // The location resolved by Stage 2's scraper (segway.md §4.2) — captured here so endpoint.md
+  // §5's decoupled image-generation trigger can fire after the reply is sent (see the SSE and
+  // sendJson tails of this handler).
+  let scrapedLocationId: string | undefined;
 
   const messages: LlmMessage[] = body.messages
     .filter((m) => ALLOWED_ROLES.has(m.role))
@@ -1134,8 +1237,19 @@ async function handleChatCompletions(
 
   if (body.chat_id) {
     // The user message (if this was a genuinely new turn) is already persisted above, before
-    // runTurn ran — only the assistant reply is appended here now.
-    await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply }]);
+    // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
+    // scrapes the turn's header block into trusted scene state, anchored to the new message's
+    // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
+    const [assistantMessage] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply }]);
+    if (assistantMessage) {
+      scrapedLocationId = await scrapeTurnPresence(
+        { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+        userId,
+        body.chat_id,
+        assistantMessage.messageId,
+        reply,
+      );
+    }
     // First exchange in a still-untitled session names it, once — bigBrain never retitles a
     // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
     // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
@@ -1173,10 +1287,20 @@ async function handleChatCompletions(
     res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, {}, 'stop'))}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
+    if (scrapedLocationId) {
+      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+      // sent — never awaited inline (a provider round-trip has no place blocking the reply).
+      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!));
+    }
     return;
   }
 
   sendJson(res, 200, buildChatCompletion(echoedModel, reply));
+  if (scrapedLocationId) {
+    // endpoint.md §5: same decoupled trigger as the streaming branch — the reply is sent, the
+    // image pass starts in the background like chatMemorySync.ts's tick.
+    res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!));
+  }
 }
 
 async function handleToolInvoke(
@@ -1430,6 +1554,147 @@ async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResp
   sendJson(res, 404, { error: 'not found' });
 }
 
+// The Connections tab's image-generation section CRUD (io/imageConnections.ts, endpoint.md §3) —
+// same id-in-path shape as handleAdminConnectionRoutes above. GET/POST on the collection;
+// GET/PATCH/DELETE plus Test on one connection by id. No /models or /providers preview routes:
+// image connections have no model/provider catalogs to browse (a kind is a fixed adapter, a model
+// is a free-text id the admin types). Activation is a plain 200, deliberately NOT the LLM
+// connections' 202+restart: the active image connection is resolved live on every
+// generateLocationImage call (bi_principles.md §13), so switching takes effect on the next render
+// with no restart.
+async function handleAdminImageConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
+  const rest = url.pathname.slice('/v1/admin/image-connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/test'
+  const segments = rest.split('/').filter(Boolean);
+
+  if (segments.length === 0) {
+    if (req.method === 'GET') {
+      sendJson(res, 200, { connections: await deps.imageConnections.list() });
+      return;
+    }
+    if (req.method === 'POST') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const parsed = parseCreateImageConnectionBody(raw);
+      if (!parsed) {
+        sendJson(res, 400, {
+          error:
+            'expected { name: non-empty string, kind: "runware" | "fal-ai" | "pollinations" | "comfyui" | "openai-images", ' +
+            'model: non-empty string, apiKey?, baseUrl?, aspectRatio?, samplingSteps?, cfgScale?, samplerName?, ' +
+            'masterPositiveStylePrefix?, masterNegativePrompt?, workflowParameters? }',
+        });
+        return;
+      }
+      const created = await deps.imageConnections.create(parsed);
+      sendJson(res, 201, created);
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  const id = decodeURIComponent(segments[0]!);
+
+  if (segments.length === 1) {
+    if (req.method === 'PATCH') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const parsed = parseUpdateImageConnectionBody(raw);
+      if (!parsed) {
+        sendJson(res, 400, { error: 'expected a partial image-connection patch — see POST /v1/admin/image-connections for field shapes' });
+        return;
+      }
+      const updated = await deps.imageConnections.update(id, parsed);
+      if (!updated) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      sendJson(res, 200, updated);
+      return;
+    }
+    if (req.method === 'DELETE') {
+      const result = await deps.imageConnections.remove(id);
+      if (result === 'not_found') {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      if (result === 'is_active') {
+        sendJson(res, 409, { error: 'cannot delete the active image connection — activate a different one first' });
+        return;
+      }
+      sendJson(res, 200, { deleted: true });
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'activate' && req.method === 'POST') {
+    let activated: boolean;
+    try {
+      activated = await deps.imageConnections.activate(id);
+    } catch (err) {
+      // activate() throws (rolling back) when the target vanished mid-transaction — from the
+      // client's perspective the id is gone, so this is a 404, not a 500. Any other error here
+      // (a genuine DB failure) also reads as not-found; the atomic rollback guarantees state was
+      // never corrupted either way (bi_principles.md §11: log the seam).
+      log.error(`image connection activation failed for "${id}"`, err);
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    if (!activated) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    // 200, not the LLM connections' 202+restart — the active image connection is resolved live
+    // on every generation call (see the handler's doc comment above).
+    sendJson(res, 200, { activated: true });
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'test' && req.method === 'POST') {
+    const result = await testImageConnection(deps.imageConnections, deps.settings, id);
+    if (!result) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, result);
+    return;
+  }
+
+  sendJson(res, 404, { error: 'not found' });
+}
+
+async function handleImageSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getImageSettings(deps.settings));
+}
+
+async function handleImageSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetImageSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { template: string }' });
+    return;
+  }
+  await setImageSettings(deps.settings, parsed.template!);
+  sendJson(res, 200, await getImageSettings(deps.settings));
+}
+
 async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const timezone = await getHouseholdTimezone(deps.settings);
   sendJson(res, 200, { timezone });
@@ -1453,6 +1718,28 @@ async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps
   await setHouseholdTimezone(deps.settings, value);
   // No restart needed — the very next chat turn reads it live (handleChatCompletions).
   sendJson(res, 200, { timezone: value });
+}
+
+// parallax_fade_teststep.md §2.2's admin write side — the SettingsView "Chat Background" toggle.
+// Same admin gate and no-restart shape as /v1/admin/timezone: the value is read live by ChatView
+// at chat load, so flipping it takes effect on the next visit without a restart.
+async function handleChatBackgroundSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const value = parseSetChatBackgroundSettingsBody(raw);
+  if (!value) {
+    sendJson(res, 400, { error: 'expected { parallaxEnabled: true | false }' });
+    return;
+  }
+
+  await setChatBackgroundSettings(deps.settings, value.parallaxEnabled ?? false);
+  sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
 }
 
 // docs/chat-memory.md — profileNames comes from deps.llmConnections.list() (the live, admin-managed
@@ -1867,6 +2154,21 @@ async function handleChatRoutes(
     return;
   }
 
+  if (segments[1] === 'location-image' && segments.length === 2 && req.method === 'GET') {
+    // endpoint.md §6.4's chat background layer: resolve the chat's active location image via the
+    // scene_id cache pointer (segway.md §2.2) — chat_sessions.scene_id -> scenes.active_location_id
+    // -> locations.image_url. The location is scoped by the §2.6 eligibility filter on the join, so
+    // an inactive/alternate-timeline location reads back as absent rather than leaking a stale
+    // render into the active chat's background.
+    const image = await resolveChatLocationImage(deps.db, userId, chatId);
+    if (!image) {
+      sendJson(res, 200, { locationId: null, name: null, imageUrl: null });
+      return;
+    }
+    sendJson(res, 200, image);
+    return;
+  }
+
   if (segments[1] === 'messages' && segments.length >= 3) {
     const messageId = decodeURIComponent(segments[2]!);
 
@@ -1929,6 +2231,12 @@ async function handleChatRoutes(
         return;
       }
       sendJson(res, 200, { message: result.message });
+      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+      // sent — a provider round-trip has no place in the request path, so the trigger rides the
+      // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
+      if (result.locationId) {
+        res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
+      }
       return;
     }
   }
@@ -2011,6 +2319,20 @@ async function handleHouseholdTimezoneGet(req: IncomingMessage, res: ServerRespo
   sendJson(res, 200, { timezone: await getHouseholdTimezone(deps.settings) });
 }
 
+// parallax_fade_teststep.md §2.2: the ChatView location-background parallax toggle, read live by
+// the frontend at chat load. Same household-key/Access gate as /v1/timezone above (the chat view
+// needs it as a regular authenticated user, before anyone would have entered the separate admin
+// key just to open Settings) and the same no-restart shape — the value is fetched fresh, never
+// baked in at boot.
+async function handleChatBackgroundSettingsGet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
+}
+
 // screen_lock_password isn't a secret (bi_principles.md §12 — see adminServer.ts's own note), and
 // ScreenLockOverlay.tsx needs it as a regular authenticated user, not an admin: it has to poll
 // this the moment the app itself is authenticated, before anyone would have entered the separate
@@ -2078,6 +2400,10 @@ async function handleRequest(
     await handleHouseholdTimezoneGet(req, res, deps);
     return;
   }
+  if (req.method === 'GET' && req.url === '/v1/chat-background-settings') {
+    await handleChatBackgroundSettingsGet(req, res, deps);
+    return;
+  }
   if (req.method === 'GET' && req.url === '/v1/screen-lock-settings') {
     await handleScreenLockSettingsGet(req, res, deps);
     return;
@@ -2140,6 +2466,17 @@ async function handleRequest(
     await handleFolderRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
     return;
   }
+  if (req.method === 'POST' && req.url?.startsWith('/v1/locations/')) {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    // endpoint.md §5.2: the Chat View's broken-background-image notify — user-scoped, clears the
+    // stale URL so the next visit re-renders.
+    await handleLocationImageBroken(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
+    return;
+  }
   if (req.method === 'GET' && req.url === '/v1/tools') {
     const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
     if (!userId) {
@@ -2178,6 +2515,34 @@ async function handleRequest(
     await handleAdminConnectionRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
     return;
   }
+  if (
+    req.url === '/v1/admin/image-connections' ||
+    req.url?.startsWith('/v1/admin/image-connections/') ||
+    req.url?.startsWith('/v1/admin/image-connections?')
+  ) {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleAdminImageConnectionRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/image-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleImageSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/image-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleImageSettingsSet(req, res, deps);
+    return;
+  }
   if (req.method === 'GET' && req.url === '/v1/admin/timezone') {
     if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
       sendJson(res, 401, { error: 'missing or incorrect admin key' });
@@ -2192,6 +2557,22 @@ async function handleRequest(
       return;
     }
     await handleTimezoneSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/chat-background-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatBackgroundSettingsGet(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/chat-background-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatBackgroundSettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/notification-settings') {

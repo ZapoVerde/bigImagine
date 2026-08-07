@@ -30,6 +30,9 @@ function createFakePool() {
   const householdMemory = []; // { user_id, source_chat_id, content, source }
   const chatMemorySyncStatus = new Map(); // chat_id -> row (chat_memory_sync_status, migration 0055)
   const canonFacts = []; // { fact_id, chat_id, user_id, status, approved_at } (canon_facts, migration 0058)
+  const swipes = []; // { swipe_id, message_id, created_at } (chat_message_swipes, migration 0059)
+  const locations = []; // { location_id, user_id, status, anchor_swipe_id } (locations, migration 0067)
+  const characters = []; // { character_id, user_id, status, anchor_swipe_id } (characters, migration 0067)
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
@@ -43,6 +46,9 @@ function createFakePool() {
     householdMemory,
     chatMemorySyncStatus,
     canonFacts,
+    swipes,
+    locations,
+    characters,
     now,
     async connect() {
       let scopedUserId;
@@ -82,13 +88,62 @@ function createFakePool() {
             return { rows: sess ? [{ kind: sess.kind ?? 'chat' }] : [] };
           }
 
-          // runOneChatSync's own full-transcript read
-          if (sql.includes('select message_id, role, content from chat_messages')) {
+          // runOneChatSync's own full-transcript read (now carrying active_swipe_id for the
+          // transient settle step — matched loosely so both column lists hit the same handler)
+          if (sql.includes('select message_id, role, content')) {
             const rows = chatMessages
               .filter((m) => m.chat_id === params[0])
               .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id))
-              .map((m) => ({ message_id: m.message_id, role: m.role, content: m.content }));
+              .map((m) => ({ message_id: m.message_id, role: m.role, content: m.content, active_swipe_id: m.active_swipe_id ?? null }));
             return { rows };
+          }
+
+          // segway.md §2.5 settle step: a message's non-active swipes, for demotion. Anchored on
+          // 'select' — the demote UPDATEs below embed the identical `from chat_message_swipes
+          // where message_id` text inside their subquery.
+          if (sql.startsWith('select') && sql.includes('from chat_message_swipes where message_id')) {
+            const rows = swipes
+              .filter((s) => s.message_id === params[0])
+              .map((s) => ({ swipe_id: s.swipe_id }));
+            return { rows };
+          }
+
+          // segway.md §2.5 settle step: promote the active swipe's rows, demote the alternates'.
+          if (sql.includes("update locations set status = 'permanent'")) {
+            const [userId, anchorSwipeId] = params;
+            const promoted = locations.filter((l) => l.user_id === userId && l.status === 'transient' && l.anchor_swipe_id === anchorSwipeId);
+            for (const l of promoted) {
+              l.status = 'permanent';
+              l.anchor_swipe_id = null;
+            }
+            return { rows: promoted.map((l) => ({ location_id: l.location_id })) };
+          }
+          if (sql.includes("update characters set status = 'permanent'")) {
+            const [userId, anchorSwipeId] = params;
+            const promoted = characters.filter((c) => c.user_id === userId && c.status === 'transient' && c.anchor_swipe_id === anchorSwipeId);
+            for (const c of promoted) {
+              c.status = 'permanent';
+              c.anchor_swipe_id = null;
+            }
+            return { rows: promoted.map((c) => ({ character_id: c.character_id })) };
+          }
+          if (sql.includes("update locations set status = 'inactive'")) {
+            const [userId, messageId, activeSwipeId] = params;
+            const alternateIds = new Set(swipes.filter((s) => s.message_id === messageId && s.swipe_id !== activeSwipeId).map((s) => s.swipe_id));
+            const demoted = locations.filter(
+              (l) => l.user_id === userId && l.status === 'transient' && alternateIds.has(l.anchor_swipe_id),
+            );
+            for (const l of demoted) l.status = 'inactive';
+            return { rows: demoted.map((l) => ({ location_id: l.location_id })) };
+          }
+          if (sql.includes("update characters set status = 'inactive'")) {
+            const [userId, messageId, activeSwipeId] = params;
+            const alternateIds = new Set(swipes.filter((s) => s.message_id === messageId && s.swipe_id !== activeSwipeId).map((s) => s.swipe_id));
+            const demoted = characters.filter(
+              (c) => c.user_id === userId && c.status === 'transient' && alternateIds.has(c.anchor_swipe_id),
+            );
+            for (const c of demoted) c.status = 'inactive';
+            return { rows: demoted.map((c) => ({ character_id: c.character_id })) };
           }
 
           // archiveChatMemory's tail read (checked before any other chat_messages branch)
@@ -518,6 +573,50 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   const digest = call.messages.find((m) => m.role === 'user').content;
   assert(digest.includes('Grocery run planning'), "the digest sent to classify_household_memory includes the chat's title");
   assert(digest.includes('Household prefers oat milk.'), 'the digest includes the existing key-ideas entries');
+}
+
+// --- segway.md §2.5: the transient settle step promotes the active swipe's rows and demotes the
+// alternate swipes' rows for the messages leaving the live window, never deleting anything ---
+{
+  const settleChatId = randomUUID();
+  pool.chatSessions.set(settleChatId, { user_id: USER, archived_at: null });
+  const settleMessages = [];
+  for (let i = 1; i <= 12; i++) {
+    settleMessages.push({
+      message_id: randomUUID(),
+      chat_id: settleChatId,
+      user_id: USER,
+      role: i % 2 === 1 ? 'user' : 'assistant',
+      content: `settle-${i}`,
+      created_at: pool.now(),
+      active_swipe_id: null,
+    });
+  }
+  // The last archived message (index 7 of the 12 — 8 archive, 4 stay live) has an active swipe
+  // plus one alternate, with transient rows anchored to each; a permanent row must stay put.
+  const activeSwipeId = randomUUID();
+  const alternateSwipeId = randomUUID();
+  settleMessages[7].active_swipe_id = activeSwipeId;
+  pool.chatMessages.push(...settleMessages);
+  pool.swipes.push({ swipe_id: activeSwipeId, message_id: settleMessages[7].message_id, created_at: pool.now() });
+  pool.swipes.push({ swipe_id: alternateSwipeId, message_id: settleMessages[7].message_id, created_at: pool.now() });
+
+  const promotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: activeSwipeId };
+  const demotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: alternateSwipeId };
+  const permanentLocation = { location_id: randomUUID(), user_id: USER, status: 'permanent', anchor_swipe_id: null };
+  const promotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: activeSwipeId };
+  const demotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: alternateSwipeId };
+  pool.locations.push(promotedLocation, demotedLocation, permanentLocation);
+  pool.characters.push(promotedCharacter, demotedCharacter);
+
+  await runChatMemorySyncTick(deps);
+
+  assert(promotedLocation.status === 'permanent' && promotedLocation.anchor_swipe_id === null, "the archived turn's active-swipe location promotes to permanent with its swipe anchor nulled");
+  assert(promotedCharacter.status === 'permanent' && promotedCharacter.anchor_swipe_id === null, "the archived turn's active-swipe character promotes to permanent too");
+  assert(demotedLocation.status === 'inactive', "the archived turn's alternate-swipe location demotes to inactive — not deleted");
+  assert(demotedCharacter.status === 'inactive', "the archived turn's alternate-swipe character demotes to inactive — not deleted");
+  assert(permanentLocation.status === 'permanent', 'a permanent row is untouched by the settle step');
+  assert(pool.locations.length === 3 && pool.characters.length === 2, 'nothing is ever deleted by the settle step');
 }
 
 if (process.exitCode) {

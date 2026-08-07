@@ -137,6 +137,91 @@ function createFakeSettingsStore() {
   };
 }
 
+// A hand-rolled fake satisfying ImageConnectionStore's shape directly (io/imageConnections.ts) —
+// this suite is testing the HTTP wiring (admin routes + deps plumbing), not the store's own
+// DB/encryption logic. resolveById returns the decrypted profile shape generateLocationImage and
+// the test route build providers from; seeding rows with real-shaped fields lets the admin
+// route tests exercise create/list/update/activate/test against it.
+function createFakeImageConnectionStore(seedRows = []) {
+  const rows = new Map(seedRows.map((r) => [r.id, { ...r }]));
+  let nextId = 1;
+  function toPublic(row) {
+    const { apiKey, ...rest } = row;
+    return { ...rest, hasApiKey: apiKey != null };
+  }
+  function toProfile(row) {
+    return {
+      kind: row.kind,
+      model: row.model,
+      apiKey: row.apiKey ?? null,
+      baseUrl: row.baseUrl ?? null,
+      aspectRatio: row.aspectRatio ?? '16:9',
+      samplingSteps: row.samplingSteps ?? 30,
+      cfgScale: row.cfgScale ?? 7,
+      samplerName: row.samplerName ?? null,
+      masterPositiveStylePrefix: row.masterPositiveStylePrefix ?? null,
+      masterNegativePrompt: row.masterNegativePrompt ?? null,
+      workflowParameters: row.workflowParameters ?? null,
+    };
+  }
+  return {
+    rows,
+    async list() {
+      return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name)).map(toPublic);
+    },
+    async create(init) {
+      const id = `img-conn-${nextId++}`;
+      const row = {
+        id,
+        name: init.name,
+        kind: init.kind,
+        model: init.model,
+        apiKey: init.apiKey ?? null,
+        baseUrl: init.baseUrl ?? null,
+        aspectRatio: init.aspectRatio ?? '16:9',
+        samplingSteps: init.samplingSteps ?? 30,
+        cfgScale: init.cfgScale ?? 7,
+        samplerName: init.samplerName ?? null,
+        masterPositiveStylePrefix: init.masterPositiveStylePrefix ?? null,
+        masterNegativePrompt: init.masterNegativePrompt ?? null,
+        workflowParameters: init.workflowParameters ?? null,
+        isActive: false,
+        updatedAt: new Date().toISOString(),
+      };
+      rows.set(id, row);
+      return toPublic(row);
+    },
+    async update(id, patch) {
+      const row = rows.get(id);
+      if (!row) return undefined;
+      Object.assign(row, patch, { updatedAt: new Date().toISOString() });
+      return toPublic(row);
+    },
+    async remove(id) {
+      const row = rows.get(id);
+      if (!row) return 'not_found';
+      if (row.isActive) return 'is_active';
+      rows.delete(id);
+      return 'ok';
+    },
+    async activate(id) {
+      const row = rows.get(id);
+      if (!row) return false;
+      for (const r of rows.values()) r.isActive = false;
+      row.isActive = true;
+      return true;
+    },
+    async resolveById(id) {
+      const row = rows.get(id);
+      return row ? toProfile(row) : undefined;
+    },
+    async resolveActive() {
+      const row = [...rows.values()].find((r) => r.isActive);
+      return row ? toProfile(row) : undefined;
+    },
+  };
+}
+
 // A hand-rolled fake satisfying AccessIdentityResolver's shape directly — this suite is testing
 // httpServer.ts's own auth-path wiring (Access-header-first, Bearer-key fallback), not
 // accessIdentity.ts's real JWT/JWKS verification, which verify-access-identity.mjs already covers
@@ -477,6 +562,25 @@ const server = startHttpServer({
   credentials,
   settings,
   llmConnections,
+  imageConnections: createFakeImageConnectionStore([
+    {
+      id: 'img-conn-pollinations',
+      name: 'pollinations-flux',
+      kind: 'pollinations',
+      model: 'flux',
+      apiKey: null,
+      baseUrl: null,
+      aspectRatio: '16:9',
+      samplingSteps: 30,
+      cfgScale: 7,
+      samplerName: null,
+      masterPositiveStylePrefix: null,
+      masterNegativePrompt: null,
+      workflowParameters: null,
+      isActive: true,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    },
+  ]),
   modelName: 'bigbrain',
   port: 0,
   triggerRestart: () => restartCalls.push(Date.now()),
@@ -946,6 +1050,157 @@ try {
   globalThis.fetch = originalFetchTestFail;
 }
 
+// --- Admin image-connections routes (endpoint.md §3 — the Connections tab's image section) ---
+
+const imgNoAuthRes = await fetch(`${base}/v1/admin/image-connections`);
+assert(imgNoAuthRes.status === 401, 'GET /v1/admin/image-connections with no auth header returns 401');
+
+const imgListRes = await fetch(`${base}/v1/admin/image-connections`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const imgListBody = await imgListRes.json();
+assert(imgListRes.status === 200, 'GET /v1/admin/image-connections with the correct admin key returns 200');
+assert(
+  imgListBody.connections.length === 1 && imgListBody.connections[0].name === 'pollinations-flux',
+  'GET /v1/admin/image-connections lists every seeded image connection with its isActive flag',
+);
+assert(
+  imgListBody.connections[0].apiKey === undefined && imgListBody.connections[0].hasApiKey === false,
+  'GET /v1/admin/image-connections never leaks an apiKey value; hasApiKey reports the keyless provider',
+);
+
+const imgCreateNoAuthRes = await fetch(`${base}/v1/admin/image-connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'runware-prod', kind: 'runware', model: 'runware:100@1', apiKey: 'sk-runware' }),
+});
+assert(imgCreateNoAuthRes.status === 401, 'POST /v1/admin/image-connections with no auth header returns 401');
+
+const imgCreateBadKindRes = await fetch(`${base}/v1/admin/image-connections`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'bad', kind: 'not-a-kind', model: 'x' }),
+});
+assert(imgCreateBadKindRes.status === 400, 'POST /v1/admin/image-connections rejects an unknown kind');
+
+// A keyless create (pollinations) is valid — unlike llm_connections, apiKey is optional
+// (endpoint.md §2.1).
+const imgCreateKeylessRes = await fetch(`${base}/v1/admin/image-connections`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'pollinations-fallback', kind: 'pollinations', model: 'flux' }),
+});
+const imgCreateKeylessBody = await imgCreateKeylessRes.json();
+assert(
+  imgCreateKeylessRes.status === 201 && imgCreateKeylessBody.name === 'pollinations-fallback' && imgCreateKeylessBody.hasApiKey === false,
+  'POST /v1/admin/image-connections accepts a keyless pollinations connection',
+);
+
+const imgCreateWithKeyRes = await fetch(`${base}/v1/admin/image-connections`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ name: 'runware-prod', kind: 'runware', model: 'runware:100@1', apiKey: 'sk-runware' }),
+});
+const imgCreateWithKeyBody = await imgCreateWithKeyRes.json();
+assert(
+  imgCreateWithKeyRes.status === 201 && imgCreateWithKeyBody.hasApiKey === true,
+  'POST /v1/admin/image-connections with a key reports hasApiKey: true and never the key itself',
+);
+assert(imgCreateWithKeyBody.apiKey === undefined, 'the created image connection response never leaks the apiKey');
+
+const imgPatchRes = await fetch(`${base}/v1/admin/image-connections/${imgCreateWithKeyBody.id}`, {
+  method: 'PATCH',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ aspectRatio: '1:1', masterNegativePrompt: 'blurry' }),
+});
+const imgPatchBody = await imgPatchRes.json();
+assert(
+  imgPatchRes.status === 200 && imgPatchBody.aspectRatio === '1:1' && imgPatchBody.masterNegativePrompt === 'blurry',
+  'PATCH /v1/admin/image-connections/:id updates only the given fields',
+);
+
+const imgDeleteActiveRes = await fetch(`${base}/v1/admin/image-connections/img-conn-pollinations`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(imgDeleteActiveRes.status === 409, 'DELETE /v1/admin/image-connections/:id on the active connection returns 409');
+
+// Activation is a plain 200 — no restart (the active image connection is resolved live per
+// generation, endpoint.md §5.1.3), unlike the LLM connections' 202+restart.
+const imgActivateRes = await fetch(`${base}/v1/admin/image-connections/img-conn-pollinations/activate`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(imgActivateRes.status === 200, 'POST /v1/admin/image-connections/:id/activate returns 200 (no restart)');
+
+// Activating a nonexistent id must not clear the current active flag (the route 404s, and the
+// previously-active connection stays active).
+const imgActivateMissingRes = await fetch(`${base}/v1/admin/image-connections/not-a-real-id/activate`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(imgActivateMissingRes.status === 404, 'POST /v1/admin/image-connections/:id/activate for an unknown id returns 404');
+const imgStillActiveRes = await fetch(`${base}/v1/admin/image-connections`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const imgStillActiveBody = await imgStillActiveRes.json();
+assert(
+  imgStillActiveBody.connections.find((c) => c.id === 'img-conn-pollinations')?.isActive === true,
+  'a failed activation leaves the previously-active connection active (existence is probed before the active flag is cleared)',
+);
+
+const imgDeleteOkRes = await fetch(`${base}/v1/admin/image-connections/${imgCreateKeylessBody.id}`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(imgDeleteOkRes.status === 200, 'DELETE /v1/admin/image-connections/:id on a non-active connection succeeds');
+
+// The Test button (endpoint.md §3.3): pollinations needs no network (its URL *is* the render
+// request), so the probe returns the constructed URL synchronously.
+const imgTestNoAuthRes = await fetch(`${base}/v1/admin/image-connections/img-conn-pollinations/test`, { method: 'POST' });
+assert(imgTestNoAuthRes.status === 401, 'POST /v1/admin/image-connections/:id/test with no auth header returns 401');
+
+const imgTestRes = await fetch(`${base}/v1/admin/image-connections/img-conn-pollinations/test`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const imgTestBody = await imgTestRes.json();
+assert(
+  imgTestRes.status === 200 && imgTestBody.ok === true && typeof imgTestBody.imageUrl === 'string' && imgTestBody.imageUrl.includes('image.pollinations.ai'),
+  'POST /v1/admin/image-connections/:id/test for pollinations returns the constructed image URL',
+);
+
+const imgTestUnknownRes = await fetch(`${base}/v1/admin/image-connections/not-a-real-id/test`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(imgTestUnknownRes.status === 404, 'POST /v1/admin/image-connections/:id/test for an unknown id returns 404');
+
+// --- Admin image-settings routes (endpoint.md §2.2, bi_principles.md §18) ---
+
+const imgSettingsNoAuthRes = await fetch(`${base}/v1/admin/image-settings`);
+assert(imgSettingsNoAuthRes.status === 401, 'GET /v1/admin/image-settings with no auth header returns 401');
+
+const imgSettingsGetRes = await fetch(`${base}/v1/admin/image-settings`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const imgSettingsGetBody = await imgSettingsGetRes.json();
+assert(
+  imgSettingsGetRes.status === 200 && imgSettingsGetBody.templateIsDefault === true,
+  'GET /v1/admin/image-settings reports the default (empty template) on first read',
+);
+
+const imgSettingsSetRes = await fetch(`${base}/v1/admin/image-settings`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ template: '{{style_prefix}} {{visual_description}} at {{time_of_day}}' }),
+});
+const imgSettingsSetBody = await imgSettingsSetRes.json();
+assert(
+  imgSettingsSetRes.status === 200 && imgSettingsSetBody.template === '{{style_prefix}} {{visual_description}} at {{time_of_day}}' && imgSettingsSetBody.templateIsDefault === false,
+  'POST /v1/admin/image-settings persists the template and reports it as non-default',
+);
+
 // --- Chat/folder CRUD routes ---
 for (const [method, path] of [
   ['GET', '/v1/chats'],
@@ -1047,6 +1302,7 @@ server.close();
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
     llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1135,6 +1391,7 @@ server.close();
         updatedAt: '2026-01-01T00:00:00.000Z',
       },
     ]),
+    imageConnections: createFakeImageConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1401,6 +1658,7 @@ server.close();
     credentials: createFakeCredentialStore(),
     settings: settingsRp,
     llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1523,6 +1781,7 @@ server.close();
     credentials: createFakeCredentialStore(),
     settings: createFakeSettingsStore(),
     llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
   });
@@ -1586,6 +1845,7 @@ server.close();
     credentials: createFakeCredentialStore(),
     settings: settings4,
     llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
     modelName: 'bigbrain',
     port: 0,
     triggerRestart: () => {
@@ -1627,6 +1887,51 @@ server.close();
   const tzAfterSaveRes = await fetch(`${base4}/v1/admin/timezone`, { headers: { authorization: 'Bearer the-admin-key' } });
   const tzAfterSaveBody = await tzAfterSaveRes.json();
   assert(tzAfterSaveBody.timezone === 'America/New_York', 'GET /v1/admin/timezone reflects the newly saved value with no restart required');
+
+  // --- Chat background settings routes (parallax_fade_teststep.md §2.2) ---
+  // Same server4/settings4 — the user-scoped GET and the admin POST share the store.
+  const bgUserNoAuthRes = await fetch(`${base4}/v1/chat-background-settings`);
+  assert(bgUserNoAuthRes.status === 401, 'GET /v1/chat-background-settings with no auth header returns 401');
+
+  const bgUserRes = await fetch(`${base4}/v1/chat-background-settings`, {
+    headers: { authorization: 'Bearer good-key-4' },
+  });
+  const bgUserBody = await bgUserRes.json();
+  assert(
+    bgUserRes.status === 200 && bgUserBody.parallaxEnabled === false,
+    'GET /v1/chat-background-settings defaults to false (parallax off) before anything has been saved',
+  );
+
+  const bgAdminNoAuthRes = await fetch(`${base4}/v1/admin/chat-background-settings`);
+  assert(bgAdminNoAuthRes.status === 401, 'GET /v1/admin/chat-background-settings with no auth header returns 401');
+
+  const bgBadRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ parallaxEnabled: 'yes' }),
+  });
+  assert(bgBadRes.status === 400, 'POST /v1/admin/chat-background-settings rejects a non-boolean parallaxEnabled');
+
+  const bgOkRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ parallaxEnabled: true }),
+  });
+  const bgOkBody = await bgOkRes.json();
+  assert(
+    bgOkRes.status === 200 && bgOkBody.parallaxEnabled === true,
+    'POST /v1/admin/chat-background-settings returns 200 with the saved value (no restart)',
+  );
+  assert(
+    settings4.setCalls.some((c) => c.key === 'chat_background_parallax' && c.value === 'true'),
+    'the settings store recorded the parallax write as text true',
+  );
+
+  const bgAfterSaveRes = await fetch(`${base4}/v1/chat-background-settings`, {
+    headers: { authorization: 'Bearer good-key-4' },
+  });
+  const bgAfterSaveBody = await bgAfterSaveRes.json();
+  assert(bgAfterSaveBody.parallaxEnabled === true, 'the user-scoped GET reflects the newly saved value with no restart');
 
   server4.close();
 }

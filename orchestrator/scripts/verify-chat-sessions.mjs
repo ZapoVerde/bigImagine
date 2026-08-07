@@ -16,18 +16,25 @@ function assert(cond, message) {
   }
 }
 
-// --- Fake pool: in-memory chat_sessions / chat_messages / folders tables ---
+// --- Fake pool: in-memory chat_sessions / chat_messages / folders / chat_message_swipes /
+// locations / characters tables ---
 function createFakePool() {
   const sessions = new Map(); // chat_id -> row
-  const messages = []; // {message_id, chat_id, user_id, role, content, created_at}
+  const messages = []; // {message_id, chat_id, user_id, role, content, created_at, active_swipe_id}
+  const swipes = []; // {swipe_id, message_id, content, created_at}
   const folders = new Map(); // folder_id -> row
+  const locations = []; // {location_id, user_id, name, status, anchor_chat_id, anchor_swipe_id, ...}
+  const characters = []; // {character_id, user_id, name, status, anchor_chat_id, anchor_swipe_id}
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
   return {
     sessions,
     messages,
+    swipes,
     folders,
+    locations,
+    characters,
     async connect() {
       let scopedUserId;
       return {
@@ -136,12 +143,15 @@ function createFakePool() {
           if (sql.includes('from canon_facts where chat_id')) {
             return { rows: [] };
           }
-          // Pre-existing gap, unrelated to forkChat/getLineage above: getChat's swipe-metadata
-          // lookup (chatSessions.ts) has never had a fake handler here, so any getChat call against
-          // a non-empty chat threw "unexpected query" before this fix — no test in this file
-          // exercises recordSwipe/cycleSwipe, so "no swipes yet" (empty) is accurate for all of them.
+          // getChat's swipe-metadata lookup (chatSessions.ts) — previously a stub that always
+          // returned empty (no test exercised swipes); now backed by the in-memory swipes table
+          // so ensureActiveSwipe's canonical swipe row reads back as {index: 0, count: 1}.
           if (sql.includes('from chat_message_swipes where message_id')) {
-            return { rows: [] };
+            const ids = Array.isArray(params[0]) ? params[0] : [params[0]];
+            const rows = swipes
+              .filter((s) => ids.includes(s.message_id))
+              .map((s) => ({ message_id: s.message_id, swipe_id: s.swipe_id }));
+            return { rows };
           }
           if (sql.includes('select chat_id, title, folder_id, updated_at from chat_sessions')) {
             let rows = [...sessions.values()].filter((s) => s.user_id === scopedUserId);
@@ -199,9 +209,84 @@ function createFakePool() {
               role,
               content,
               created_at: now(),
+              active_swipe_id: null,
             };
             messages.push(row);
             return { rows: [row] };
+          }
+          // ensureActiveSwipe's and forkChat-resurrection's single-message read — anchored on
+          // 'select' (a plain includes() would also swallow `delete from chat_messages where
+          // message_id`, which the deleteMessage branch below owns) and discriminated from the
+          // getChat select-all by the `where message_id` predicate.
+          if (sql.startsWith('select') && sql.includes('from chat_messages where message_id')) {
+            const row = messages.find((m) => m.message_id === params[0] && m.chat_id === params[1]);
+            return { rows: row ? [row] : [] };
+          }
+          // ensureActiveSwipe / forkChat mirroring: give a message its own swipe row.
+          if (sql.includes('insert into chat_message_swipes')) {
+            const [messageId, content, createdAt] = params;
+            const row = { swipe_id: randomUUID(), message_id: messageId, content, created_at: createdAt ?? now() };
+            swipes.push(row);
+            return { rows: [{ swipe_id: row.swipe_id }] };
+          }
+          if (sql.includes('update chat_messages set active_swipe_id')) {
+            const [swipeId, messageId] = params;
+            const row = messages.find((m) => m.message_id === messageId);
+            if (row) row.active_swipe_id = swipeId;
+            return { rows: [] };
+          }
+          // forkChat resurrection (§2.7): transient/inactive rows anchored to the fork swipe.
+          // The `from locations`/`from characters` predicates live on different lines from the
+          // `where user_id` in the real SQL, so the matchers don't require adjacency.
+          if (sql.includes('from locations') && sql.includes('anchor_swipe_id')) {
+            const [userId, anchorSwipeId] = params;
+            const rows = locations.filter(
+              (l) => l.user_id === userId && l.anchor_swipe_id === anchorSwipeId && (l.status === 'transient' || l.status === 'inactive'),
+            );
+            // endpoint.md §6.2: the resurrection clone now carries the visual cache columns too.
+            return {
+              rows: rows.map((l) => ({
+                name: l.name,
+                visual_description: l.visual_description,
+                environment: JSON.stringify(l.environment ?? {}),
+                seed: l.seed ?? null,
+                image_url: l.image_url ?? null,
+                image_generated_at: l.image_generated_at ?? null,
+                image_rendered_input: l.image_rendered_input ? JSON.stringify(l.image_rendered_input) : null,
+              })),
+            };
+          }
+          if (sql.includes('from characters') && sql.includes('anchor_swipe_id')) {
+            const [userId, anchorSwipeId] = params;
+            const rows = characters.filter(
+              (c) => c.user_id === userId && c.anchor_swipe_id === anchorSwipeId && (c.status === 'transient' || c.status === 'inactive'),
+            );
+            return { rows: rows.map((c) => ({ name: c.name })) };
+          }
+          if (sql.includes('insert into locations') && params.length >= 10) {
+            const [userId, name, visualDescription, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, chatId, anchorSwipeId] = params;
+            const row = {
+              location_id: randomUUID(),
+              user_id: userId,
+              name,
+              visual_description: visualDescription,
+              environment: JSON.parse(environmentJson ?? '{}'),
+              seed: seed ?? null,
+              image_url: imageUrl ?? null,
+              image_generated_at: imageGeneratedAt ?? null,
+              image_rendered_input: renderedInputJson ? JSON.parse(renderedInputJson) : null,
+              status: 'transient',
+              anchor_chat_id: chatId,
+              anchor_swipe_id: anchorSwipeId,
+            };
+            locations.push(row);
+            return { rows: [] };
+          }
+          if (sql.includes('insert into characters') && params.length >= 4) {
+            const [userId, name, chatId, anchorSwipeId] = params;
+            const row = { character_id: randomUUID(), user_id: userId, name, status: 'transient', anchor_chat_id: chatId, anchor_swipe_id: anchorSwipeId };
+            characters.push(row);
+            return { rows: [] };
           }
           // Anchored with startsWith, checked before the generic select-all branch below —
           // 'delete from chat_messages where chat_id' is itself a substring match for the old
@@ -513,6 +598,103 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(filtered.get('alpha') === undefined, 'a non-allowed tool no longer resolves, even though it exists underneath');
   const none = filterToolRegistry(full, []);
   assert(none.definitions().length === 0, 'an empty allow-list yields no tools at all');
+}
+
+// --- ensureActiveSwipe: a never-regenerated assistant message gets its own anchorable swipe ---
+{
+  const chat = await store.createChat(USER_A, { title: 'ensureActiveSwipe scratch' });
+  const [msg] = await store.appendMessages(USER_A, chat.chatId, [{ role: 'assistant', content: 'A1' }]);
+
+  const swipeId = await store.ensureActiveSwipe(USER_A, chat.chatId, msg.messageId);
+  assert(typeof swipeId === 'string' && swipeId.length > 0, 'ensureActiveSwipe returns a swipe id for a swipe-less message');
+
+  const again = await store.ensureActiveSwipe(USER_A, chat.chatId, msg.messageId);
+  assert(again === swipeId, 'ensureActiveSwipe is idempotent — the message\'s own active swipe is returned unchanged on repeat');
+
+  const missing = await store.ensureActiveSwipe(USER_A, chat.chatId, 'no-such-message');
+  assert(missing === undefined, 'ensureActiveSwipe returns undefined for a message that is not in the chat');
+
+  const detail = await store.getChat(USER_A, chat.chatId);
+  assert(detail.messages[0].swipes.index === 0 && detail.messages[0].swipes.count === 1, 'a single canonical swipe row reads back as {index: 0, count: 1}');
+}
+
+// --- forkChat resurrection (§2.7): the fork point's transient/inactive rows come along, cloned
+// as fresh transient rows anchored to the branch's own swipe; permanent rows do not ---
+{
+  const parent = await store.createChat(USER_A, { title: 'Resurrection parent' });
+  await store.appendMessages(USER_A, parent.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+  ]);
+  const detail = await store.getChat(USER_A, parent.chatId);
+  const forkPoint = detail.messages[1]; // A1
+
+  // Simulate a scraped turn: the fork-point message has an active swipe, with a transient
+  // location + an inactive character anchored to it, plus a permanent location that must not
+  // come along.
+  const forkSwipeId = randomUUID();
+  const parentMsg = pool.messages.find((m) => m.message_id === forkPoint.messageId);
+  parentMsg.active_swipe_id = forkSwipeId;
+  pool.locations.push({
+    location_id: randomUUID(),
+    user_id: USER_A,
+    name: 'The Dark Cave',
+    visual_description: 'Stalactites.',
+    environment: { time_of_day: 'night' },
+    seed: 42,
+    image_url: 'https://cdn.example.invalid/dark-cave.png',
+    image_generated_at: '2026-08-13T00:00:00.000Z',
+    image_rendered_input: { visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 },
+    status: 'transient',
+    anchor_chat_id: parent.chatId,
+    anchor_swipe_id: forkSwipeId,
+  });
+  pool.locations.push({
+    location_id: randomUUID(),
+    user_id: USER_A,
+    name: 'The Forest Clearing',
+    visual_description: 'Sunlight.',
+    environment: {},
+    status: 'permanent',
+    anchor_chat_id: null,
+    anchor_swipe_id: null,
+  });
+  pool.characters.push({
+    character_id: randomUUID(),
+    user_id: USER_A,
+    name: 'Goblin Merchant',
+    status: 'inactive',
+    anchor_chat_id: parent.chatId,
+    anchor_swipe_id: forkSwipeId,
+  });
+
+  const branch = await store.forkChat(USER_A, parent.chatId, forkPoint.messageId);
+  assert(branch !== undefined, 'forkChat succeeds at the swiped fork point');
+
+  const branchMsg = pool.messages.find((m) => m.chat_id === branch.chatId && m.message_id !== undefined && m.content === 'A1');
+  assert(branchMsg && branchMsg.active_swipe_id !== forkSwipeId, 'the branch\'s copied fork-point message has its own fresh active swipe (never the parent\'s id)');
+
+  const branchLocations = pool.locations.filter((l) => l.anchor_chat_id === branch.chatId);
+  assert(
+    branchLocations.length === 1 && branchLocations[0].name === 'The Dark Cave' && branchLocations[0].status === 'transient',
+    'the fork point\'s transient location is cloned into the branch as a fresh transient row',
+  );
+  assert(branchLocations[0].anchor_swipe_id === branchMsg.active_swipe_id, 'the cloned location is anchored to the branch\'s corresponding swipe');
+  assert(
+    branchLocations[0].seed === 42 && branchLocations[0].image_url === 'https://cdn.example.invalid/dark-cave.png',
+    'endpoint.md §6.2: the cloned location carries seed/image_url/image_generated_at forward, so a fork does not force a fresh render',
+  );
+  assert(
+    JSON.stringify(branchLocations[0].image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
+    'the cloned location carries the render-input snapshot too, so its cache check (endpoint.md §5.1.2) hits on the branch',
+  );
+  assert(pool.locations.some((l) => l.name === 'The Forest Clearing' && l.anchor_chat_id === null), 'a permanent location is world canon — never cloned into the branch');
+
+  const branchCharacters = pool.characters.filter((c) => c.anchor_chat_id === branch.chatId);
+  assert(
+    branchCharacters.length === 1 && branchCharacters[0].name === 'Goblin Merchant' && branchCharacters[0].status === 'transient',
+    'the fork point\'s inactive character is resurrected into the branch as transient',
+  );
 }
 
 if (process.exitCode) {

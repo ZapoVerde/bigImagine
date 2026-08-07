@@ -24,6 +24,51 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  /* The location background layer (endpoint.md §6.4) sits absolutely behind the scroll area —
+     .chat-main is the positioning context, the header/history/rail paint above it. */
+  position: relative;
+}
+
+.chat-location-background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.15;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Fade transition classes (parallax_fade_teststep.md §3): ST Vistalyze's single-layer rhythm —
+   fade the old layer out (0.3s), swap src, fade the new one in (0.6s). The resting state is the
+   base .chat-location-background opacity (0.15); .vistalyze-fade-out animates to 0 and
+   .vistalyze-fade-in animates back from 0 to 0.15. The img is not keyed by URL — these classes
+   drive the transition on one persistent element. */
+.chat-location-background.vistalyze-fade-out {
+  opacity: 0;
+  transition: opacity 0.3s ease-in-out;
+}
+
+.chat-location-background.vistalyze-fade-in {
+  opacity: 0.15;
+  transition: opacity 0.6s ease-in-out;
+}
+
+/* Parallax mode (parallax_fade_teststep.md §2): the layer is oversized by the pan cap (200px)
+   each way so the translate3d drift never reveals the container edge; the module toggles this
+   class on attach and removes it on dispose. */
+.chat-location-background.parallax-active {
+  width: calc(100% + 400px);
+  height: calc(100% + 400px);
+  left: -200px;
+  top: -200px;
+  will-change: transform;
+}
+
+.chat-main > :not(.chat-location-background) {
+  position: relative;
+  z-index: 1;
 }
 
 .chat-header {

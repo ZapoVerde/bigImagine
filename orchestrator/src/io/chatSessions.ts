@@ -68,9 +68,12 @@
  *     swipe, no LLM call (db/migrations/0059_chat_message_swipes.sql). See ChatSessionStore's own
  *     doc on the shape of the result.
  *   .forkChat(userId, chatId, forkFromMessageId, title?) — new session row branched from this
- *     chat at that message, or undefined if forkFromMessageId doesn't belong to it. Swipe history
- *     is deliberately not carried into the fork — same accepted-imprecision trade this file's
- *     preamble already documents for chat_memory_entries; only the active content comes along.
+ *     chat at that message, or undefined if forkFromMessageId doesn't belong to it. Alternate
+ *     swipe history is deliberately not carried into the fork — same accepted-imprecision trade
+ *     this file's preamble already documents for chat_memory_entries; only the active content
+ *     comes along (each copied assistant message does get its own canonical swipe row, mirroring
+ *     the parent's active swipe, so the branch's transient location/character records can be
+ *     resurrected against it — docs/vistalyze_integration/segway.md §2.7).
  *   .archiveChat(userId, chatId) — stamps archived_at (now), or undefined if not found
  *   .listFolders / .createFolder / .updateFolder / .deleteFolder — folder CRUD; deleting a
  *     folder cascades to child folders, chats fall back to no-folder (on delete set null)
@@ -134,6 +137,12 @@ export interface ChatSessionRow {
    *  cleanup is off; nothing sets this yet (no dedicated tool/UI in this pass — settable today
    *  only via updateChat's patch, same as any other session field). */
   cleanupPresetId: string | null;
+  /** Cache pointer to the chat's current scene (db/migrations/0067, docs/vistalyze_integration/
+   *  segway.md §2.2) — kept stamped by the post-cleanup scraper (orchestrator/
+   *  locationAndPresenceScraper.ts). A *cache*, not the source of truth: the real scene identity
+   *  is the (chat_id, active_location_id) pair on scenes itself. Null until the first turn whose
+   *  header block resolves a scene. */
+  sceneId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -245,9 +254,18 @@ export interface ChatSessionStore {
   /** Cycles messageId's active content to an existing sibling swipe — a pure content swap, no LLM
    *  call. See CycleSwipeResult's own doc for what each outcome means. */
   cycleSwipe(userId: string, chatId: string, messageId: string, direction: 'prev' | 'next'): Promise<CycleSwipeResult>;
+  /** Returns the message's active swipe id, creating the message's own swipe row (containing its
+   *  current content) and making it active when the message has none yet — the invariant the
+   *  post-cleanup scraper (docs/vistalyze_integration/segway.md §4) anchors its transient
+   *  location/character rows to: every persisted assistant message it processes must have an
+   *  attributable active swipe for the sync tick to promote/demote against (§2.5). recordSwipe's
+   *  regenerations always have one already, so this is a no-op there. Undefined when messageId
+   *  isn't in this chat. */
+  ensureActiveSwipe(userId: string, chatId: string, messageId: string): Promise<string | undefined>;
   /** Branches a new chat from this one at forkFromMessageId (inclusive) — see this file's own
    *  preamble for exactly what does and doesn't come along. Undefined if forkFromMessageId isn't a
-   *  message in this chat. */
+   *  message in this chat. Transient/inactive locations and characters anchored to the fork
+   *  point's active swipe are resurrected onto the branch as fresh transient rows (segway.md §2.7). */
   forkChat(userId: string, chatId: string, forkFromMessageId: string, title?: string): Promise<ChatSessionRow | undefined>;
   /** The whole fork family a chat belongs to — every chat reachable by walking parent_chat_id up
    *  to the root and back down through every descendant, root first. A chat that was never forked
@@ -278,6 +296,7 @@ interface SessionDbRow {
   character_id: string | null;
   prompt_stack_preset_id: string | null;
   cleanup_preset_id: string | null;
+  scene_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -297,13 +316,14 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     characterId: row.character_id,
     promptStackPresetId: row.prompt_stack_preset_id,
     cleanupPresetId: row.cleanup_preset_id,
+    sceneId: row.scene_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, scene_id, created_at, updated_at';
 
 interface LineageDbRow {
   chat_id: string;
@@ -620,6 +640,31 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
       });
     },
 
+    async ensureActiveSwipe(userId, chatId, messageId) {
+      return db.withUserScope(userId, async (session) => {
+        const rows = await session.query<{ content: string; active_swipe_id: string | null }>(
+          'select content, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+          [messageId, chatId],
+        );
+        const current = rows[0];
+        if (!current) return undefined;
+        if (current.active_swipe_id) return current.active_swipe_id;
+        // A never-regenerated assistant message has no swipe row yet — create its own canonical
+        // variant and make it active, so the scraper's transient rows can anchor to it. The
+        // swipes metadata stays `{index: 0, count: 1}`, which cycleSwipe's bounds checks and the
+        // frontend's count > 1 gating both treat exactly like the old zero-row state.
+        const [inserted] = await session.query<{ swipe_id: string }>(
+          'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
+          [messageId, current.content],
+        );
+        await session.query('update chat_messages set active_swipe_id = $1 where message_id = $2', [
+          inserted!.swipe_id,
+          messageId,
+        ]);
+        return inserted!.swipe_id;
+      });
+    },
+
     async forkChat(userId, chatId, forkFromMessageId, title) {
       return db.withUserScope(userId, async (session) => {
         const parentRows = await session.query<SessionDbRow>(
@@ -629,8 +674,14 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         if (!parentRows[0]) return undefined;
         const parent = toSessionRow(parentRows[0]);
 
-        const messages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string; created_at: string }>(
-          'select message_id, role, content, created_at from chat_messages where chat_id = $1 order by created_at, message_id',
+        const messages = await session.query<{
+          message_id: string;
+          role: 'user' | 'assistant';
+          content: string;
+          created_at: string;
+          active_swipe_id: string | null;
+        }>(
+          'select message_id, role, content, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
           [chatId],
         );
         const forkIdx = messages.findIndex((m) => m.message_id === forkFromMessageId);
@@ -660,7 +711,14 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         // Fresh message_ids under the new chat_id (message_id is a global PK — the parent's own
         // rows can't be reused) — original created_at is preserved for provenance/ordering.
+        // Each copied assistant message also gets its own swipe row, mirroring the parent's
+        // active swipe one-for-one (swipe_id is a global PK too): alternates still don't come
+        // along (same accepted-imprecision trade this file's preamble documents), but the
+        // branch's own messages need their own anchorable active swipes — the transient
+        // location/character rows the scraper anchors to one of the parent's swipes are
+        // resurrected against these (§2.7 below).
         const idMap = new Map<string, string>();
+        const swipeIdMap = new Map<string, string>();
         for (const m of toCopy) {
           const [inserted] = await session.query<{ message_id: string }>(
             `insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, $5)
@@ -668,6 +726,17 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             [newChatId, userId, m.role, m.content, m.created_at],
           );
           idMap.set(m.message_id, inserted!.message_id);
+          if (m.role === 'assistant' && m.active_swipe_id) {
+            const [swipe] = await session.query<{ swipe_id: string }>(
+              'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, $3) returning swipe_id',
+              [inserted!.message_id, m.content, m.created_at],
+            );
+            await session.query('update chat_messages set active_swipe_id = $1 where message_id = $2', [
+              swipe!.swipe_id,
+              inserted!.message_id,
+            ]);
+            swipeIdMap.set(m.active_swipe_id, swipe!.swipe_id);
+          }
         }
 
         // Only sync points whose restore-point message was actually copied come along — this is
@@ -773,6 +842,64 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
               f.approved_at,
             ],
           );
+        }
+
+        // docs/vistalyze_integration/segway.md §2.7 / location_status.md §3 Step 3: resurrect the
+        // fork point's transient-or-inactive locations/characters into the new branch. Only rows
+        // anchored to the fork point's *active* swipe come along (that's the variant the fork
+        // actually copies — its alternate swipes stay behind with the parent), cloned as fresh
+        // transient rows anchored to the branch's own corresponding swipe (created in the message
+        // copy loop above), so the branch's own sync ticks promote/demote them independently from
+        // that point on. Never cloned: promoted/permanent rows (they're world canon, not branch
+        // state) and rows anchored to other messages' swipes.
+        const [forkMessage] = await session.query<{ active_swipe_id: string | null }>(
+          'select active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+          [forkFromMessageId, chatId],
+        );
+        const forkSwipeId = forkMessage?.active_swipe_id;
+        const branchForkSwipeId = forkSwipeId ? swipeIdMap.get(forkSwipeId) : undefined;
+        if (branchForkSwipeId) {
+          const resurrectionLocations = await session.query<{
+            name: string;
+            visual_description: string;
+            environment: string;
+            seed: number | null;
+            image_url: string | null;
+            image_generated_at: string | null;
+            image_rendered_input: string | null;
+          }>(
+            `select name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input from locations
+             where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,
+            [userId, forkSwipeId],
+          );
+          for (const loc of resurrectionLocations) {
+            // docs/vistalyze_integration/endpoint.md §6.2: carry seed/image_url/image_generated_at
+            // forward too — without them every fork forces a fresh render for a resurrected
+            // location even when nothing about it visually changed, silently defeating §1.3's
+            // cache-first commitment on the one path that most needs it (forking is exactly when
+            // a stale/expensive re-render is most wasteful). The image_rendered_input snapshot
+            // must come along as well: cache validation (endpoint.md §5.1.2) compares the current
+            // inputs against that snapshot, so a clone without it would never hit the cache even
+            // though its inputs are byte-identical to the parent's. Character resurrection is
+            // unaffected — characters carry no visual fields.
+            await session.query(
+              `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_generated_at, image_rendered_input, status, anchor_chat_id, anchor_swipe_id)
+               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, 'transient', $9, $10)`,
+              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, newChatId, branchForkSwipeId],
+            );
+          }
+          const resurrectionCharacters = await session.query<{ name: string }>(
+            `select name from characters
+             where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,
+            [userId, forkSwipeId],
+          );
+          for (const c of resurrectionCharacters) {
+            await session.query(
+              `insert into characters (user_id, name, status, anchor_chat_id, anchor_swipe_id)
+               values ($1, $2, 'transient', $3, $4)`,
+              [userId, c.name, newChatId, branchForkSwipeId],
+            );
+          }
         }
 
         return toSessionRow(newRows[0]!);

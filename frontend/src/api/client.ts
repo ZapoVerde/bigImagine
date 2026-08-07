@@ -10,8 +10,13 @@ import type {
   ChatSummary,
   ConnectionTestResult,
   CreateConnectionInput,
+  CreateImageConnectionInput,
   CredentialSummary,
   Folder,
+  ImageConnectionSummary,
+  ImageConnectionTestResult,
+  ImageSettings,
+  ChatBackgroundSettings,
   ImportedCharacter,
   LlmConnectionSummary,
   ModelProvidersResult,
@@ -23,6 +28,7 @@ import type {
   StagedAttachment,
   StoredChatMessage,
   UpdateConnectionInput,
+  UpdateImageConnectionInput,
 } from './types';
 
 export class ApiError extends Error {
@@ -198,6 +204,37 @@ export function createChat(
 
 export function getChat(chatId: string, apiKey: string | null): Promise<ChatDetail> {
   return jsonRequest<ChatDetail>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey);
+}
+
+/** GET /v1/chats/:id/location-image — the active location's rendered image for the Chat View
+ *  background layer (endpoint.md §6.4), resolved via chat_sessions.scene_id -> scenes
+ *  .active_location_id -> locations.image_url and §2.6-filtered. Nulls mean the chat has no
+ *  eligible rendered location image. */
+export async function getChatLocationImage(
+  chatId: string,
+  apiKey: string | null,
+): Promise<{ locationId: string; name: string; imageUrl: string } | { locationId: null; name: null; imageUrl: null }> {
+  return jsonRequest(`/v1/chats/${encodeURIComponent(chatId)}/location-image`, apiKey);
+}
+
+/** GET /v1/chat-background-settings — the ChatView location-background parallax toggle
+ *  (parallax_fade_teststep.md §2.2), same household-key/Access auth as getTimezone: ChatView
+ *  reads it live at chat load, before anyone would have entered the separate admin key. Defaults
+ *  to false when unset. */
+export async function getChatBackgroundSettings(apiKey: string | null): Promise<ChatBackgroundSettings> {
+  const res = await fetch('/v1/chat-background-settings', { headers: authHeaders(apiKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return (await res.json()) as ChatBackgroundSettings;
+}
+
+/** POST /v1/locations/:id/image-broken (endpoint.md §5.2) — the Chat View's background <img>
+ *  onError notifies the server that the CDN link 404'd/expired; the server clears image_url so the
+ *  next visit's cache check sees a miss and re-renders a fresh URL. */
+export async function reportBrokenLocationImage(locationId: string, apiKey: string | null): Promise<void> {
+  await jsonRequest<{ cleared: boolean }>(`/v1/locations/${encodeURIComponent(locationId)}/image-broken`, apiKey, {
+    method: 'POST',
+    body: {},
+  });
 }
 
 /** GET /v1/chats/:id/prompt-preview — the exact system-prompt breakdown and trimmed history an
@@ -411,6 +448,86 @@ export async function adminListConnectionProviders(
  *  (id not found, network failure reaching the orchestrator) throws. */
 export async function adminTestConnection(id: string, adminKey: string | null): Promise<ConnectionTestResult> {
   return jsonRequest<ConnectionTestResult>(`/v1/admin/connections/${encodeURIComponent(id)}/test`, adminKey, { method: 'POST' });
+}
+
+/** The Connections tab's image section full list (io/imageConnections.ts, endpoint.md §3) — every
+ *  admin-managed image generation connection, redacted (no apiKey field; hasApiKey instead, since
+ *  keyless providers legitimately have none). */
+export async function adminListImageConnections(adminKey: string | null): Promise<ImageConnectionSummary[]> {
+  const body = await jsonRequest<{ connections: ImageConnectionSummary[] }>('/v1/admin/image-connections', adminKey);
+  return body.connections;
+}
+
+export function adminCreateImageConnection(
+  input: CreateImageConnectionInput,
+  adminKey: string | null,
+): Promise<ImageConnectionSummary> {
+  return jsonRequest<ImageConnectionSummary>('/v1/admin/image-connections', adminKey, { method: 'POST', body: input });
+}
+
+/** Only send the fields actually changing — apiKey omitted leaves the stored key untouched
+ *  (write-only, never round-tripped back for editing). */
+export function adminUpdateImageConnection(
+  id: string,
+  patch: UpdateImageConnectionInput,
+  adminKey: string | null,
+): Promise<ImageConnectionSummary> {
+  return jsonRequest<ImageConnectionSummary>(`/v1/admin/image-connections/${encodeURIComponent(id)}`, adminKey, {
+    method: 'PATCH',
+    body: patch,
+  });
+}
+
+/** 409s (thrown as ApiError) if `id` is the currently active image connection — activate a
+ *  different one first. */
+export async function adminDeleteImageConnection(id: string, adminKey: string | null): Promise<void> {
+  await jsonRequest<{ deleted: boolean }>(`/v1/admin/image-connections/${encodeURIComponent(id)}`, adminKey, { method: 'DELETE' });
+}
+
+/** Resolves immediately (200, no restart): the active image connection is resolved live on every
+ *  generation call (endpoint.md §5.1.3, bi_principles.md §13), so the switch takes effect on the
+ *  next render — unlike LLM connections, which restart because deps.llm is a boot-time singleton. */
+export async function adminActivateImageConnection(id: string, adminKey: string | null): Promise<void> {
+  await jsonRequest<{ activated: boolean }>(`/v1/admin/image-connections/${encodeURIComponent(id)}/activate`, adminKey, {
+    method: 'POST',
+  });
+}
+
+/** Fires endpoint.md §3.3's diagnostic probe through this saved connection — resolves with
+ *  { ok: false, error } rather than throwing when the provider call itself fails (bad key/model/
+ *  baseUrl/unreachable endpoint); only a genuine route error (id not found) throws. */
+export async function adminTestImageConnection(id: string, adminKey: string | null): Promise<ImageConnectionTestResult> {
+  return jsonRequest<ImageConnectionTestResult>(`/v1/admin/image-connections/${encodeURIComponent(id)}/test`, adminKey, {
+    method: 'POST',
+  });
+}
+
+/** The master image prompt template (endpoint.md §2.2) — read live per generation; an empty
+ *  template means "use the built-in default" (bi_principles.md §18). */
+export async function adminGetImageSettings(adminKey: string | null): Promise<ImageSettings> {
+  return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey);
+}
+
+export function adminSetImageSettings(template: string, adminKey: string | null): Promise<ImageSettings> {
+  return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey, { method: 'POST', body: { template } });
+}
+
+/** GET /v1/admin/chat-background-settings — the SettingsView "Chat Background" toggle's saved
+ *  value (parallax_fade_teststep.md §2.2), admin-gated like every other Settings-tab GET. */
+export function adminGetChatBackgroundSettings(adminKey: string | null): Promise<ChatBackgroundSettings> {
+  return jsonRequest<ChatBackgroundSettings>('/v1/admin/chat-background-settings', adminKey);
+}
+
+/** POST /v1/admin/chat-background-settings — the SettingsView "Chat Background" toggle
+ *  (parallax_fade_teststep.md §2.2). No restart: ChatView re-reads the value live at chat load. */
+export function adminSetChatBackgroundSettings(
+  parallaxEnabled: boolean,
+  adminKey: string | null,
+): Promise<ChatBackgroundSettings> {
+  return jsonRequest<ChatBackgroundSettings>('/v1/admin/chat-background-settings', adminKey, {
+    method: 'POST',
+    body: { parallaxEnabled },
+  });
 }
 
 /** The household's IANA timezone (defaults to "UTC" server-side until ever set) — used to tell

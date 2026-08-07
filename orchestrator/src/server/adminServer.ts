@@ -51,6 +51,24 @@
  * setCredential(store, name, value) — encrypts + upserts the one named credential
  * parseCreateConnectionBody(raw) — validates an LlmConnectionInit; undefined on any malformed shape
  * parseUpdateConnectionBody(raw) — validates an LlmConnectionPatch; undefined on any malformed shape
+ * parseCreateImageConnectionBody(raw) — validates an ImageConnectionInit (apiKey optional — keyless
+ *   providers, endpoint.md §2.1); undefined on any malformed shape
+ * parseUpdateImageConnectionBody(raw) — validates an ImageConnectionPatch; undefined on any malformed
+ *   shape
+ * getImageSettings(store) — { template, templateIsDefault } for the master image prompt template
+ *   (endpoint.md §2.2, bi_principles.md §18; '' = built-in default)
+ * parseSetImageSettingsBody(raw) — validates { template?: string }; undefined on any malformed shape
+ * setImageSettings(store, template) — upserts image_prompt_template
+ * testImageConnection(imageConnections, settings, id) — endpoint.md §3.3's diagnostic probe
+ *   through one saved image connection, synthesized through the Master Image Prompt Template with
+ *   the connection's style prefix (parallax_fade_teststep.md §4.2); undefined only if the id
+ *   doesn't exist, otherwise always a result (a bad key/unreachable endpoint surfaces as
+ *   { ok: false, error }, not a thrown error)
+ * getChatBackgroundSettings(store) — { parallaxEnabled } (default false) for the ChatView
+ *   location-background parallax pan (parallax_fade_teststep.md §2.2)
+ * parseSetChatBackgroundSettingsBody(raw) — validates { parallaxEnabled?: boolean }; undefined on
+ *   any malformed shape
+ * setChatBackgroundSettings(store, enabled) — upserts chat_background_parallax as 'true'/'false'
  * listModelsForConnection(connections, id) — the live model catalog for one saved connection
  *   (or its single static model if the provider kind has no listModels), for the Connections tab
  *   to show before an admin commits to a model choice
@@ -101,6 +119,10 @@ import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
+import type { ImageConnectionInit, ImageConnectionKind, ImageConnectionPatch, ImageConnectionStore } from '../io/imageConnections.js';
+import { createImageGenProvider } from '../io/imageGen/index.js';
+import { parseAspectRatio } from '../io/imageGen/types.js';
+import { synthesizeImagePrompt } from '../util/synthesizeImagePrompt.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
@@ -287,6 +309,257 @@ export async function testConnection(connections: LlmConnectionStore, id: string
     return { ok: true, latencyMs: Date.now() - start, reply: turn.message.content };
   } catch (err) {
     return { ok: false, latencyMs: Date.now() - start, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- Image generation connections (docs/vistalyze_integration/endpoint.md §3) ---
+// The Connections tab's image section CRUD (GET/POST/PATCH/DELETE /v1/admin/image-connections,
+// io/imageConnections.ts), plus the image-settings GET/POST and the per-connection Test button.
+// Same shapes as the LLM-connection functions above, with two differences that fall out of the
+// spec:
+//   * create's apiKey is optional, not "exactly one of apiKey/copyApiKeyFrom" — keyless providers
+//     (pollinations, a local comfyui endpoint) have no key to enter (endpoint.md §2.1).
+//   * activate needs no restart and no 202: the active connection is resolved live on every
+//     generateLocationImage call (bi_principles.md §13), so the route replies 200 immediately.
+// The Test button (endpoint.md §3.3) fires a single, low-cost diagnostic generation probe through
+// the saved connection and reports latency + the generated test Image URL without saving the URL
+// to any location record — the same "reachable-and-failing is a normal { ok: false } result, not a
+// thrown error" contract as testConnection above. The probe prompt is *synthesized* through the
+// real engine (util/synthesizeImagePrompt.ts) with fixed sample inputs — including the
+// connection's own master positive style prefix — so Test shows what this connection will
+// actually render (parallax_fade_teststep.md §4.2), and the exact prompt sent is returned in the
+// result (bi_principles.md §18 — prompts are surfaced, never hidden).
+//
+// NOTE: testImageConnection genuinely calls the provider adapter. Pollinations needs no network
+// (its URL *is* the render request, io/imageGen/pollinations.ts), so for that kind the probe is
+// the URL construction itself — instant and keyless by design.
+
+const IMAGE_KINDS = ['runware', 'fal-ai', 'pollinations', 'comfyui', 'openai-images'] as const;
+
+function isImageKind(value: unknown): value is ImageConnectionKind {
+  return typeof value === 'string' && (IMAGE_KINDS as readonly string[]).includes(value);
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionInit | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const {
+    name,
+    kind,
+    model,
+    apiKey,
+    baseUrl,
+    aspectRatio,
+    samplingSteps,
+    cfgScale,
+    samplerName,
+    masterPositiveStylePrefix,
+    masterNegativePrompt,
+    workflowParameters,
+  } = raw as Record<string, unknown>;
+  if (typeof name !== 'string' || !name.trim()) return undefined;
+  if (!isImageKind(kind)) return undefined;
+  if (typeof model !== 'string' || !model) return undefined;
+  if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
+  if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
+  if (aspectRatio !== undefined && typeof aspectRatio !== 'string') return undefined;
+  if (samplingSteps !== undefined && (typeof samplingSteps !== 'number' || !Number.isInteger(samplingSteps) || samplingSteps <= 0)) {
+    return undefined;
+  }
+  if (cfgScale !== undefined && (typeof cfgScale !== 'number' || !Number.isFinite(cfgScale) || cfgScale <= 0)) return undefined;
+  if (samplerName !== undefined && typeof samplerName !== 'string') return undefined;
+  if (masterPositiveStylePrefix !== undefined && typeof masterPositiveStylePrefix !== 'string') return undefined;
+  if (masterNegativePrompt !== undefined && typeof masterNegativePrompt !== 'string') return undefined;
+  if (workflowParameters !== undefined && !isJsonObject(workflowParameters)) return undefined;
+  return {
+    name: name.trim(),
+    kind,
+    model,
+    apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+    baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
+    aspectRatio: typeof aspectRatio === 'string' ? aspectRatio : undefined,
+    samplingSteps: typeof samplingSteps === 'number' ? samplingSteps : undefined,
+    cfgScale: typeof cfgScale === 'number' ? cfgScale : undefined,
+    samplerName: typeof samplerName === 'string' ? samplerName : undefined,
+    masterPositiveStylePrefix: typeof masterPositiveStylePrefix === 'string' ? masterPositiveStylePrefix : undefined,
+    masterNegativePrompt: typeof masterNegativePrompt === 'string' ? masterNegativePrompt : undefined,
+    workflowParameters: isJsonObject(workflowParameters) ? workflowParameters : undefined,
+  };
+}
+
+// Every field optional (a PATCH); nullable string/jsonb fields additionally accept `null` to
+// explicitly clear a previously-set value, distinct from `undefined` ("leave it alone") — the
+// same three-state shape io/imageConnections.ts's ImageConnectionPatch expects.
+export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPatch | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const {
+    name,
+    kind,
+    model,
+    apiKey,
+    baseUrl,
+    aspectRatio,
+    samplingSteps,
+    cfgScale,
+    samplerName,
+    masterPositiveStylePrefix,
+    masterNegativePrompt,
+    workflowParameters,
+  } = raw as Record<string, unknown>;
+  if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
+  if (kind !== undefined && !isImageKind(kind)) return undefined;
+  if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
+  // apiKey undefined leaves the stored key untouched; empty string is rejected (there's no
+  // "clear the key" — keyless connections are created without one, not rotated to nothing).
+  if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
+  if (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== 'string') return undefined;
+  if (aspectRatio !== undefined && typeof aspectRatio !== 'string') return undefined;
+  if (samplingSteps !== undefined && (typeof samplingSteps !== 'number' || !Number.isInteger(samplingSteps) || samplingSteps <= 0)) {
+    return undefined;
+  }
+  if (cfgScale !== undefined && (typeof cfgScale !== 'number' || !Number.isFinite(cfgScale) || cfgScale <= 0)) return undefined;
+  if (samplerName !== undefined && samplerName !== null && typeof samplerName !== 'string') return undefined;
+  if (masterPositiveStylePrefix !== undefined && masterPositiveStylePrefix !== null && typeof masterPositiveStylePrefix !== 'string') {
+    return undefined;
+  }
+  if (masterNegativePrompt !== undefined && masterNegativePrompt !== null && typeof masterNegativePrompt !== 'string') {
+    return undefined;
+  }
+  if (workflowParameters !== undefined && workflowParameters !== null && !isJsonObject(workflowParameters)) return undefined;
+
+  const patch: ImageConnectionPatch = {};
+  if (name !== undefined) patch.name = (name as string).trim();
+  if (kind !== undefined) patch.kind = kind as ImageConnectionKind;
+  if (model !== undefined) patch.model = model as string;
+  if (apiKey !== undefined) patch.apiKey = apiKey as string;
+  if (baseUrl !== undefined) patch.baseUrl = baseUrl as string | null;
+  if (aspectRatio !== undefined) patch.aspectRatio = aspectRatio as string;
+  if (samplingSteps !== undefined) patch.samplingSteps = samplingSteps as number;
+  if (cfgScale !== undefined) patch.cfgScale = cfgScale as number;
+  if (samplerName !== undefined) patch.samplerName = samplerName as string | null;
+  if (masterPositiveStylePrefix !== undefined) patch.masterPositiveStylePrefix = masterPositiveStylePrefix as string | null;
+  if (masterNegativePrompt !== undefined) patch.masterNegativePrompt = masterNegativePrompt as string | null;
+  if (workflowParameters !== undefined) patch.workflowParameters = workflowParameters as Record<string, unknown> | null;
+  return patch;
+}
+
+// --- Image settings (endpoint.md §2.2, bi_principles.md §18) ---
+// The one orchestrator-settings key this subsystem adds: image_prompt_template, the Master Image
+// Prompt Template synthesizeImagePrompt.ts expands against a location's visual_description/
+// environment. Live-read on every generation call (no restart), empty value = built-in default.
+
+export interface ImageSettings {
+  template: string;
+  templateIsDefault: boolean;
+}
+
+// parallax_fade_teststep.md §2.2: the ChatView location-background parallax toggle. Stored as
+// text 'true'/'false' in orchestrator_settings (migration 0069); unset = false (matching ST
+// Vistalyze's own parallaxEnabled=false default). Read live by the frontend at chat load via
+// GET /v1/chat-background-settings — same no-restart shape as household_timezone.
+export interface ChatBackgroundSettings {
+  parallaxEnabled: boolean;
+}
+
+export async function getChatBackgroundSettings(store: OrchestratorSettingsStore): Promise<ChatBackgroundSettings> {
+  return { parallaxEnabled: (await store.get('chat_background_parallax')) === 'true' };
+}
+
+export function parseSetChatBackgroundSettingsBody(raw: unknown): { parallaxEnabled?: boolean } | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { parallaxEnabled } = raw as Record<string, unknown>;
+  if (parallaxEnabled === undefined) return undefined;
+  if (typeof parallaxEnabled !== 'boolean') return undefined;
+  return { parallaxEnabled };
+}
+
+export async function setChatBackgroundSettings(store: OrchestratorSettingsStore, enabled: boolean): Promise<void> {
+  await store.set('chat_background_parallax', enabled ? 'true' : 'false');
+}
+
+export async function getImageSettings(store: OrchestratorSettingsStore): Promise<ImageSettings> {
+  const template = (await store.get('image_prompt_template')) ?? '';
+  return { template, templateIsDefault: !template };
+}
+
+export function parseSetImageSettingsBody(raw: unknown): { template?: string } | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { template } = raw as Record<string, unknown>;
+  if (template === undefined) return undefined;
+  if (typeof template !== 'string') return undefined;
+  return { template };
+}
+
+export async function setImageSettings(store: OrchestratorSettingsStore, template: string): Promise<void> {
+  await store.set('image_prompt_template', template);
+}
+
+export interface ImageConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  imageUrl?: string;
+  /** The exact synthesized positive prompt that was sent to the provider (parallax_fade_teststep.md
+   *  §4.2) — present on both success and failure so the admin always sees what was sent. */
+  prompt?: string;
+  error?: string;
+}
+
+// endpoint.md §3.3's Test button: a single, low-cost diagnostic generation probe through one
+// saved image connection, reporting latency + the generated test Image URL. The URL is never
+// saved to any location record — this is a probe, not a render. Undefined only for "no such
+// connection" (404); a reachable-but-failing connection (bad key, unreachable endpoint) is a
+// normal { ok: false } result, not a thrown error.
+//
+// The probe prompt is synthesized exactly like a real render (generateLocationImage.ts): fixed
+// sample visual description + environment (the same sample ST's test-step populates), expanded
+// through the Master Image Prompt Template (live-read from the settings store — empty = built-in
+// default) with this connection's master positive style prefix and negative prompt, so Test
+// exercises the same synthesis path a real render does (parallax_fade_teststep.md §4.2).
+const PROBE_VISUAL_DESCRIPTION = 'a serene mountain landscape at golden hour, soft mist over the valley';
+const PROBE_ENVIRONMENT = { time_of_day: 'golden hour', weather: 'clear', mood: 'serene', lighting: 'soft golden light' } as const;
+
+export async function testImageConnection(
+  imageConnections: ImageConnectionStore,
+  settings: OrchestratorSettingsStore,
+  id: string,
+): Promise<ImageConnectionTestResult | undefined> {
+  const profile = await imageConnections.resolveById(id);
+  if (!profile) return undefined;
+  const { positive, negative } = synthesizeImagePrompt({
+    template: (await settings.get('image_prompt_template')) ?? '',
+    visualDescription: PROBE_VISUAL_DESCRIPTION,
+    environment: PROBE_ENVIRONMENT,
+    stylePrefix: profile.masterPositiveStylePrefix ?? '',
+    negativePrompt: profile.masterNegativePrompt ?? '',
+  });
+  const { width, height } = parseAspectRatio(profile.aspectRatio);
+  const start = Date.now();
+  try {
+    const imageUrl = await createImageGenProvider(profile).generate({
+      prompt: positive,
+      negativePrompt: negative,
+      model: profile.model,
+      apiKey: profile.apiKey,
+      baseUrl: profile.baseUrl,
+      width,
+      height,
+      seed: null,
+      steps: profile.samplingSteps,
+      cfgScale: profile.cfgScale,
+      samplerName: profile.samplerName,
+      workflowParameters: profile.workflowParameters,
+    });
+    return { ok: true, latencyMs: Date.now() - start, imageUrl, prompt: positive };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      error: err instanceof Error ? err.message : String(err),
+      prompt: positive,
+    };
   }
 }
 

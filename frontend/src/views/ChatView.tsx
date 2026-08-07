@@ -16,14 +16,18 @@ import {
   deleteMessage,
   forkChat,
   getChat,
+  getChatLocationImage,
+  getChatBackgroundSettings,
   getChatTurnStatus,
   listFolders,
   listToolNames,
+  reportBrokenLocationImage,
   swipeMessage,
   truncateMessagesFrom,
   updateChat,
   uploadAttachment,
 } from '../api/client';
+import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
 import { formatPricePerMillion } from '../api/pricing';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
@@ -126,6 +130,72 @@ function readImageAsBase64(file: File): Promise<string> {
 export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView, onOpenChat }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
+  // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
+  // the scene_id cache pointer, §2.6-filtered). nulls = no eligible rendered location image yet.
+  const [locationImage, setLocationImage] = useState<{ locationId: string; name: string; imageUrl: string } | null>(null);
+
+  // Background fade state machine (parallax_fade_teststep.md §3): when locationImage's URL
+  // changes, the old layer fades out (0.3s), then the src swaps and the new layer fades in (0.6s)
+  // — SillyTavern-Vistalyze's single-layer class-toggle rhythm (style.css fade-out/fade-in), not a
+  // two-image crossfade. bgUrl is the URL actually displayed (it lags locationImage during a fade);
+  // bgFadeClass is the active transition class. The img is deliberately NOT keyed by URL — the key
+  // used to remount it, which made every location change an instant cut.
+  const [bgUrl, setBgUrl] = useState<string | null>(null);
+  const [bgFadeClass, setBgFadeClass] = useState('');
+  const bgFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Parallax (parallax_fade_teststep.md §2): read live from the orchestrator at chat load (the
+  // household-key user gate, same shape as /v1/timezone); the attach effect below only engages
+  // when it's on AND a background image is present.
+  const [parallaxEnabled, setParallaxEnabled] = useState(false);
+  const chatMainRef = useRef<HTMLDivElement | null>(null);
+  const bgRef = useRef<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    getChatBackgroundSettings(apiKey)
+      .then((s) => setParallaxEnabled(s.parallaxEnabled))
+      .catch(() => setParallaxEnabled(false));
+  }, [apiKey]);
+
+  // Attach/dispose the parallax pan (parallax_fade_teststep.md §2.3): the img element persists
+  // across URL fades (it is not keyed), so this effect keys on whether an image is present at
+  // all + the toggle, not on the URL itself. Disposing is mandatory on unmount/disable/chat
+  // switch so no rAF loop outlives this view.
+  useEffect(() => {
+    if (!parallaxEnabled || !bgUrl) return;
+    const container = chatMainRef.current;
+    const img = bgRef.current;
+    if (!container || !img) return;
+    const handle = attachBackgroundParallax(container, img);
+    return () => handle.dispose();
+  }, [parallaxEnabled, bgUrl !== null]);
+
+  useEffect(() => {
+    const next = locationImage?.imageUrl ?? null;
+    // Any pending swap is superseded by this change — even when next equals bgUrl again (the
+    // image bounced back to the current URL mid-fade), the old timer must not fire and swap to a
+    // stale URL.
+    if (bgFadeTimerRef.current) clearTimeout(bgFadeTimerRef.current);
+    if (next === bgUrl) return;
+    if (bgUrl === null) {
+      // First paint (or recovery from a broken link): show immediately — no fade-out of nothing.
+      setBgUrl(next);
+      setBgFadeClass(next ? 'vistalyze-fade-in' : '');
+      return;
+    }
+    // URL changed: fade the old layer out, then swap src and fade the new one in.
+    setBgFadeClass('vistalyze-fade-out');
+    bgFadeTimerRef.current = setTimeout(() => {
+      bgFadeTimerRef.current = null;
+      setBgUrl(next);
+      setBgFadeClass(next ? 'vistalyze-fade-in' : '');
+    }, 300);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locationImage?.imageUrl]);
+
+  useEffect(() => () => {
+    if (bgFadeTimerRef.current) clearTimeout(bgFadeTimerRef.current);
+  }, []);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -220,8 +290,21 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content })));
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load chat'));
+    refreshLocationImage(chatId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
+
+  // endpoint.md §6.4: refresh the chat's active-location background image. Best-effort — a
+  // failure just leaves the previous image (or none), never surfaces an error banner for what is
+  // decorative state.
+  async function refreshLocationImage(chatId: string) {
+    try {
+      const image = await getChatLocationImage(chatId, apiKey);
+      setLocationImage(image.imageUrl ? image : null);
+    } catch {
+      setLocationImage(null);
+    }
+  }
 
   // Tells the owning tab about this chat's identity/title — once when a fresh chat first gets a
   // real id, and again any time the title changes afterward (e.g. the server's auto-title).
@@ -248,6 +331,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     const detail = await getChat(chatId, apiKey);
     setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, swipes: m.swipes })));
     setActiveChat(detail.session);
+    refreshLocationImage(chatId);
   }
 
   async function closeCanvas() {
@@ -522,8 +606,26 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         />
       )}
 
-      <div className="chat-main">
+      <div className="chat-main" ref={chatMainRef}>
         {error && <div className="error-banner">{error}</div>}
+
+        {bgUrl && (
+          // endpoint.md §6.4: the active location's rendered image as the chat background layer,
+          // faded between URLs by the state machine above (parallax_fade_teststep.md §3).
+          // onError = §5.2's broken-link expiry recovery — notify the server to clear the stale
+          // URL (next visit re-renders), then drop the layer rather than showing a broken image.
+          <img
+            ref={bgRef}
+            className={`chat-location-background ${bgFadeClass}`.trim()}
+            src={bgUrl}
+            alt=""
+            aria-hidden="true"
+            onError={() => {
+              reportBrokenLocationImage(locationImage?.locationId ?? '', apiKey).catch(() => {});
+              setLocationImage(null);
+            }}
+          />
+        )}
 
         <div className="chat-header">
           <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
@@ -764,6 +866,8 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           apiKey={apiKey}
           noteId={activeChat.canvasNoteId}
           refreshToken={messages.length}
+          locationImage={locationImage}
+          onLocationImageChanged={() => refreshLocationImage(activeChat.chatId)}
           onClose={closeCanvas}
         />
       )}

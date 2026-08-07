@@ -284,3 +284,34 @@
   color: var(--color-success);
   font-size: var(--font-size-sm);
 }
+
+/* Test-step result panel (parallax_fade_teststep.md §4.3): the generated probe image, the
+   synthesized prompt that produced it, latency and the CDN link. */
+.test-step-image {
+  display: block;
+  max-width: 100%;
+  max-height: 12rem;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  margin: 0.5rem 0;
+}
+.test-step-meta {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  word-break: break-all;
+}
+.test-step-meta a {
+  color: var(--color-accent);
+}
+.test-step-prompt {
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: var(--color-surface-raised, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 10rem;
+  overflow-y: auto;
+}

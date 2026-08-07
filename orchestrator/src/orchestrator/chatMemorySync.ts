@@ -19,7 +19,10 @@
  *
  * One sync pass, per chat, does everything in a single withUserScope transaction: promote that
  * chat's 'proposed' canon_facts to 'approved' (the settling-window auto-approve — see
- * plugins/canonize/src/proposeCanonFactTool.ts), chunk the newly-archived messages
+ * plugins/canonize/src/proposeCanonFactTool.ts), settle the transient locations/characters the
+ * post-cleanup scraper anchored to the archived messages (docs/vistalyze_integration/segway.md
+ * §2.5: active-swipe rows promote to 'permanent', alternate-swipe rows demote to 'inactive'),
+ * chunk the newly-archived messages
  * (chunkChatTranscript.ts), summarize+embed each chunk (classifyChatChunk.ts + the embeddings
  * provider) — always, for both chat kinds, since chat_chunks/recall_chat_history is the one lane
  * that's already correctly RAG-only and needs no divergence — then branch on chat_sessions.kind:
@@ -352,8 +355,13 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       const [chatRow] = await session.query<{ kind: 'chat' | 'rp' }>('select kind from chat_sessions where chat_id = $1', [chatId]);
       const kind = chatRow?.kind ?? 'chat';
 
-      const allMessages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string }>(
-        'select message_id, role, content from chat_messages where chat_id = $1 order by created_at, message_id',
+      const allMessages = await session.query<{
+        message_id: string;
+        role: 'user' | 'assistant';
+        content: string;
+        active_swipe_id: string | null;
+      }>(
+        'select message_id, role, content, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
         [chatId],
       );
 
@@ -386,11 +394,71 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       // The message right before the (turnsToArchive)-th unsynced turn boundary — everything up to
       // there (including the leading greeting, if any) archives; everything from there on stays live.
       const archiveEndIdx = turnsToArchive < unsyncedBoundaries.length ? unsyncedBoundaries[turnsToArchive]! : allMessages.length;
-      const toArchive: ChatTranscriptMessage[] = allMessages.slice(lastSyncedIdx + 1, archiveEndIdx).map((m) => ({
+      const toArchiveRows = allMessages.slice(lastSyncedIdx + 1, archiveEndIdx);
+      const toArchive: ChatTranscriptMessage[] = toArchiveRows.map((m) => ({
         messageId: m.message_id,
         role: m.role,
         content: m.content,
       }));
+
+      // docs/vistalyze_integration/segway.md §2.5 (location_status.md §3 Steps 1-2, generalized to
+      // characters): the transient location/character rows the post-cleanup scraper anchored to
+      // the messages leaving the live window settle here, in the same tick that already
+      // auto-approves canon facts. Continuing play on a swipe is the user's explicit signal that
+      // its timeline happened (bi_principles.md §3), so the active swipe's rows promote to
+      // permanent and every alternate swipe's rows demote to inactive — never deleted. A message
+      // with no active swipe (e.g. a greeting inserted outside the scrape path) anchors nothing,
+      // so it's a no-op.
+      await step('settle_transient_records', async () => {
+        let promotedLocations = 0;
+        let promotedCharacters = 0;
+        let demotedLocations = 0;
+        let demotedCharacters = 0;
+        for (const m of toArchiveRows) {
+          if (!m.active_swipe_id) continue;
+          const promotedLoc = await session.query<{ location_id: string }>(
+            `update locations set status = 'permanent', anchor_swipe_id = null, updated_at = now()
+             where user_id = $1 and status = 'transient' and anchor_swipe_id = $2
+             returning location_id`,
+            [userId, m.active_swipe_id],
+          );
+          promotedLocations += promotedLoc.length;
+          const promotedChar = await session.query<{ character_id: string }>(
+            `update characters set status = 'permanent', anchor_swipe_id = null, updated_at = now()
+             where user_id = $1 and status = 'transient' and anchor_swipe_id = $2
+             returning character_id`,
+            [userId, m.active_swipe_id],
+          );
+          promotedCharacters += promotedChar.length;
+          const demotedLoc = await session.query<{ location_id: string }>(
+            `update locations set status = 'inactive', updated_at = now()
+             where user_id = $1 and status = 'transient' and anchor_swipe_id in (
+               select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+             )
+             returning location_id`,
+            [userId, m.message_id, m.active_swipe_id],
+          );
+          demotedLocations += demotedLoc.length;
+          const demotedChar = await session.query<{ character_id: string }>(
+            `update characters set status = 'inactive', updated_at = now()
+             where user_id = $1 and status = 'transient' and anchor_swipe_id in (
+               select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+             )
+             returning character_id`,
+            [userId, m.message_id, m.active_swipe_id],
+          );
+          demotedCharacters += demotedChar.length;
+        }
+        if (promotedLocations + promotedCharacters + demotedLocations + demotedCharacters > 0) {
+          log.info('chat-memory sync: settled transient location/character records', {
+            chatId,
+            promotedLocations,
+            promotedCharacters,
+            demotedLocations,
+            demotedCharacters,
+          });
+        }
+      });
 
       const chunks = await step('chunk', async () => {
         const [existingChunkCount] = await session.query<{ n: string }>(

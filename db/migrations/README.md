@@ -316,3 +316,42 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Companion to 0057's `chat_sessions.cleanup_preset_id` column; null (unset) chat references keep
   cleanup off. Guarded on the preset name so re-runs can't double-seed after a duplicate.
 
+- `0067_transient_location_and_people.sql` — the schema half of docs/vistalyze_integration/segway.md
+  (transient → permanent/inactive lifecycle for `locations` and `characters`, plus the scene
+  identity everything depends on). `scenes.chat_id` (`on delete cascade`) with a unique
+  `(chat_id, active_location_id)` index makes a scene a per-chat visit record keyed by location
+  rather than one mutable row per chat; `chat_sessions.scene_id` (`on delete set null`) is the
+  cache pointer the turn pipeline's Stage 2 scraper keeps stamped. Both tables gain `status`
+  (`locations` defaulting `'transient'`, `characters` defaulting null — ordinary user-authored
+  characters are neither transient nor inactive, per segway.md §2.4), `anchor_chat_id` (`on
+  delete set null` — deleting a chat must never destroy canon it promoted, same invariant as
+  0054), and `anchor_swipe_id` (`on delete cascade` — deleting the originating turn purges its
+  still-transient/inactive rows). `plugins/locations`' `create_location` writes `status =
+  'permanent'` — a user manually creating a location is the explicit canon signal
+  (bi_principles.md §3) — and the migration backfills pre-existing unanchored rows the same way.
+
+- `0068_image_connections.sql` — the schema half of docs/vistalyze_integration/endpoint.md (the
+  Vistalyze image-generation subsystem). A new `image_connections` table mirrors
+  `llm_connections` (0062): household-wide, no RLS, admin-managed rows for image backends
+  (runware/fal-ai/pollinations/comfyui/openai-images) with `api_key_ciphertext` (nullable —
+  keyless providers like Pollinations have none, unlike LLM keys), per-connection generation
+  defaults (aspect_ratio/sampling_steps/cfg_scale/sampler_name), master positive/negative prompt
+  fragments, and a ComfyUI `workflow_parameters` jsonb graph. `is_active` + the partial unique
+  index is the single active pointer, read live by `resolveActive()` on every generation call —
+  no boot-time singleton, no restart on switch (the spec's §2.2 "Active Image Connection Pointer"
+  settings entry is deliberately not added: it would duplicate this column as a second source of
+  truth, same shape as 0062). `locations.image_path` is renamed to `image_url` (endpoint.md §2.3):
+  the column now means a remote CDN URL, never a local file path — the stateless-media
+  commitment (endpoint.md §1.1). Cache validation (§5.1) compares the location's current
+  visual_description/environment/seed against the new `image_rendered_input` snapshot recorded at
+  the last render — not against `updated_at`, because the post-cleanup scraper bumps `updated_at`
+  on every matched turn even on a no-op merge, which would make a timestamp-based check always
+  miss and defeat the cache-first commitment. Widens
+  `orchestrator_settings.key`'s CHECK with `image_prompt_template` (the master prompt template
+  synthesizeImagePrompt.ts expands, `''` = built-in default per bi_principles.md §18).
+- `0069_chat_background_settings.sql` — widens `orchestrator_settings.key`'s CHECK with
+  `chat_background_parallax` (docs/vistalyze_integration/parallax_fade_teststep.md §2.2): the
+  toggle for the ChatView location-background's parallax pan, read live by the frontend via
+  `GET /v1/chat-background-settings` (same no-restart shape as `household_timezone`), written by
+  the admin-gated SettingsView toggle. Stored as text `'true'`/`'false'`, default false when
+  unset — matching SillyTavern-Vistalyze's own `parallaxEnabled=false` default.

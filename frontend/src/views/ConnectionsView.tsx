@@ -12,6 +12,7 @@ import {
 } from '../api/client';
 import { formatPricePerMillion } from '../api/pricing';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
+import ImageConnectionsSection from '../components/connections/ImageConnectionsSection';
 import type { ConnectionTestResult, LlmConnectionSummary } from '../api/types';
 import './ConnectionsView.css';
 
@@ -363,6 +364,7 @@ export default function ConnectionsView() {
   }
 
   return (
+    <>
     <div className={`connections-view${mobileShowEditor ? ' mobile-editor' : ''}`}>
       <div className="connections-list">
         <div className="connections-list-header">
@@ -643,5 +645,7 @@ export default function ConnectionsView() {
         )}
       </div>
     </div>
+    <ImageConnectionsSection adminKey={adminKey} />
+    </>
   );
 }

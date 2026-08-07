@@ -17,10 +17,12 @@ function assert(cond, message) {
 
 function createFakePool() {
   const locations = [];
+  const chatMessages = []; // {chat_id, active_swipe_id} — §2.6 eligibility
   let counter = 0;
 
   return {
     locations,
+    chatMessages,
     async connect() {
       let scopedUserId;
       return {
@@ -41,16 +43,24 @@ function createFakePool() {
               visual_description: visualDescription,
               environment: JSON.parse(environmentJson),
               seed,
+              status: 'permanent', // createLocationTool.ts writes 'permanent' (user-created = canon)
             };
             locations.push(row);
             return { rows: [{ location_id: row.location_id, name: row.name }] };
           }
 
           if (sql.startsWith('select location_id, name from locations')) {
-            const [userId] = params;
+            const [userId, chatId] = params;
             assert(scopedUserId === userId, 'get_locations is scoped to the requesting user');
+            // segway.md §2.6 eligibility, modeled in JS: transient rows count only when their
+            // anchor is on the calling chat's active swipe path ($2; null chat -> none).
+            const activeSwipeIds = new Set(
+              chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id),
+            );
+            const eligible = (l) =>
+              l.status === 'permanent' || l.status === null || (l.status === 'transient' && activeSwipeIds.has(l.anchor_swipe_id));
             const rows = locations
-              .filter((l) => l.user_id === userId)
+              .filter((l) => l.user_id === userId && eligible(l))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((l) => ({ location_id: l.location_id, name: l.name }));
             return { rows };
@@ -67,10 +77,10 @@ function createFakePool() {
 assert(info.id === 'locations' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is present and matches the required format');
 
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, db: null, credentials: null, settings: null });
-assert(pluginTools.length === 2, 'registerTools returns exactly two tools');
+assert(pluginTools.length === 3, 'registerTools returns exactly three tools (create, list, regenerate image)');
 
 const registry = createToolRegistry(pluginTools);
-for (const name of ['create_location', 'get_locations']) {
+for (const name of ['create_location', 'get_locations', 'regenerate_location_image']) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
 }
 
@@ -128,6 +138,45 @@ assert(threw, 'create_location rejects a non-object environment before reaching 
 // --- cross-user isolation ---
 const crossUser = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
 assert(!crossUser.some((l) => l.locationId === otherUsersLoc.locationId), "another user's location is never visible");
+
+// --- segway.md §2.6: an inactive location must never be model-visible ---------------------------
+{
+  const chatId = 'chat-live';
+  const liveSwipe = 'swipe-live';
+  pool.chatMessages.push({ chat_id: chatId, active_swipe_id: liveSwipe });
+  pool.locations.push({
+    location_id: 'loc-inactive',
+    user_id: userId,
+    name: 'The Dark Cave',
+    visual_description: '',
+    environment: {},
+    seed: null,
+    status: 'inactive', // demoted alternate timeline
+    anchor_swipe_id: 'swipe-dead',
+  });
+  pool.locations.push({
+    location_id: 'loc-transient',
+    user_id: userId,
+    name: 'The Forest Clearing',
+    visual_description: '',
+    environment: {},
+    seed: null,
+    status: 'transient',
+    anchor_swipe_id: liveSwipe,
+  });
+
+  const withoutChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+  assert(
+    !withoutChat.some((l) => l.locationId === 'loc-inactive') && !withoutChat.some((l) => l.locationId === 'loc-transient'),
+    'with no chat context, an inactive and an unproven-transient location are both excluded',
+  );
+
+  const inChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session, chatId }));
+  assert(
+    inChat.some((l) => l.locationId === 'loc-transient') && !inChat.some((l) => l.locationId === 'loc-inactive'),
+    "a transient location on the calling chat's active swipe path is surfaced; an inactive one never is",
+  );
+}
 
 if (process.exitCode) {
   console.error('\nlocations verification FAILED');

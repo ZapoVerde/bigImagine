@@ -2,6 +2,8 @@ import { useRef, useState } from 'react';
 import {
   ApiError,
   adminGetChatMemorySettings,
+  adminGetChatBackgroundSettings,
+  adminGetImageSettings,
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
@@ -11,6 +13,8 @@ import {
   adminListCredentials,
   adminSetChatMemorySettings,
   adminSetCredential,
+  adminSetChatBackgroundSettings,
+  adminSetImageSettings,
   adminSetNotificationSettings,
   adminSetPersonaSettings,
   adminSetPiaProxyUrl,
@@ -18,7 +22,7 @@ import {
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { ChatMemorySettings, CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
+import type { ChatBackgroundSettings, ChatMemorySettings, CredentialSummary, ImageSettings, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
@@ -132,6 +136,17 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
 
+  // Vistalyze image generation (docs/vistalyze_integration/endpoint.md §2.2, bi_principles.md §18).
+  const [imageSettings, setImageSettingsState] = useState<ImageSettings | null>(null);
+  const [selectedImageTemplate, setSelectedImageTemplate] = useState('');
+  const [imageStatus, setImageStatus] = useState('');
+
+  // Chat background parallax (parallax_fade_teststep.md §2.2) — the saved value and the
+  // in-progress selection, mirroring the other toggle fieldsets.
+  const [chatBackgroundParallax, setChatBackgroundParallax] = useState(false);
+  const [selectedParallax, setSelectedParallax] = useState(false);
+  const [chatBackgroundStatus, setChatBackgroundStatus] = useState('');
+
   function applyNotificationSettings(settings: NotificationSettings) {
     setNtfyServerUrl(settings.serverUrl ?? '');
     setSelectedNtfyServerUrl(settings.serverUrl ?? '');
@@ -167,12 +182,22 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedPeopleCuratorPrompt(settings.peopleCuratorPrompt);
   }
 
+  function applyImageSettings(settings: ImageSettings) {
+    setImageSettingsState(settings);
+    setSelectedImageTemplate(settings.template);
+  }
+
+  function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
+    setChatBackgroundParallax(settings.parallaxEnabled);
+    setSelectedParallax(settings.parallaxEnabled);
+  }
+
   // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
   // state (adminKey/checking/unlocked/loadError, the mount-time no-key-then-stored-key probe, the
   // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, connections, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, chatMemorySettingsResult] =
+      const [creds, connections, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, chatMemorySettingsResult, imageSettingsResult, chatBackgroundSettingsResult] =
         await Promise.all([
           adminListCredentials(key),
           adminListConnections(key),
@@ -182,6 +207,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           adminGetPersonaSettings(key),
           adminGetScreenLockSettings(key),
           adminGetChatMemorySettings(key),
+          adminGetImageSettings(key),
+          adminGetChatBackgroundSettings(key),
         ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -194,6 +221,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
       applyChatMemorySettings(chatMemorySettingsResult);
+      applyImageSettings(imageSettingsResult);
+      applyChatBackgroundSettings(chatBackgroundSettingsResult);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };
@@ -226,6 +255,30 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setPiaProxyUrl(selectedPiaProxyUrl);
     setPiaProxyUrlStatus('Saved — takes effect on the next chub import/search call, no restart needed.');
+  }
+
+  async function saveImageSettings() {
+    if (!imageSettings || selectedImageTemplate === imageSettings.template) return;
+    setImageStatus('');
+    try {
+      const updated = await adminSetImageSettings(selectedImageTemplate, adminKey);
+      applyImageSettings(updated);
+      setImageStatus('Saved — applies to the next location render, no restart needed.');
+    } catch (err) {
+      setImageStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+    }
+  }
+
+  async function saveChatBackgroundSettings() {
+    if (selectedParallax === chatBackgroundParallax) return;
+    setChatBackgroundStatus('');
+    try {
+      const updated = await adminSetChatBackgroundSettings(selectedParallax, adminKey);
+      applyChatBackgroundSettings(updated);
+      setChatBackgroundStatus('Saved — takes effect on the next chat view load, no restart needed.');
+    } catch (err) {
+      setChatBackgroundStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
+    }
   }
 
   async function savePersonaSettings() {
@@ -495,6 +548,57 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{personaSettingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Image Generation</legend>
+        <label>
+          Master image prompt template {imageSettings?.templateIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedImageTemplate}
+            onChange={(e) => setSelectedImageTemplate(e.target.value)}
+            rows={8}
+            placeholder="e.g. {{style_prefix}} Concept Art for Video Games, {{visual_description}}, {{time_of_day}}, {{weather}}, {{mood}} lighting…"
+          />
+        </label>
+        <div className="status">
+          Vistalyze's prompt synthesis template (endpoint.md §4.2): macros expanded per render are{' '}
+          <code>{'{{visual_description}}'}</code>, <code>{'{{time_of_day}}'}</code>, <code>{'{{weather}}'}</code>,{' '}
+          <code>{'{{mood}}'}</code>, <code>{'{{lighting}}'}</code> and <code>{'{{style_prefix}}'}</code>. Empty means
+          the built-in default (bi_principles.md §18) — there is no separate reset action; clearing
+          the field is how you ask for the default back.
+        </div>
+        <br />
+        <button
+          onClick={saveImageSettings}
+          disabled={!imageSettings || selectedImageTemplate === imageSettings.template}
+        >
+          Save
+        </button>
+        <div className="status">{imageStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Chat Background</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={selectedParallax}
+            onChange={(e) => setSelectedParallax(e.target.checked)}
+          />{' '}
+          Parallax pan on the chat location background
+        </label>
+        <div className="status">
+          The location background pans gently opposite the pointer / device tilt
+          (parallax_fade_teststep.md §2), matching SillyTavern-Vistalyze's parallax. Off by
+          default; takes effect on the next chat view load.
+        </div>
+        <br />
+        <button onClick={saveChatBackgroundSettings} disabled={selectedParallax === chatBackgroundParallax}>
+          Save
+        </button>
+        <div className="status">{chatBackgroundStatus}</div>
       </fieldset>
 
       <fieldset>

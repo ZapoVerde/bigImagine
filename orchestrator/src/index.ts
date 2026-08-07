@@ -54,6 +54,7 @@ import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispat
 import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
 import { parseLlmProfiles } from './io/llm/profiles.js';
 import { createLlmConnectionStore } from './io/llmConnections.js';
+import { createImageConnectionStore } from './io/imageConnections.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createFieldCipher } from './io/fieldCipher.js';
 import { createAccessIdentityResolver } from './io/accessIdentity.js';
@@ -98,6 +99,7 @@ async function main(): Promise<void> {
   const credentials = createProviderCredentialStore(db, cipher);
   const settings = createOrchestratorSettingsStore(db);
   const llmConnections = createLlmConnectionStore(db, cipher);
+  const imageConnections = createImageConnectionStore(db, cipher);
 
   const voyageKey = await credentials.resolve('voyage_api_key', process.env.BIGBRAIN_EMBEDDINGS_API_KEY);
 
@@ -208,6 +210,7 @@ async function main(): Promise<void> {
     credentials,
     settings,
     llmConnections,
+    imageConnections,
     modelName: 'bigbrain',
     port,
     backupConfigured,

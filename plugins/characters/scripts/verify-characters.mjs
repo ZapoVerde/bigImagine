@@ -61,6 +61,7 @@ function createFakePool() {
               spec_version: 'v2',
               source_json: null,
               avatar_path: null,
+              status: null, // user-authored (create_character leaves the lifecycle column unset)
             };
             characters.push(row);
             return { rows: [{ character_id: row.character_id, name: row.name }] };
@@ -89,10 +90,17 @@ function createFakePool() {
 
           // --- get_characters ---
           if (sql.startsWith('select character_id, name from characters')) {
-            const [userId] = params;
+            const [userId, chatId] = params;
             assert(scopedUserId === userId, 'get_characters is scoped to the requesting user');
+            // segway.md §2.6 eligibility, modeled in JS: transient rows count only when their
+            // anchor is on the calling chat's active swipe path ($2; null chat -> none).
+            const activeSwipeIds = new Set(
+              chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id),
+            );
+            const eligible = (c) =>
+              c.status == null || c.status === 'permanent' || (c.status === 'transient' && activeSwipeIds.has(c.anchor_swipe_id));
             const rows = characters
-              .filter((c) => c.user_id === userId)
+              .filter((c) => c.user_id === userId && eligible(c))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((c) => ({ character_id: c.character_id, name: c.name }));
             return { rows };
@@ -100,9 +108,14 @@ function createFakePool() {
 
           // --- get_character ---
           if (sql.startsWith('select character_id, name, persona')) {
-            const [characterId, userId] = params;
+            const [characterId, userId, chatId] = params;
             assert(scopedUserId === userId, 'get_character is scoped to the requesting user');
-            const row = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+            const activeSwipeIds = new Set(
+              chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id),
+            );
+            const eligible = (c) =>
+              c.status == null || c.status === 'permanent' || (c.status === 'transient' && activeSwipeIds.has(c.anchor_swipe_id));
+            const row = characters.find((c) => c.character_id === characterId && c.user_id === userId && eligible(c));
             if (!row) return { rows: [] };
             return {
               rows: [
@@ -347,6 +360,48 @@ const notFoundDetail = await db.withUserScope(userId, (session) =>
   getOneTool.handler({ characterId: otherUsersChar.characterId }, { userId, db: session }),
 );
 assert(notFoundDetail.found === false, "get_character can't see another user's character");
+
+// --- segway.md §2.6: an inactive character must never be model-visible --------------------------
+{
+  const chatId = 'chat-live';
+  const liveSwipe = 'swipe-live';
+  pool.chatMessages.push({ chat_id: chatId, active_swipe_id: liveSwipe });
+  const inactiveChar = await db.withUserScope(userId, (session) =>
+    createTool.handler({ name: 'Goblin Merchant' }, { userId, db: session }),
+  );
+  const transientChar = await db.withUserScope(userId, (session) =>
+    createTool.handler({ name: 'Night Guard' }, { userId, db: session }),
+  );
+  // Simulate the scraper's lifecycle columns: one demoted to inactive, one transient but anchored
+  // to the live chat's active swipe.
+  const inactiveRow = pool.characters.find((c) => c.character_id === inactiveChar.characterId);
+  inactiveRow.status = 'inactive';
+  inactiveRow.anchor_swipe_id = 'swipe-dead';
+  const transientRow = pool.characters.find((c) => c.character_id === transientChar.characterId);
+  transientRow.status = 'transient';
+  transientRow.anchor_swipe_id = liveSwipe;
+
+  const withoutChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+  assert(
+    !withoutChat.some((c) => c.characterId === inactiveChar.characterId) && !withoutChat.some((c) => c.characterId === transientChar.characterId),
+    'with no chat context, an inactive and an unproven-transient character are both excluded',
+  );
+
+  const inChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session, chatId }));
+  assert(
+    inChat.some((c) => c.characterId === transientChar.characterId) && !inChat.some((c) => c.characterId === inactiveChar.characterId),
+    "a transient character on the calling chat's active swipe path is surfaced; an inactive one never is",
+  );
+
+  const inactiveDetail = await db.withUserScope(userId, (session) =>
+    getOneTool.handler({ characterId: inactiveChar.characterId }, { userId, db: session }),
+  );
+  assert(inactiveDetail.found === false, 'get_character reports not-found for an inactive character');
+  const transientDetail = await db.withUserScope(userId, (session) =>
+    getOneTool.handler({ characterId: transientChar.characterId }, { userId, db: session, chatId }),
+  );
+  assert(transientDetail.found === true, 'get_character returns an eligible transient character when called with chat context');
+}
 
 // --- update_character ---
 const updated = await db.withUserScope(userId, (session) =>

@@ -10,6 +10,12 @@
  * image_path is cache, not source). Scope for a scene and for canon facts' linked_location_id
  * without any image pipeline.
  *
+ * status is written as 'permanent', never left at the migration default ('transient') — a user
+ * manually creating a location is the explicit canon signal (bi_principles.md §3,
+ * docs/vistalyze_integration/segway.md §2.6), so the row stays eligible for the post-cleanup
+ * scraper's name-lookup and for prompt injection. Transient status is reserved for rows the story
+ * auto-registers, which are anchored to a turn's swipe and settle through the sync tick.
+ *
  * @api-declaration
  * createCreateLocationTool() — returns the create_location RegisteredTool
  *
@@ -75,8 +81,8 @@ export function createCreateLocationTool(): RegisteredTool {
         throw new Error('create_location requires a non-empty name: string; optional fields must be strings/object/number');
       }
       const [row] = await ctx.db.query<LocationRow>(
-        `insert into locations (user_id, name, visual_description, environment, seed)
-         values ($1, $2, $3, $4, $5)
+        `insert into locations (user_id, name, visual_description, environment, seed, status)
+         values ($1, $2, $3, $4, $5, 'permanent')
          returning location_id, name`,
         [ctx.userId, args.name.trim(), args.visual_description ?? '', JSON.stringify(args.environment ?? {}), args.seed ?? null],
       );

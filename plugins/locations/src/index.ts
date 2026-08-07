@@ -24,13 +24,15 @@ import type { PluginDeps } from '@bigbrain/orchestrator/plugin-loader';
 import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 import { createCreateLocationTool } from './createLocationTool.js';
 import { createGetLocationsTool } from './getLocationsTool.js';
+import { createGenerateLocationImageTool } from './generateLocationImageTool.js';
 
 export const info = {
   id: 'locations',
   name: 'Locations',
-  description: 'Structured location records: create locations and list them for referencing in scenes and canon facts.',
+  description:
+    'Structured location records: create locations, list them for referencing in scenes and canon facts, and regenerate a location\'s cached image (Vistalyze).',
 };
 
-export async function registerTools(_deps: PluginDeps): Promise<RegisteredTool[]> {
-  return [createCreateLocationTool(), createGetLocationsTool()];
+export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]> {
+  return [createCreateLocationTool(), createGetLocationsTool(), createGenerateLocationImageTool(deps)];
 }

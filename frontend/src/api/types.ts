@@ -176,6 +176,90 @@ export interface ConnectionTestResult {
   error?: string;
 }
 
+// orchestrator/src/io/imageConnections.ts ImageConnectionRow — the Connections tab's image section
+// list/detail shape. No apiKey field (write-only, same as LlmConnectionSummary); hasApiKey instead,
+// since keyless providers (pollinations, local comfyui) legitimately have none.
+export interface ImageConnectionSummary {
+  id: string;
+  name: string;
+  kind: 'runware' | 'fal-ai' | 'pollinations' | 'comfyui' | 'openai-images';
+  model: string;
+  hasApiKey: boolean;
+  baseUrl: string | null;
+  aspectRatio: string;
+  samplingSteps: number;
+  cfgScale: number;
+  samplerName: string | null;
+  masterPositiveStylePrefix: string | null;
+  masterNegativePrompt: string | null;
+  workflowParameters: Record<string, unknown> | null;
+  isActive: boolean;
+  updatedAt: string;
+}
+
+// orchestrator/src/server/adminServer.ts parseCreateImageConnectionBody's expected shape
+// (ImageConnectionInit) — apiKey is optional: keyless providers need none (endpoint.md §2.1).
+export interface CreateImageConnectionInput {
+  name: string;
+  kind: ImageConnectionSummary['kind'];
+  model: string;
+  apiKey?: string;
+  baseUrl?: string;
+  aspectRatio?: string;
+  samplingSteps?: number;
+  cfgScale?: number;
+  samplerName?: string;
+  masterPositiveStylePrefix?: string;
+  masterNegativePrompt?: string;
+  workflowParameters?: Record<string, unknown>;
+}
+
+// orchestrator/src/server/adminServer.ts parseUpdateImageConnectionBody's expected shape
+// (ImageConnectionPatch) — every field optional; string/jsonb fields accept null to explicitly
+// clear a previously-set value.
+export interface UpdateImageConnectionInput {
+  name?: string;
+  kind?: ImageConnectionSummary['kind'];
+  model?: string;
+  /** Omit to leave the stored key untouched — only send when actually rotating it. */
+  apiKey?: string;
+  baseUrl?: string | null;
+  aspectRatio?: string;
+  samplingSteps?: number;
+  cfgScale?: number;
+  samplerName?: string | null;
+  masterPositiveStylePrefix?: string | null;
+  masterNegativePrompt?: string | null;
+  workflowParameters?: Record<string, unknown> | null;
+}
+
+// orchestrator/src/server/adminServer.ts ImageConnectionTestResult — endpoint.md §3.3's diagnostic
+// probe through one saved image connection.
+export interface ImageConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  imageUrl?: string;
+  /** The exact synthesized positive prompt sent to the provider — surfaced so the admin sees what
+   *  the connection will actually render (parallax_fade_teststep.md §4.2, bi_principles §18). */
+  prompt?: string;
+  error?: string;
+}
+
+/** orchestrator/src/server/adminServer.ts ChatBackgroundSettings — parallax_fade_teststep.md §2.2:
+ *  the ChatView location-background parallax toggle. Stored as 'true'/'false' text in
+ *  orchestrator_settings (migration 0069); defaults to false when unset (ST's parallaxEnabled
+ *  default). */
+export interface ChatBackgroundSettings {
+  parallaxEnabled: boolean;
+}
+
+// orchestrator/src/server/adminServer.ts ImageSettings — the master image prompt template
+// (endpoint.md §2.2); '' means "use the built-in default" (bi_principles.md §18).
+export interface ImageSettings {
+  template: string;
+  templateIsDefault: boolean;
+}
+
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions
 export interface ChatParams {
   system?: string;
