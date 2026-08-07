@@ -1579,7 +1579,17 @@ server.close();
     detail.messages[0].role === 'user' && detail.messages[0].content === 'hello there' && detail.messages[1].content === 'terse reply',
     'persisted messages have the right role/content and order',
   );
-  assert(detail.session.title === 'hello there', "an untitled chat's first exchange auto-titles it from the user's message");
+  // Title generation is deliberately async now (httpServer.ts — a second LLM round-trip must
+  // not hold up the reply), so the first exchange's auto-title lands in the background. Wait
+  // for it before asserting, with a short timeout so a genuinely missing title fails loudly
+  // rather than hanging the suite.
+  const titleDeadline = Date.now() + 2000;
+  let titled = detail;
+  while (titled.session.title === 'New chat' && Date.now() < titleDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    titled = await chats3.getChat(userId3, chat.chatId);
+  }
+  assert(titled.session.title === 'hello there', "an untitled chat's first exchange auto-titles it from the user's message");
 
   const withoutChatIdRes = await fetch(`${base3}/v1/chat/completions`, {
     method: 'POST',

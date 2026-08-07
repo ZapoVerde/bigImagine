@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/httpServer.ts
- * @stamp 2026-08-05
+ * @stamp 2026-08-07
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
@@ -1523,17 +1523,31 @@ async function handleChatCompletions(
     // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
     // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
     // fallback keeps a naming hiccup from being visible as a broken turn.
+    // Deliberately *not* awaited: naming the chat is background polish, and the reply the user
+    // is waiting on has no business sitting behind a second LLM round-trip. The call runs
+    // decoupled — the same shape as fireLocationImageGeneration and chatMemorySync.ts's tick —
+    // and the title lands in the DB whenever it lands; the client picks it up on its next chat
+    // refresh (ChatView's refreshActiveMessages re-reads the session). A naming failure still
+    // falls back to the truncated title, and a failed persist is logged, never surfaced.
     if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
-      let title: string;
-      try {
-        title = await runWithCallContext({ taskId: body.chat_id, kind: 'system', userId }, () =>
-          generateChatTitle(turnLlm, latestUserMessage.content, reply),
+      // Const captures for the background task — TypeScript doesn't preserve let/narrowed
+      // variable types inside closures, and these are read after this function has returned.
+      const chatId = body.chat_id;
+      const userMessageText = latestUserMessage.content;
+      void (async () => {
+        let title: string;
+        try {
+          title = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
+            generateChatTitle(turnLlm, userMessageText, reply),
+          );
+        } catch (err) {
+          log.error('generateChatTitle failed, falling back to a truncated title', err);
+          title = userMessageText.slice(0, 60);
+        }
+        await chats.updateChat(userId, chatId, { title }).catch((err) =>
+          log.error(`failed to persist chat title for ${chatId}`, err),
         );
-      } catch (err) {
-        log.error('generateChatTitle failed, falling back to a truncated title', err);
-        title = latestUserMessage.content.slice(0, 60);
-      }
-      await chats.updateChat(userId, body.chat_id, { title });
+      })();
     }
     // Canvas: only when this turn actually touched a note (a tool's own focusHint said so) —
     // omitted entirely otherwise, so an unrelated turn never clears/overwrites the chat's
