@@ -25,8 +25,9 @@
  */
 
 /** The request every io/imageGen adapter receives. width/height are already parsed pixels;
- *  apiKey/baseUrl are the connection's own (null for keyless/local backends); workflowParameters
- *  is the ComfyUI graph (endpoint.md §2.1), ignored by every other adapter. */
+ *  apiKey/baseUrl are the connection's own (null only for a local comfyui endpoint — every
+ *  cloud provider, Pollinations included, requires one); workflowParameters is the ComfyUI
+ *  graph (endpoint.md §2.1), ignored by every other adapter. */
 export interface ImageGenRequest {
   prompt: string;
   negativePrompt: string;

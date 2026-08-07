@@ -14,8 +14,8 @@
  * returned by list(), only decrypted by resolveById/resolveActive, which hand back an
  * ImageConnectionProfile for io/imageGen/index.ts's createImageGenProvider to consume — the one
  * place plaintext ever exists outside this module. Unlike llmConnections, the column is nullable:
- * keyless providers (Pollinations, a local ComfyUI endpoint) legitimately have no key, so
- * hasApiKey is reported rather than assumed.
+ * only a local ComfyUI endpoint legitimately has no key — every cloud provider (Runware, fal.ai,
+ * Pollinations, OpenAI) requires one — so hasApiKey is reported rather than assumed.
  *
  * is_active is enforced to at most one row by 0068's partial unique index, exactly like 0062's
  * llm_connections_one_active; activate() uses the same sequential-statement-within-one-transaction
@@ -33,7 +33,8 @@
  *   adapter from
  * createImageConnectionStore(db, cipher) -> ImageConnectionStore
  *   .list() -> Promise<ImageConnectionRow[]>
- *   .create(init) -> Promise<ImageConnectionRow> — apiKey optional (keyless providers)
+ *   .create(init) -> Promise<ImageConnectionRow> — apiKey optional (only a local comfyui endpoint
+ *     has none; every cloud provider, Pollinations included, requires one)
  *   .update(id, patch) -> Promise<ImageConnectionRow | undefined> — undefined if id doesn't exist
  *   .remove(id) -> Promise<'ok' | 'not_found' | 'is_active'>
  *   .activate(id) -> Promise<boolean> — false if id doesn't exist
@@ -93,7 +94,8 @@ export interface ImageConnectionInit {
   name: string;
   kind: ImageConnectionKind;
   model: string;
-  /** Optional — keyless providers (pollinations, a local comfyui endpoint) have none. */
+  /** Optional — only a local comfyui endpoint has none (every cloud provider, Pollinations
+   *  included, requires a key). */
   apiKey?: string;
   baseUrl?: string;
   aspectRatio?: string;

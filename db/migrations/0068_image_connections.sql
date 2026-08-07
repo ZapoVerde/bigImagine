@@ -9,8 +9,10 @@
 --    household-wide system config with no user_id column and no RLS (0062's own comment explains
 --    why — there is no BigImagine user an admin-managed backend could sensibly be scoped to, and
 --    the only readers are the admin routes and the generation pass, both household-wide).
---    api_key_ciphertext follows io/fieldCipher.ts (AES-256-GCM) and is nullable: keyless
---    providers (Pollinations, local ComfyUI endpoints) legitimately have none, unlike llm_connections
+--    api_key_ciphertext follows io/fieldCipher.ts (AES-256-GCM) and is nullable: only a local
+--    ComfyUI endpoint legitimately has no key — every cloud provider (Runware, fal.ai,
+--    Pollinations, OpenAI) requires one. Pollinations stopped being keyless in 2025; its token
+--    is required and rides as the `token` URL param (io/imageGen/pollinations.ts), unlike llm_connections
 --    where every connection needs a key. is_active is the single active-pointer — enforced by the
 --    partial unique index, read live by io/imageConnections.ts's resolveActive() on every
 --    generateLocationImage call (no boot-time singleton, no restart on switch, per bi_principles.md

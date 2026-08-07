@@ -29,7 +29,7 @@ Created via Migration 0068 (0066 and 0067 are already taken by `0066_cleanup_pre
 * **Name**: Unique human-readable label (for example, "Runware - Flux Dev" or "fal.ai - SDXL").
 * **Kind**: Closed vocabulary text string indicating the provider adapter (for example, runware, fal-ai, pollinations, comfyui, sd-webui, or openai-images).
 * **Model**: Model identifier string passed to the vendor API (for example, runware:100@1 or fal-ai/flux/dev).
-* **API Key Ciphertext**: Write-only API key, encrypted at rest using the server field cipher. Nullable for keyless providers like Pollinations or local endpoints.
+* **API Key Ciphertext**: Write-only API key, encrypted at rest using the server field cipher. Nullable only for a local ComfyUI endpoint — every cloud provider (Runware, fal.ai, Pollinations, OpenAI) requires one; Pollinations stopped being keyless in 2025 (anonymous requests are watermarked and rate-limited).
 * **Base URL**: Endpoint URL (required for local endpoints like ComfyUI or custom proxies; optional for cloud APIs with fixed default endpoints).
 * **Aspect Ratio / Dimensions**: Default output resolution or aspect ratio string (for example, "16:9" or "1024x576").
 * **Sampling Steps**: Integer specifying default inference steps.
@@ -76,7 +76,7 @@ Each provider adapter accepts generation parameters and returns a single **Image
 2. **fal.ai Adapter**:
    Submits generation jobs to fal.ai model endpoints (Flux, SDXL) and returns the direct fal.media CDN image URL.
 3. **Pollinations Adapter**:
-   Formats an instant URL request with prompt, width, height, model, and seed parameters for zero-key fallback rendering. Returns the Pollinations image URL directly.
+   Formats an instant URL request with prompt, width, height, model, seed, and negative-prompt parameters — and REQUIRES the connection's API key, which rides as the `token` query parameter (Pollinations' own extractFromRequest checks `?token=` first; the upstream ST SD-extension proxy sends the same key as an Authorization header). Returns the Pollinations image URL directly; the browser loads it with auth baked in, so the stateless-media commitment (§1.1) holds.
 4. **ComfyUI Adapter**:
    Injects parameters into a local or remote ComfyUI workflow graph and returns the view URL from the ComfyUI server or local image host.
 5. **OpenAI / DALL-E Adapter**:
@@ -149,7 +149,7 @@ Because remote CDN URLs may eventually expire after days or weeks:
 * **`orchestrator/src/io/imageGen/index.ts`**: Provider adapter factory and dispatch layer.
 * **`orchestrator/src/io/imageGen/runware.ts`**: Runware API adapter returning CDN Image URLs.
 * **`orchestrator/src/io/imageGen/falAi.ts`**: fal.ai API adapter returning CDN Image URLs.
-* **`orchestrator/src/io/imageGen/pollinations.ts`**: Pollinations API adapter returning image URLs.
+* **`orchestrator/src/io/imageGen/pollinations.ts`**: Pollinations API adapter returning image URLs — requires the connection key (carried as the `token` URL param; not keyless since 2025).
 * **`orchestrator/src/io/imageGen/comfyUi.ts`**: ComfyUI API adapter returning local/server image URLs.
 * **`orchestrator/src/orchestrator/generateLocationImage.ts`**: Plain async function — cache validation, prompt synthesis, adapter dispatch, Image URL update. This is the real implementation and the only thing the post-cleanup pass calls; see §5.1.
 * **`orchestrator/src/util/synthesizeImagePrompt.ts`**: Pure function macro expansion engine for image prompts.

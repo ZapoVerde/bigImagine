@@ -345,7 +345,7 @@ export default function ImageConnectionsSection({ adminKey }: { adminKey: string
                   value={draft.kind}
                   onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Draft['kind'] }))}
                 >
-                  <option value="pollinations">Pollinations (keyless)</option>
+                  <option value="pollinations">Pollinations</option>
                   <option value="runware">Runware</option>
                   <option value="fal-ai">fal.ai</option>
                   <option value="comfyui">ComfyUI (self-hosted)</option>

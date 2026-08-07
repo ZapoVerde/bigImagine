@@ -51,8 +51,9 @@
  * setCredential(store, name, value) — encrypts + upserts the one named credential
  * parseCreateConnectionBody(raw) — validates an LlmConnectionInit; undefined on any malformed shape
  * parseUpdateConnectionBody(raw) — validates an LlmConnectionPatch; undefined on any malformed shape
- * parseCreateImageConnectionBody(raw) — validates an ImageConnectionInit (apiKey optional — keyless
- *   providers, endpoint.md §2.1); undefined on any malformed shape
+ * parseCreateImageConnectionBody(raw) — validates an ImageConnectionInit (apiKey optional — only
+ *   a local comfyui endpoint has none; every cloud provider, Pollinations included, requires one,
+ *   endpoint.md §2.1); undefined on any malformed shape
  * parseUpdateImageConnectionBody(raw) — validates an ImageConnectionPatch; undefined on any malformed
  *   shape
  * getImageSettings(store) — { template, templateIsDefault } for the master image prompt template
@@ -317,8 +318,9 @@ export async function testConnection(connections: LlmConnectionStore, id: string
 // io/imageConnections.ts), plus the image-settings GET/POST and the per-connection Test button.
 // Same shapes as the LLM-connection functions above, with two differences that fall out of the
 // spec:
-//   * create's apiKey is optional, not "exactly one of apiKey/copyApiKeyFrom" — keyless providers
-//     (pollinations, a local comfyui endpoint) have no key to enter (endpoint.md §2.1).
+//   * create's apiKey is optional, not "exactly one of apiKey/copyApiKeyFrom" — only a local
+//     comfyui endpoint has no key to enter (Pollinations stopped being keyless in 2025; its token
+//     is required and rides as the `token` URL param, endpoint.md §2.1/§3.2.3).
 //   * activate needs no restart and no 202: the active connection is resolved live on every
 //     generateLocationImage call (bi_principles.md §13), so the route replies 200 immediately.
 // The Test button (endpoint.md §3.3) fires a single, low-cost diagnostic generation probe through
@@ -331,8 +333,8 @@ export async function testConnection(connections: LlmConnectionStore, id: string
 // result (bi_principles.md §18 — prompts are surfaced, never hidden).
 //
 // NOTE: testImageConnection genuinely calls the provider adapter. Pollinations needs no network
-// (its URL *is* the render request, io/imageGen/pollinations.ts), so for that kind the probe is
-// the URL construction itself — instant and keyless by design.
+// (its URL *is* the render request, io/imageGen/pollinations.ts) — the probe is the URL
+// construction itself, instant, but it still requires the connection's key and throws without it.
 
 const IMAGE_KINDS = ['runware', 'fal-ai', 'pollinations', 'comfyui', 'openai-images'] as const;
 

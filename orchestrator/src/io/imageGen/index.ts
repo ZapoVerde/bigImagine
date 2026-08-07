@@ -14,8 +14,10 @@
  *
  * Each adapter returns the direct remote CDN Image URL string (endpoint.md §3.2 header) — no
  * image bytes ever touch this process, honoring the stateless-media commitment (endpoint.md §1.1).
- * The pollinations adapter makes no network call at all (its URL *is* the render request), which
- * is exactly why it's the zero-key fallback.
+ * The pollinations adapter makes no network call either (its URL *is* the render request), but it
+ * is NOT keyless — Pollinations has required a token since 2025 (anonymous requests are
+ * watermarked/rate-limited), so the connection's apiKey rides along as the `token` URL param
+ * (io/imageGen/pollinations.ts).
  *
  * @api-declaration
  * createImageGenProvider(profile: ImageConnectionProfile) -> ImageGenProvider

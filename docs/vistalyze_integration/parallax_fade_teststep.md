@@ -130,8 +130,10 @@ made load-bearing:
   steps, CFG, sampler, key, and base URL. A bad key or unreachable endpoint surfaces as
   `{ ok: false, error }` with measured latency — never a throw, never a silent success.
 * `pollinations`: the adapter's `generate()` is URL construction (the URL *is* the render
-  request, `io/imageGen/pollinations.ts` — zero-key by design). This still counts: Test returns
-  a working image URL. The result is instant; latency ≈ 0.
+  request, `io/imageGen/pollinations.ts`). It is NOT keyless — the connection's token rides as
+  the `token` query param (Pollinations requires a key since 2025), and the adapter throws a
+  clear error without one. This still counts: Test returns a working image URL. The result is
+  instant; latency ≈ 0.
 
 The existing `testImageConnection` (`orchestrator/src/server/adminServer.ts:476-503`) already
 meets 4.1's call-side. What follows closes its two gaps.

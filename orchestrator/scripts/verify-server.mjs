@@ -568,7 +568,7 @@ const server = startHttpServer({
       name: 'pollinations-flux',
       kind: 'pollinations',
       model: 'flux',
-      apiKey: null,
+      apiKey: 'fake-poll-token',
       baseUrl: null,
       aspectRatio: '16:9',
       samplingSteps: 30,
@@ -1065,8 +1065,8 @@ assert(
   'GET /v1/admin/image-connections lists every seeded image connection with its isActive flag',
 );
 assert(
-  imgListBody.connections[0].apiKey === undefined && imgListBody.connections[0].hasApiKey === false,
-  'GET /v1/admin/image-connections never leaks an apiKey value; hasApiKey reports the keyless provider',
+  imgListBody.connections[0].apiKey === undefined && imgListBody.connections[0].hasApiKey === true,
+  'GET /v1/admin/image-connections never leaks an apiKey value; hasApiKey reflects the stored key',
 );
 
 const imgCreateNoAuthRes = await fetch(`${base}/v1/admin/image-connections`, {
@@ -1083,17 +1083,18 @@ const imgCreateBadKindRes = await fetch(`${base}/v1/admin/image-connections`, {
 });
 assert(imgCreateBadKindRes.status === 400, 'POST /v1/admin/image-connections rejects an unknown kind');
 
-// A keyless create (pollinations) is valid — unlike llm_connections, apiKey is optional
-// (endpoint.md §2.1).
+// A keyless create (a local comfyui endpoint) is valid — unlike llm_connections, apiKey is
+// optional (endpoint.md §2.1); every cloud provider (Pollinations included) requires one,
+// enforced at render time.
 const imgCreateKeylessRes = await fetch(`${base}/v1/admin/image-connections`, {
   method: 'POST',
   headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
-  body: JSON.stringify({ name: 'pollinations-fallback', kind: 'pollinations', model: 'flux' }),
+  body: JSON.stringify({ name: 'local-comfyui', kind: 'comfyui', model: 'anything', baseUrl: 'http://127.0.0.1:8188' }),
 });
 const imgCreateKeylessBody = await imgCreateKeylessRes.json();
 assert(
-  imgCreateKeylessRes.status === 201 && imgCreateKeylessBody.name === 'pollinations-fallback' && imgCreateKeylessBody.hasApiKey === false,
-  'POST /v1/admin/image-connections accepts a keyless pollinations connection',
+  imgCreateKeylessRes.status === 201 && imgCreateKeylessBody.name === 'local-comfyui' && imgCreateKeylessBody.hasApiKey === false,
+  'POST /v1/admin/image-connections accepts a keyless connection (a local comfyui endpoint)',
 );
 
 const imgCreateWithKeyRes = await fetch(`${base}/v1/admin/image-connections`, {
@@ -1156,7 +1157,8 @@ const imgDeleteOkRes = await fetch(`${base}/v1/admin/image-connections/${imgCrea
 assert(imgDeleteOkRes.status === 200, 'DELETE /v1/admin/image-connections/:id on a non-active connection succeeds');
 
 // The Test button (endpoint.md §3.3): pollinations needs no network (its URL *is* the render
-// request), so the probe returns the constructed URL synchronously.
+// request), so the probe returns the constructed URL — with the connection's token baked in —
+// synchronously.
 const imgTestNoAuthRes = await fetch(`${base}/v1/admin/image-connections/img-conn-pollinations/test`, { method: 'POST' });
 assert(imgTestNoAuthRes.status === 401, 'POST /v1/admin/image-connections/:id/test with no auth header returns 401');
 
@@ -1166,8 +1168,9 @@ const imgTestRes = await fetch(`${base}/v1/admin/image-connections/img-conn-poll
 });
 const imgTestBody = await imgTestRes.json();
 assert(
-  imgTestRes.status === 200 && imgTestBody.ok === true && typeof imgTestBody.imageUrl === 'string' && imgTestBody.imageUrl.includes('image.pollinations.ai'),
-  'POST /v1/admin/image-connections/:id/test for pollinations returns the constructed image URL',
+  imgTestRes.status === 200 && imgTestBody.ok === true && typeof imgTestBody.imageUrl === 'string'
+    && imgTestBody.imageUrl.includes('image.pollinations.ai') && imgTestBody.imageUrl.includes('token=fake-poll-token'),
+  'POST /v1/admin/image-connections/:id/test for pollinations returns the constructed image URL carrying the token',
 );
 
 const imgTestUnknownRes = await fetch(`${base}/v1/admin/image-connections/not-a-real-id/test`, {

@@ -5,12 +5,14 @@
 //     remove (refuses the active row), resolveActive returning the decrypted profile;
 //   - util/synthesizeImagePrompt.ts + io/imageGen dispatch are exercised indirectly through
 //     generateLocationImage below (the pollinations adapter needs no fetch, so it works with no
-//     network at all);
+//     network at all), and io/imageGen/runware.ts's wire shape is pinned directly against a
+//     mocked fetch (Bearer header + array body + imageInference taskType + positivePrompt/
+//     CFGScale/scheduler field names — the proven REST contract, not the legacy WS-era shape);
 //   - orchestrator/generateLocationImage.ts: cache hit (updated_at <= image_generated_at → no
 //     provider call), cache miss on a touched row, miss on a null image_url, no-active-connection
 //     fail-open, unknown-location fail-open, and the URL + image_generated_at write-back;
-//   - endpoint.md §3.3's testImageConnection probe for the keyless pollinations kind (URL
-//     constructed, no fetch).
+//   - endpoint.md §3.3's testImageConnection probe for the pollinations kind (URL constructed,
+//     no fetch — but the key is required, see below).
 
 import { randomBytes } from 'node:crypto';
 import { createFieldCipher } from '../dist/io/fieldCipher.js';
@@ -18,6 +20,7 @@ import { createPostgresClient } from '../dist/io/postgres.js';
 import { createImageConnectionStore } from '../dist/io/imageConnections.js';
 import { generateLocationImage } from '../dist/orchestrator/generateLocationImage.js';
 import { parseAspectRatio } from '../dist/io/imageGen/types.js';
+import { generateRunwareImage } from '../dist/io/imageGen/runware.js';
 import { testImageConnection } from '../dist/server/adminServer.js';
 import { createOrchestratorSettingsStore } from '../dist/io/orchestratorSettings.js';
 
@@ -211,8 +214,8 @@ assert(
   'the stored api_key_ciphertext is encrypted, not the plaintext key',
 );
 
-const keyless = await imageConnections.create({ name: 'pollinations-fallback', kind: 'pollinations', model: 'flux' });
-assert(keyless.hasApiKey === false, 'a keyless connection (pollinations) is created without a key');
+const keyless = await imageConnections.create({ name: 'local-comfyui', kind: 'comfyui', model: 'anything', baseUrl: 'http://127.0.0.1:8188' });
+assert(keyless.hasApiKey === false, 'a keyless connection (a local comfyui endpoint) is created without a key');
 
 const listed = await imageConnections.list();
 assert(
@@ -240,6 +243,90 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
 // --- parseAspectRatio (pure) ---
 assert(parseAspectRatio('16:9').width === 1344 && parseAspectRatio('16:9').height === 768, '16:9 parses to native Flux/SDXL pixels');
 assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').height === 1024, 'an unknown ratio falls back to square');
+
+// --- io/imageGen/runware.ts: the wire shape must match the live REST contract ---
+// Pins the proven request contract (Authorization: Bearer header, ARRAY body, taskType
+// imageInference, positivePrompt/negativePrompt/CFGScale/scheduler field names) verified
+// against the stack's own Canvalyze route (plugin/routes/runware.js) and the official SDK
+// (Runware/runware-typescript, schema 2026-07-30). The legacy WebSocket-era shape (apiKey in
+// body, 'imageGeneration', 'prompt', 'cfgScale') would 401 / validation-fail live — this is the
+// regression guard for that half-migration.
+{
+  const realFetch = global.fetch;
+  let captured;
+  global.fetch = async (url, init) => {
+    captured = { url, init };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://cdn.runware.ai/img/abc.jpg' }] }),
+    };
+  };
+  try {
+    const url = await generateRunwareImage({
+      prompt: 'a harbor at dusk',
+      negativePrompt: 'blurry',
+      model: 'runware:z-image@turbo',
+      apiKey: 'sk-rw-test',
+      baseUrl: null,
+      width: 1344,
+      height: 768,
+      seed: 42,
+      steps: 8,
+      cfgScale: 7,
+      samplerName: 'Euler a',
+      workflowParameters: null,
+    });
+    assert(url === 'https://cdn.runware.ai/img/abc.jpg', 'the runware adapter returns the CDN imageURL from the response');
+    assert(captured.url === 'https://api.runware.ai/v1' && captured.init.method === 'POST', 'the runware adapter POSTs the REST endpoint');
+    assert(captured.init.headers.authorization === 'Bearer sk-rw-test', 'the runware adapter authenticates with an Authorization: Bearer header');
+    const sent = JSON.parse(captured.init.body);
+    const task = sent[0];
+    assert(Array.isArray(sent), 'the runware adapter sends an ARRAY of tasks (the documented REST body shape)');
+    assert(task.taskType === 'imageInference', 'the runware adapter uses taskType imageInference (imageGeneration is the legacy WebSocket-era type)');
+    assert(task.positivePrompt === 'a harbor at dusk' && task.negativePrompt === 'blurry', 'the runware adapter maps prompt/negative to positivePrompt/negativePrompt');
+    assert(task.model === 'runware:z-image@turbo' && task.width === 1344 && task.height === 768, 'the runware adapter forwards model and pixel dimensions');
+    assert(task.CFGScale === 7 && task.steps === 8, 'the runware adapter sends CFGScale (capital) and steps');
+    assert(task.scheduler === 'Euler a' && task.samplerName === undefined, 'the runware adapter maps sampler_name to Runware\'s scheduler field');
+    assert(task.seed === 42 && task.numberResults === 1 && task.outputType[0] === 'URL' && task.outputFormat === 'JPG' && task.checkNSFW === false,
+      'the runware adapter sends seed, numberResults, a URL output type and checkNSFW=false (Canvalyze\'s proven base task)');
+    assert(task.apiKey === undefined, 'the runware adapter never puts the apiKey in the body (it lives in the Bearer header)');
+    assert(task.taskUUID && task.taskUUID.length > 0, 'the runware adapter gives each task a taskUUID for response correlation');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// --- io/imageGen/runware.ts: task-level errorCode and missing imageURL surface as clear errors ---
+{
+  const realFetch = global.fetch;
+  const base = { prompt: 'x', negativePrompt: '', model: 'runware:100@1', apiKey: 'k', baseUrl: null, width: 1024, height: 1024, seed: null, steps: 30, cfgScale: 7, samplerName: null, workflowParameters: null };
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ taskUUID: 't', errorCode: 'INVALID_PROMPT', message: 'bad prompt' }] }) });
+  try {
+    let threw = false;
+    try {
+      await generateRunwareImage(base);
+    } catch (e) {
+      threw = /INVALID_PROMPT/.test(e.message) && /bad prompt/.test(e.message);
+    }
+    assert(threw, 'the runware adapter surfaces task-level errorCode with its message');
+  } finally {
+    global.fetch = realFetch;
+  }
+  global.fetch = async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ taskUUID: 't' }] }) });
+  try {
+    let threw = false;
+    try {
+      await generateRunwareImage(base);
+    } catch (e) {
+      threw = /no imageURL/.test(e.message);
+    }
+    assert(threw, 'the runware adapter throws a clear error when the response has no imageURL');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
 
 // --- generateLocationImage: cache hit (image + matching input snapshot) ---
 {
@@ -271,14 +358,17 @@ assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').hei
     image_rendered_input: { visual_description: 'A mossy clearing', environment: { time_of_day: 'dusk' }, seed: 7 },
   });
   // The active connection is runware (activated above) — make it pollinations instead so the
-  // miss path needs no network. Simulate by activating a keyless pollinations row.
-  const poll = await imageConnections.create({ name: 'poll', kind: 'pollinations', model: 'flux' });
+  // miss path needs no network. Pollinations is NOT keyless (anonymous requests are
+  // watermarked/rate-limited since 2025), so the row carries a token and the adapter bakes it
+  // into the URL as `token` (io/imageGen/pollinations.ts).
+  const poll = await imageConnections.create({ name: 'poll', kind: 'pollinations', model: 'flux', apiKey: 'poll-token-123' });
   await imageConnections.activate(poll.id);
   const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-miss');
   assert(result.ok === true && result.cached !== true, 'a touched row is a cache miss and re-renders');
   assert(
-    typeof result.imageUrl === 'string' && result.imageUrl.startsWith('https://image.pollinations.ai/prompt/'),
-    'the pollinations adapter returns its constructed URL (no network needed)',
+    typeof result.imageUrl === 'string' && result.imageUrl.startsWith('https://image.pollinations.ai/prompt/')
+      && result.imageUrl.includes('token=poll-token-123'),
+    'the pollinations adapter returns its constructed URL carrying the connection token (no network needed)',
   );
   const row = pool.locations.find((l) => l.location_id === 'loc-miss');
   assert(row.image_url === result.imageUrl && row.image_generated_at !== null, 'the new URL + image_generated_at are written back to the location row');
@@ -367,7 +457,7 @@ assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').hei
   assert(transientForeignChat.ok === false && transientForeignChat.error === 'location_not_found', "a transient location anchored to a different chat's swipe is not eligible");
 
   // Re-activate a connection — the "no active connection" test above cleared every is_active flag.
-  const pollAgain = await imageConnections.create({ name: 'poll-again', kind: 'pollinations', model: 'flux' });
+  const pollAgain = await imageConnections.create({ name: 'poll-again', kind: 'pollinations', model: 'flux', apiKey: 'poll-token-456' });
   await imageConnections.activate(pollAgain.id);
   const transientLiveChat = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-transient-live', chatId);
   assert(transientLiveChat.ok === true && typeof transientLiveChat.imageUrl === 'string', "a transient location on the calling chat's active swipe path renders normally");
@@ -375,7 +465,7 @@ assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').hei
 
 // --- endpoint.md §3.3 testImageConnection probe (pollinations: URL constructed, no fetch) ---
 {
-  const probe = await imageConnections.create({ name: 'probe', kind: 'pollinations', model: 'flux' });
+  const probe = await imageConnections.create({ name: 'probe', kind: 'pollinations', model: 'flux', apiKey: 'probe-token' });
   const testResult = await testImageConnection(imageConnections, settings, probe.id);
   assert(
     testResult?.ok === true && typeof testResult.imageUrl === 'string' && decodeURIComponent(testResult.imageUrl).includes('serene mountain landscape'),
@@ -388,12 +478,34 @@ assert(parseAspectRatio('bogus').width === 1024 && parseAspectRatio('bogus').hei
   assert((await testImageConnection(imageConnections, settings, 'missing')) === undefined, 'the Test probe for an unknown id returns undefined (404 at the route)');
 }
 
+// --- pollinations without a key is a loud, structured failure (not keyless anymore) ---
+{
+  pool.locations.push({
+    location_id: 'loc-nokey',
+    user_id: USER,
+    visual_description: 'A windmill at noon',
+    environment: {},
+    seed: null,
+    image_url: null,
+    image_generated_at: null,
+    updated_at: new Date().toISOString(),
+  });
+  const noKey = await imageConnections.create({ name: 'poll-nokey', kind: 'pollinations', model: 'flux' });
+  await imageConnections.activate(noKey.id);
+  const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-nokey');
+  assert(
+    result.ok === false && typeof result.error === 'string' && result.error.includes('apiKey is required'),
+    'a pollinations connection without a key fails with a clear structured error, not a silent anonymous render',
+  );
+}
+
 // --- probe prompt is *synthesized*: the connection's master positive style prefix must appear ---
 {
   const styled = await imageConnections.create({
     name: 'probe-styled',
     kind: 'pollinations',
     model: 'flux',
+    apiKey: 'probe-style-token',
     masterPositiveStylePrefix: 'cinematic 35mm film, anamorphic lens flare',
     masterNegativePrompt: 'blurry, low quality',
   });
