@@ -118,6 +118,55 @@ body {
   min-width: 0;
 }
 
+/* Mobile: the chat's top bars collapse up when the user scrolls down the history and come back on
+   scroll-up or a pull-down at the top (ChatView.tsx's handleHistoryScroll + pull gesture). Both
+   collapsible stacks — .app-top-bars (TabStrip + TimerStrip) and .chat-top-bar (the chat header)
+   — are single-row grids whose row height App animates between 1fr and 0fr (the standard
+   animate-height-to-zero trick: the child needs min-height:0 + overflow:hidden so it can shrink
+   and clip). During the pull the gesture sets an inline px track on the wrappers so the bars
+   follow the finger. Desktop keeps the bars permanently visible — the whole block is
+   breakpoint-gated, so even a stale .top-bars-hidden class can't hide anything wide-screen. */
+@media (max-width: 768px) {
+  .app-top-bars,
+  .chat-top-bar {
+    display: grid;
+    grid-template-rows: 1fr;
+    transition: grid-template-rows 0.25s ease;
+    flex-shrink: 0;
+  }
+
+  .app-top-bars > *,
+  .chat-top-bar > * {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* Column shim so TabStrip + TimerStrip stack inside the single collapsing grid row. */
+  .app-top-bars-inner {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app.top-bars-hidden .app-top-bars,
+  .app.top-bars-hidden .chat-top-bar {
+    grid-template-rows: 0fr;
+  }
+
+  /* Direct-manipulation phase of the pull gesture: the drag sets an inline px track, so
+     transitions must not fight the finger. */
+  .app.top-bars-dragging .app-top-bars,
+  .app.top-bars-dragging .chat-top-bar {
+    transition: none;
+  }
+
+  /* The mobile sidebar and settings-rail drawers anchor below the tab bar (top: var(--topbar-
+     height)); with the bars collapsed there's no bar left to clear, so they start at the top. */
+  .app.top-bars-hidden .sidebar,
+  .app.top-bars-hidden .chat-settings-rail {
+    top: 0;
+  }
+}
+
 .tab-bar {
   display: flex;
   align-items: center;

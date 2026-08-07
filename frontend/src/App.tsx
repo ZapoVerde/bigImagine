@@ -49,6 +49,18 @@ export default function App() {
   // above.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 768);
 
+  // Mobile chat only: the top bars (TabStrip + TimerStrip + the chat header) collapse up when the
+  // user scrolls down the chat history and come back on scroll-up or a pull-down at the top —
+  // ChatView drives this via onTopBarsHiddenChange; the class below is what actually collapses
+  // them (App.css, .app.top-bars-hidden). Lifted here because the bars straddle the App/ChatView
+  // boundary (TabStrip is App's, the chat header is ChatView's), and reset on any tab switch so
+  // non-chat views never inherit a collapsed bar they have no bottom control to bring back.
+  const [topBarsHidden, setTopBarsHidden] = useState(false);
+
+  useEffect(() => {
+    setTopBarsHidden(false);
+  }, [activeTabId]);
+
   // Sidebar/view picker state for the singleton notes tab — lifted here because the sidebar's
   // browser and the tab's detail view are siblings, not parent/child. The "changed" callback
   // bumps the refresh key so the sidebar's browser (which owns its own fetch) knows to re-fetch
@@ -109,7 +121,7 @@ export default function App() {
   const activeTab = tabs.find((t) => t.id === activeTabId);
 
   return (
-    <div className="app">
+    <div className={topBarsHidden ? 'app top-bars-hidden' : 'app'}>
       <ScreenLockOverlay apiKey={apiKey} />
       {showBackupWarning && (
         <BackupWarningModal
@@ -132,25 +144,32 @@ export default function App() {
         notesRefreshKey={notesRefreshKey}
       />
       <div className="app-main">
-        <TabStrip
-          tabs={tabs}
-          activeId={activeTabId}
-          onSelect={focus}
-          onClose={close}
-          onNew={openBlank}
-          onOpenSettings={() => summon('settings')}
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
-          onChangeKey={
-            auth.mode === 'key'
-              ? () => {
-                  localStorage.removeItem(API_KEY_STORAGE_KEY);
-                  setAuth({ mode: 'locked' });
-                }
-              : undefined
-          }
-        />
-        <TimerStrip apiKey={apiKey} />
+        {/* .app-top-bars is a collapsing single-row grid (App.css); the inner column shim keeps
+            TabStrip and TimerStrip stacked vertically so the grid always has exactly one child
+            to collapse. */}
+        <div className="app-top-bars">
+          <div className="app-top-bars-inner">
+            <TabStrip
+              tabs={tabs}
+              activeId={activeTabId}
+              onSelect={focus}
+              onClose={close}
+              onNew={openBlank}
+              onOpenSettings={() => summon('settings')}
+              sidebarCollapsed={sidebarCollapsed}
+              onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
+              onChangeKey={
+                auth.mode === 'key'
+                  ? () => {
+                      localStorage.removeItem(API_KEY_STORAGE_KEY);
+                      setAuth({ mode: 'locked' });
+                    }
+                  : undefined
+              }
+            />
+            <TimerStrip apiKey={apiKey} />
+          </div>
+        </div>
         {tabs.map((tab) => (
           <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
             {tab.type === 'blank' && (
@@ -166,6 +185,8 @@ export default function App() {
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onSwitchView={summon}
                 onOpenChat={openChat}
+                topBarsHidden={topBarsHidden}
+                onTopBarsHiddenChange={setTopBarsHidden}
               />
             )}
             {tab.type === 'rp' && (
@@ -176,6 +197,8 @@ export default function App() {
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onSwitchView={summon}
                 onOpenChat={openChat}
+                topBarsHidden={topBarsHidden}
+                onTopBarsHiddenChange={setTopBarsHidden}
               />
             )}
             {tab.type === 'notes' && (

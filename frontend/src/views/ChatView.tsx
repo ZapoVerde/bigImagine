@@ -82,6 +82,13 @@ interface ChatViewProps {
   /** Focuses (or opens) a chat tab by id — used by the "Fork from here" action to jump straight
    *  to the new branch once it's created (useTabs.ts's openChat). */
   onOpenChat?: (chatId: string, title?: string) => void;
+  /** Mobile-only: whether the app-level top bars (TabStrip + TimerStrip + this chat's header) are
+   *  currently collapsed away — owned by App.tsx, which applies .app.top-bars-hidden. ChatView
+   *  both drives it (scroll-down on the history collapses, scroll-up / pull-down-at-top restores)
+   *  and reads it (to gate the pull gesture on the bars actually being hidden). */
+  topBarsHidden: boolean;
+  /** Ask the app to collapse (true) or restore (false) the top bars. */
+  onTopBarsHiddenChange: (hidden: boolean) => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -134,7 +141,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView, onOpenChat }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView, onOpenChat, topBarsHidden, onTopBarsHiddenChange }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -281,6 +288,26 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
   const historyRef = useRef<HTMLDivElement | null>(null);
   const chatMenuRef = useRef<HTMLDivElement | null>(null);
+  // Second mount of the ☰ chat menu, in the mobile input row opposite Send (the desktop copy
+  // lives in the chat header). Only one is visible at a time — CSS hides the header one on
+  // mobile and the row one on desktop — but both need to participate in outside-click closing.
+  const chatMenuMobileRef = useRef<HTMLDivElement | null>(null);
+
+  // Mobile collapsing top bars (App.css's .app.top-bars-hidden): scroll-down on the history
+  // collapses the TabStrip/TimerStrip/chat-header, scroll-up restores them, and pulling down at
+  // the top is the finger-driven version of the same reveal. Mirrored in a ref so the scroll and
+  // touch handlers can read the latest value without re-subscribing.
+  const topBarsHiddenRef = useRef(topBarsHidden);
+  const lastHistoryScrollTopRef = useRef(0);
+  // Pull-down gesture state: where the drag started, and how far the bars have been pulled (the
+  // touchend snap threshold reads it). Plain refs — mid-drag the bars follow via direct DOM
+  // writes (applyTopBarPull), no re-render needed.
+  const pullStartRef = useRef<{ x: number; y: number } | null>(null);
+  const pullRef = useRef(0);
+
+  useEffect(() => {
+    topBarsHiddenRef.current = topBarsHidden;
+  }, [topBarsHidden]);
 
   useEffect(() => {
     listFolders(apiKey).then(setFolders).catch(() => {});
@@ -291,6 +318,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Loads the chat this tab was opened for. Guarded so the round trip through onChatCreated below
   // (parent hands the new id back as a prop) doesn't trigger a redundant refetch.
   useEffect(() => {
+    lastHistoryScrollTopRef.current = 0;
     if (!chatId) {
       setActiveChat(null);
       setMessages([]);
@@ -324,12 +352,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
-  // Close the header hamburger menu on outside click or Escape. Only mounted while the menu is
-  // open, so the listeners cost nothing when it isn't.
+  // Close the ☰ chat menu (either mount — header or mobile input row) on outside click or
+  // Escape. Only mounted while the menu is open, so the listeners cost nothing when it isn't.
   useEffect(() => {
     if (!chatMenuOpen) return;
     const onPointerDown = (e: MouseEvent) => {
-      if (chatMenuRef.current && !chatMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      const insideHeader = chatMenuRef.current?.contains(target);
+      const insideRow = chatMenuMobileRef.current?.contains(target);
+      if (!insideHeader && !insideRow) {
         setChatMenuOpen(false);
       }
     };
@@ -343,6 +374,101 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       document.removeEventListener('keydown', onKeyDown);
     };
   }, [chatMenuOpen]);
+
+  // --- Mobile collapsing top bars (App.css's .app.top-bars-hidden) ---
+  // Scrolling down the history collapses the TabStrip/TimerStrip/chat-header; scrolling up (or
+  // pulling down at the top, below) restores them. Everything here is gated on the 768px
+  // breakpoint — desktop keeps the bars permanently, and only the active, scrolling chat drives
+  // the state (inactive tabs are display:none, so they never scroll).
+  const updateTopBars = (hidden: boolean) => {
+    if (topBarsHiddenRef.current === hidden) return;
+    onTopBarsHiddenChange(hidden);
+  };
+
+  const handleHistoryScroll = () => {
+    const el = historyRef.current;
+    if (!el || window.innerWidth >= 768) return;
+    const delta = el.scrollTop - lastHistoryScrollTopRef.current;
+    lastHistoryScrollTopRef.current = el.scrollTop;
+    // Small scroll-up at the top shouldn't collapse: require a real downward scroll and some
+    // distance from the top before hiding, but restore on any upward scroll.
+    if (delta > 6 && el.scrollTop > 60) updateTopBars(true);
+    else if (delta < -6) updateTopBars(false);
+  };
+
+  // Direct manipulation during the pull: both collapsing wrappers (.app-top-bars, .chat-top-bar)
+  // follow the finger via an inline px row height, with transitions disabled (the app-level
+  // .top-bars-dragging class) so they don't fight the drag. On release the inline styles are
+  // cleared and the class-driven 0fr/1fr transition animates the snap.
+  const applyTopBarPull = (px: number) => {
+    const appEl = chatMainRef.current?.closest('.app');
+    if (!(appEl instanceof HTMLElement)) return;
+    appEl.classList.add('top-bars-dragging');
+    appEl.querySelectorAll<HTMLElement>('.app-top-bars, .chat-top-bar').forEach((el) => {
+      el.style.gridTemplateRows = `${px}px`;
+    });
+  };
+  const clearTopBarPull = () => {
+    const appEl = chatMainRef.current?.closest('.app');
+    if (!(appEl instanceof HTMLElement)) return;
+    appEl.classList.remove('top-bars-dragging');
+    appEl.querySelectorAll<HTMLElement>('.app-top-bars, .chat-top-bar').forEach((el) => {
+      el.style.gridTemplateRows = '';
+    });
+  };
+
+  const handleHistoryTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (window.innerWidth >= 768 || !topBarsHiddenRef.current) return;
+    const t = e.touches[0];
+    if (t) pullStartRef.current = { x: t.clientX, y: t.clientY };
+  };
+  // touchcancel lands here too (React's onTouchCancel): a dropped gesture (system alert,
+  // edge swipe, etc.) must still clear the drag or the bars would stick at partial height.
+  const handleHistoryTouchEnd = () => {
+    const start = pullStartRef.current;
+    pullStartRef.current = null;
+    if (!start || window.innerWidth >= 768) return;
+    clearTopBarPull();
+    // Snap: pulled past ~40 of the 72px cap -> reveal, otherwise collapse back.
+    updateTopBars(pullRef.current < 40);
+    pullRef.current = 0;
+  };
+
+  // The touchmove listener must be native and non-passive so preventDefault actually stops the
+  // browser's own overscroll/pull-to-refresh while the user drags the bars down from the top
+  // (React's synthetic touchmove is registered passive and can't preventDefault).
+  useEffect(() => {
+    const el = historyRef.current;
+    if (!el) return;
+    const onTouchMove = (e: TouchEvent) => {
+      if (window.innerWidth >= 768 || !topBarsHiddenRef.current) return;
+      const start = pullStartRef.current;
+      if (!start) return;
+      // Pull-to-reveal only makes sense at the very top — anywhere else a downward drag is
+      // ordinary scrolling toward older messages and must not be hijacked (a hijacked one
+      // would also preventDefault, which would block that scroll entirely).
+      if ((historyRef.current?.scrollTop ?? 0) !== 0) return;
+      const touch = e.touches[0];
+      if (!touch) return;
+      const dy = touch.clientY - start.y;
+      const dx = Math.abs(touch.clientX - start.x);
+      // Dominant downward drag only — never hijack the horizontal swipe gesture on bubbles.
+      if (dy <= 12 || dy < dx) return;
+      e.preventDefault();
+      const pull = Math.min(dy, 72);
+      pullRef.current = pull;
+      applyTopBarPull(pull);
+    };
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    return () => {
+      el.removeEventListener('touchmove', onTouchMove);
+      // Unmount mid-drag must not leave the App-level wrappers stuck at a partial height.
+      clearTopBarPull();
+      pullRef.current = 0;
+      pullStartRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Escape exits selection mode too, same as it closes the hamburger menu.
   useEffect(() => {
@@ -709,6 +835,76 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
+  // Shared between the desktop header ☰ and the mobile input-row ☰ — the same five items, two
+  // mounts (ChatView.css hides the header copy on mobile and the row copy on desktop). One
+  // chatMenuOpen state serves both.
+  const chatMenuItems = (
+    <>
+      <button
+        type="button"
+        role="menuitem"
+        title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
+        onClick={() => {
+          setPromptInspectorOpen((v) => !v);
+          setChatMenuOpen(false);
+        }}
+      >
+        🧾 {promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect prompt'}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
+        onClick={() => {
+          setBranchMapOpen((v) => !v);
+          setChatMenuOpen(false);
+        }}
+      >
+        🌳 {branchMapOpen ? 'Hide branch map' : 'Branch map'}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        title={
+          syncStatusOpen
+            ? 'Hide sync status'
+            : 'When the background memory sync last ran for this chat, and when the next one is due'
+        }
+        onClick={() => {
+          setSyncStatusOpen((v) => !v);
+          setChatMenuOpen(false);
+        }}
+      >
+        🔄 {syncStatusOpen ? 'Hide sync status' : 'Sync status'}
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        title="Attach a file or image"
+        disabled={attaching}
+        onClick={() => {
+          fileInputRef.current?.click();
+          setChatMenuOpen(false);
+        }}
+      >
+        📎 Attach file or image
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        title="Select messages to delete"
+        disabled={messages.length === 0 || sending}
+        onClick={() => {
+          setSelectionMode(true);
+          setSelectionStart(null);
+          setChatMenuOpen(false);
+        }}
+      >
+        🗑 Delete messages
+      </button>
+    </>
+  );
+
   return (
     <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}>
       {promptInspectorOpen && activeChat?.kind === 'rp' && (
@@ -741,125 +937,66 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           />
         )}
 
-        <div className="chat-header">
-          <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
-          {activeChat && !activeChat.archivedAt && (
-            <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
-              Archive
-            </button>
-          )}
-          {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
-          {activeChat?.kind === 'rp' ? (
-            <div className="chat-menu-wrap" ref={chatMenuRef}>
+        <div className="chat-top-bar">
+          <div className="chat-header">
+            <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
+            {activeChat && !activeChat.archivedAt && (
+              <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
+                Archive
+              </button>
+            )}
+            {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
+            {activeChat?.kind === 'rp' ? (
+              <div className="chat-menu-wrap" ref={chatMenuRef}>
+                <button
+                  type="button"
+                  className="chat-menu-button"
+                  title="Chat menu"
+                  aria-haspopup="menu"
+                  aria-expanded={chatMenuOpen}
+                  onClick={() => setChatMenuOpen((v) => !v)}
+                >
+                  ☰
+                </button>
+                {chatMenuOpen && (
+                  <div className="chat-menu" role="menu">
+                    {chatMenuItems}
+                  </div>
+                )}
+              </div>
+            ) : (
+              activeChat && (
+                <button
+                  type="button"
+                  className="chat-branch-map-summon"
+                  title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
+                  onClick={() => setBranchMapOpen((v) => !v)}
+                >
+                  🌳
+                </button>
+              )
+            )}
+            {activeChat?.canvasNoteId && (
               <button
                 type="button"
-                className="chat-menu-button"
-                title="Chat menu"
-                aria-haspopup="menu"
-                aria-expanded={chatMenuOpen}
-                onClick={() => setChatMenuOpen((v) => !v)}
+                className="chat-canvas-switch mobile-only"
+                onClick={() => setMobileShowCanvas((v) => !v)}
               >
-                ☰
+                {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
               </button>
-              {chatMenuOpen && (
-                <div className="chat-menu" role="menu">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
-                    onClick={() => {
-                      setPromptInspectorOpen((v) => !v);
-                      setChatMenuOpen(false);
-                    }}
-                  >
-                    🧾 {promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect prompt'}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
-                    onClick={() => {
-                      setBranchMapOpen((v) => !v);
-                      setChatMenuOpen(false);
-                    }}
-                  >
-                    🌳 {branchMapOpen ? 'Hide branch map' : 'Branch map'}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    title={
-                      syncStatusOpen
-                        ? 'Hide sync status'
-                        : 'When the background memory sync last ran for this chat, and when the next one is due'
-                    }
-                    onClick={() => {
-                      setSyncStatusOpen((v) => !v);
-                      setChatMenuOpen(false);
-                    }}
-                  >
-                    🔄 {syncStatusOpen ? 'Hide sync status' : 'Sync status'}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    title="Attach a file or image"
-                    disabled={attaching}
-                    onClick={() => {
-                      fileInputRef.current?.click();
-                      setChatMenuOpen(false);
-                    }}
-                  >
-                    📎 Attach file or image
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    title="Select messages to delete"
-                    disabled={messages.length === 0 || sending}
-                    onClick={() => {
-                      setSelectionMode(true);
-                      setSelectionStart(null);
-                      setChatMenuOpen(false);
-                    }}
-                  >
-                    🗑 Delete messages
-                  </button>
-                </div>
-              )}
-            </div>
-          ) : (
-            activeChat && (
-              <button
-                type="button"
-                className="chat-branch-map-summon"
-                title={branchMapOpen ? 'Hide branch map' : "Show this chat's fork family"}
-                onClick={() => setBranchMapOpen((v) => !v)}
-              >
-                🌳
-              </button>
-            )
-          )}
-          {activeChat?.canvasNoteId && (
+            )}
             <button
               type="button"
-              className="chat-canvas-switch mobile-only"
-              onClick={() => setMobileShowCanvas((v) => !v)}
+              className="chat-settings-summon mobile-only"
+              title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+              onClick={() => setSettingsCollapsed((c) => !c)}
             >
-              {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
+              ⚙
             </button>
-          )}
-          <button
-            type="button"
-            className="chat-settings-summon mobile-only"
-            title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
-            onClick={() => setSettingsCollapsed((c) => !c)}
-          >
-            ⚙
-          </button>
+          </div>
         </div>
 
-        <div className="chat-history" ref={historyRef}>
+        <div className="chat-history" ref={historyRef} onScroll={handleHistoryScroll} onTouchStart={handleHistoryTouchStart} onTouchEnd={handleHistoryTouchEnd} onTouchCancel={handleHistoryTouchEnd}>
           {messages.length === 0 && chatId && <div className="empty-state">Ask BigImagine something.</div>}
           {messages.length === 0 && !chatId && (
             <div className="chat-empty-landing">
@@ -1095,6 +1232,28 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               e.target.value = '';
             }}
           />
+          {/* RP chats attach from the ☰ menu; on mobile that menu lives in this row (opposite
+              Send) instead of the header, so the row carries its own copy here. Non-RP chats
+              keep the paper clip. */}
+          {activeChat?.kind === 'rp' && (
+            <div className="chat-menu-wrap chat-menu-mobile" ref={chatMenuMobileRef}>
+              <button
+                type="button"
+                className="chat-menu-button"
+                title="Chat menu"
+                aria-haspopup="menu"
+                aria-expanded={chatMenuOpen}
+                onClick={() => setChatMenuOpen((v) => !v)}
+              >
+                ☰
+              </button>
+              {chatMenuOpen && (
+                <div className="chat-menu" role="menu">
+                  {chatMenuItems}
+                </div>
+              )}
+            </div>
+          )}
           {/* RP chats attach from the header hamburger menu instead — the input row keeps just
               the textarea + Send, with the paper clip reserved for non-RP chats. */}
           {activeChat?.kind !== 'rp' && (

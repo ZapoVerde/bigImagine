@@ -69,7 +69,7 @@
 /* The header's dropdown menu must float above the history pane below it — both are z-index:1
    siblings and the later history would otherwise paint over the menu, which lives inside the
    header's own stacking context. */
-.chat-main > .chat-header {
+.chat-main > .chat-top-bar {
   z-index: 2;
 }
 
@@ -175,6 +175,12 @@
 .chat-menu button:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* Mobile-only mount of the same ☰ menu, in the input row opposite Send — hidden on desktop,
+   where the header's copy is the live one (see the mobile block below for the swap). */
+.chat-menu-mobile {
+  display: none;
 }
 
 /* Not mobile-only either, same reasoning as the chat-menu-button above — BranchMapPanel
@@ -838,11 +844,11 @@
   }
 
   .chat-input button.chat-attach-button {
-    order: 2;
+    order: 3;
   }
 
   .chat-input button.chat-send-button {
-    order: 3;
+    order: 4;
     margin-left: auto;
   }
 
@@ -857,6 +863,44 @@
     align-items: center;
     justify-content: center;
     font-size: var(--font-size-lg);
+  }
+
+  /* The ☰ chat menu relocates from the header into the input row on mobile (ChatView.tsx
+     renders a second copy there; one chatMenuOpen state serves both). The header's copy hides
+     and the row's takes the left slot opposite Send — same pill shape as attach/send — with the
+     popup opening upward since it now sits at the bottom of the screen. */
+  .chat-header .chat-menu-wrap {
+    display: none;
+  }
+
+  .chat-input .chat-menu-mobile {
+    display: block;
+    order: 2;
+    position: relative;
+    z-index: 21;
+    flex: 0 0 auto;
+  }
+
+  .chat-input .chat-menu-mobile .chat-menu-button {
+    width: 2.5rem;
+    height: 2.5rem;
+    flex: 0 0 auto;
+    padding: 0;
+    border-radius: var(--radius-pill);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--font-size-lg);
+    background: var(--color-bg-panel);
+    color: var(--color-text-primary);
+    border: 1px solid var(--color-border);
+  }
+
+  .chat-menu-mobile .chat-menu {
+    top: auto;
+    right: auto;
+    left: 0;
+    bottom: calc(100% + 0.35rem);
   }
 
   .chat-send-label {
