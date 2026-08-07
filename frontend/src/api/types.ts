@@ -234,6 +234,12 @@ export interface ChatMemorySettings {
   distillPromptIsDefault: boolean;
   householdMemoryPrompt: string;
   householdMemoryPromptIsDefault: boolean;
+  bridgePrompt: string;
+  bridgePromptIsDefault: boolean;
+  lorebookCuratorPrompt: string;
+  lorebookCuratorPromptIsDefault: boolean;
+  peopleCuratorPrompt: string;
+  peopleCuratorPromptIsDefault: boolean;
 }
 
 // orchestrator/src/server/adminServer.ts getChatMemorySyncStatus() — one row per chat, the

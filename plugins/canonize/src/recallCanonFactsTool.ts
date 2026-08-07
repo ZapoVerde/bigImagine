@@ -21,10 +21,15 @@
  *
  * For 'plot' facts, a continuing arc_tag thread's every proposal is its own row — recall must
  * collapse that to only the most-recently-approved row per arc_tag before ranking, or a stale,
- * superseded plot beat would sit in the prompt stack alongside its own replacement. Non-plot facts
- * have no arc_tag, so `coalesce(arc_tag, fact_id::text)` gives each of them its own dedup group —
- * collapsing on a bare `arc_tag` would fold every arc_tag-less fact together into a single
- * arbitrary survivor.
+ * superseded plot beat would sit in the prompt stack alongside its own replacement.
+ * person/place/thing/concept facts have the same shape for the same reason, but a different group
+ * key: entity_key (db/migrations/0064_canon_facts_entity_key.sql), populated by the periodic
+ * lorebook/people curators (io/chatMemory/curateLorebook.ts, curatePeople.ts) — a continuing
+ * dictionary entry's every UPDATE is its own row too, most-recent-approved wins. arc_tag and
+ * entity_key are deliberately separate columns (one is plot-arc identity, the other is
+ * dictionary-entry identity) that happen to want the same dedup shape, so
+ * `coalesce(arc_tag, entity_key, fact_id::text)` tries both before falling back to the row's own
+ * id — a fact with neither (today's turn-time propose_canon_fact notes) gets its own dedup group.
  *
  * as_of_message_id (db/migrations/0054_canon_facts_chat_anchor.sql) is point-in-time recall: "what
  * did canon look like as of this point in the story," not just "what does it look like now." A
@@ -135,7 +140,7 @@ export function createRecallCanonFactsTool(
            select $5::timestamptz as as_of_created_at, $6::uuid as as_of_message_id
          ),
          candidates as (
-           select f.fact_id, f.category, f.summary, f.detail, f.arc_tag, f.approved_at, f.vector_embed
+           select f.fact_id, f.category, f.summary, f.detail, f.arc_tag, f.entity_key, f.approved_at, f.vector_embed
            from canon_facts f
            left join chat_messages cm on cm.message_id = f.anchor_message_id
            cross join anchor a
@@ -149,9 +154,9 @@ export function createRecallCanonFactsTool(
              )
          ),
          ranked as (
-           select distinct on (coalesce(arc_tag, fact_id::text)) fact_id, category, summary, detail, vector_embed
+           select distinct on (coalesce(arc_tag, entity_key, fact_id::text)) fact_id, category, summary, detail, vector_embed
            from candidates
-           order by coalesce(arc_tag, fact_id::text), approved_at desc
+           order by coalesce(arc_tag, entity_key, fact_id::text), approved_at desc
          )
          select fact_id, category, summary, detail
          from ranked

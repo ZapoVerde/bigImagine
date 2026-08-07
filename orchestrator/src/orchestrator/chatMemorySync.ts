@@ -21,12 +21,23 @@
  * chat's 'proposed' canon_facts to 'approved' (the settling-window auto-approve — see
  * plugins/canonize/src/proposeCanonFactTool.ts), chunk the newly-archived messages
  * (chunkChatTranscript.ts), summarize+embed each chunk (classifyChatChunk.ts + the embeddings
- * provider), distill the chat's "key ideas" digest (distillChatMemory.ts) against its own existing
- * entries, then write one new chat_sync_points row plus the chat_chunks/chat_memory_entries rows
- * tied to it. A mid-pipeline failure rolls the whole transaction back, canon-fact promotion
- * included — the previous sync point is untouched, and the next poll tick just retries from there
- * (self-healing, same "advance state, don't double-count" caution agentRoutineDispatch.ts's own
- * doc explains, just via ROLLBACK instead of an explicit ordering trick).
+ * provider) — always, for both chat kinds, since chat_chunks/recall_chat_history is the one lane
+ * that's already correctly RAG-only and needs no divergence — then branch on chat_sessions.kind:
+ * a 'chat' (household) chat distills its "key ideas" digest (distillChatMemory.ts) against its own
+ * existing entries, unchanged; an 'rp' chat instead runs the hookseeker-parity bridge
+ * (bridgeChatMemory.ts) against the RAW toArchive transcript (never a summary-of-summary), writing
+ * an evolving SCENE + EVENTS text block to chat_memory_entries (topic_key 'scene'/'events') and
+ * arc-tagged plot developments as 'proposed' canon_facts rows. An 'rp' chat also runs two more
+ * periodic curators every tick, over the same raw transcript: curateLorebook.ts (place/thing/
+ * concept) and curatePeople.ts (person) — both ported from CNZ the same way the bridge was, both
+ * proposing entity_key-tagged canon_facts rows (db/migrations/0064_canon_facts_entity_key.sql).
+ * Either branch then writes one new chat_sync_points row plus the chat_chunks rows tied to it. A
+ * mid-pipeline failure rolls the whole transaction back, canon-fact promotion included — the
+ * previous sync point is untouched, and the next poll tick just retries from there (self-healing,
+ * same "advance state, don't double-count" caution agentRoutineDispatch.ts's own doc explains, just
+ * via ROLLBACK instead of an explicit ordering trick). Plot/lorebook/people facts proposed this
+ * tick get no special-cased approval — they settle through the exact same promote_canon_facts step,
+ * on the chat's next tick, as every other canon fact.
  *
  * Every attempt (ok, skipped, or error-with-which-step) is also recorded into
  * chat_memory_sync_status, one upserted row per chat, through a separate transaction from the
@@ -34,13 +45,16 @@
  * (bi_principles.md §11: the failure logging already existed here, this is just the read surface
  * for it). server/adminServer.ts's getChatMemorySyncStatus is the read side.
  *
- * The connection this pipeline's calls run through, and each of the three prompts, are read live
+ * The connection this pipeline's calls run through, and each of the six prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
- * chat_memory_distill_prompt/chat_memory_household_memory_prompt) — a Settings-tab change takes
- * effect on the very next tick, no restart, mirroring server/httpServer.ts's own per-chat
+ * chat_memory_distill_prompt/chat_memory_household_memory_prompt/chat_memory_bridge_prompt/
+ * chat_memory_lorebook_curator_prompt/chat_memory_people_curator_prompt) — a Settings-tab change
+ * takes effect on the very next tick, no restart, mirroring server/httpServer.ts's own per-chat
  * profile-override construction (createLlmProviderForProfile + createGatedLlmProvider) for the
- * "which connection" half.
+ * "which connection" half. persona_name is also read live here, purely to resolve the bridge and
+ * people-curator prompts' {{user}} macro (util/interpolateMacros.ts) the same way
+ * SillyTavern-Canonize's own {{user}} resolves against the ST persona.
  *
  * distillChatMemory's second argument is not just the chunk summaries this tick freshly produced —
  * it's the trailing chat_memory_digest_horizon_pairs' worth of chat_chunks.summary rows, oldest
@@ -77,6 +91,9 @@ import { chunkChatTranscript, MESSAGES_PER_CHUNK, type ChatTranscriptMessage } f
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
 import { distillChatMemory, type ChatMemoryEntryDraft } from '../io/chatMemory/distillChatMemory.js';
 import { classifyHouseholdMemory } from '../io/chatMemory/classifyHouseholdMemory.js';
+import { bridgeChatMemory } from '../io/chatMemory/bridgeChatMemory.js';
+import { curateLorebook } from '../io/chatMemory/curateLorebook.js';
+import { curatePeople } from '../io/chatMemory/curatePeople.js';
 
 const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation urgency — minutes-scale is fine
 const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
@@ -171,6 +188,10 @@ interface SyncSettings {
   chunkSummaryPrompt: string | undefined;
   distillPrompt: string | undefined;
   householdMemoryPrompt: string | undefined;
+  bridgePrompt: string | undefined;
+  lorebookCuratorPrompt: string | undefined;
+  peopleCuratorPrompt: string | undefined;
+  personaName: string | undefined;
   liveWindowMessages: number;
   syncEveryMessages: number;
   digestHorizonChunks: number;
@@ -182,16 +203,31 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
 }
 
 async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettings> {
-  const [profileName, livePairsRaw, syncEveryPairsRaw, digestHorizonPairsRaw, chunkSummaryPrompt, distillPrompt, householdMemoryPrompt] =
-    await Promise.all([
-      deps.settings.get('chat_memory_profile'),
-      deps.settings.get('chat_memory_live_window_pairs'),
-      deps.settings.get('chat_memory_sync_every_pairs'),
-      deps.settings.get('chat_memory_digest_horizon_pairs'),
-      deps.settings.get('chat_memory_chunk_summary_prompt'),
-      deps.settings.get('chat_memory_distill_prompt'),
-      deps.settings.get('chat_memory_household_memory_prompt'),
-    ]);
+  const [
+    profileName,
+    livePairsRaw,
+    syncEveryPairsRaw,
+    digestHorizonPairsRaw,
+    chunkSummaryPrompt,
+    distillPrompt,
+    householdMemoryPrompt,
+    bridgePrompt,
+    lorebookCuratorPrompt,
+    peopleCuratorPrompt,
+    personaName,
+  ] = await Promise.all([
+    deps.settings.get('chat_memory_profile'),
+    deps.settings.get('chat_memory_live_window_pairs'),
+    deps.settings.get('chat_memory_sync_every_pairs'),
+    deps.settings.get('chat_memory_digest_horizon_pairs'),
+    deps.settings.get('chat_memory_chunk_summary_prompt'),
+    deps.settings.get('chat_memory_distill_prompt'),
+    deps.settings.get('chat_memory_household_memory_prompt'),
+    deps.settings.get('chat_memory_bridge_prompt'),
+    deps.settings.get('chat_memory_lorebook_curator_prompt'),
+    deps.settings.get('chat_memory_people_curator_prompt'),
+    deps.settings.get('persona_name'),
+  ]);
 
   let llm = deps.llm;
   if (profileName) {
@@ -213,6 +249,10 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     chunkSummaryPrompt: chunkSummaryPrompt || undefined,
     distillPrompt: distillPrompt || undefined,
     householdMemoryPrompt: householdMemoryPrompt || undefined,
+    bridgePrompt: bridgePrompt || undefined,
+    lorebookCuratorPrompt: lorebookCuratorPrompt || undefined,
+    peopleCuratorPrompt: peopleCuratorPrompt || undefined,
+    personaName: personaName || undefined,
     liveWindowMessages: livePairs * 2,
     syncEveryMessages: syncEveryPairs * 2,
     digestHorizonChunks: Math.ceil(digestHorizonPairs / pairsPerChunk),
@@ -245,9 +285,45 @@ async function findDueChats(db: PostgresClient, userId: string, syncEveryMessage
   });
 }
 
+/**
+ * Turn-start indices into `messages`: a boundary is the first user message of the chat, or any
+ * later user message that arrives after at least one assistant reply since the previous boundary.
+ * Consecutive user messages with no assistant reply between them share one boundary — they're still
+ * the same open turn, not a new one — and a leading assistant-only message (a seeded greeting) never
+ * gets a boundary of its own, so it's never orphaned as its own chunk.
+ */
+function findTurnBoundaries(messages: { role: 'user' | 'assistant' }[]): number[] {
+  const boundaries: number[] = [];
+  let sawAssistantSinceLastBoundary = false;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]!.role === 'user') {
+      if (boundaries.length === 0 || sawAssistantSinceLastBoundary) {
+        boundaries.push(i);
+        sawAssistantSinceLastBoundary = false;
+      }
+    } else {
+      sawAssistantSinceLastBoundary = true;
+    }
+  }
+  return boundaries;
+}
+
 interface ExistingEntryRow {
   topic_key: string;
   content: string;
+}
+
+// canon_facts.entity_key for a curator-produced person/place/thing/concept entry — category-
+// prefixed so a person and a thing that happen to share a name (or a curator-hallucinated name
+// collision) never fold into the same dedup group; recallCanonFactsTool.ts's dedup is otherwise
+// purely name-keyed. Not exported: only curateLorebook/curatePeople's inserts below need it.
+function entityKeyFor(category: string, name: string): string {
+  const slug = name
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return `${category}:${slug || 'unnamed'}`;
 }
 
 async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<SyncResult> {
@@ -273,6 +349,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         log.info('chat-memory sync: auto-approved canon facts', { chatId, count: promoted.length });
       }
 
+      const [chatRow] = await session.query<{ kind: 'chat' | 'rp' }>('select kind from chat_sessions where chat_id = $1', [chatId]);
+      const kind = chatRow?.kind ?? 'chat';
+
       const allMessages = await session.query<{ message_id: string; role: 'user' | 'assistant'; content: string }>(
         'select message_id, role, content from chat_messages where chat_id = $1 order by created_at, message_id',
         [chatId],
@@ -283,15 +362,31 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         [chatId],
       );
       const lastSyncedIdx = lastSynced[0] ? allMessages.findIndex((m) => m.message_id === lastSynced[0]!.last_message_id) : -1;
+
+      // A "turn" starts at a user message and runs through every message after it up to (but not
+      // including) the next user message that arrives once at least one assistant reply has landed
+      // — so a user message sent again before the assistant has answered (nothing generates that
+      // today, but a future "continue" affordance could) doesn't open a second turn on its own.
+      // applyCharacterToChatTool.ts's seeded opening greeting is a lone leading 'assistant' message
+      // with no user turn of its own; findTurnBoundaries() never marks a boundary there, so it just
+      // rides along inside whichever chunk turn 1 ends up in — the "first turn always rolls into the
+      // first chunk" case falls out of this rule for free, no extra special-casing needed.
+      const turnBoundaries = findTurnBoundaries(allMessages);
+      const unsyncedBoundaries = turnBoundaries.filter((idx) => idx > lastSyncedIdx);
       const unsynced = allMessages.slice(lastSyncedIdx + 1);
 
-      const eligibleCount = unsynced.length - sync.liveWindowMessages;
-      const toArchiveCount = eligibleCount - (eligibleCount % MESSAGES_PER_CHUNK);
-      if (toArchiveCount < MESSAGES_PER_CHUNK) {
+      const pairsPerChunk = MESSAGES_PER_CHUNK / 2;
+      const liveWindowPairs = sync.liveWindowMessages / 2;
+      const eligibleTurns = unsyncedBoundaries.length - liveWindowPairs;
+      const turnsToArchive = eligibleTurns - (eligibleTurns % pairsPerChunk);
+      if (turnsToArchive < pairsPerChunk) {
         log.info('chat-memory sync: nothing eligible to archive yet, skipping', { chatId, unsynced: unsynced.length });
         return { status: 'skipped' };
       }
-      const toArchive: ChatTranscriptMessage[] = unsynced.slice(0, toArchiveCount).map((m) => ({
+      // The message right before the (turnsToArchive)-th unsynced turn boundary — everything up to
+      // there (including the leading greeting, if any) archives; everything from there on stays live.
+      const archiveEndIdx = turnsToArchive < unsyncedBoundaries.length ? unsyncedBoundaries[turnsToArchive]! : allMessages.length;
+      const toArchive: ChatTranscriptMessage[] = allMessages.slice(lastSyncedIdx + 1, archiveEndIdx).map((m) => ({
         messageId: m.message_id,
         role: m.role,
         content: m.content,
@@ -331,6 +426,152 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           );
         }
       });
+
+      // The two lanes diverge here — a 'chat' (household) chat gets the flat key-ideas digest
+      // (distillChatMemory.ts, fed only the compressed chunk summaries above); an 'rp' chat gets
+      // the hookseeker-parity bridge (bridgeChatMemory.ts, fed the RAW toArchive transcript
+      // directly, never a summary-of-summary). The two prompts/topic_key vocabularies are mutually
+      // exclusive per chat, selected once by chat_sessions.kind — see this file's own header doc.
+      if (kind === 'rp') {
+        // Shared by the bridge and both curator calls below — one raw transcript of this sync
+        // window's toArchive messages, never a summary-of-summary, same "read the real thing every
+        // time" property as the bridge's own doc explains.
+        const transcriptText = toArchive.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
+
+        const bridgeResult = await step('bridge', async () => {
+          const previousRows = await session.query<{ topic_key: string; content: string }>(
+            `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
+            [chatId],
+          );
+          const previousScene = previousRows.find((r) => r.topic_key === 'scene')?.content ?? '';
+          const previousEvents = previousRows.find((r) => r.topic_key === 'events')?.content ?? '';
+          // Reconstructs CNZ's own "PREVIOUS OUTPUT" shape (an EVENTS table followed by a SCENE
+          // block) — the bridge's own PART 1/PART 2 instructions read this back as one blob, the
+          // same way its live output looked the sync before.
+          const previousOutput = previousScene || previousEvents ? `EVENTS:\n${previousEvents}\n\nSCENE:\n${previousScene}` : '';
+
+          // Latest-approved-per-arc_tag, mirroring recallCanonFactsTool.ts's own dedup query — every
+          // plot arc_tag is unique by the canon_facts table's own CHECK, so no coalesce needed here.
+          const openThreadRows = await session.query<{ arc_tag: string; summary: string; detail: string }>(
+            `select distinct on (arc_tag) arc_tag, summary, detail
+             from canon_facts
+             where chat_id = $1 and category = 'plot' and status = 'approved'
+             order by arc_tag, proposed_at desc`,
+            [chatId],
+          );
+          const existingThreads = openThreadRows
+            .map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`)
+            .join('\n');
+
+          return bridgeChatMemory(sync.llm, transcriptText, previousOutput, existingThreads, sync.personaName, sync.bridgePrompt);
+        });
+
+        await step('upsert_bridge', async () => {
+          await session.query(
+            `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
+             values ($1, $2, $3, 'scene', $4)
+             on conflict (chat_id, topic_key) do update set
+               sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
+            [chatId, syncId, userId, bridgeResult.scene],
+          );
+          await session.query(
+            `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
+             values ($1, $2, $3, 'events', $4)
+             on conflict (chat_id, topic_key) do update set
+               sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
+            [chatId, syncId, userId, bridgeResult.events],
+          );
+          // Proposed, not approved — these go through the exact same settling-window auto-approve
+          // (this function's own promote_canon_facts step, next tick) as every other canon fact, no
+          // special-casing. summary carries the actual 2-4 sentence development (what
+          // recall_canon_facts/CanonQueueView show as the fact itself); detail carries the bridge's
+          // vivid entry name (a scannable label, secondary).
+          for (const entry of bridgeResult.plotEntries) {
+            const [vector] = await deps.embeddings.embed([`${entry.name}\n${entry.content}`]);
+            await session.query(
+              `insert into canon_facts (user_id, category, arc_tag, summary, detail, vector_embed, chat_id)
+               values ($1, 'plot', $2, $3, $4, $5, $6)`,
+              [userId, entry.arcTag, entry.content, entry.name, toPgVectorLiteral(vector!), chatId],
+            );
+          }
+        });
+
+        // The two periodic curators (place/thing/concept, and person) run every tick alongside the
+        // bridge, over the same transcriptText — CNZ's own real per-cycle cost, not a simplification.
+        // Both propose 'proposed' canon_facts rows keyed by entity_key (db/migrations/
+        // 0064_canon_facts_entity_key.sql), settling through this function's own promote_canon_facts
+        // step next tick, zero special-casing, same as the bridge's plot entries above.
+        const lorebookResult = await step('curate_lorebook', async () => {
+          const existingRows = await session.query<{ category: string; detail: string; summary: string }>(
+            `select distinct on (entity_key) category, detail, summary
+             from canon_facts
+             where chat_id = $1 and category in ('place', 'thing', 'concept') and status = 'approved'
+             order by entity_key, proposed_at desc`,
+            [chatId],
+          );
+          const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}\n#${r.category}`).join('\n\n');
+          const entries = await curateLorebook(sync.llm, transcriptText, existingBlock, sync.lorebookCuratorPrompt);
+          return { entries, existingRows };
+        });
+
+        await step('upsert_lorebook', async () => {
+          // A 'duplicate' action carries no category of its own — it's flagging an *existing* entry
+          // (one of existingRows) as redundant, so its category comes from that row, not the model.
+          const categoryByName = new Map(lorebookResult.existingRows.map((r) => [r.detail.trim().toLowerCase(), r.category]));
+          for (const entry of lorebookResult.entries) {
+            const category = entry.action === 'duplicate' ? categoryByName.get(entry.name.trim().toLowerCase()) : entry.category;
+            const content = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
+            if (!category || !content) {
+              log.error('chat-memory sync: lorebook curator entry missing category/content, skipping', { chatId, entry });
+              continue;
+            }
+            const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
+            await session.query(
+              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id)
+               values ($1, $2, $3, $4, $5, $6, $7)`,
+              [userId, category, entityKeyFor(category, entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId],
+            );
+          }
+        });
+
+        const peopleResult = await step('curate_people', async () => {
+          const existingRows = await session.query<{ detail: string; summary: string }>(
+            `select distinct on (entity_key) detail, summary
+             from canon_facts
+             where chat_id = $1 and category = 'person' and status = 'approved'
+             order by entity_key, proposed_at desc`,
+            [chatId],
+          );
+          const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}`).join('\n\n');
+          return curatePeople(sync.llm, transcriptText, existingBlock, sync.personaName, sync.peopleCuratorPrompt);
+        });
+
+        await step('upsert_people', async () => {
+          for (const entry of peopleResult) {
+            const content = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
+            if (!content) {
+              log.error('chat-memory sync: people curator entry missing content, skipping', { chatId, entry });
+              continue;
+            }
+            const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
+            await session.query(
+              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id)
+               values ($1, 'person', $2, $3, $4, $5, $6)`,
+              [userId, entityKeyFor('person', entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId],
+            );
+          }
+        });
+
+        const entriesUpdated = 2 + bridgeResult.plotEntries.length + lorebookResult.entries.length + peopleResult.length;
+        log.info('chat-memory sync: bridged rp chat', {
+          chatId,
+          chunksAdded: chunks.length,
+          plotEntries: bridgeResult.plotEntries.length,
+          lorebookEntries: lorebookResult.entries.length,
+          peopleEntries: peopleResult.length,
+        });
+        return { status: 'ok', chunksAdded: chunks.length, entriesUpdated };
+      }
 
       const updates = await step('distill', async () => {
         const existingEntries = await session.query<ExistingEntryRow>(

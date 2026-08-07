@@ -601,6 +601,9 @@ export async function adminSetChatMemorySettings(
     chunk_summary_prompt?: string;
     distill_prompt?: string;
     household_memory_prompt?: string;
+    bridge_prompt?: string;
+    lorebook_curator_prompt?: string;
+    people_curator_prompt?: string;
   },
   adminKey: string | null,
 ): Promise<ChatMemorySettings> {

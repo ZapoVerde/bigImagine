@@ -127,6 +127,9 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedChunkSummaryPrompt, setSelectedChunkSummaryPrompt] = useState('');
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
   const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
+  const [selectedBridgePrompt, setSelectedBridgePrompt] = useState('');
+  const [selectedLorebookCuratorPrompt, setSelectedLorebookCuratorPrompt] = useState('');
+  const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
 
   function applyNotificationSettings(settings: NotificationSettings) {
@@ -159,6 +162,9 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedChunkSummaryPrompt(settings.chunkSummaryPrompt);
     setSelectedDistillPrompt(settings.distillPrompt);
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
+    setSelectedBridgePrompt(settings.bridgePrompt);
+    setSelectedLorebookCuratorPrompt(settings.lorebookCuratorPrompt);
+    setSelectedPeopleCuratorPrompt(settings.peopleCuratorPrompt);
   }
 
   // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
@@ -294,6 +300,13 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     if (selectedHouseholdMemoryPrompt !== chatMemorySettings.householdMemoryPrompt) {
       patch.household_memory_prompt = selectedHouseholdMemoryPrompt;
     }
+    if (selectedBridgePrompt !== chatMemorySettings.bridgePrompt) patch.bridge_prompt = selectedBridgePrompt;
+    if (selectedLorebookCuratorPrompt !== chatMemorySettings.lorebookCuratorPrompt) {
+      patch.lorebook_curator_prompt = selectedLorebookCuratorPrompt;
+    }
+    if (selectedPeopleCuratorPrompt !== chatMemorySettings.peopleCuratorPrompt) {
+      patch.people_curator_prompt = selectedPeopleCuratorPrompt;
+    }
     if (Object.keys(patch).length === 0) return;
 
     setChatMemoryStatus('');
@@ -307,10 +320,15 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setChatMemoryStatus('Saved — takes effect on the next sync tick, no restart needed.');
   }
 
-  function resetChatMemoryPrompt(field: 'chunkSummaryPrompt' | 'distillPrompt' | 'householdMemoryPrompt') {
+  function resetChatMemoryPrompt(
+    field: 'chunkSummaryPrompt' | 'distillPrompt' | 'householdMemoryPrompt' | 'bridgePrompt' | 'lorebookCuratorPrompt' | 'peopleCuratorPrompt',
+  ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
     if (field === 'householdMemoryPrompt') setSelectedHouseholdMemoryPrompt('');
+    if (field === 'bridgePrompt') setSelectedBridgePrompt('');
+    if (field === 'lorebookCuratorPrompt') setSelectedLorebookCuratorPrompt('');
+    if (field === 'peopleCuratorPrompt') setSelectedPeopleCuratorPrompt('');
   }
 
   async function save() {
@@ -602,6 +620,55 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         </label>
         <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('householdMemoryPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          RP bridge prompt (SCENE / EVENTS / PLOT) {chatMemorySettings?.bridgePromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea value={selectedBridgePrompt} onChange={(e) => setSelectedBridgePrompt(e.target.value)} rows={20} />
+        </label>
+        <div className="status">
+          Used only for 'rp'-kind chats, in place of the key-ideas digest prompt above: reads the raw transcript and this
+          chat's own previous SCENE/EVENTS output every sync tick to maintain an evolving scene, a table of upcoming
+          events, and arc-tagged plot entries — the storytelling-continuity lane, kept separate from the household
+          digest lane per chat kind.
+        </div>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('bridgePrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Lorebook curator prompt (place / thing / concept) {chatMemorySettings?.lorebookCuratorPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedLorebookCuratorPrompt}
+            onChange={(e) => setSelectedLorebookCuratorPrompt(e.target.value)}
+            rows={20}
+          />
+        </label>
+        <div className="status">
+          Runs every sync tick alongside the RP bridge prompt above, for 'rp'-kind chats only: reviews the transcript
+          against every existing approved place/thing/concept entry and proposes updates, new entries, and duplicate
+          flags — CNZ's periodic lorebook curator.
+        </div>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('lorebookCuratorPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          People curator prompt (person) {chatMemorySettings?.peopleCuratorPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea value={selectedPeopleCuratorPrompt} onChange={(e) => setSelectedPeopleCuratorPrompt(e.target.value)} rows={20} />
+        </label>
+        <div className="status">
+          Runs every sync tick alongside the RP bridge prompt above, for 'rp'-kind chats only: maintains a living
+          seven-section record for every named person — CNZ's periodic people curator.
+        </div>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('peopleCuratorPrompt')}>
           Reset to default
         </button>
         <br />

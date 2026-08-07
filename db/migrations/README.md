@@ -280,3 +280,29 @@ Already applied by hand, not run automatically (see the file for the exact comma
   never-narrow precedent as `CREDENTIAL_NAMES`' still-present `deepseek_api_key`/
   `openrouter_api_key` entries, kept only so the one-time seed above can still read a pre-cutover
   deployment's values on its first boot after upgrading; nothing reads them after that.
+- `0063_chat_memory_bridge_settings.sql` — widens `orchestrator_settings.key` with
+  `chat_memory_bridge_prompt`: the 'rp'-kind sync lane's hookseeker-parity bridge prompt
+  (`io/chatMemory/bridgeChatMemory.ts`), ported near-verbatim from SillyTavern-Canonize's own
+  hand-tuned `hookseekerPrompt` per the user's explicit direction to preserve exact wording rather
+  than re-paraphrase it. Same "default + bespoke" override shape as `chat_memory_distill_prompt`,
+  but a separate key — a chat's `kind` (`0049_chat_kind.sql`) selects exactly one of the two lanes
+  (household digest vs. RP bridge), never both, so the two prompts are mutually exclusive per chat
+  rather than layered.
+- `0064_canon_facts_entity_key.sql` — adds `canon_facts.entity_key`: the dictionary-identity column
+  for `person`/`place`/`thing`/`concept` facts, populated by the new periodic lorebook/people
+  curators (`io/chatMemory/curateLorebook.ts`, `curatePeople.ts`). Deliberately a new column, not a
+  reuse of `arc_tag` — `arc_tag` groups successive proposals into one continuing *plot arc*;
+  `entity_key` groups successive proposals into one continuing *dictionary entry* for a named
+  thing. The user's explicit call after an earlier draft proposed folding this into `arc_tag`.
+  Nullable/unconstrained: turn-time `propose_canon_fact` facts never carry one.
+  `recallCanonFactsTool.ts`'s dedup CTE widens from `coalesce(arc_tag, fact_id::text)` to
+  `coalesce(arc_tag, entity_key, fact_id::text)` in the same batch.
+- `0065_chat_memory_curator_settings.sql` — widens `orchestrator_settings.key` with
+  `chat_memory_lorebook_curator_prompt` and `chat_memory_people_curator_prompt`: two new periodic
+  curator calls in the 'rp'-kind sync lane, ported near-verbatim from SillyTavern-Canonize's
+  `lorebookSyncPrompt`/`peopleSyncPrompt` (same direction as `0063`'s bridge prompt — preserve exact
+  wording). Both run every sync tick alongside the existing bridge call, writing `'proposed'`
+  `person`/`place`/`thing`/`concept` canon_facts that settle through the same auto-approve step,
+  zero special-casing. The one deliberate adaptation from CNZ: their "Keys:" keyword-list
+  instruction is dropped from both ported prompts — `docs/spec.md`'s vector recall already replaces
+  keyword-lorebook matching entirely, so there's nothing that would ever read a generated key.

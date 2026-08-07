@@ -14,7 +14,12 @@
  * groups whatever it's given. A trailing partial group (fewer than MESSAGES_PER_CHUNK messages
  * left over) is dropped, not chunked short — runChatSync.ts only calls this with a message count
  * that's an exact multiple of MESSAGES_PER_CHUNK, so a leftover here would mean a caller bug, not
- * a real partial-pair chat.
+ * a real partial-pair chat. That guarantee itself rests on every turn being exactly one user +
+ * one assistant message today; runChatSync.ts's own eligibility math is turn-boundary-aware (not a
+ * blind raw-message count) specifically so this still holds once a turn can span more than two
+ * messages (e.g. a future "continue" affordance) — but this module would need to become
+ * turn-boundary-aware too at that point, since a mid-turn split here would break a chunk's semantic
+ * grouping even though runChatSync.ts's own boundaries stayed correct.
  *
  * @api-declaration
  * chunkChatTranscript(messages, startOrdinal) — groups messages into fixed-size chunks; ordinal

@@ -104,6 +104,9 @@ import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
+import { DEFAULT_BRIDGE_PROMPT } from '../io/chatMemory/bridgeChatMemory.js';
+import { DEFAULT_LOREBOOK_CURATOR_PROMPT } from '../io/chatMemory/curateLorebook.js';
+import { DEFAULT_PEOPLE_CURATOR_PROMPT } from '../io/chatMemory/curatePeople.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import type { PostgresClient } from '../io/postgres.js';
 
@@ -485,10 +488,27 @@ export interface ChatMemorySettings {
   distillPromptIsDefault: boolean;
   householdMemoryPrompt: string;
   householdMemoryPromptIsDefault: boolean;
+  bridgePrompt: string;
+  bridgePromptIsDefault: boolean;
+  lorebookCuratorPrompt: string;
+  lorebookCuratorPromptIsDefault: boolean;
+  peopleCuratorPrompt: string;
+  peopleCuratorPromptIsDefault: boolean;
 }
 
 export async function getChatMemorySettings(store: OrchestratorSettingsStore): Promise<ChatMemorySettings> {
-  const [profile, liveRaw, syncRaw, digestHorizonRaw, chunkSummaryPrompt, distillPrompt, householdMemoryPrompt] = await Promise.all([
+  const [
+    profile,
+    liveRaw,
+    syncRaw,
+    digestHorizonRaw,
+    chunkSummaryPrompt,
+    distillPrompt,
+    householdMemoryPrompt,
+    bridgePrompt,
+    lorebookCuratorPrompt,
+    peopleCuratorPrompt,
+  ] = await Promise.all([
     store.get('chat_memory_profile'),
     store.get('chat_memory_live_window_pairs'),
     store.get('chat_memory_sync_every_pairs'),
@@ -496,6 +516,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_chunk_summary_prompt'),
     store.get('chat_memory_distill_prompt'),
     store.get('chat_memory_household_memory_prompt'),
+    store.get('chat_memory_bridge_prompt'),
+    store.get('chat_memory_lorebook_curator_prompt'),
+    store.get('chat_memory_people_curator_prompt'),
   ]);
   return {
     profile: profile || null,
@@ -508,6 +531,12 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     distillPromptIsDefault: !distillPrompt,
     householdMemoryPrompt: householdMemoryPrompt || DEFAULT_HOUSEHOLD_MEMORY_PROMPT,
     householdMemoryPromptIsDefault: !householdMemoryPrompt,
+    bridgePrompt: bridgePrompt || DEFAULT_BRIDGE_PROMPT,
+    bridgePromptIsDefault: !bridgePrompt,
+    lorebookCuratorPrompt: lorebookCuratorPrompt || DEFAULT_LOREBOOK_CURATOR_PROMPT,
+    lorebookCuratorPromptIsDefault: !lorebookCuratorPrompt,
+    peopleCuratorPrompt: peopleCuratorPrompt || DEFAULT_PEOPLE_CURATOR_PROMPT,
+    peopleCuratorPromptIsDefault: !peopleCuratorPrompt,
   };
 }
 
@@ -519,6 +548,9 @@ export interface SetChatMemorySettingsBody {
   chunkSummaryPrompt?: string;
   distillPrompt?: string;
   householdMemoryPrompt?: string;
+  bridgePrompt?: string;
+  lorebookCuratorPrompt?: string;
+  peopleCuratorPrompt?: string;
 }
 
 // Every field is optional and independently settable; an empty string on any prompt field clears
@@ -535,6 +567,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     chunk_summary_prompt,
     distill_prompt,
     household_memory_prompt,
+    bridge_prompt,
+    lorebook_curator_prompt,
+    people_curator_prompt,
   } = raw as Record<string, unknown>;
   if (
     profile === undefined &&
@@ -543,7 +578,10 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     digest_horizon_pairs === undefined &&
     chunk_summary_prompt === undefined &&
     distill_prompt === undefined &&
-    household_memory_prompt === undefined
+    household_memory_prompt === undefined &&
+    bridge_prompt === undefined &&
+    lorebook_curator_prompt === undefined &&
+    people_curator_prompt === undefined
   ) {
     return undefined;
   }
@@ -554,6 +592,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (chunk_summary_prompt !== undefined && typeof chunk_summary_prompt !== 'string') return undefined;
   if (distill_prompt !== undefined && typeof distill_prompt !== 'string') return undefined;
   if (household_memory_prompt !== undefined && typeof household_memory_prompt !== 'string') return undefined;
+  if (bridge_prompt !== undefined && typeof bridge_prompt !== 'string') return undefined;
+  if (lorebook_curator_prompt !== undefined && typeof lorebook_curator_prompt !== 'string') return undefined;
+  if (people_curator_prompt !== undefined && typeof people_curator_prompt !== 'string') return undefined;
   return {
     profile: profile as string | undefined,
     liveWindowPairs: live_window_pairs as number | undefined,
@@ -562,6 +603,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     chunkSummaryPrompt: chunk_summary_prompt as string | undefined,
     distillPrompt: distill_prompt as string | undefined,
     householdMemoryPrompt: household_memory_prompt as string | undefined,
+    bridgePrompt: bridge_prompt as string | undefined,
+    lorebookCuratorPrompt: lorebook_curator_prompt as string | undefined,
+    peopleCuratorPrompt: people_curator_prompt as string | undefined,
   };
 }
 
@@ -573,6 +617,9 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.chunkSummaryPrompt !== undefined) await store.set('chat_memory_chunk_summary_prompt', body.chunkSummaryPrompt);
   if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
   if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);
+  if (body.bridgePrompt !== undefined) await store.set('chat_memory_bridge_prompt', body.bridgePrompt);
+  if (body.lorebookCuratorPrompt !== undefined) await store.set('chat_memory_lorebook_curator_prompt', body.lorebookCuratorPrompt);
+  if (body.peopleCuratorPrompt !== undefined) await store.set('chat_memory_people_curator_prompt', body.peopleCuratorPrompt);
 }
 
 // --- Canon settings (docs/canonize-plan.md §6, bi_principles.md §13/§18) ---

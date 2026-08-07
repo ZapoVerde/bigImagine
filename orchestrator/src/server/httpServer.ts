@@ -378,12 +378,18 @@ function toPreviewItem(
 
 // docs/chat-memory.md: the always-injected half of chat memory (small, unconditional — see
 // recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead).
-// household_memory is every user's own row (RLS already scopes it); chat_memory_entries is this
-// one chat's distilled digest of whatever's rolled off the live window below. household_memory is
-// skipped entirely for an 'rp' chat (docs/bi_principles.md §4/§16, db/migrations/0049_chat_kind.sql)
-// — in-fiction details have no business leaking into unrelated chats, or vice versa.
-// chat_memory_entries stays in for RP too: it's already scoped per chat_id, and still useful in a
-// long roleplay.
+// The two chat kinds diverge completely here, mirroring chatMemorySync.ts's own kind branch:
+//
+// A 'chat' (household) chat gets household_memory (every user's own row — RLS already scopes it)
+// plus chat_memory_entries' flat key-ideas digest, byte-for-byte the original behavior.
+//
+// An 'rp' chat gets no household_memory at all (docs/bi_principles.md §4/§16,
+// db/migrations/0049_chat_kind.sql — in-fiction details have no business leaking into unrelated
+// chats, or vice versa) and instead gets the hookseeker-parity bridge's own output: the evolving
+// SCENE and EVENTS chat_memory_entries rows (topic_key 'scene'/'events', written by
+// bridgeChatMemory.ts) plus the latest-approved-per-arc_tag 'plot' canon_facts — the same
+// dedup-to-most-recent-per-arc query recallCanonFactsTool.ts uses, just unranked (this is the
+// unconditional "what's the state of every open thread" injection, not a semantic top-k search).
 async function buildChatMemorySystemPrompt(
   db: PostgresClient,
   userId: string,
@@ -391,13 +397,38 @@ async function buildChatMemorySystemPrompt(
   kind: 'chat' | 'rp',
 ): Promise<string> {
   return db.withUserScope(userId, async (session) => {
+    if (kind === 'rp') {
+      const [bridgeRows, plotRows] = await Promise.all([
+        session.query<{ topic_key: string; content: string }>(
+          `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
+          [chatId],
+        ),
+        session.query<{ arc_tag: string; summary: string; detail: string }>(
+          `select distinct on (arc_tag) arc_tag, summary, detail
+           from canon_facts
+           where chat_id = $1 and category = 'plot' and status = 'approved'
+           order by arc_tag, proposed_at desc`,
+          [chatId],
+        ),
+      ]);
+      const scene = bridgeRows.find((r) => r.topic_key === 'scene')?.content;
+      const events = bridgeRows.find((r) => r.topic_key === 'events')?.content;
+      const parts: string[] = [];
+      if (scene) parts.push(`Scene so far (evolves each sync — call recall_chat_history for exact recent wording):\n${scene}`);
+      if (events) parts.push(`Upcoming scheduled events:\n${events}`);
+      if (plotRows.length) {
+        parts.push(
+          `Open plot threads:\n${plotRows.map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`).join('\n')}`,
+        );
+      }
+      return parts.join('\n\n');
+    }
+
     const [household, entries] = await Promise.all([
-      kind === 'rp'
-        ? Promise.resolve([])
-        : session.query<{ content: string }>(
-            'select content from household_memory where user_id = $1 order by updated_at desc',
-            [userId],
-          ),
+      session.query<{ content: string }>(
+        'select content from household_memory where user_id = $1 order by updated_at desc',
+        [userId],
+      ),
       session.query<{ content: string }>(
         'select content from chat_memory_entries where chat_id = $1 order by updated_at',
         [chatId],

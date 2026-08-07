@@ -2,25 +2,32 @@
 
 Long conversations in the Chat tab have the same problem any long-context chat has: every turn resends
 the entire history, cost and latency grow without bound, and the model's attention dilutes across
-messages that stopped being relevant hundreds of turns ago. This is bigBrain's answer — adapted from
+messages that stopped being relevant hundreds of turns ago. This is BigImagine's answer — adapted from
 the pattern in [SillyTavern-Canonize](https://github.com/ZapoVerde/SillyTavern-Canonize), a rolling
-summarization/RAG extension for a different kind of chat app, reshaped around the two things bigBrain
-has that Canonize doesn't: a real relational store as the canonical record (`docs/bi_principles.md`
-§1), and no roleplay "world" to model — a household's actual facts already live in `notes`,
-`documents`, `list_items`, `recipes`, and `calendar_events`.
+summarization/RAG extension for a different kind of chat app.
 
-That difference is why this isn't a port of Canonize's lorebook system. Canonize needs a free-text
-"world model" (people/places/things entries) because SillyTavern has no database at all — the
-lorebook *is* the only place world state can live. bigBrain already has that world state, in
-structured, queryable tables. What bigBrain was actually missing was narrower: a way to keep a long
-chat's own history out of the model's face without losing it, and a place to keep facts that are
-genuinely about the ongoing relationship with the household rather than about any single note or
-event. That's what this feature builds.
+This piece of the fork originally carried bigBrain's own household-only framing verbatim: a real
+relational store as the canonical record (`docs/bi_principles.md` §1), and "no roleplay world to
+model" — a household's actual facts already live in `notes`/`documents`/`list_items`/`recipes`/
+`calendar_events`, so Canonize's free-text plot lorebook seemed like a redundant second copy of the
+same facts. That reasoning is still correct for a household ('chat'-kind) chat — see "Household
+Memory" below, untouched by any of what follows. It stopped being correct once BigImagine repointed
+at narrative instead of household data (`docs/bootstrap.md`): an RP-kind chat *is* exactly the kind
+of chat Canonize was built for, and `docs/bi_principles.md`'s own "What BigImagine Is" commits to
+making Canonize's features "native, relational features of this platform," not declining to build
+them. So `chat_sessions.kind` (`0049_chat_kind.sql`) now forks this whole pipeline in two: a 'chat'
+chat keeps bigBrain's original digest-only behavior exactly as designed below; an 'rp' chat instead
+runs three more lanes on top — the **bridge**, a near-verbatim port of Canonize's own hand-tuned
+hookseeker prompt, reading the chat's raw transcript every sync to maintain an evolving SCENE, an
+EVENTS table, and arc-tagged PLOT entries; and two periodic **curators**, near-verbatim ports of
+Canonize's own `lorebookSyncPrompt`/`peopleSyncPrompt`, maintaining living place/thing/concept and
+person entries against the same raw transcript. See "The Bridge (RP Lane)" and "The Curators (RP
+Lane)" below.
 
-## The Four Pieces
+## The Four Pieces (household / 'chat' lane)
 
-At every turn in a persisted chat (one with a `chat_id` — Open WebUI's stateless traffic is
-untouched by any of this), the prompt is assembled from:
+At every turn in a persisted 'chat'-kind chat (one with a `chat_id` — Open WebUI's stateless traffic
+is untouched by any of this), the prompt is assembled from:
 
 1. **Live context** — the most recent turn pairs, sent raw, exactly as today.
 2. **Household memory** — durable, cross-chat facts about the household (preferences, corrections,
@@ -29,6 +36,9 @@ untouched by any of this), the prompt is assembled from:
    always included.
 4. **Chat-lane recall** — full-turn search over this chat's archived history, reached only when the
    model explicitly calls `recall_chat_history`.
+
+An 'rp'-kind chat gets pieces 1 and 4 unchanged, but not 2 or 3 — see "The Bridge (RP Lane)" below
+for what it gets instead.
 
 ```
 │←──────────── archival (chat_chunks, RAG-only) ────────────→│←── live context ──→│
@@ -57,23 +67,128 @@ chat, in one transaction:
 1. The eligible message run (past the live window, rounded down to a whole number of chunks) is
    sliced into fixed-size chunks — 4 messages (2 turn pairs) each
    (`io/chatMemory/chunkChatTranscript.ts`, the chat-transcript analogue of
-   `plugins/documents/src/chunkDocument.ts`).
+   `plugins/documents/src/chunkDocument.ts`). Same for both chat kinds — this is the RAG-only lane
+   (`chat_chunks`/`recall_chat_history`), untouched by the kind branch below.
 2. Each chunk gets a one/two-sentence AI summary (`io/chatMemory/classifyChatChunk.ts`) and is
    embedded (single-lane — content only, unlike Canonize's content+summary two-lane retrieval; a
-   second lane is a real refinement but not one this scale needs yet).
-3. The chat's key-ideas digest is updated (`io/chatMemory/distillChatMemory.ts`): given the current
-   digest and the trailing `chat_memory_digest_horizon_pairs` worth of `chat_chunks` summaries — not
-   just the ones this tick freshly produced — the model returns only entries that are new or
-   changed, reusing an existing `topic_key` for a continuing thread and coining a new one only for a
-   genuinely new idea — the same "arc tag" discipline Canonize's plot lorebook uses to stay append-
-   bounded instead of growing one row per sync forever. The horizon re-read (oldest-first) is this
-   platform's analogue of Canonize's own bridge-summary horizon — see Settings below for why it can
-   default smaller than Canonize's.
-4. One new `chat_sync_points` row records the restore point; the chunks and updated digest entries
-   are tied to it.
+   second lane is a real refinement but not one this scale needs yet). Same for both chat kinds.
+3. **This is where the two lanes diverge**, on `chat_sessions.kind`:
+   - A 'chat' chat updates its key-ideas digest (`io/chatMemory/distillChatMemory.ts`): given the
+     current digest and the trailing `chat_memory_digest_horizon_pairs` worth of `chat_chunks`
+     summaries — not just the ones this tick freshly produced — the model returns only entries that
+     are new or changed, reusing an existing `topic_key` for a continuing thread and coining a new
+     one only for a genuinely new idea. The horizon re-read (oldest-first) is this platform's
+     analogue of Canonize's own bridge-summary horizon — see Settings below for why it can default
+     smaller than Canonize's.
+   - An 'rp' chat instead runs the bridge (`io/chatMemory/bridgeChatMemory.ts`) plus the two
+     periodic curators (`io/chatMemory/curateLorebook.ts`, `curatePeople.ts`) — see "The Bridge (RP
+     Lane)" and "The Curators (RP Lane)" below. None of the three read `chat_chunks` summaries; all
+     three read the RAW `toArchive` transcript from step 1 directly, the same messages step 2
+     chunked, before they were compressed — one shared `transcriptText`, three separate LLM calls.
+4. One new `chat_sync_points` row records the restore point; the chunks from step 2 and whatever
+   step 3 wrote (digest entries, or scene/events/plot/lorebook/people) are tied to it.
 
 A failure mid-pipeline rolls the whole transaction back — the previous sync point is untouched, and
 the next tick simply retries.
+
+## The Bridge (RP Lane)
+
+An 'rp'-kind chat's sync step 3 is `io/chatMemory/bridgeChatMemory.ts`, not
+`distillChatMemory.ts`. Where the household digest is fed only compressed chunk summaries (a
+summary-of-summary), the bridge is fed the sync window's RAW transcript directly every tick — the
+same shape Canonize's own hookseeker call has always used, and the reason a plain "make the RP digest
+richer" fix wasn't enough: the digest's whole shape (summaries-of-summaries, one flat topic_key list)
+was the wrong shape for storytelling continuity, not just thin wording.
+
+`DEFAULT_BRIDGE_PROMPT` is a near-verbatim port of Canonize's own hand-tuned `hookseekerPrompt`
+(`stacks/sillytavern/st-data/default-user/settings.json`,
+`extension_settings.cnz.activeState.hookseekerPrompt`) — preserved wording and structure, not a
+re-paraphrase, per the explicit call that years of prompt tuning in Canonize eventually let it "ride
+between syncs without adjustment," and that property is the entire point of porting it this way. The
+one unavoidable adaptation: Canonize's own raw-markdown "OUTPUT FORMAT" section (parsed by regex on
+the SillyTavern side) is replaced with an equivalent forced-tool-call schema (`bridge_chat_memory`) —
+BigImagine has no regex-parsing consumer, so the model answers via a structured call instead of free
+text. Everything upstream of that section is unchanged. `{{user}}` in the ported prompt resolves
+through `util/interpolateMacros.ts` against the household's `persona_name` setting, the same live
+macro shape Canonize's own `{{user}}` resolves against.
+
+Each bridge call produces exactly three things, mirroring Canonize's own three-part hookseeker
+output:
+
+- **SCENE** — ~150-200 words of present-tense prose, carried forward and evolved each sync, never
+  reset. Written to `chat_memory_entries` under the reserved `topic_key` `'scene'` (plain text, same
+  upsert-on-`(chat_id, topic_key)` mechanism the household digest already uses — no new table).
+- **EVENTS** — a markdown table of upcoming confirmed scheduled events, output in full every sync
+  (even unchanged). Written to `chat_memory_entries` under `topic_key` `'events'`. Plain text for
+  now, per the user's explicit call — a structured table is a real refinement but "nearly free" to
+  add later, not needed to get this working.
+- **PLOT entries** — arc-tagged developments (a character's goal/allegiance shifting, a decision, a
+  revelation, a threat escalating or resolving, and so on — the exact trigger list lives in the
+  ported prompt itself). Each becomes a `'proposed'` `canon_facts` row, `category = 'plot'`. These go
+  through the *exact same* settling-window auto-approval as every other canon fact
+  (`chatMemorySync.ts`'s `promote_canon_facts` step, which already runs unconditionally at the start
+  of every sync tick) — no special-casing needed; a plot fact proposed this tick simply isn't
+  `'approved'` until the chat's next tick, the same one-cycle settling window Canonize's own manual
+  review gave every entry in its early days.
+
+The bridge also reads two things back in every sync, both scoped to the chat: the **previous
+output** (this chat's current `'scene'`/`'events'` `chat_memory_entries` rows, recombined into one
+"PREVIOUS OUTPUT" blob — Canonize's own hookseeker reads its own prior output back the same way, and
+the prompt's PART 1/PART 2 instructions depend on it for continuity), and **currently open plot
+threads** (the latest-approved-per-`arc_tag` `canon_facts` rows where `category = 'plot'` — the same
+dedup-to-most-recent-per-arc query `recallCanonFactsTool.ts` already uses for recall, reused here
+unranked as a plain listing).
+
+At read time, `buildChatMemorySystemPrompt` (`server/httpServer.ts`) injects an 'rp' chat's SCENE,
+EVENTS, and open plot threads unconditionally every turn — the RP lane's equivalent of the household
+lane's always-injected key-ideas digest, just three labeled blocks instead of one flat bullet list.
+household_memory is never injected for an 'rp' chat, unchanged from before this lane existed.
+
+## The Curators (RP Lane)
+
+The bridge covers Canonize's *plot* lorebook (hookseeker); it never touches Canonize's other
+lorebook — the general one, place/thing/concept, plus the dedicated person cards. Those are two more
+periodic curator calls, `io/chatMemory/curateLorebook.ts` and `io/chatMemory/curatePeople.ts`,
+running every sync tick alongside the bridge for 'rp'-kind chats, over the exact same
+`transcriptText`. Both are near-verbatim ports of Canonize's own hand-tuned
+`lorebookSyncPrompt`/`peopleSyncPrompt` (same source file as the hookseeker prompt), same "preserve
+exact wording" direction as the bridge's own port.
+
+Two adaptations from the CNZ source, made identically in both prompts:
+
+- **"Keys:" dropped entirely.** Canonize generates a keyword list per entry for SillyTavern's
+  keyword-triggered lorebook activation. `docs/spec.md` states BigImagine's vector recall
+  (`recall_canon_facts`) replaces keyword lorebooks outright — there is no keyword-match fallback
+  anywhere in this schema — so a generated key would never be read by anything. Dropped along with
+  it: Canonize's own carve-out letting the lorebook curator correct a mistagged `#person` entry's
+  category alone; BigImagine's lorebook curator is never even shown person entries (the people
+  curator owns that category exclusively), so there's nothing for it to mistag.
+- **Forced tool call instead of raw markdown.** Canonize's `### OUTPUT FORMAT` section (parsed by
+  regex client-side) becomes `curate_lorebook`/`curate_people` — a structured tool call, same swap
+  the bridge already made for `bridge_chat_memory`. Canonize's own free-text
+  `` **dup** — duplicate of [Primary Name] `` convention becomes a first-class `'duplicate'` action
+  with a `duplicate_of` field: the same information, structured instead of parsed back out of prose.
+
+Each curator call returns a list of entries, each an `'update'`, `'new'`, or `'duplicate'` action —
+empty when nothing in the window warrants a change, same "silence is a valid answer" shape as the
+bridge's own `plot_entries`. Every entry becomes a `'proposed'` `canon_facts` row
+(`category = 'place' | 'thing' | 'concept'` for the lorebook curator, always `'person'` for the
+people curator), keyed by a new `entity_key` column (`db/migrations/0064_canon_facts_entity_key.sql`)
+rather than `arc_tag` — see "Tables" below for why the two columns are kept separate. These settle
+through the exact same `promote_canon_facts` auto-approval step as every other canon fact, the chat's
+next sync tick, zero special-casing — identical to how the bridge's own plot entries settle.
+
+A `'duplicate'` entry isn't auto-merged — it writes a `'proposed'` row for the *redundant* entry's own
+`entity_key`, content `Duplicate of {primary name}.`, which becomes that entity's new live content
+once approved (recall's dedup is most-recent-approved-wins, so the duplicate marker naturally
+supersedes whatever the redundant entry used to say). Manual cleanup from there — same as Canonize's
+own dup-flagging convention, which is also never auto-resolved.
+
+Unlike the bridge's SCENE/EVENTS, curator-produced entries are never unconditionally injected into
+the system prompt — `recall_canon_facts` is the read path for them, same as any other person/place/
+thing/concept fact, reached only when the model explicitly searches for one (§2: the LLM reasons,
+nothing else does). These curators exist to give that tool something real to search, not to add a
+fourth always-on injected block.
 
 ## Branching, and Why the Healing Problem Mostly Disappears
 
@@ -155,24 +270,31 @@ section exposes:
   40, because the key-ideas digest already persists its own state forward as `chat_memory_entries`
   rows across syncs; the horizon here is a revision window layered on top of that persistence, not
   the sole source of continuity the way Canonize's wholesale bridge re-read is.
-- **Three prompts** (chunk summary, key-ideas digest, long-term memory), each **default + bespoke**:
-  every prompt ships a sensible built-in (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`,
-  `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`, `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, each exported from its
-  own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
-  the default rather than needing a separate reset action. `docs/bi_principles.md` §18 makes this
-  default-plus-bespoke shape a platform-wide requirement, not a one-off pattern local to this
-  feature: any prompt driving an internal LLM call must be surfaced here or somewhere else in
-  Settings.
+- **Six prompts** (chunk summary, key-ideas digest, long-term memory, RP bridge, lorebook curator,
+  people curator), each **default + bespoke**: every prompt ships a sensible built-in
+  (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`, `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`,
+  `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_LOREBOOK_CURATOR_PROMPT`,
+  `DEFAULT_PEOPLE_CURATOR_PROMPT`, each exported from its own `io/chatMemory/*.ts` module) and can be
+  overridden freely; an empty override clears back to the default rather than needing a separate
+  reset action. `docs/bi_principles.md` §18 makes this default-plus-bespoke shape a platform-wide
+  requirement, not a one-off pattern local to this feature: any prompt driving an internal LLM call
+  must be surfaced here or somewhere else in Settings. The key-ideas digest prompt is mutually
+  exclusive with the other three RP-lane prompts per chat (`chat_sessions.kind` picks exactly one
+  branch); the bridge/lorebook-curator/people-curator prompts all run together for every 'rp' chat,
+  not exclusively.
 
-All seven settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
+All ten settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
 `chat_memory_sync_every_pairs`, `chat_memory_digest_horizon_pairs`, `chat_memory_chunk_summary_prompt`,
-`chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`) are read live on every sync
-tick — a save takes effect on the next tick, no restart, same shape as `household_timezone`.
+`chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`, `chat_memory_bridge_prompt`,
+`chat_memory_lorebook_curator_prompt`, `chat_memory_people_curator_prompt`) are read live on every
+sync tick — a save takes effect on the next tick, no restart, same shape as `household_timezone`.
 
-These seven keys all needed `orchestrator_settings.key`'s CHECK constraint widened before any of
-them could actually be saved; the first six were added to application code in `0036`-`0041` but the
-constraint itself was never widened to match until `0043` closed that gap alongside adding the
-seventh (`chat_memory_digest_horizon_pairs`) fresh — see `db/migrations/README.md`'s `0043` entry.
+Each of these keys needed `orchestrator_settings.key`'s CHECK constraint widened before it could
+actually be saved: the first six were added to application code in `0036`-`0041` but the constraint
+itself was never widened to match until `0043` closed that gap alongside adding
+`chat_memory_digest_horizon_pairs` fresh (see `db/migrations/README.md`'s `0043` entry);
+`chat_memory_bridge_prompt` followed the same pattern in `0063`, and
+`chat_memory_lorebook_curator_prompt`/`chat_memory_people_curator_prompt` in `0065`.
 
 ## Tables
 
@@ -180,15 +302,30 @@ seventh (`chat_memory_digest_horizon_pairs`) fresh — see `db/migrations/README
 |---|---|---|
 | `chat_sync_points` | per chat | bookkeeping only — records how far rolling sync has reached |
 | `chat_chunks` | per chat | archived turn-pairs + AI summary + embedding; reached via `recall_chat_history` |
-| `chat_memory_entries` | per chat | the always-injected "key ideas" digest, bounded by topic_key upsert |
-| `household_memory` | per household member, cross-chat | populated once at explicit archive; outlives its source chat |
+| `chat_memory_entries` | per chat | 'chat' lane: the always-injected "key ideas" digest, one row per `topic_key`. 'rp' lane: exactly two reserved rows, `topic_key` `'scene'`/`'events'`, written by the bridge. Same upsert-on-`(chat_id, topic_key)` mechanism either way. |
+| `household_memory` | per household member, cross-chat | populated once at explicit archive; outlives its source chat; 'chat' lane only |
+| `canon_facts` (`category = 'plot'`) | per chat | 'rp' lane's plot entries — `'proposed'` rows written by the bridge, promoted to `'approved'` at the chat's next sync tick, latest-per-`arc_tag` is the live state |
+| `canon_facts` (`category in ('place','thing','concept','person')`) | per chat | 'rp' lane's lorebook/people entries — `'proposed'` rows written by the two curators, same promotion, latest-per-`entity_key` is the live state |
+
+`entity_key` (`0064_canon_facts_entity_key.sql`) is deliberately a separate column from `arc_tag`,
+not a reuse of it, even though both exist purely to give `recallCanonFactsTool.ts`'s dedup query a
+group key and the SQL shape (`distinct on (coalesce(arc_tag, entity_key, fact_id::text))`) is
+identical either way. `arc_tag` groups successive proposals into one continuing *plot arc*;
+`entity_key` groups successive proposals into one continuing *dictionary entry* for a named person/
+place/thing/concept — different kinds of identity that happen to want the same recall mechanism. A
+`plot` fact never sets `entity_key`; a curator-produced fact never sets `arc_tag`; turn-time
+`propose_canon_fact` facts (any category) set neither and dedup to their own `fact_id`.
 
 ## What's Different From Canonize, and Why
 
 | Canonize | Chat Memory | Why |
 |---|---|---|
-| General/Plot lorebook (free-text world model) | Nothing — existing `notes`/`documents`/`list_items` tables | The relational store is already the canonical world model (§1); a shadow prose copy would be a second, un-reconciled source of the same facts |
+| General lorebook (place/thing/concept, free-text world model) | The lorebook curator (`curateLorebook.ts`), 'rp' lane only — a near-verbatim port, see "The Curators (RP Lane)" above | Same call as the plot lorebook below: this is a real feature Canonize was built for, not a redundant shadow of the relational store — `canon_facts` (via `entity_key`) is the one canonical home for it, not a second un-reconciled copy |
+| Person lorebook (living character cards: appearance/personality/connections/goals) | The people curator (`curatePeople.ts`), 'rp' lane only — a near-verbatim port, see "The Curators (RP Lane)" above | Same reasoning as the general lorebook row; kept as its own curator/prompt because Canonize itself keeps it as a dedicated pass, not folded into the general one |
+| Keyword-triggered lorebook activation ("Keys:" per entry) | Dropped — not ported | `docs/spec.md`'s vector recall (`recall_canon_facts`) replaces keyword-lorebook matching outright; there is no keyword-match fallback anywhere in this schema for a generated key to ever reach |
+| Targeted on-demand entry refresh/creation (`targetedUpdatePrompt`/`targetedNewPrompt`) | Not ported | Explicit scoping call: periodic batch curation only for now: the two curators above already keep every entry current every sync tick |
+| Plot lorebook (hookseeker: EVENTS + SCENE + arc-tagged plot entries) | The bridge (`bridgeChatMemory.ts`), 'rp' lane only — a near-verbatim port, see "The Bridge (RP Lane)" above | This *is* the storytelling-continuity mechanism Canonize was built for; an RP-kind chat gets the real thing, not a simplified reinterpretation |
 | Silent RAG injection every turn | `recall_chat_history` is an explicit tool call | The LLM reasons, nothing else does (§2) |
-| Hash-linked anchor chain + branch detection | FK cascade (`on delete cascade`) + fork-as-new-row | bigBrain owns its own mutations; no need to detect what it caused itself |
+| Hash-linked anchor chain + branch detection | FK cascade (`on delete cascade`) + fork-as-new-row | BigImagine owns its own mutations; no need to detect what it caused itself |
 | Wholesale lorebook/scene snapshot restore | Same idea, narrower: entries dropped rather than reconstructed pre-fork | Accepted simplicity trade, not a correctness gap in the common case |
-| Bridge-summary horizon defaults to 40 pairs, a full wholesale re-read every sync | Digest horizon defaults to 24 pairs, a revision window on top of persisted state | The key-ideas digest already carries state forward as `chat_memory_entries` rows across syncs; Canonize's bridge summary has no equivalent persistent entries of its own, so its horizon has to do all the continuity work alone |
+| Bridge-summary horizon defaults to 40 pairs, a full wholesale re-read every sync ('chat' lane's own analogue only — the RP bridge has no horizon setting, it always reads the live raw transcript) | Digest horizon defaults to 24 pairs, a revision window on top of persisted state | The key-ideas digest already carries state forward as `chat_memory_entries` rows across syncs; Canonize's bridge summary has no equivalent persistent entries of its own, so its horizon has to do all the continuity work alone |

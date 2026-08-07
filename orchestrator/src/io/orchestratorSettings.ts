@@ -63,6 +63,19 @@
  * back to the default. Every one of these six chat_memory_* keys was missing from 0010's CHECK
  * constraint until 0043 added them — see db/migrations/README.md's 0043 entry.
  *
+ * chat_memory_bridge_prompt (io/chatMemory/bridgeChatMemory.ts) is the 'rp'-kind sync lane's
+ * counterpart to chat_memory_distill_prompt — same "default + bespoke" override shape, but for the
+ * hookseeker-parity bridge call (SCENE/EVENTS/PLOT) rather than the household digest. 'chat'-kind
+ * chats never read this key; distillChatMemory.ts and this key's prompt are mutually exclusive per
+ * chat, selected once by chat_sessions.kind. Added to 0010's CHECK constraint by a later migration
+ * — see db/migrations/README.md's corresponding entry.
+ *
+ * chat_memory_lorebook_curator_prompt (io/chatMemory/curateLorebook.ts) and
+ * chat_memory_people_curator_prompt (io/chatMemory/curatePeople.ts) are the 'rp'-kind sync lane's
+ * other two periodic curators — place/thing/concept and person respectively — same "default +
+ * bespoke" override shape, run every tick alongside chat_memory_bridge_prompt, not in place of it.
+ * Added to 0010's CHECK constraint by db/migrations/0065_chat_memory_curator_settings.sql.
+ *
  * canon_recall_top_k/canon_extraction_prompt (docs/canonize-plan.md §6, plugins/canonize,
  * migration 0048) are the Canonize feature's two settings: canon_recall_top_k (integer-as-text,
  * default '8' — how many facts recall_canon_facts returns) is read live by the recall tool on
@@ -136,6 +149,9 @@ export const SETTING_NAMES = [
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
   'chat_memory_household_memory_prompt',
+  'chat_memory_bridge_prompt',
+  'chat_memory_lorebook_curator_prompt',
+  'chat_memory_people_curator_prompt',
   'canon_recall_top_k',
   'canon_extraction_prompt',
   'screen_lock_password',
