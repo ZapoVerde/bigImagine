@@ -1050,21 +1050,26 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         }
 
         // docs/vistalyze_integration/segway.md §2.7 / location_status.md §3 Step 3: resurrect the
-        // fork point's transient-or-inactive locations/characters into the new branch. Only rows
-        // anchored to the fork point's *active* swipe come along (that's the variant the fork
-        // actually copies — its alternate swipes stay behind with the parent), cloned as fresh
-        // transient rows anchored to the branch's own corresponding swipe (created in the message
+        // fork's transient-or-inactive locations/characters into the new branch. Locations: every
+        // row anchored to a *copied* active swipe comes along (the fork's own swipe plus every
+        // earlier turn's — that's what makes "all the bgs up until the fork transfer over, the
+        // ones after do not" true for prev/next cycling inside the branch), cloned as fresh
+        // transient rows anchored to the branch's corresponding swipe (created in the message
         // copy loop above), so the branch's own sync ticks promote/demote them independently from
-        // that point on. Never cloned: promoted/permanent rows (they're world canon, not branch
-        // state) and rows anchored to other messages' swipes.
+        // that point on. Alternate swipes never come along (they stay behind with the parent), so
+        // rows anchored to them aren't copied either. Never cloned: promoted/permanent rows
+        // (they're world canon, not branch state). Characters stay fork-point-scoped as before —
+        // they carry no visual/bg state.
         const [forkMessage] = await session.query<{ active_swipe_id: string | null }>(
           'select active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
           [forkFromMessageId, chatId],
         );
         const forkSwipeId = forkMessage?.active_swipe_id;
         const branchForkSwipeId = forkSwipeId ? swipeIdMap.get(forkSwipeId) : undefined;
-        if (branchForkSwipeId) {
+        const copiedSwipeIds = [...swipeIdMap.keys()];
+        if (copiedSwipeIds.length > 0) {
           const resurrectionLocations = await session.query<{
+            location_id: string;
             name: string;
             visual_description: string;
             environment: string;
@@ -1073,11 +1078,16 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             image_generated_at: string | null;
             image_rendered_input: string | null;
             image_render_hash: string | null;
+            anchor_swipe_id: string | null;
           }>(
-            `select name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash from locations
-             where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,
-            [userId, forkSwipeId],
+            `select location_id, name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash, anchor_swipe_id from locations
+             where user_id = $1 and anchor_swipe_id = any($2::uuid[]) and status in ('transient', 'inactive')`,
+            [userId, copiedSwipeIds],
           );
+          // Parent location_id -> the branch's cloned location_id. Needed below to re-key the
+          // per-swipe image associations onto the branch's own rows (location ids are a global
+          // PK — the parent's rows can't be reused).
+          const branchLocationIdMap = new Map<string, string>();
           for (const loc of resurrectionLocations) {
             // docs/vistalyze_integration/endpoint.md §6.2: carry seed/image_url/image_generated_at
             // forward too — without them every fork forces a fresh render for a resurrected
@@ -1088,12 +1098,49 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             // §5.1.2) compares the render hash (migration 0076) first, so a clone without it
             // would never hit the cache even though its inputs are byte-identical to the
             // parent's. Character resurrection is unaffected — characters carry no visual fields.
-            await session.query(
+            const branchAnchorSwipeId = loc.anchor_swipe_id ? (swipeIdMap.get(loc.anchor_swipe_id) ?? branchForkSwipeId) : undefined;
+            const [cloned] = await session.query<{ location_id: string }>(
               `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
-               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9, 'transient', $10, $11)`,
-              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchForkSwipeId],
+               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9, 'transient', $10, $11)
+               returning location_id`,
+              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
+            );
+            if (cloned) branchLocationIdMap.set(loc.location_id, cloned.location_id);
+          }
+          // endpoint.md §5.1.8's per-swipe image associations for every copied swipe, re-keyed to
+          // the branch's own chat/swipe/location ids (values ride along unchanged — same URL,
+          // same render hash, same render time): a cycle-back inside the branch reuses the
+          // recorded URL instead of re-generating, exactly like the parent. Rows whose location
+          // wasn't resurrected (permanent rows, or rows anchored to an alternate swipe that
+          // didn't come along) are skipped — the branch has no row to point them at.
+          const swipeImageRows = await session.query<{
+            swipe_id: string;
+            location_id: string;
+            image_url: string | null;
+            render_hash: string | null;
+            image_generated_at: string | null;
+          }>(
+            `select swipe_id, location_id, image_url, render_hash, image_generated_at from location_swipe_images
+             where chat_id = $1 and swipe_id = any($2::uuid[])`,
+            [chatId, copiedSwipeIds],
+          );
+          for (const si of swipeImageRows) {
+            const branchSwipeId = swipeIdMap.get(si.swipe_id);
+            const branchLocationId = branchLocationIdMap.get(si.location_id);
+            if (!branchSwipeId || !branchLocationId) continue;
+            await session.query(
+              `insert into location_swipe_images (chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at)
+               values ($1, $2, $3, $4, $5, $6)
+               on conflict (chat_id, swipe_id) do update set
+                 location_id = excluded.location_id,
+                 image_url = excluded.image_url,
+                 render_hash = excluded.render_hash,
+                 image_generated_at = excluded.image_generated_at`,
+              [newChatId, branchSwipeId, branchLocationId, si.image_url, si.render_hash, si.image_generated_at],
             );
           }
+        }
+        if (branchForkSwipeId) {
           const resurrectionCharacters = await session.query<{ name: string }>(
             `select name from characters
              where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,

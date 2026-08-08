@@ -174,6 +174,7 @@ import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { buildAutoRecallPrompt } from '../io/chatMemory/recallForPrompt.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
+import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
@@ -1453,6 +1454,24 @@ async function handleChatCompletions(
   const echoedModel = model ?? turnDefaultModel;
 
   if (body.chat_id) {
+    // First LLM turn of a new RP chat (≤1 pre-turn message: empty chat, a seeded greeting only,
+    // or a user message left by a failed first attempt): repair the scene header synchronously
+    // when the raw reply lacks one, so the scrape below has a header to resolve a location from
+    // and the bg pass fires on turn 1 — the async cleanup subloop would otherwise add the header
+    // only after this reply was already persisted and scraped, and nothing re-scrapes (see
+    // orchestrator/ensureFirstTurnHeader.ts). One small LLM call, first turn only, fail-open:
+    // a failed repair stores and sends the raw reply, byte-identical to before.
+    const firstLlmTurn = sessionKind === 'rp' && priorMessageCount <= 1;
+    if (firstLlmTurn && reply) {
+      reply = await ensureFirstTurnHeader(
+        { settings: deps.settings },
+        turnLlm,
+        userId,
+        body.chat_id,
+        reply,
+        messagesForLlm,
+      );
+    }
     // The user message (if this was a genuinely new turn) is already persisted above, before
     // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
     // scrapes the turn's header block into trusted scene state, anchored to the new message's

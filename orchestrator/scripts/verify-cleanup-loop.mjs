@@ -792,6 +792,59 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(llm.calls.length === 1, 'covered message is not re-planned after the job lands');
 }
 
+
+// --- ensureFirstTurnHeader (the first-turn synchronous header repair, httpServer.ts wiring):
+// header-already-conforming skips the LLM call entirely; a missing header fires one repair
+// prompt and returns the repaired text; an empty repair output and a throwing LLM both keep the
+// raw reply (fail-open). ---
+{
+  const { ensureFirstTurnHeader } = await import('../dist/orchestrator/ensureFirstTurnHeader.js');
+  const noHeaderReply = 'She met his gaze and refused to flinch.';
+  const history = [{ role: 'user', content: 'You step onto the Observation Deck.' }];
+
+  {
+    // Already conforming — zero LLM calls.
+    const llm = createFakeLlm();
+    const out = await ensureFirstTurnHeader(
+      { settings: createFakeSettings() },
+      llm,
+      'u1',
+      'c1',
+      VALID_HEADER + 'She met his gaze.',
+      history,
+    );
+    assert(out === VALID_HEADER + 'She met his gaze.', 'ensureFirstTurnHeader: a conforming header returns the reply unchanged');
+    assert(llm.calls.length === 0, 'ensureFirstTurnHeader: a conforming header fires no LLM call');
+  }
+
+  {
+    // Missing header — one repair prompt, the repaired text comes back with the header on top.
+    const llm = createFakeLlm(() => VALID_HEADER.trimEnd());
+    const out = await ensureFirstTurnHeader({ settings: createFakeSettings() }, llm, 'u1', 'c1', noHeaderReply, history);
+    assert(
+      out.startsWith(VALID_HEADER.trimEnd()) && out.endsWith(noHeaderReply),
+      'ensureFirstTurnHeader: a missing header is repaired (header prepended) and the reply follows',
+    );
+    assert(llm.calls.length === 1, 'ensureFirstTurnHeader: a missing header fires exactly one repair call');
+    assert(llm.calls[0][0].content.includes('Required format, exactly two lines'), 'ensureFirstTurnHeader: the repair prompt is the editable cleanup_header_prompt');
+  }
+
+  {
+    // Empty repair output — fail-open, raw reply kept.
+    const llm = createFakeLlm(() => '');
+    const out = await ensureFirstTurnHeader({ settings: createFakeSettings() }, llm, 'u1', 'c1', noHeaderReply, history);
+    assert(out === noHeaderReply, 'ensureFirstTurnHeader: an empty repair output keeps the raw reply (fail-open)');
+  }
+
+  {
+    // Throwing LLM — fail-open, raw reply kept, never rejects.
+    const llm = { name: 'fake', supportsVision: false, async complete() { throw new Error('provider down'); } };
+    const out = await ensureFirstTurnHeader({ settings: createFakeSettings() }, llm, 'u1', 'c1', noHeaderReply, history);
+    assert(out === noHeaderReply, 'ensureFirstTurnHeader: a throwing repair LLM keeps the raw reply (fail-open)');
+  }
+}
+
+
 if (process.exitCode) {
   console.error('cleanup loop verification FAILED');
 } else {

@@ -74,7 +74,9 @@ A `locations` or `characters` row is **eligible** for lookup, recall, or injecti
 * `recall_canon_facts` / `buildNarratorStackItems`, wherever they resolve `linked_location_id` / `linked_character_ids` — an inactive link should recall as absent, not throw or leak.
 
 ### 2.7 Fork Resurrection
-`forkChat()` (`orchestrator/src/io/chatSessions.ts`) forks up to a chosen swipe. At that point, per `location_status.md` §3 Step 3: any `locations`/`characters` rows (`inactive` or still-`transient`) anchored to the swipe being forked from are cloned into the new chat with `status = 'transient'`, `anchor_chat_id` = the new chat, `anchor_swipe_id` = the new chat's corresponding swipe. The clone is independent from that point on — its own promotion/demotion at the new chat's own sync ticks.
+`forkChat()` (`orchestrator/src/io/chatSessions.ts`) forks up to a chosen swipe. At that point, per `location_status.md` §3 Step 3: every `locations`/`characters` row (`inactive` or still-`transient`) anchored to a *copied* active swipe — the fork point's own swipe and every earlier turn's — is cloned into the new chat with `status = 'transient'`, `anchor_chat_id` = the new chat, `anchor_swipe_id` = the new chat's corresponding swipe. Cloning every copied swipe (not just the fork point's) is what makes "all the bgs up until the fork transfer over, the ones after do not" true for prev/next cycling inside the branch; alternate (non-active) swipes never come along, so rows anchored to them aren't copied either. Permanent rows are never cloned (world canon, not branch state). Each cloned location is independent from that point on — its own promotion/demotion at the new chat's own sync ticks.
+
+The clone carries the full visual cache record (`image_url`/`image_generated_at`/`image_rendered_input`/`image_render_hash`, endpoint.md §6.2) so a fork never forces a re-render, and the per-swipe image associations (`location_swipe_images`, migration 0076) for every copied swipe are re-keyed onto the branch's own chat/swipe/location ids — same URL, same render hash — so a cycle-back inside the branch reuses the recorded bg exactly like the parent.
 
 ---
 
@@ -133,7 +135,7 @@ Using the `Present:` line extracted in §4.1:
 6. Demote its other swipes' transient locations/characters to inactive (§2.5.2).
 
 **On fork** (`forkChat()`, existing):
-7. Resurrect any `inactive`/`transient` locations/characters anchored to the swipe being forked from, as new `transient` rows on the new chat (§2.7).
+7. Resurrect every `inactive`/`transient` location/character anchored to any copied active swipe (fork point + all earlier turns), as new `transient` rows on the new chat (§2.7); clone the per-swipe image associations re-keyed onto the branch.
 
 Steps 5–7 are not part of the per-turn path — they're the reason this spec cites `location_status.md` rather than reinventing it, and skipping them (as an earlier draft of this spec did) would leave Stage 2 creating records that never promote, never get excluded when stale, and never come back on fork.
 

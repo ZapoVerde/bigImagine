@@ -182,7 +182,7 @@ interface ResolvedCleanupConfig {
 // Config loading — re-read every tick (bi_principles.md §13, chatMemorySync pattern)
 // ---------------------------------------------------------------------------
 
-async function resolveCleanupConfig(settings: OrchestratorSettingsStore): Promise<ResolvedCleanupConfig> {
+export async function resolveCleanupConfig(settings: OrchestratorSettingsStore): Promise<ResolvedCleanupConfig> {
   const [headerRegex, headerPrompt, footerRegex, footerPrompt, userName] = await Promise.all([
     settings.get('cleanup_header_regex'),
     settings.get('cleanup_header_prompt'),

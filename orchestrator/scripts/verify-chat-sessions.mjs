@@ -25,6 +25,7 @@ function createFakePool() {
   const folders = new Map(); // folder_id -> row
   const locations = []; // {location_id, user_id, name, status, anchor_chat_id, anchor_swipe_id, ...}
   const characters = []; // {character_id, user_id, name, status, anchor_chat_id, anchor_swipe_id}
+  const swipeImages = []; // {chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at}
   const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
   const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
   let clock = 1000;
@@ -37,6 +38,7 @@ function createFakePool() {
     folders,
     locations,
     characters,
+    swipeImages,
     syncStatus,
     canonCounts,
     async connect() {
@@ -291,17 +293,22 @@ function createFakePool() {
             }
             return { rows: [] };
           }
-          // forkChat resurrection (§2.7): transient/inactive rows anchored to the fork swipe.
+          // forkChat resurrection (§2.7): transient/inactive rows anchored to the copied swipes.
           // The `from locations`/`from characters` predicates live on different lines from the
-          // `where user_id` in the real SQL, so the matchers don't require adjacency.
+          // `where user_id` in the real SQL, so the matchers don't require adjacency. Since the
+          // fork now resurrects every copied swipe (not just the fork point's), the anchor param
+          // is an array; a bare id (the characters query, fork-point only) still works.
           if (sql.includes('from locations') && sql.includes('anchor_swipe_id')) {
-            const [userId, anchorSwipeId] = params;
+            const [userId, anchorParam] = params;
+            const anchorIds = Array.isArray(anchorParam) ? anchorParam : [anchorParam];
             const rows = locations.filter(
-              (l) => l.user_id === userId && l.anchor_swipe_id === anchorSwipeId && (l.status === 'transient' || l.status === 'inactive'),
+              (l) => l.user_id === userId && l.anchor_swipe_id && anchorIds.includes(l.anchor_swipe_id) && (l.status === 'transient' || l.status === 'inactive'),
             );
-            // endpoint.md §6.2: the resurrection clone now carries the visual cache columns too.
+            // endpoint.md §6.2: the resurrection clone now carries the visual cache columns too,
+            // plus location_id/anchor_swipe_id for re-keying the per-swipe image associations.
             return {
               rows: rows.map((l) => ({
+                location_id: l.location_id,
                 name: l.name,
                 visual_description: l.visual_description,
                 environment: JSON.stringify(l.environment ?? {}),
@@ -310,6 +317,7 @@ function createFakePool() {
                 image_generated_at: l.image_generated_at ?? null,
                 image_rendered_input: l.image_rendered_input ? JSON.stringify(l.image_rendered_input) : null,
                 image_render_hash: l.image_render_hash ?? null,
+                anchor_swipe_id: l.anchor_swipe_id ?? null,
               })),
             };
           }
@@ -319,6 +327,33 @@ function createFakePool() {
               (c) => c.user_id === userId && c.anchor_swipe_id === anchorSwipeId && (c.status === 'transient' || c.status === 'inactive'),
             );
             return { rows: rows.map((c) => ({ name: c.name })) };
+          }
+          // forkChat: per-swipe image associations (location_swipe_images) for every copied
+          // swipe, re-keyed onto the branch's chat/swipe/location ids.
+          if (sql.includes('from location_swipe_images') && sql.includes('swipe_id = any')) {
+            const [chatId, swipeIds] = params;
+            const rows = swipeImages.filter(
+              (s) => s.chat_id === chatId && s.swipe_id && swipeIds.includes(s.swipe_id),
+            );
+            return {
+              rows: rows.map((s) => ({
+                swipe_id: s.swipe_id,
+                location_id: s.location_id,
+                image_url: s.image_url ?? null,
+                render_hash: s.render_hash ?? null,
+                image_generated_at: s.image_generated_at ?? null,
+              })),
+            };
+          }
+          if (sql.includes('insert into location_swipe_images')) {
+            const [chatId, swipeId, locationId, imageUrl, renderHash, imageGeneratedAt] = params;
+            const existing = swipeImages.find((s) => s.chat_id === chatId && s.swipe_id === swipeId);
+            if (existing) {
+              Object.assign(existing, { location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
+            } else {
+              swipeImages.push({ chat_id: chatId, swipe_id: swipeId, location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
+            }
+            return { rows: [] };
           }
           if (sql.includes('insert into locations') && params.length >= 10) {
             const [userId, name, visualDescription, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, renderHash, chatId, anchorSwipeId] = params;
@@ -338,7 +373,7 @@ function createFakePool() {
               anchor_swipe_id: anchorSwipeId,
             };
             locations.push(row);
-            return { rows: [] };
+            return { rows: [row] };
           }
           if (sql.includes('insert into characters') && params.length >= 4) {
             const [userId, name, chatId, anchorSwipeId] = params;
@@ -738,25 +773,35 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(detail.messages[0].swipes.index === 0 && detail.messages[0].swipes.count === 1, 'a single canonical swipe row reads back as {index: 0, count: 1}');
 }
 
-// --- forkChat resurrection (§2.7): the fork point's transient/inactive rows come along, cloned
-// as fresh transient rows anchored to the branch's own swipe; permanent rows do not ---
+// --- forkChat resurrection (§2.7): the fork's transient/inactive rows come along, cloned as
+// fresh transient rows anchored to the branch's own swipes; permanent rows do not. Every copied
+// swipe's locations come along (not just the fork point's), and the per-swipe image
+// associations (location_swipe_images) are re-keyed onto the branch. ---
 {
   const parent = await store.createChat(USER_A, { title: 'Resurrection parent' });
   await store.appendMessages(USER_A, parent.chatId, [
     { role: 'user', content: 'U1' },
     { role: 'assistant', content: 'A1' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
   ]);
   const detail = await store.getChat(USER_A, parent.chatId);
-  const forkPoint = detail.messages[1]; // A1
+  const forkPoint = detail.messages[3]; // A2 — fork after two full turns
 
-  // Simulate a scraped turn: the fork-point message has an active swipe, with a transient
-  // location + an inactive character anchored to it, plus a permanent location that must not
-  // come along.
-  const forkSwipeId = randomUUID();
-  const parentMsg = pool.messages.find((m) => m.message_id === forkPoint.messageId);
-  parentMsg.active_swipe_id = forkSwipeId;
+  // Simulate two scraped turns: each assistant message has its own active swipe, with a
+  // transient location anchored to each (the fork point's and the earlier turn's), plus a
+  // permanent location that must not come along.
+  const turnSwipe1 = randomUUID();
+  const forkSwipe2 = randomUUID();
+  const parentA1 = pool.messages.find((m) => m.message_id === detail.messages[1].messageId);
+  parentA1.active_swipe_id = turnSwipe1;
+  const parentA2 = pool.messages.find((m) => m.message_id === forkPoint.messageId);
+  parentA2.active_swipe_id = forkSwipe2;
+
+  const caveId = randomUUID();
+  const bridgeId = randomUUID();
   pool.locations.push({
-    location_id: randomUUID(),
+    location_id: caveId,
     user_id: USER_A,
     name: 'The Dark Cave',
     visual_description: 'Stalactites.',
@@ -768,7 +813,22 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     image_render_hash: 'render-hash-abc',
     status: 'transient',
     anchor_chat_id: parent.chatId,
-    anchor_swipe_id: forkSwipeId,
+    anchor_swipe_id: forkSwipe2,
+  });
+  pool.locations.push({
+    location_id: bridgeId,
+    user_id: USER_A,
+    name: 'The Old Bridge',
+    visual_description: 'Rotten planks.',
+    environment: { time_of_day: 'dusk' },
+    seed: 7,
+    image_url: 'https://cdn.example.invalid/old-bridge.png',
+    image_generated_at: '2026-08-13T00:00:01.000Z',
+    image_rendered_input: { visual_description: 'Rotten planks.', environment: { time_of_day: 'dusk' }, seed: 7 },
+    image_render_hash: 'render-hash-def',
+    status: 'transient',
+    anchor_chat_id: parent.chatId,
+    anchor_swipe_id: turnSwipe1,
   });
   pool.locations.push({
     location_id: randomUUID(),
@@ -786,34 +846,77 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     name: 'Goblin Merchant',
     status: 'inactive',
     anchor_chat_id: parent.chatId,
-    anchor_swipe_id: forkSwipeId,
+    anchor_swipe_id: forkSwipe2,
+  });
+  // Per-swipe image associations (migration 0076): both turns' swipes have recorded bgs.
+  pool.swipeImages.push({
+    chat_id: parent.chatId,
+    swipe_id: forkSwipe2,
+    location_id: caveId,
+    image_url: 'https://cdn.example.invalid/dark-cave.png',
+    render_hash: 'render-hash-abc',
+    image_generated_at: '2026-08-13T00:00:00.000Z',
+  });
+  pool.swipeImages.push({
+    chat_id: parent.chatId,
+    swipe_id: turnSwipe1,
+    location_id: bridgeId,
+    image_url: 'https://cdn.example.invalid/old-bridge.png',
+    render_hash: 'render-hash-def',
+    image_generated_at: '2026-08-13T00:00:01.000Z',
   });
 
   const branch = await store.forkChat(USER_A, parent.chatId, forkPoint.messageId);
   assert(branch !== undefined, 'forkChat succeeds at the swiped fork point');
 
-  const branchMsg = pool.messages.find((m) => m.chat_id === branch.chatId && m.message_id !== undefined && m.content === 'A1');
-  assert(branchMsg && branchMsg.active_swipe_id !== forkSwipeId, 'the branch\'s copied fork-point message has its own fresh active swipe (never the parent\'s id)');
+  const branchMsgA1 = pool.messages.find((m) => m.chat_id === branch.chatId && m.content === 'A1');
+  const branchMsgA2 = pool.messages.find((m) => m.chat_id === branch.chatId && m.content === 'A2');
+  assert(
+    branchMsgA1 && branchMsgA1.active_swipe_id !== turnSwipe1 && branchMsgA2 && branchMsgA2.active_swipe_id !== forkSwipe2,
+    'the branch\'s copied messages have their own fresh active swipes (never the parent\'s ids)',
+  );
 
   const branchLocations = pool.locations.filter((l) => l.anchor_chat_id === branch.chatId);
   assert(
-    branchLocations.length === 1 && branchLocations[0].name === 'The Dark Cave' && branchLocations[0].status === 'transient',
-    'the fork point\'s transient location is cloned into the branch as a fresh transient row',
+    branchLocations.length === 2 && branchLocations.every((l) => l.status === 'transient'),
+    'both turns\' transient locations (fork point + earlier turn) are cloned into the branch as fresh transient rows',
   );
-  assert(branchLocations[0].anchor_swipe_id === branchMsg.active_swipe_id, 'the cloned location is anchored to the branch\'s corresponding swipe');
+  const branchCave = branchLocations.find((l) => l.name === 'The Dark Cave');
+  const branchBridge = branchLocations.find((l) => l.name === 'The Old Bridge');
   assert(
-    branchLocations[0].seed === 42 && branchLocations[0].image_url === 'https://cdn.example.invalid/dark-cave.png',
+    branchCave && branchCave.anchor_swipe_id === branchMsgA2.active_swipe_id,
+    'the fork point\'s cloned location is anchored to the branch\'s fork-point swipe',
+  );
+  assert(
+    branchBridge && branchBridge.anchor_swipe_id === branchMsgA1.active_swipe_id,
+    'an earlier turn\'s cloned location is anchored to the branch\'s corresponding earlier swipe',
+  );
+  assert(
+    branchCave.seed === 42 && branchCave.image_url === 'https://cdn.example.invalid/dark-cave.png',
     'endpoint.md §6.2: the cloned location carries seed/image_url/image_generated_at forward, so a fork does not force a fresh render',
   );
   assert(
-    JSON.stringify(branchLocations[0].image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
+    JSON.stringify(branchCave.image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
     'the cloned location carries the render-input snapshot too, so its cache check (endpoint.md §5.1.2) hits on the branch',
   );
   assert(
-    branchLocations[0].image_render_hash === 'render-hash-abc',
-    'the cloned location carries the prompt render hash (migration 0076) so its cache check hits on the branch',
+    branchCave.image_render_hash === 'render-hash-abc' && branchBridge.image_render_hash === 'render-hash-def',
+    'the cloned locations carry the prompt render hashes (migration 0076) so their cache checks hit on the branch',
   );
   assert(pool.locations.some((l) => l.name === 'The Forest Clearing' && l.anchor_chat_id === null), 'a permanent location is world canon — never cloned into the branch');
+
+  const branchSwipeImages = pool.swipeImages.filter((s) => s.chat_id === branch.chatId);
+  assert(branchSwipeImages.length === 2, 'both per-swipe image associations are cloned into the branch');
+  const branchCaveRow = branchSwipeImages.find((s) => s.location_id === branchCave.location_id);
+  const branchBridgeRow = branchSwipeImages.find((s) => s.location_id === branchBridge.location_id);
+  assert(
+    branchCaveRow && branchCaveRow.swipe_id === branchMsgA2.active_swipe_id && branchCaveRow.image_url === 'https://cdn.example.invalid/dark-cave.png' && branchCaveRow.render_hash === 'render-hash-abc',
+    'the fork-point swipe\'s association is re-keyed to the branch chat/swipe/location ids with URL + render hash carried over',
+  );
+  assert(
+    branchBridgeRow && branchBridgeRow.swipe_id === branchMsgA1.active_swipe_id && branchBridgeRow.image_url === 'https://cdn.example.invalid/old-bridge.png' && branchBridgeRow.render_hash === 'render-hash-def',
+    'an earlier turn\'s association is re-keyed too, so prev/next cycling inside the branch reuses the recorded URL',
+  );
 
   const branchCharacters = pool.characters.filter((c) => c.anchor_chat_id === branch.chatId);
   assert(
