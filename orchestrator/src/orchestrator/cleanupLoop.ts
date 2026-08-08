@@ -67,7 +67,9 @@
  * @contract
  *   assertions:
  *     purity:          impure (Postgres IO, LLM IO; owns the setInterval timer it starts)
- *     state_ownership: [the setInterval timer this starts]
+ *     state_ownership: [the setInterval timer this starts; the in-flight (chat, message, swipe)
+ *                       guard set that keeps overlapping ticks from re-planning a message whose
+ *                       repair pass is still running]
  *     external_io:     [Postgres, the LLM via the shared gated provider]
  */
 
@@ -93,6 +95,18 @@ const POLL_INTERVAL_MS = 5_000; // the pill/user watches for the rewrite — sna
 /** How much of the chat's history precedes one message for {{history, N}} resolution. formatHistoryPairs
  *  slices to the prompt's own pair count, so this cap only bounds the read, never the semantics. */
 const HISTORY_READ_LIMIT = 40;
+
+/** (chatId, messageId, swipeId) triples whose repair pipeline is currently running. The poll tick
+ *  fires every POLL_INTERVAL_MS while a repair round-trip can take minutes, and a message stays
+ *  'due' to every tick until its pass records a job — so without this guard each overlapping tick
+ *  re-plans the same in-flight message and launches another LLM repair call for it. That runaway
+ *  (tens of concurrent repairs per message, each holding an LLM lane slot for its whole duration)
+ *  saturated the shared gate and starved interactive turns on 2026-08-08; this is the fix. One
+ *  entry per (chat, message, swipe) triple: a user swipe mid-flight legitimately starts a new
+ *  triple, and a finished pass records its job so findDueMessages skips it from then on anyway.
+ *  Module-level in-memory only, same lifetime as the timer — a process bounce drops the set and
+ *  the ledger re-plans, which is the restart tolerance the tick already has. */
+const inFlightRepairs = new Set<string>();
 
 export interface CleanupLoopDeps {
   db: PostgresClient;
@@ -303,12 +317,31 @@ async function processDueMessage(
   config: ResolvedCleanupConfig,
   rules: SlopRule[],
 ): Promise<void> {
+  // Declared outside the try so the finally can always drop the guard entry — the key is only
+  // assigned after ensureActiveSwipe succeeds, so an early return before that leaves it undefined
+  // and the finally's delete is a harmless no-op.
+  let inFlightKey: string | undefined;
   try {
     const swipeId = await deps.chats.ensureActiveSwipe(userId, chatId, message.message_id);
     if (!swipeId) {
       log.warn(`cleanup loop: message ${message.message_id} vanished before processing, skipping`);
       return;
     }
+
+    // In-flight guard: at most one repair pass per (chat, message, swipe) at a time. Without it,
+    // every overlapping tick (POLL_INTERVAL_MS while a pass takes minutes) sees the message as
+    // still 'due' — no job is recorded until the pass finishes — and launches another LLM repair
+    // call for the same content, the runaway that saturated the LLM lane and starved interactive
+    // turns on 2026-08-08. Skip, don't queue: the next tick re-reads the ledger and only picks
+    // the message up again if this pass left it uncovered (e.g. the user swiped mid-flight).
+    inFlightKey = `${chatId}:${message.message_id}:${swipeId}`;
+    if (inFlightRepairs.has(inFlightKey)) {
+      log.debug(`cleanup loop: message ${message.message_id} in chat ${chatId} already being repaired, skipping this tick`, {
+        swipe: swipeId,
+      });
+      return;
+    }
+    inFlightRepairs.add(inFlightKey);
 
     const history = await loadHistory(deps.db, userId, chatId, message.message_id, message.created_at);
     const plan = planCleanup(message.content, rules, config.header, config.footer, { history, userName: config.userName });
@@ -367,6 +400,12 @@ async function processDueMessage(
     await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'error', false, 'unexpected failure').catch((e) =>
       log.error(`cleanup loop: failed to record error job for ${message.message_id}`, e),
     );
+  } finally {
+    // The guard is per (chat, message, swipe): drop it once this pass is done, whatever happened
+    // (job recorded, flagged, or the user changed the content mid-flight). If the pass left the
+    // message uncovered, the next tick legitimately picks it up again — but as a new pass, not
+    // as a parallel twin of this one.
+    if (inFlightKey) inFlightRepairs.delete(inFlightKey);
   }
 }
 

@@ -5,11 +5,12 @@
  * @description
  * docs/llm-gate-plan.md §4.1/§4.4: bounds how many complete() calls run against the provider at
  * once, so a burst (a multi-character turn's several calls, a sync tick, a canon-extraction pass
- * all landing together) can't saturate a rate limit. Two lanes, per §6's resolved open question —
- * separate concurrency for 'agent_routine' vs everything else ('chat'/'system') so a background
- * sync/extraction burst can never delay an interactive turn the household is waiting on, the same
- * "an unattended routine's budget should never be able to interrupt the household's own chat"
- * reasoning llmGate.ts's own doc comment already applies to caps, extended here to concurrency.
+ * all landing together) can't saturate a rate limit. Three lanes, per §6's resolved open question —
+ * separate concurrency for 'agent_routine' and for 'system'-kind background work ('cleanup'/'chat
+ * memory sync'/'title generation') vs a live interactive turn, so a background loop's burst can
+ * never delay an interactive turn the household is waiting on, the same "an unattended routine's
+ * budget should never be able to interrupt the household's own chat" reasoning llmGate.ts's own
+ * doc comment already applies to caps, extended here to concurrency.
  *
  * In-memory only, per-process — matches how every existing caller already tolerates a restart
  * (bb_principles.md's own "not a distributed queue" scoping in the plan doc): a queued call just
@@ -32,7 +33,7 @@
  *     external_io:     []
  */
 
-export type LlmLane = 'interactive' | 'agent_routine';
+export type LlmLane = 'interactive' | 'agent_routine' | 'background';
 
 interface LaneState {
   inFlight: number;
@@ -46,6 +47,7 @@ function makeLaneState(): LaneState {
 const lanes: Record<LlmLane, LaneState> = {
   interactive: makeLaneState(),
   agent_routine: makeLaneState(),
+  background: makeLaneState(),
 };
 
 function acquire(lane: LlmLane, maxConcurrent: number): Promise<void> {

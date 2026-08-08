@@ -79,6 +79,10 @@ const DEFAULT_HOUSEHOLD_MAX_TOKENS_PER_DAY = 200_000;
 
 const DEFAULT_MAX_CONCURRENT_INTERACTIVE = 3;
 const DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE = 1;
+/** Background ('system'-kind) work — cleanup repairs, chat-memory sync, title generation. Small
+ *  but >0: repairs can legitimately need a bit of parallelism, and this lane can never delay an
+ *  interactive turn regardless (each lane admits independently, llmQueue.ts). */
+const DEFAULT_MAX_CONCURRENT_BACKGROUND = 2;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_RETRY_BASE_MS = 500;
 const DEFAULT_RETRY_MAX_MS = 8000;
@@ -262,10 +266,24 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
         }
       }
 
-      const lane: LlmLane = ctx.kind === 'agent_routine' ? 'agent_routine' : 'interactive';
+      // Lane isolation: 'interactive' is a live turn the household is waiting on; 'agent_routine'
+      // and 'background' (system-kind: cleanup repairs, chat-memory sync, title generation) admit
+      // independently (llmQueue.ts) so a background loop's burst — e.g. the cleanup repair
+      // runaway that saturated this lane on 2026-08-08 — can never starve a user's send.
+      const lane: LlmLane = ctx.kind === 'agent_routine' ? 'agent_routine' : ctx.kind === 'system' ? 'background' : 'interactive';
       const maxConcurrent = Number(
-        (await settings.get(lane === 'agent_routine' ? 'llm_gate_max_concurrent_agent_routine' : 'llm_gate_max_concurrent')) ??
-          (lane === 'agent_routine' ? DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE : DEFAULT_MAX_CONCURRENT_INTERACTIVE),
+        (await settings.get(
+          lane === 'agent_routine'
+            ? 'llm_gate_max_concurrent_agent_routine'
+            : lane === 'background'
+              ? 'llm_gate_max_concurrent_background'
+              : 'llm_gate_max_concurrent',
+        )) ??
+          (lane === 'agent_routine'
+            ? DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE
+            : lane === 'background'
+              ? DEFAULT_MAX_CONCURRENT_BACKGROUND
+              : DEFAULT_MAX_CONCURRENT_INTERACTIVE),
       );
       const maxRetries = Number((await settings.get('llm_gate_max_retries')) ?? DEFAULT_MAX_RETRIES);
       const retryBaseMs = Number((await settings.get('llm_gate_retry_base_ms')) ?? DEFAULT_RETRY_BASE_MS);

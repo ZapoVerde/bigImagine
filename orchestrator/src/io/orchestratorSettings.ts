@@ -221,6 +221,7 @@ export const SETTING_NAMES = [
   'persona_description',
   'llm_gate_max_concurrent',
   'llm_gate_max_concurrent_agent_routine',
+  'llm_gate_max_concurrent_background',
   'llm_gate_max_retries',
   'llm_gate_retry_base_ms',
   'llm_gate_retry_max_ms',

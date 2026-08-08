@@ -277,6 +277,27 @@ function createFakeLlm(respond) {
   };
 }
 
+// --- Fake LLM whose complete() stays pending until resolve() is called — lets a test hold a
+// repair pass in flight while a second tick runs, to prove the in-flight guard. ---
+function createDeferredLlm() {
+  const calls = [];
+  let resolve;
+  const gate = new Promise((r) => {
+    resolve = r;
+  });
+  return {
+    calls,
+    name: 'fake',
+    supportsVision: false,
+    async complete(messages) {
+      calls.push(messages);
+      await gate;
+      return { message: { content: 'repaired' }, toolCalls: [], usage: undefined };
+    },
+    resolve: () => resolve(),
+  };
+}
+
 // --- Seed helpers ---
 function addUser(pool, userId) {
   pool.users.push(userId);
@@ -735,6 +756,40 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(jobs[0].messageId === newer.message_id && jobs[0].status === 'flagged', 'newest job is first (newest-first order)');
   assert(jobs[0].preview.includes('newer message'), 'flagged job carries a content preview');
   assert(jobs[1].changed === true && jobs[1].notes === 'header:ok', 'done+changed job fields round-trip');
+}
+
+// ---------------------------------------------------------------------------
+// 15. In-flight guard: an overlapping tick must not re-fire a repair for a message whose
+//     repair pass is still running (the 2026-08-08 runaway that saturated the LLM lane and
+//     starved interactive turns — every 5s tick re-planned the same message and launched a new
+//     LLM call, since no job is recorded until the pass finishes)
+// ---------------------------------------------------------------------------
+{
+  const pool = createFakePool();
+  addUser(pool, 'u1');
+  const chatId = addChat(pool, { userId: 'u1' });
+  // Missing header + valid footer → exactly one repair step (header) per pass, so one LLM call
+  // per pass and nothing else to fire after the guard skips.
+  addMessage(pool, { chatId, userId: 'u1', content: `Body text, no header.${VALID_FOOTER}` });
+  const llm = createDeferredLlm();
+  const chats = createFakeChats(pool);
+  const db = createPostgresClient(pool);
+
+  // Tick 1 starts the header repair and awaits the LLM (which stays pending until we resolve it).
+  const firstTick = runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
+  await new Promise((r) => setImmediate(r));
+  assert(llm.calls.length === 1, 'first tick fires exactly one repair call');
+
+  // Tick 2 lands while the repair is still in flight — the guard must skip, not fire a twin.
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
+  assert(llm.calls.length === 1, 'overlapping tick does not re-fire the in-flight repair (in-flight guard)');
+
+  // Let the first pass finish: writeback + job recorded, then a fresh tick must see it covered.
+  llm.resolve();
+  await firstTick;
+  assert(pool.jobs.length === 1 && pool.jobs[0].status === 'done', 'completed pass records its job');
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
+  assert(llm.calls.length === 1, 'covered message is not re-planned after the job lands');
 }
 
 if (process.exitCode) {
