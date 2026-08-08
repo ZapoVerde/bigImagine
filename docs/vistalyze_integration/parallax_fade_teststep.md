@@ -46,17 +46,27 @@ The ChatView background image (`ChatView.tsx`'s `.chat-location-background` elem
 horizontally opposite the pointer, and on mobile, opposite device tilt — ported from
 `SillyTavern-Vistalyze/ui/parallax.js` (see `st-extensions/SillyTavern-Vistalyze/`).
 
-* Pan range: **capped at 200px** in each direction (the ST cap, `ui/parallax.js:53-59`).
+* **Sizing: scaled to fit the height, never cropped.** The image renders at `height: 100%`
+  with `width: auto` (aspect ratio preserved), centered on the pane — the same geometry ST
+  ships (`ui/parallax.js:54-58`): `displayedWidth = naturalWidth * (containerHeight /
+  naturalHeight)`, `baseLeft = (containerWidth - displayedWidth) / 2`. No `object-fit: cover`;
+  a wider-than-pane image simply overflows horizontally and is clipped by the pane.
+* Pan range: the image's **own** horizontal overflow — `(displayedWidth - containerWidth) / 2`
+  (zero when the image is narrower than the pane) — **capped at 200px** in each direction (the
+  ST cap, `ui/parallax.js:53-59`). The pan travels to the image edges and can never reveal the
+  container edge, so no oversized layer is needed.
 * Motion: requestAnimationFrame lerp toward the target position — the image eases, it never
   snaps (`ui/parallax.js:63-75`).
 * Inputs:
   * Mouse: `mousemove` on the chat view container, normalized to -1..1 (left edge = -1),
     `ui/parallax.js:175-177`.
-  * Tilt: `deviceorientation` beta/gamma when the device reports orientation, `ui/parallax.js:79-86`.
-* The image must be oversized to cover the pan (width: `calc(100% + 400px)`, or `left: -200px`
-  with width 100% + 400px margin) so panning never reveals the container edge.
+  * Tilt: `deviceorientation` gamma (horizontal tilt only), clamped to ±30°,
+    `ui/parallax.js:79-86`.
 * The background already has `pointer-events: none` (`ChatView.css:39`) — the listener goes on
   the chat container, not the image.
+* The img src swaps during background fades (the §3 state machine) while the attach effect
+  keys on URL *nullness*, not the URL value — so the module re-geometries itself on every
+  `load`, not just at attach.
 * **Teardown**: on chat switch / unmount, cancel the rAF loop and remove both listeners
   (`ui/parallax.js:204-222`). A stale loop must not outlive its ChatView.
 
@@ -87,8 +97,9 @@ frontend constant:
 ### 2.3 File Shape
 
 * **`frontend/src/components/chat/backgroundParallax.ts`** *(new, UI code)*: a small imperative
-  module owning the rAF loop, lerp state, and listener lifecycle — `attachBackgroundParallax(container, img)`
-  returning a `dispose()` handle. One purpose, well under the 300-line budget (bi_principles §10).
+  module owning the geometry (inline `left` + `transform`), the rAF loop, lerp state, and
+  listener lifecycle — `attachBackgroundParallax(container, img)` returning a `dispose()`
+  handle. One purpose, well under the 300-line budget (bi_principles §10).
 * **`ChatView.tsx`**: call `attachBackgroundParallax` when `locationImage` is set and the setting
   is on; dispose on chat change / image change / unmount.
 * No orchestrator involvement beyond the settings key — this is pure frontend, per bi_principles §8.

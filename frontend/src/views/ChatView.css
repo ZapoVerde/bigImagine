@@ -26,18 +26,27 @@
   min-width: 0;
   /* The location background layer (endpoint.md §6.4) sits absolutely behind the scroll area —
      .chat-main is the positioning context, the header/history/rail paint above it. overflow:
-     hidden clips the parallax-oversized layer (100% + 400px, shifted -200px, §2) to this pane,
-     so the pan can never paint over the side panels (CanvasPanel / settings rail) beside it. */
+     hidden clips the height-fit image (which is wider than the pane when its aspect is wider
+     than 1:1, §2) to this pane, so the pan can never paint over the side panels (CanvasPanel /
+     settings rail) beside it. */
   position: relative;
   overflow: hidden;
 }
 
 .chat-location-background {
   position: absolute;
-  inset: 0;
-  width: 100%;
+  top: 0;
+  left: 50%;
+  /* Vistalyze's geometry (ui/parallax.js:54-58): the image is scaled to fit the container's
+     height — width follows the aspect ratio, never object-fit:cover-cropped — and centered.
+     Resting centering is left: 50% + translateX(-50%); the parallax module overrides both
+     inline (left = baseLeft px, transform = the pan) while active, so the pan travels to the
+     image's own edges. max-width: none keeps a wider-than-pane image at its height-fit size
+     instead of a global img reset letterboxing it. */
   height: 100%;
-  object-fit: cover;
+  width: auto;
+  max-width: none;
+  transform: translateX(-50%);
   /* Full opacity here — the dimming is the .chat-location-overlay veil (settings-controlled,
      migration 0073), not a translucent image over the page background. The veil's resting 50%
      black preserves the pre-0073 look (bg reading clearly in the gaps between bubbles, the
@@ -75,14 +84,11 @@
   transition: opacity 0.6s ease-in-out;
 }
 
-/* Parallax mode (parallax_fade_teststep.md §2): the layer is oversized by the pan cap (200px)
-   each way so the translate3d drift never reveals the container edge; the module toggles this
-   class on attach and removes it on dispose. */
+/* Parallax mode (parallax_fade_teststep.md §2): no oversize — the image is already its
+   height-fit size and the module clamps the pan to the image's own horizontal overflow (capped
+   at 200px), so the edge is never revealed. The module toggles this class on attach and removes
+   it on dispose; will-change hints the compositor for the transform the module drives. */
 .chat-location-background.parallax-active {
-  width: calc(100% + 400px);
-  height: calc(100% + 400px);
-  left: -200px;
-  top: -200px;
   will-change: transform;
 }
 
