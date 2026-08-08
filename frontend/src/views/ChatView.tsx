@@ -698,33 +698,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChat]);
 
-  // Every messages/sending change funnels through here — send, resend, swipe-regenerate,
-  // edit-resend, and the reply landing. Position the view at the TOP of the new turn (the
-  // newest user message — the start of the turn, so a fresh reply reads from its beginning)
-  // instead of the bottom of the new content. Fallbacks: a greeting-only chat has no user
-  // message, so its turn starts at the first message; an empty history just settles at the
-  // bottom (a no-op). Instant jump, same as the old bottom-scroll — never smooth, so a landing
-  // reply can't animate a scroll race with the user.
-  useEffect(() => {
-    const el = historyRef.current;
-    if (!el) return;
-    let turnStart = 0;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i]!.role === 'user') {
-        turnStart = i;
-        break;
-      }
-    }
-    const target = el.querySelectorAll<HTMLElement>('.chat-message')[turnStart];
-    if (!target) {
-      el.scrollTo({ top: el.scrollHeight });
-      return;
-    }
-    // Viewport-relative distance from the container's top edge to the target's top edge —
-    // independent of the container's current scrollTop and of where the positioned ancestors
-    // sit, so aligning scrollTop to it puts the turn's start flush at the top of the view.
-    el.scrollTo({ top: target.getBoundingClientRect().top - el.getBoundingClientRect().top });
-  }, [messages, sending]);
+  // No auto-scroll here, on purpose: a new turn renders below the fold and the reader scrolls
+  // down on their own. Auto-positioning — to the bottom, or to the top of the newest turn —
+  // kept fighting the reader: it fired on every messages/sending change, and whenever a chat
+  // had no user message left it snapped to the very first message. Manual scrolling only.
+
 
   // Re-fetches the active chat from the server — the source of truth for real messageIds, called
   // after every mutation (send/rerun/edit) rather than hand-constructing local state, so
