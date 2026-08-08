@@ -166,6 +166,7 @@ import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
+import { buildAutoRecallPrompt } from '../io/chatMemory/recallForPrompt.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -416,8 +417,10 @@ function toPreviewItem(
 }
 
 // docs/chat-memory.md: the always-injected half of chat memory (small, unconditional — see
-// recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead).
-// The two chat kinds diverge completely here, mirroring chatMemorySync.ts's own kind branch:
+// recallChatHistoryTool.ts's own doc for why full-turn recall stays an explicit tool call instead,
+// and recallForPrompt.ts for the CNZ-shaped auto-recall this module now also runs — the user
+// chose CNZ parity for the RP read path: silent per-turn retrieval on top of the still-enabled
+// tools). The two chat kinds diverge completely here, mirroring chatMemorySync.ts's own kind branch:
 //
 // A 'chat' (household) chat gets household_memory (every user's own row — RLS already scopes it)
 // plus chat_memory_entries' flat key-ideas digest, byte-for-byte the original behavior.
@@ -428,16 +431,27 @@ function toPreviewItem(
 // SCENE and EVENTS chat_memory_entries rows (topic_key 'scene'/'events', written by
 // bridgeChatMemory.ts) plus the latest-approved-per-arc_tag 'plot' canon_facts — the same
 // dedup-to-most-recent-per-arc query recallCanonFactsTool.ts uses, just unranked (this is the
-// unconditional "what's the state of every open thread" injection, not a semantic top-k search).
+// unconditional "what's the state of every open thread" injection, not a semantic top-k search) —
+// plus buildAutoRecallPrompt's CNZ-style auto-recall: the last AUTO_RECALL_PAIRS turn-pairs
+// embedded as the query, returning this chat's archived full turns and approved canon facts,
+// injected unconditionally (fail-open — '' on error or no match).
 async function buildChatMemorySystemPrompt(
   db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  embeddings: EmbeddingProvider,
   userId: string,
   chatId: string,
   kind: 'chat' | 'rp',
+  messages: LlmMessage[],
 ): Promise<string> {
   return db.withUserScope(userId, async (session) => {
     if (kind === 'rp') {
-      const [bridgeRows, plotRows] = await Promise.all([
+      // docs/chat-memory.md: the always-injected half (scene/events/plot threads) plus the
+      // CNZ-shaped auto-recall (io/chatMemory/recallForPrompt.ts) — the last AUTO_RECALL_PAIRS
+      // turn-pairs become the query, and both the chat's archived full turns and its approved
+      // canon facts are injected unconditionally. Fail-open: '' when nothing matched or
+      // retrieval errored, so memory can never break a turn.
+      const [bridgeRows, plotRows, autoRecall] = await Promise.all([
         session.query<{ topic_key: string; content: string }>(
           `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
           [chatId],
@@ -449,6 +463,7 @@ async function buildChatMemorySystemPrompt(
            order by arc_tag, proposed_at desc`,
           [chatId],
         ),
+        buildAutoRecallPrompt(session, settings, embeddings, userId, chatId, messages),
       ]);
       const scene = bridgeRows.find((r) => r.topic_key === 'scene')?.content;
       const events = bridgeRows.find((r) => r.topic_key === 'events')?.content;
@@ -460,6 +475,7 @@ async function buildChatMemorySystemPrompt(
           `Open plot threads:\n${plotRows.map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`).join('\n')}`,
         );
       }
+      if (autoRecall) parts.push(autoRecall);
       return parts.join('\n\n');
     }
 
@@ -837,6 +853,7 @@ async function handleLocationImageBroken(_req: IncomingMessage, res: ServerRespo
 async function assembleSessionTurnContext(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
+  embeddings: EmbeddingProvider,
   userId: string,
   chatId: string,
   sessionKind: 'chat' | 'rp',
@@ -847,7 +864,7 @@ async function assembleSessionTurnContext(
   timezone: string,
 ): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[] }> {
   const [memoryContext, trimmed] = await Promise.all([
-    buildChatMemorySystemPrompt(db, userId, chatId, sessionKind),
+    buildChatMemorySystemPrompt(db, settings, embeddings, userId, chatId, sessionKind, messagesForLlm),
     trimToLiveWindow(messagesForLlm, settings),
   ]);
 
@@ -1000,7 +1017,7 @@ async function buildPromptPreview(  deps: HttpServerDeps,
   } else {
     const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));
     let [memoryContext, trimmed] = await Promise.all([
-      buildChatMemorySystemPrompt(deps.db, userId, chatId, session.kind),
+      buildChatMemorySystemPrompt(deps.db, deps.settings, deps.embeddings, userId, chatId, session.kind, messagesForLlm),
       trimToLiveWindow(messagesForLlm, deps.settings),
     ]);
 
@@ -1134,6 +1151,7 @@ async function regenerateSwipe(
   const { systemPrompt, messagesForLlm: trimmed } = await assembleSessionTurnContext(
     db,
     deps.settings,
+    deps.embeddings,
     userId,
     chatId,
     session.kind,
@@ -1345,6 +1363,7 @@ async function handleChatCompletions(
     const assembled = await assembleSessionTurnContext(
       db,
       deps.settings,
+      deps.embeddings,
       userId,
       body.chat_id,
       sessionKind,

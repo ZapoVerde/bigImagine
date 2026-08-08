@@ -4,7 +4,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
-import { createChatSessionStore } from '../dist/io/chatSessions.js';
+import { createChatSessionStore, DEFAULT_RP_TOOLS } from '../dist/io/chatSessions.js';
 import { createToolRegistry, filterToolRegistry } from '../dist/orchestrator/toolRegistry.js';
 
 function assert(cond, message) {
@@ -425,12 +425,22 @@ assert(created.chatId.length > 0, 'createChat returns a session with an id');
 assert(created.title === 'Groceries planning', 'createChat honors the given title');
 assert(created.toolNames === null, 'a new chat allows all tools (toolNames null)');
 
+{
+  const rpChat = await store.createChat(USER_A, { title: 'An RP', kind: 'rp' });
+  assert(
+    JSON.stringify(rpChat.toolNames) === JSON.stringify(DEFAULT_RP_TOOLS),
+    "an rp chat defaults to DEFAULT_RP_TOOLS (the recall pair), not null/all and not []",
+  );
+  const explicitRp = await store.createChat(USER_A, { title: 'RP no tools', kind: 'rp', toolNames: [] });
+  assert(JSON.stringify(explicitRp.toolNames) === '[]', 'an explicit toolNames overrides the rp default');
+}
+
 const defaultTitled = await store.createChat(USER_A);
 assert(defaultTitled.title === 'New chat', 'createChat defaults the title');
 
 {
   const list = await store.listChats(USER_A);
-  assert(list.length === 2, 'listChats returns both chats');
+  assert(list.length === 4, 'listChats returns every chat (2 general + 2 rp)');
 }
 {
   const list = await store.listChats(USER_B);

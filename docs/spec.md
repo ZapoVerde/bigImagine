@@ -164,7 +164,7 @@ What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the
 
 bigBrain's rolling summarization/RAG/digest system was itself adapted from Canonize's pattern once already (`docs/chat-memory.md`), then reshaped around bigBrain's relational store being the canonical world model. BigImagine inherits that same reshaped version, keyed by `scene_id` instead of a household:
 
-- Full-turn recall stays an explicit tool call (`recall_chat_history`), never silently injected — `bi_principles.md` §2 holds here exactly as it did in bigBrain.
+- Full-turn recall stays an explicit tool call (`recall_chat_history`) in the 'chat' lane; the 'rp' lane additionally auto-injects it every turn, CNZ-style, per user decision (2026-08-08) — see `docs/chat-memory.md`'s "The RP Read Path". `bi_principles.md` §2 holds everywhere except that one documented carve-out.
 - The per-scene "key ideas" digest and chat-lane RAG chunks replace ST's keyword lorebook the same way approved Canon Facts do (§4 above) — this is a second, complementary recall path (recent-history-shaped) alongside Canon Facts' (fact-shaped) semantic recall, not a duplicate of it.
 - Branching is a new `chat_sessions` row constructed correct from birth, not a divergence-detection system — unchanged rationale from bigBrain, since this platform owns every mutation to its own `chat_messages` exactly as bigBrain does.
 

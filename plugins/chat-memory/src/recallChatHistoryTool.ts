@@ -15,6 +15,13 @@
  * (server/httpServer.ts), full-turn recall is a deliberate reach into the archive and stays an
  * explicit, on-demand action.
  *
+ * One carve-out, added by user decision (2026-08-08): the 'rp' lane now also auto-injects the same
+ * chat_chunks rows every turn via io/chatMemory/recallForPrompt.ts's CNZ-style auto-recall (the
+ * user: "the way CNZ works") — silent per-turn retrieval on top of the still-enabled tools. This
+ * tool remains the mid-turn escalation path: the auto-injected block is a fixed top-4, while a
+ * model that needs to dig further can still call recall_chat_history itself. The 'chat' lane is
+ * untouched — explicit tool call only, as documented here.
+ *
  * @api-declaration
  * createRecallChatHistoryTool(embeddings) — returns the recall_chat_history RegisteredTool
  *

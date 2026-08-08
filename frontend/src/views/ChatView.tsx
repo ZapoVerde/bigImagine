@@ -1908,7 +1908,7 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         </select>
       </label>
 
-      {allToolNames.length > 0 && session?.kind !== 'rp' && (
+      {allToolNames.length > 0 && (
         <fieldset className="tool-checklist">
           <legend>Tools available in this chat</legend>
           {allToolNames.map((name) => (

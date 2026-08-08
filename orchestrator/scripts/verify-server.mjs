@@ -542,6 +542,14 @@ function createFakePool() {
           if (sql.includes('from canon_facts')) {
             return { rows: [] };
           }
+          // ...and the rp-lane's CNZ-style auto-recall (httpServer.ts's buildChatMemorySystemPrompt
+          // -> io/chatMemory/recallForPrompt.ts): both its chat_chunks full-turn read and its
+          // approved-canon-facts read (the `with candidates ... distinct on (coalesce(...))` CTE —
+          // matches via the 'from canon_facts f' inside). No archived turns / no approved facts is
+          // a legitimate, common state; nothing here asserts on their contents either.
+          if (sql.includes('from chat_chunks')) {
+            return { rows: [] };
+          }
           // GET /v1/chats/:id/location-image (endpoint.md §6.4 + §5.1.8):
           //   resolveChatLocationImage's chat-state read — params: [chatId] -> the chat's scene
           //   pointers (current + previous). Empty = no scene state at all.

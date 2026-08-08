@@ -341,7 +341,8 @@ export interface ChatSessionRow {
   /** Set once, explicitly, via the Archive action — null means still ongoing. */
   archivedAt: string | null;
   /** Set once at creation, never changed afterward. An 'rp' chat gets no household_memory
-   *  read/write and starts with empty toolNames — see orchestrator/src/io/chatSessions.ts. */
+   *  read/write and starts with DEFAULT_RP_TOOLS (the recall pair) — see
+   *  orchestrator/src/io/chatSessions.ts. */
   kind: 'chat' | 'rp';
   /** Which character this chat is playing, if any — set by apply_character_to_chat. */
   characterId: string | null;

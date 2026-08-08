@@ -34,11 +34,12 @@ is untouched by any of this), the prompt is assembled from:
    standing context), always included.
 3. **Key-ideas digest** — a short, per-chat running summary of what's rolled off the live window,
    always included.
-4. **Chat-lane recall** — full-turn search over this chat's archived history, reached only when the
-   model explicitly calls `recall_chat_history`.
+4. **Chat-lane recall** — full-turn search over this chat's archived history. For a 'chat'-kind
+   session it is reached only when the model explicitly calls `recall_chat_history`; for an 'rp'
+   session it is *also* auto-injected every turn, CNZ-style (see "The RP Read Path" below).
 
-An 'rp'-kind chat gets pieces 1 and 4 unchanged, but not 2 or 3 — see "The Bridge (RP Lane)" below
-for what it gets instead.
+An 'rp'-kind chat gets pieces 1 and 4 unchanged (piece 4 now auto-injected, see below), but not 2
+or 3 — see "The Bridge (RP Lane)" below for what it gets instead.
 
 ```
 │←──────────── archival (chat_chunks, RAG-only) ────────────→│←── live context ──→│
@@ -53,10 +54,18 @@ model's own working notes" than a retrieval decision, so they're just always the
 the live window itself always is. Full-turn recall is different: pulling a specific archived
 exchange back into view is a real reach into the past, and per `docs/bi_principles.md` §2 (the LLM
 reasons, nothing else does), that's a decision the model makes explicitly by calling a tool — not
-something silently injected on the server's own judgment about what's relevant. This is a deliberate
-departure from Canonize, which re-runs its full retrieval pipeline unprompted on every turn; bigBrain
-has no other precedent for silent context injection (`search_documents` and every other RAG-backed
-tool here are explicit, LLM-chosen calls), and this feature doesn't introduce one either.
+something silently injected on the server's own judgment about what's relevant. That stance still
+holds for the 'chat' lane (and for `search_documents` / every other RAG-backed tool here, which are
+all explicit, LLM-chosen calls).
+
+**The RP lane is the one deliberate exception, and it's a user decision (session note, 2026-08-08):
+"for the prompt stack, we autopopulate the recall tool with the last x turns plus the content of
+the user's last entry to pull both the saved facts plus a number of full turn text — the way CNZ
+works."** So an 'rp'-kind chat runs the Canonize-shaped retrieval silently at prompt-assembly time
+on top of the still-enabled recall tools — see "The RP Read Path" below for exactly what is
+injected, how the query is built, and why the tools stay live. This is the one place bigBrain
+intentionally reintroduces Canonize's per-turn silent retrieval; everywhere else the "explicit
+tool call" rule is unchanged.
 
 ## The Sync Pipeline
 
@@ -185,10 +194,40 @@ supersedes whatever the redundant entry used to say). Manual cleanup from there 
 own dup-flagging convention, which is also never auto-resolved.
 
 Unlike the bridge's SCENE/EVENTS, curator-produced entries are never unconditionally injected into
-the system prompt — `recall_canon_facts` is the read path for them, same as any other person/place/
-thing/concept fact, reached only when the model explicitly searches for one (§2: the LLM reasons,
-nothing else does). These curators exist to give that tool something real to search, not to add a
-fourth always-on injected block.
+the system prompt as standalone blocks — but they are exactly what the RP read path's auto-recall
+finds (see "The RP Read Path" below): the same `recall_canon_facts` query, run silently at prompt
+assembly against the approved rows, in addition to the still-enabled `recall_canon_facts` tool the
+model can call to dig deeper mid-turn. These curators exist to give that read path something real
+to search, not to add a fourth always-on injected block.
+
+## The RP Read Path (auto-recall)
+
+For an 'rp'-kind chat, `buildChatMemorySystemPrompt` (`server/httpServer.ts`) runs a fourth,
+Canonize-shaped read every turn on top of the scene/events/plot threads — `io/chatMemory/
+recallForPrompt.ts`'s `buildAutoRecallPrompt`, the CNZ-style silent retrieval the user asked for
+("the way CNZ works"):
+
+1. **Query = the last `AUTO_RECALL_PAIRS` (3) turn-pairs** of the full message list handed to the
+   prompt assembler — which includes the just-sent user message (the client sends complete history;
+   `trimToLiveWindow` runs only after assembly), so the user's last entry is always the newest pair.
+   This mirrors Canonize's own `ragClassifierHistory` (`formatPairsAsTranscript(allPairs.slice(-3))`
+   → `cleanForEmbedding`): the query is the recent transcript itself, not a synthesized question.
+2. **One embedding** of that query text.
+3. **Two parallel searches**, both scoped to this chat_id inside one `withUserScope`:
+   - `chat_chunks` — the chat's archived full-turn texts, top `AUTO_RECALL_CHUNK_TOP_K` (4) by
+     vector distance, content verbatim (the same rows/columns `recall_chat_history` returns).
+   - `canon_facts` — approved rows only, deduped to most-recent-approved per
+     `arc_tag`/`entity_key` (the same `distinct on (coalesce(...))` query
+     `recallCanonFactsTool.ts` runs), top-k from the live `canon_recall_top_k` setting (default 8).
+4. **Injected unconditionally** as one labeled block (`Recalled from earlier in this conversation
+   (archived):` — `<memory turns="…">` chunks then `- [category] summary — detail` fact bullets),
+   appended to the memory context after the open plot threads.
+
+Fail-open by contract: any error (embeddings provider down, DB hiccup) logs a warning and injects
+nothing — retrieval must never break or stall a turn. The tools stay enabled alongside it (an RP
+chat's default `tool_names` is `DEFAULT_RP_TOOLS` = `recall_chat_history` + `recall_canon_facts`,
+`io/chatSessions.ts`), so the model can reach deeper mid-turn than the auto-injected block covers —
+the auto-recall is the baseline, the tools are the escalation, not a replacement.
 
 ## Branching, and Why the Healing Problem Mostly Disappears
 
@@ -301,7 +340,7 @@ itself was never widened to match until `0043` closed that gap alongside adding
 | Table | Scope | Lifecycle |
 |---|---|---|
 | `chat_sync_points` | per chat | bookkeeping only — records how far rolling sync has reached |
-| `chat_chunks` | per chat | archived turn-pairs + AI summary + embedding; reached via `recall_chat_history` |
+| `chat_chunks` | per chat | archived turn-pairs + AI summary + embedding; reached via `recall_chat_history` (explicit tool call) and, for 'rp' chats, auto-injected every turn by the RP read path (`recallForPrompt.ts`) |
 | `chat_memory_entries` | per chat | 'chat' lane: the always-injected "key ideas" digest, one row per `topic_key`. 'rp' lane: exactly two reserved rows, `topic_key` `'scene'`/`'events'`, written by the bridge. Same upsert-on-`(chat_id, topic_key)` mechanism either way. |
 | `household_memory` | per household member, cross-chat | populated once at explicit archive; outlives its source chat; 'chat' lane only |
 | `canon_facts` (`category = 'plot'`) | per chat | 'rp' lane's plot entries — `'proposed'` rows written by the bridge, promoted to `'approved'` at the chat's next sync tick, latest-per-`arc_tag` is the live state |
@@ -325,7 +364,7 @@ place/thing/concept — different kinds of identity that happen to want the same
 | Keyword-triggered lorebook activation ("Keys:" per entry) | Dropped — not ported | `docs/spec.md`'s vector recall (`recall_canon_facts`) replaces keyword-lorebook matching outright; there is no keyword-match fallback anywhere in this schema for a generated key to ever reach |
 | Targeted on-demand entry refresh/creation (`targetedUpdatePrompt`/`targetedNewPrompt`) | Not ported | Explicit scoping call: periodic batch curation only for now: the two curators above already keep every entry current every sync tick |
 | Plot lorebook (hookseeker: EVENTS + SCENE + arc-tagged plot entries) | The bridge (`bridgeChatMemory.ts`), 'rp' lane only — a near-verbatim port, see "The Bridge (RP Lane)" above | This *is* the storytelling-continuity mechanism Canonize was built for; an RP-kind chat gets the real thing, not a simplified reinterpretation |
-| Silent RAG injection every turn | `recall_chat_history` is an explicit tool call | The LLM reasons, nothing else does (§2) |
+| Silent RAG injection every turn | **'rp' lane: yes, CNZ-style auto-recall at prompt assembly** (see "The RP Read Path" above); 'chat' lane: no — `recall_chat_history` stays an explicit tool call | User decision (2026-08-08): the RP read path autopopulates the recall from the last turn-pairs, "the way CNZ works", pulling both approved facts and full-turn texts — with the recall tools still enabled alongside so the model can escalate mid-turn. The household 'chat' lane keeps the strict §2 stance |
 | Hash-linked anchor chain + branch detection | FK cascade (`on delete cascade`) + fork-as-new-row | BigImagine owns its own mutations; no need to detect what it caused itself |
 | Wholesale lorebook/scene snapshot restore | Same idea, narrower: entries dropped rather than reconstructed pre-fork | Accepted simplicity trade, not a correctness gap in the common case |
 | Bridge-summary horizon defaults to 40 pairs, a full wholesale re-read every sync ('chat' lane's own analogue only — the RP bridge has no horizon setting, it always reads the live raw transcript) | Digest horizon defaults to 24 pairs, a revision window on top of persisted state | The key-ideas digest already carries state forward as `chat_memory_entries` rows across syncs; Canonize's bridge summary has no equivalent persistent entries of its own, so its horizon has to do all the continuity work alone |
