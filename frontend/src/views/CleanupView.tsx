@@ -247,7 +247,8 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
               {rule.action !== 'remove' && (
                 <label className="cleanup-slop-prompt">
                   llm prompt
-                  <input
+                  <textarea
+                    rows={3}
                     value={rule.llmPrompt ?? ''}
                     placeholder='e.g. The reply contains "{{keyword}}" — remove it. {{paragraph}}'
                     onChange={(e) => updateRule(rule.ruleId, { llmPrompt: e.target.value || null })}
