@@ -251,6 +251,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Mobile: which message's action row is revealed by tapping its bubble — hidden by default
+  // below the mobile breakpoint (ChatView.css). One at a time: tapping another message moves the
+  // reveal, tapping the same message again closes it. Desktop is unaffected — the CSS rules that
+  // read this class live inside the mobile media query.
+  const [actionsVisibleId, setActionsVisibleId] = useState<string | null>(null);
   // Which message a swipe (prev/next/regenerate) is in flight for, if any — deliberately not the
   // same flag `sending` uses, since a swipe replaces one message's content in place and shouldn't
   // render the "new turn incoming" pending bubble the way send/rerun's own full turns do.
@@ -834,6 +839,14 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
+  /** Mobile tap-to-reveal for a message's action row: tapping the bubble toggles which message's
+   *  row is visible (one at a time). Action-button clicks stopPropagation inside the row, so
+   *  using the buttons doesn't collapse the row mid-use. */
+  function toggleMessageActions(messageId: string | undefined) {
+    if (!messageId) return;
+    setActionsVisibleId((cur) => (cur === messageId ? null : messageId));
+  }
+
   async function saveSettings(patch: {
     params?: ChatParams;
     tool_names?: string[] | null;
@@ -1049,9 +1062,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             const hasMoreSwipesAhead = m.swipes ? m.swipes.index < m.swipes.count - 1 : false;
             const swipeNextDisabled = sending || swipingId === m.messageId || (isOpeningGreeting && !hasMoreSwipesAhead);
             const swipePrevDisabled = sending || swipingId === m.messageId || !m.swipes || m.swipes.index === 0;
-            // The last reply's bottom action bar (below) is always visible, unlike the per-message
-            // hover row — arrow shown only when a swipe exists in that direction, Rerun standing in
-            // for the next-arrow when there's nothing ahead to swipe to.
+            // The last reply's bottom action bar (below) is always visible on desktop, unlike the
+            // per-message hover row — arrow shown only when a swipe exists in that direction, Rerun
+            // standing in for the next-arrow when there's nothing ahead to swipe to. Mobile hides
+            // it until the message is tapped (actionsVisibleId / .actions-visible).
             const busy = sending || swipingId === m.messageId;
             const hasPrevSwipe = !!m.swipes && m.swipes.index > 0;
             const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
@@ -1098,7 +1112,8 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   </label>
                 )}
                 <div
-                  className={`chat-bubble ${m.role}`}
+                  className={`chat-bubble ${m.role}${actionsVisibleId === m.messageId ? ' actions-visible' : ''}`}
+                  onClick={() => toggleMessageActions(m.messageId)}
                   onTouchStart={handleSwipeTouchStart}
                   onTouchEnd={handleSwipeTouchEnd}
                 >
@@ -1136,7 +1151,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                     </div>
                     {m.messageId && !selectionMode &&
                       (isLastAssistant && m.role === 'assistant' ? (
-                        <div className="last-chat-actions">
+                        <div className="last-chat-actions" onClick={(e) => e.stopPropagation()}>
                           {hasPrevSwipe && (
                             <button
                               type="button"
@@ -1196,7 +1211,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                           )}
                         </div>
                       ) : (
-                        <div className="message-actions">
+                        <div className="message-actions" onClick={(e) => e.stopPropagation()}>
                           <button onClick={() => copyMessage(m.content, m.messageId)}>
                             {copiedId === m.messageId ? 'Copied' : 'Copy'}
                           </button>

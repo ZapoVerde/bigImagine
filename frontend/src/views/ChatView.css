@@ -629,11 +629,12 @@
 }
 
 /* --- Last reply's bottom action bar ---
-   Bigger than the per-message hover row and always visible (no hover needed — works on mobile
-   where hover doesn't exist). Swipe arrows appear only when a swipe exists in that direction,
-   Rerun stands in for the next-arrow when there's nothing ahead, and the [n/N] counter shows
-   only when there's more than one variant. Icon-only buttons keep the bar compact at phone
-   width while staying tappable (bi_principles.md §19). */
+   Bigger than the per-message hover row and always visible on desktop (no hover needed). On
+   mobile it's hidden until the message is tapped, same as the per-message row (see the mobile
+   block below). Swipe arrows appear only when a swipe exists in that direction, Rerun stands in
+   for the next-arrow when there's nothing ahead, and the [n/N] counter shows only when there's
+   more than one variant. Icon-only buttons keep the bar compact at phone width while staying
+   tappable (bi_principles.md §19). */
 .last-chat-actions {
   display: flex;
   align-items: center;
@@ -922,6 +923,23 @@
     width: 2.5rem;
     height: 2.5rem;
     padding: 0;
+  }
+
+  /* Mobile: per-message action rows are hidden until the user taps the message — the always-
+     visible last-reply bar would otherwise crowd the newest turn, and the per-message hover row
+     has no hover on a phone. ChatView toggles .actions-visible on the bubble (one at a time);
+     button taps inside a revealed row keep it open via stopPropagation. */
+  .message-actions,
+  .last-chat-actions {
+    display: none;
+  }
+
+  .chat-bubble.actions-visible .message-actions,
+  .chat-bubble.actions-visible .last-chat-actions {
+    display: flex;
+    /* the base .message-actions rule is visibility:hidden (desktop hover-reveal) — override it
+       here or a revealed row would still be invisible */
+    visibility: visible;
   }
 
   /* Same bump for the selection-mode tickboxes. */
