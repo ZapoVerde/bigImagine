@@ -147,6 +147,13 @@ const MAX_STAGED_IMAGES = 4;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 const ALLOWED_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
 
+// endpoint.md §5.1.8's "notify UI" gap: the post-turn bg pass runs decoupled from the reply, so
+// after a turn that moved to a new location the rendered image lands a beat (or more) later. When
+// a refresh finds an eligible location with no image yet, poll briefly — the displayed background
+// stays up until its replacement is ready, then fades to it (refreshLocationImage below).
+const BG_POLL_INTERVAL_MS = 2000;
+const BG_POLL_MAX_TRIES = 30; // 60s cap — a provider round trip can sit in a queue for a while.
+
 function readImageAsBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -168,7 +175,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
-  // the scene_id cache pointer, §2.6-filtered). nulls = no eligible rendered location image yet.
+  // the scene_id cache pointer, §2.6-filtered). nulls = no eligible location at all — a location
+  // whose image hasn't rendered yet does NOT null this out: the previous background stays up until
+  // the pending render is ready to replace it (refreshLocationImage below, endpoint.md §5.1.8).
   const [locationImage, setLocationImage] = useState<{ locationId: string; name: string; imageUrl: string } | null>(null);
 
   // Background fade state machine (parallax_fade_teststep.md §3): when locationImage's URL
@@ -180,6 +189,26 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [bgUrl, setBgUrl] = useState<string | null>(null);
   const [bgFadeClass, setBgFadeClass] = useState('');
   const bgFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The bg-replacement poll (see the BG_POLL_* constants): while a location's render is still in
+  // flight, refreshLocationImage re-checks every BG_POLL_INTERVAL_MS so the new background swaps in
+  // the moment it's ready. Cleared on image arrival, on chat switch, and on unmount.
+  const bgPollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bgPollTriesRef = useRef(0);
+  // Staleness/disposal guards for the poll and the in-flight refreshes it drives. bgChatIdRef is
+  // the chat this bg work belongs to, kept in sync with the chatId prop; bgDisposedRef flips on
+  // unmount. An async resolve or a poll tick for a stale chat — or after unmount — must neither
+  // clobber the on-screen chat's background nor re-arm an orphaned interval.
+  const bgChatIdRef = useRef(chatId);
+  const bgDisposedRef = useRef(false);
+  // endpoint.md §5.1.8's last-turn location state on the client side: the endpoint's `previous`
+  // from the last refresh (the revert target a regen swipe shows while the new turn settles), the
+  // last settled current locationId (to compute freshness — "did the swiped turn establish the
+  // current background"), and whether that location was freshly established by the last settle.
+  // All three reset on chat switch; freshness starts false on load (a chat's historical
+  // background is established, never "fresh").
+  const bgPreviousRef = useRef<{ locationId: string; name: string; imageUrl: string } | null>(null);
+  const bgLastLocationIdRef = useRef<string | null>(null);
+  const bgFreshRef = useRef(false);
 
   // Chat background settings (parallax_fade_teststep.md §2.2 + migration 0073): the whole set —
   // parallax toggle, overlay veil opacity/shade, bubble opacity/shades — read live from the
@@ -288,8 +317,17 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationImage?.imageUrl]);
 
-  useEffect(() => () => {
-    if (bgFadeTimerRef.current) clearTimeout(bgFadeTimerRef.current);
+  // Reset the disposal flag in the setup body: StrictMode's dev double-mount unmounts then
+  // remounts with the SAME ref objects (initializers don't re-run), so the unmount cleanup
+  // below must not leave the flag set on a live second mount — that would permanently disable
+  // the bg refresh/poll in dev.
+  useEffect(() => {
+    bgDisposedRef.current = false;
+    return () => {
+      if (bgFadeTimerRef.current) clearTimeout(bgFadeTimerRef.current);
+      bgDisposedRef.current = true;
+      stopBgPoll();
+    };
   }, []);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [draft, setDraft] = useState('');
@@ -404,6 +442,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Loads the chat this tab was opened for. Guarded so the round trip through onChatCreated below
   // (parent hands the new id back as a prop) doesn't trigger a redundant refetch.
   useEffect(() => {
+    bgChatIdRef.current = chatId;
+    bgPreviousRef.current = null;
+    bgLastLocationIdRef.current = null;
+    bgFreshRef.current = false;
     lastHistoryScrollTopRef.current = 0;
     if (!chatId) {
       setActiveChat(null);
@@ -418,6 +460,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setSelectionStart(null);
       setError(null);
       setEditingId(null);
+      stopBgPoll();
       return;
     }
     if (activeChat?.chatId === chatId) return;
@@ -428,6 +471,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setSyncStatusOpen(false);
     setSelectionMode(false);
     setSelectionStart(null);
+    stopBgPoll();
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
@@ -566,15 +610,77 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [selectionMode]);
 
+  // Stops the bg-replacement poll (BG_POLL_* above) and resets its try counter. Called on image
+  // arrival, on "no eligible location", on chat switch, and on unmount.
+  function stopBgPoll() {
+    if (bgPollTimerRef.current !== null) {
+      clearInterval(bgPollTimerRef.current);
+      bgPollTimerRef.current = null;
+    }
+    bgPollTriesRef.current = 0;
+  }
+
   // endpoint.md §6.4: refresh the chat's active-location background image. Best-effort — a
   // failure just leaves the previous image (or none), never surfaces an error banner for what is
-  // decorative state.
+  // decorative state. Display rule (endpoint.md §5.1.8): the current location's image when it has
+  // one; while it's pending (imageUrl null — the post-turn bg pass fires only after the reply is
+  // sent, endpoint.md §5) or the chat has no eligible location at all, the last settled location's
+  // image stays up instead of blanking the layer — "some background is better than no background
+  // even if stale". Only a chat that never had a location shows nothing. A pending render keeps a
+  // bounded poll running (BG_POLL_*) until the replacement lands.
   async function refreshLocationImage(chatId: string) {
+    let payload: Awaited<ReturnType<typeof getChatLocationImage>>;
     try {
-      const image = await getChatLocationImage(chatId, apiKey);
-      setLocationImage(image.imageUrl ? image : null);
+      payload = await getChatLocationImage(chatId, apiKey);
     } catch {
+      // Best-effort fetch — a transient failure leaves whatever background is currently showing.
+      return;
+    }
+    // Stale-response guard: the chat on screen may have changed (or this ChatView unmounted)
+    // while the request was in flight — don't clobber the new chat's background, and don't let a
+    // stale null re-arm a poll against an old chatId.
+    if (bgDisposedRef.current || bgChatIdRef.current !== chatId) return;
+    const { current, previous } = payload;
+    bgPreviousRef.current = previous?.imageUrl ? { locationId: previous.locationId, name: previous.name, imageUrl: previous.imageUrl } : null;
+    if (current?.imageUrl) {
+      // A rendered current — show it; the fade state machine swaps it in. Freshness: the
+      // location changed on this settle (a swipe of that turn should revert to the previous
+      // location). Any pending poll for the old render is moot now.
+      bgFreshRef.current = bgLastLocationIdRef.current !== null && current.locationId !== bgLastLocationIdRef.current;
+      bgLastLocationIdRef.current = current.locationId;
+      setLocationImage({ locationId: current.locationId, name: current.name, imageUrl: current.imageUrl });
+      stopBgPoll();
+      return;
+    }
+    // No rendered current: the render is still pending, or the chat has no eligible location.
+    // Keep the last settled location up rather than blanking; only a never-located chat shows
+    // nothing. The settle (whenever it lands) updates freshness via the branch above.
+    if (bgPreviousRef.current && bgPreviousRef.current.imageUrl !== locationImage?.imageUrl) {
+      setLocationImage(bgPreviousRef.current);
+    } else if (!bgPreviousRef.current) {
       setLocationImage(null);
+    }
+    if (current && !current.imageUrl) {
+      // Pending render — poll until it lands (bounded — see BG_POLL_MAX_TRIES).
+      if (bgPollTimerRef.current === null) {
+        bgPollTriesRef.current = 0;
+        bgPollTimerRef.current = setInterval(() => {
+          // Belt-and-suspenders on top of stopBgPoll's chat-switch/unmount teardown: never let a
+          // tick outlive its chat or its ChatView (a stale tick would fetch a wrong chat's image).
+          if (bgDisposedRef.current || bgChatIdRef.current !== chatId) {
+            stopBgPoll();
+            return;
+          }
+          bgPollTriesRef.current += 1;
+          if (bgPollTriesRef.current > BG_POLL_MAX_TRIES) {
+            stopBgPoll();
+            return;
+          }
+          void refreshLocationImage(chatId);
+        }, BG_POLL_INTERVAL_MS);
+      }
+    } else {
+      stopBgPoll();
     }
   }
 
@@ -765,21 +871,51 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
    *  conversation changes. 'next' past the newest stored variant instead triggers a fresh
    *  regeneration server-side (still in place, via recordSwipe) — this is also what "Rerun" is
    *  now, so the Rerun button below just calls swipe(id, 'next'). Only ever offered on the
-   *  chat's current last assistant reply (isLastAssistant below); the server enforces this too. */
+   *  chat's current last assistant reply (isLastAssistant below); the server enforces this too.
+   *
+   *  endpoint.md §5.1.8's revert rule: regenerating the last turn invalidates its background when
+   *  that turn *established* it (the location changed on the last settle — a freshly generated
+   *  image). The display reverts to the last settled location immediately and keeps it while the
+   *  new turn settles (its location + render), then the refresh swaps in the replacement;
+   *  a failure restores the swiped-from background. Plain prev/next cycling between stored
+   *  variants never reverts — the location state doesn't change. */
   async function swipe(messageId: string, direction: 'prev' | 'next') {
     if (!activeChat || sending || swipingId) return;
     setError(null);
     setSwipingId(messageId);
+    const msg = messages.find((m) => m.messageId === messageId);
+    const hasMoreSwipesAhead = !!msg?.swipes && msg.swipes.index < msg.swipes.count - 1;
+    const willRegenerate = direction === 'next' && !hasMoreSwipesAhead;
+    const swipedFrom = locationImage;
+    const prevImage = bgPreviousRef.current;
+    const reverted =
+      willRegenerate &&
+      bgFreshRef.current &&
+      !!prevImage?.imageUrl &&
+      prevImage.imageUrl !== locationImage?.imageUrl;
+    if (reverted) {
+      // The swiped turn's freshly generated image belongs to content being replaced — show the
+      // last settled location until the regenerated turn settles.
+      setLocationImage({ locationId: prevImage.locationId, name: prevImage.name, imageUrl: prevImage.imageUrl });
+    }
     try {
       const result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
       if ('message' in result) {
         setMessages((prev) =>
           prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes } : m)),
         );
+        // A switch happened (regeneration or variant cycle) — the active swipe changed, so the
+        // location state may have too: re-read it. For a regen the new location is pending until
+        // its render lands, so the reverted previous background stays up and the poll swaps in
+        // the replacement the moment it's ready; for a cycle the server's own trigger
+        // (ensureActiveLocationImage) restarts a dropped render and this read picks it up.
+        void refreshLocationImage(activeChat.chatId);
       }
       // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to swipe');
+      // The swipe failed — the turn is unchanged, so restore the swiped-from background.
+      if (reverted) setLocationImage(swipedFrom);
     } finally {
       setSwipingId(null);
     }

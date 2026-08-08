@@ -122,16 +122,18 @@ Image generation is executed through an asynchronous background pass (`generateL
 ### 5.1 Execution Flow
 
 1. **Location Trigger**: A location change or environment update is detected during the post-cleanup heuristic pass.
-2. **Cache Validation Check**:
-   * The engine compares the location's current visual description, environment JSON, and seed against the state recorded at Image Generated At.
-   * **Cache Hit**: If Image URL is present AND parameters are unchanged, rendering is skipped entirely. The existing Image URL is retained (zero cost).
-   * **Cache Miss**: If parameters changed or Image URL is missing/null, proceed to generation.
+2. **Cache Validation Check** (re-keyed to the prompt render hash, migration 0076):
+   * The engine synthesizes the actual prompt first (template + location description/environment + connection style prefix + negative prompt) and hashes it together with every other output-affecting provider input (model, dims, steps, cfg, sampler, workflow params, seed) into a single `image_render_hash`.
+   * **Cache Hit**: If Image URL is present AND the row's stored hash equals the freshly computed one, rendering is skipped entirely. The existing Image URL is retained (zero cost). The hash — not the raw inputs — is the variant: the same prompt reuses the URL, a changed prompt (a varied bg description, or eventually a mood/time slot, or a different connection) renders.
+   * **Cache Miss**: If parameters changed, Image URL is missing/null, or the row predates 0076 (hash null — one-time legacy snapshot comparison), proceed to generation.
 3. **Resolve Image Connection**: The engine fetches the active image connection (or chat/scene override) and decrypts its API key.
 4. **Prompt Synthesis**: Expands the Master Image Prompt Template using the location's description and environment parameters.
-5. **Execute Provider Adapter**: Calls the provider adapter (Runware, fal.ai, etc.) with the synthesized positive prompt, negative prompt, and model parameters.
+5. **Execute Provider Adapter**: Calls the provider adapter (Runware, fal.ai, etc.) with the synthesized positive prompt, negative prompt, and model parameters. Immediately before the call, the §2.6 eligibility is re-checked: if the turn was regenerated while this pass was starting up (a swipe landed), the pending render is dropped without spending the provider call — a round-trip for a discarded timeline is a wasted gen. Discovery restarts when that swipe becomes active again (the chat-load / cycle-back triggers below).
 6. **Receive Image URL**: The adapter returns the remote CDN Image URL string.
-7. **Update Database**: The locations table is updated with the new Image URL and the current Image Generated At timestamp.
-8. **Notify UI**: The client receives the updated location Image URL and smoothly transitions the chat view background image.
+7. **Update Database**: The locations table is updated with the new Image URL, the current Image Generated At timestamp, the input snapshot, and the prompt render hash. The (chat, swipe, location) -> URL + hash association is recorded on `location_swipe_images` too (migration 0076): a rendered background is per-swipe — it stays valid for the swipe that used it even after the location row is re-anchored to a newer swipe, and prev/next cycling back to that swipe reuses the URL instead of re-generating.
+8. **Notify UI**: The client receives the updated location Image URL and smoothly transitions the chat view background image. Because the pass runs decoupled from the turn, a location change lands with no image for a beat: `GET /v1/chats/:id/location-image` returns the eligible current location with `imageUrl: null` until the render lands, plus the last settled location (`previous` — the last-turn location state on `chat_sessions.previous_scene_id`, maintained by the scraper: only an *extending* turn advances it, a swipe regeneration never does, so it survives a chain of swipes). The Chat View shows the current image when it has one, otherwise the previous one — the background is persistent, never blanked on send ("some background is better than no background even if stale"); only a chat that never had a location shows nothing. A pending render keeps a bounded poll running until the replacement lands.
+   * **Revert-on-swipe**: regenerating the last turn (Rerun / 'next' past the newest variant) invalidates its background when that turn established the current location (a freshly generated image) — the view instantly reverts to the `previous` location and keeps it while the new turn settles, then swaps in the replacement; a failed swipe restores the swiped-from background. Plain prev/next cycling between stored variants never reverts.
+   * **Restart on return**: a chat (re)open or a prev/next cycle re-fires the cache-first pass when the active location has no rendered image (a pass dropped by a swipe, or a failed render) — `ensureActiveLocationImage`. Cache-first plus an in-process in-flight guard make repeat triggers no-ops, and the active-swipe read (anchored location or `location_swipe_images` association) fixes the stale-scene-pointer blank on cycle-back.
 
 ### 5.2 Automatic Expiry Recovery (Broken Link Fallback)
 Because remote CDN URLs may eventually expire after days or weeks:
@@ -145,6 +147,7 @@ Because remote CDN URLs may eventually expire after days or weeks:
 
 ### 6.1 Database Migrations
 * **`db/migrations/0068_image_connections.sql`**: Creates the image connections table, partial unique index for active status, adds image settings keys to orchestrator settings, and renames `locations.image_path` to `image_url` (see §2.3).
+* **`db/migrations/0076_location_swipe_images.sql`**: Adds `locations.image_render_hash` (the prompt-hash cache key, §5.1 step 2), `chat_sessions.previous_scene_id` (the last-turn location state, §5.1 step 8), and the `location_swipe_images` per-swipe association table (chat + swipe -> location + URL + render hash, RLS-scoped through the swipe's message).
 
 ### 6.2 Orchestrator Core & IO
 * **`orchestrator/src/io/imageConnections.ts`**: CRUD store for image connections, with write-only key encryption and active connection resolution.
@@ -153,8 +156,9 @@ Because remote CDN URLs may eventually expire after days or weeks:
 * **`orchestrator/src/io/imageGen/falAi.ts`**: fal.ai API adapter returning CDN Image URLs.
 * **`orchestrator/src/io/imageGen/pollinations.ts`**: Pollinations API adapter returning image URLs — requires the connection key (carried as the `token` URL param; not keyless since 2025).
 * **`orchestrator/src/io/imageGen/comfyUi.ts`**: ComfyUI API adapter returning local/server image URLs.
-* **`orchestrator/src/orchestrator/generateLocationImage.ts`**: Plain async function — cache validation, prompt synthesis, adapter dispatch, Image URL update. This is the real implementation and the only thing the post-cleanup pass calls; see §5.1.
+* **`orchestrator/src/orchestrator/generateLocationImage.ts`**: Plain async function — prompt-hash cache validation, prompt synthesis, adapter dispatch, Image URL + render hash update, the per-swipe association record, the pre-provider eligibility re-check (drop rule), and the in-flight guard. This is the real implementation and the only thing the post-cleanup pass calls; see §5.1.
 * **`orchestrator/src/util/synthesizeImagePrompt.ts`**: Pure function macro expansion engine for image prompts.
+* **`orchestrator/src/orchestrator/locationAndPresenceScraper.ts`**: `scrapeTurnPresence` gained an extend/replace mode — an extending turn's location change advances `chat_sessions.previous_scene_id` (the last-turn location state, §5.1 step 8); a swipe regeneration ('replace') never does.
 * **`orchestrator/src/io/chatSessions.ts`**: `forkChat()`'s location-resurrection clone (currently selects only `name`, `visual_description`, `environment`) must also carry `seed`, `image_url`, and `image_generated_at` forward onto the cloned row. Without this, every fork forces a fresh render for a resurrected location even when nothing about it visually changed — silently defeating §1.3's cache-first commitment on the one path that most needs it (forking is exactly when a stale/expensive re-render is most wasteful). Character resurrection is unaffected — characters carry no visual fields.
 
 ### 6.3 Plugins & Server Routes
@@ -164,5 +168,6 @@ Because remote CDN URLs may eventually expire after days or weeks:
 ### 6.4 Frontend Surfaces
 * **`frontend/src/views/ConnectionsView.tsx`**: Expanded UI for managing image generation connections alongside LLM connections.
 * **`frontend/src/views/SettingsView.tsx`**: Configuration UI for editing the Master Image Prompt Template.
-* **`frontend/src/views/ChatView.tsx`**: Renders `scenes.active_location_id`'s remote Image URL as the background layer of the chat view.
+* **`frontend/src/views/ChatView.tsx`**: Renders `scenes.active_location_id`'s remote Image URL as the background layer of the chat view — the current image when it has one, else the last settled one (never blank, §5.1 step 8), with the bounded poll for pending renders and the revert-on-swipe behavior.
+* **`frontend/src/api/client.ts`**: `getChatLocationImage` returns `{ current, previous }` — the current eligible location (imageUrl null while its render is pending) and the last settled location (only when it has an image to show).
 * **`frontend/src/components/canvas/CanvasPanel.tsx`**: Displays active location image preview, environment controls, and manual re-render trigger.

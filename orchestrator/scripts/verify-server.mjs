@@ -457,10 +457,28 @@ function createFakePool() {
   // context_stack_slots read resolves. Slots are shaped like context_stack_slots rows minus the
   // id/position columns.
   const slotsByPreset = new Map();
+  // GET /v1/chats/:id/location-image (endpoint.md §6.4 + §5.1.8): resolveChatLocationImage's
+  // reads — the chat's scene pointers, the scene-path current location, the previous (last
+  // settled) location, and the active-swipe fallback. Modeled as the SQL rows they produce
+  // (snake_case). chatLocationState is keyed by chatId; sceneLocations by sceneId;
+  // fallbackLocations by `${userId}:${chatId}`. image_url null = the "location exists, render
+  // still in flight" state the persistence contract relies on.
+  const chatLocationState = new Map();
+  const sceneLocations = new Map();
+  const fallbackLocations = new Map();
   return {
     inserts,
     characters,
     slotsByPreset,
+    setChatLocationState(chatId, state) {
+      chatLocationState.set(chatId, state);
+    },
+    setSceneLocation(sceneId, row) {
+      sceneLocations.set(sceneId, row);
+    },
+    setFallbackLocation(userId, chatId, row) {
+      fallbackLocations.set(`${userId}:${chatId}`, row);
+    },
     async connect() {
       let scopedUserId;
       return {
@@ -523,6 +541,29 @@ function createFakePool() {
           // is a legitimate, common state; nothing here asserts on its contents either.
           if (sql.includes('from canon_facts')) {
             return { rows: [] };
+          }
+          // GET /v1/chats/:id/location-image (endpoint.md §6.4 + §5.1.8):
+          //   resolveChatLocationImage's chat-state read — params: [chatId] -> the chat's scene
+          //   pointers (current + previous). Empty = no scene state at all.
+          if (sql.startsWith('select scene_id, previous_scene_id from chat_sessions where chat_id')) {
+            const state = chatLocationState.get(params[0]);
+            return { rows: state ? [state] : [] };
+          }
+          //   the scene-path reads — params: [userId, sceneId, chatId?] -> the scene's location.
+          //   The previous-location read (endpoint.md §5.1.8) is the same join with
+          //   `l.image_url is not null`: a historical pointer is only shown when it has an image.
+          if (sql.startsWith('select l.location_id, l.name, l.image_url') && sql.includes('from scenes s')) {
+            const row = sceneLocations.get(params[1]);
+            if (sql.includes('l.image_url is not null')) {
+              return { rows: row && row.image_url ? [row] : [] };
+            }
+            return { rows: row ? [row] : [] };
+          }
+          //   the active-swipe fallback (stale scene pointer on prev/next cycling) — params:
+          //   [userId, chatId] -> the cycled-to swipe's own location.
+          if (sql.startsWith('select l.location_id, l.name, l.image_url') && sql.includes('from locations l')) {
+            const row = fallbackLocations.get(`${params[0]}:${params[1]}`);
+            return { rows: row ? [row] : [] };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -2517,6 +2558,117 @@ server.close();
   );
 
   server4.close();
+}
+
+// --- Part 7: chat location-image contract (endpoint.md §6.4 + §5.1.8) ---
+// The chat background layer resolves the current eligible location (scene_id pointer with an
+// active-swipe fallback) plus the last settled location (previous_scene_id — the last-turn
+// location state). A current location whose image hasn't rendered yet (the post-turn bg pass is
+// still in flight, endpoint.md §5) must come back as current.imageUrl null — NOT blank — and the
+// previous location stays available as the "some background is better than no background even if
+// stale" fallback.
+{
+  const pool7 = createFakePool();
+  const server7 = startHttpServer({
+    llm,
+    db: createPostgresClient(pool7),
+    tools: createToolRegistry([]),
+    apiKeys: createApiKeyStore('good-key-7:77777777-7777-7777-7777-777777777777'),
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: createFakeChatSessionStore(),
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server7.once('listening', resolve));
+  const base7 = `http://127.0.0.1:${server7.address().port}`;
+  const auth7 = { authorization: 'Bearer good-key-7' };
+  const userId7 = '77777777-7777-7777-7777-777777777777';
+  const chats7 = createFakeChatSessionStore();
+  const chat7 = await chats7.createChat(userId7, {});
+
+  // No scene/location at all -> both sides null.
+  const noLocRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const noLocBody = await noLocRes.json();
+  assert(
+    noLocRes.status === 200 && noLocBody.current?.locationId === null && noLocBody.previous?.locationId === null,
+    'a chat with no scene/location reads back current null and previous null',
+  );
+
+  // Eligible location, render still in flight -> current present with imageUrl null (the
+  // persistence contract), previous null (nothing settled before it).
+  pool7.setChatLocationState(chat7.chatId, { scene_id: 'scene-1', previous_scene_id: null });
+  pool7.setSceneLocation('scene-1', { location_id: 'loc-1', name: 'The Crossroads', image_url: null });
+  const pendingRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const pendingBody = await pendingRes.json();
+  assert(
+    pendingRes.status === 200 &&
+      pendingBody.current?.locationId === 'loc-1' &&
+      pendingBody.current?.name === 'The Crossroads' &&
+      pendingBody.current?.imageUrl === null &&
+      pendingBody.previous?.locationId === null,
+    'an eligible location whose image has not rendered yet returns current with imageUrl null',
+  );
+
+  // Render lands -> imageUrl present on the same location row.
+  pool7.setSceneLocation('scene-1', { location_id: 'loc-1', name: 'The Crossroads', image_url: 'https://cdn.example.invalid/bg.png' });
+  const readyRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const readyBody = await readyRes.json();
+  assert(
+    readyRes.status === 200 &&
+      readyBody.current?.locationId === 'loc-1' &&
+      readyBody.current?.imageUrl === 'https://cdn.example.invalid/bg.png' &&
+      readyBody.previous?.locationId === null,
+    'once the render lands the endpoint returns the image URL on the same location row',
+  );
+
+  // A settled previous location comes back alongside the current — the last-turn location state
+  // (endpoint.md §5.1.8) the client reverts to on a swipe and falls back to while a render is
+  // pending.
+  pool7.setChatLocationState(chat7.chatId, { scene_id: 'scene-1', previous_scene_id: 'scene-0' });
+  pool7.setSceneLocation('scene-0', { location_id: 'loc-0', name: 'The Old Mill', image_url: 'https://cdn.example.invalid/prev.png' });
+  const prevRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const prevBody = await prevRes.json();
+  assert(
+    prevRes.status === 200 &&
+      prevBody.current?.locationId === 'loc-1' &&
+      prevBody.previous?.locationId === 'loc-0' &&
+      prevBody.previous?.imageUrl === 'https://cdn.example.invalid/prev.png',
+    'a settled previous location comes back alongside the current as the last-turn location state',
+  );
+
+  // Pending current + settled previous -> previous still returned (the client never blanks the
+  // background layer).
+  pool7.setSceneLocation('scene-1', { location_id: 'loc-1', name: 'The Crossroads', image_url: null });
+  const pendingPrevRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const pendingPrevBody = await pendingPrevRes.json();
+  assert(
+    pendingPrevRes.status === 200 &&
+      pendingPrevBody.current?.imageUrl === null &&
+      pendingPrevBody.previous?.imageUrl === 'https://cdn.example.invalid/prev.png',
+    'a pending render keeps the previous location available so the client never blanks the background',
+  );
+
+  // Stale scene pointer (prev/next cycling flipped the active swipe, not the scene) -> the
+  // active-swipe fallback resolves the cycled-to variant's own location (endpoint.md §5.1.8's
+  // per-swipe reuse).
+  pool7.setChatLocationState(chat7.chatId, { scene_id: 'scene-1', previous_scene_id: 'scene-0' });
+  pool7.setSceneLocation('scene-1', undefined); // the scene path resolves nothing (ineligible)
+  pool7.setFallbackLocation(userId7, chat7.chatId, { location_id: 'loc-2', name: 'The Harbor', image_url: 'https://cdn.example.invalid/cycle.png' });
+  const cycleRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
+  const cycleBody = await cycleRes.json();
+  assert(
+    cycleRes.status === 200 &&
+      cycleBody.current?.locationId === 'loc-2' &&
+      cycleBody.current?.imageUrl === 'https://cdn.example.invalid/cycle.png',
+    'a stale scene pointer falls back to the active swipe\u2019s own location (cycle-back)',
+  );
+
+  server7.close();
 }
 
 if (process.exitCode) {

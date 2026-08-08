@@ -1039,8 +1039,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             image_url: string | null;
             image_generated_at: string | null;
             image_rendered_input: string | null;
+            image_render_hash: string | null;
           }>(
-            `select name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input from locations
+            `select name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash from locations
              where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,
             [userId, forkSwipeId],
           );
@@ -1050,14 +1051,14 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             // location even when nothing about it visually changed, silently defeating §1.3's
             // cache-first commitment on the one path that most needs it (forking is exactly when
             // a stale/expensive re-render is most wasteful). The image_rendered_input snapshot
-            // must come along as well: cache validation (endpoint.md §5.1.2) compares the current
-            // inputs against that snapshot, so a clone without it would never hit the cache even
-            // though its inputs are byte-identical to the parent's. Character resurrection is
-            // unaffected — characters carry no visual fields.
+            // and image_render_hash must come along as well: cache validation (endpoint.md
+            // §5.1.2) compares the render hash (migration 0076) first, so a clone without it
+            // would never hit the cache even though its inputs are byte-identical to the
+            // parent's. Character resurrection is unaffected — characters carry no visual fields.
             await session.query(
-              `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_generated_at, image_rendered_input, status, anchor_chat_id, anchor_swipe_id)
-               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, 'transient', $9, $10)`,
-              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, newChatId, branchForkSwipeId],
+              `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
+               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9, 'transient', $10, $11)`,
+              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchForkSwipeId],
             );
           }
           const resurrectionCharacters = await session.query<{ name: string }>(

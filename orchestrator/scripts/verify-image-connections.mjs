@@ -39,6 +39,7 @@ function createFakePool() {
   const imageConnections = [];
   const locations = [];
   const chatMessages = []; // {chat_id, active_swipe_id} — §2.6 eligibility
+  const swipeImages = new Map(); // `${chatId}:${swipeId}` -> location_swipe_images row (0076)
   const settings = new Map();
   let connCounter = 0;
   let locCounter = 0;
@@ -49,6 +50,7 @@ function createFakePool() {
     imageConnections,
     locations,
     chatMessages,
+    swipeImages,
     settings,
     now,
     async connect() {
@@ -173,18 +175,34 @@ function createFakePool() {
                       image_url: row.image_url,
                       image_generated_at: row.image_generated_at,
                       image_rendered_input: row.image_rendered_input,
+                      image_render_hash: row.image_render_hash ?? null,
+                      anchor_swipe_id: row.anchor_swipe_id ?? null,
+                      status: row.status ?? null,
                     },
                   ]
                 : [],
             };
           }
           if (sql.startsWith('update locations set image_url')) {
-            const row = locations.find((l) => l.location_id === params[0] && l.user_id === params[3]);
+            const row = locations.find((l) => l.location_id === params[0] && l.user_id === params[4]);
             if (row) {
               row.image_url = params[1];
               row.image_generated_at = now();
               row.image_rendered_input = JSON.parse(params[2]);
+              row.image_render_hash = params[3];
             }
+            return { rows: [] };
+          }
+          if (sql.startsWith('update locations set image_render_hash')) {
+            // §5.1.2 legacy backfill: a pre-0076 cache hit writes the hash so the next check fast-paths.
+            const row = locations.find((l) => l.location_id === params[0] && l.user_id === scopedUserId);
+            if (row) row.image_render_hash = params[1];
+            return { rows: [] };
+          }
+          if (sql.startsWith('insert into location_swipe_images')) {
+            // migration 0076: per-swipe association recorded on every successful render.
+            const [chatId, swipeId, locationId, imageUrl, renderHash] = params;
+            swipeImages.set(`${chatId}:${swipeId}`, { chat_id: chatId, swipe_id: swipeId, location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: now() });
             return { rows: [] };
           }
 
@@ -460,6 +478,15 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
   await imageConnections.activate(pollAgain.id);
   const transientLiveChat = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-transient-live', chatId);
   assert(transientLiveChat.ok === true && typeof transientLiveChat.imageUrl === 'string', "a transient location on the calling chat's active swipe path renders normally");
+
+  // migration 0076: the successful render records the (chat, swipe, location) -> URL + hash
+  // association — the per-swipe record that makes the image reusable on cycle-back instead of
+  // re-generated (the "save that image url association with that location and swipe" rule).
+  const assoc = pool.swipeImages.get(`${chatId}:${liveSwipe}`);
+  assert(
+    assoc?.location_id === 'loc-transient-live' && assoc.image_url === transientLiveChat.imageUrl && typeof assoc.render_hash === 'string' && assoc.render_hash.length === 64,
+    'the rendered URL + prompt render hash are recorded against the swipe (migration 0076)',
+  );
 }
 
 // --- endpoint.md §3.3 testImageConnection probe (pollinations: URL constructed, no fetch) ---

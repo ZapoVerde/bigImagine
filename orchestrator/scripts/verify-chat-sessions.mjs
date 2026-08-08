@@ -297,6 +297,7 @@ function createFakePool() {
                 image_url: l.image_url ?? null,
                 image_generated_at: l.image_generated_at ?? null,
                 image_rendered_input: l.image_rendered_input ? JSON.stringify(l.image_rendered_input) : null,
+                image_render_hash: l.image_render_hash ?? null,
               })),
             };
           }
@@ -308,7 +309,7 @@ function createFakePool() {
             return { rows: rows.map((c) => ({ name: c.name })) };
           }
           if (sql.includes('insert into locations') && params.length >= 10) {
-            const [userId, name, visualDescription, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, chatId, anchorSwipeId] = params;
+            const [userId, name, visualDescription, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, renderHash, chatId, anchorSwipeId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
@@ -319,6 +320,7 @@ function createFakePool() {
               image_url: imageUrl ?? null,
               image_generated_at: imageGeneratedAt ?? null,
               image_rendered_input: renderedInputJson ? JSON.parse(renderedInputJson) : null,
+              image_render_hash: renderHash ?? null,
               status: 'transient',
               anchor_chat_id: chatId,
               anchor_swipe_id: anchorSwipeId,
@@ -702,6 +704,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     image_url: 'https://cdn.example.invalid/dark-cave.png',
     image_generated_at: '2026-08-13T00:00:00.000Z',
     image_rendered_input: { visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 },
+    image_render_hash: 'render-hash-abc',
     status: 'transient',
     anchor_chat_id: parent.chatId,
     anchor_swipe_id: forkSwipeId,
@@ -744,6 +747,10 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(
     JSON.stringify(branchLocations[0].image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
     'the cloned location carries the render-input snapshot too, so its cache check (endpoint.md §5.1.2) hits on the branch',
+  );
+  assert(
+    branchLocations[0].image_render_hash === 'render-hash-abc',
+    'the cloned location carries the prompt render hash (migration 0076) so its cache check hits on the branch',
   );
   assert(pool.locations.some((l) => l.name === 'The Forest Clearing' && l.anchor_chat_id === null), 'a permanent location is world canon — never cloned into the branch');
 

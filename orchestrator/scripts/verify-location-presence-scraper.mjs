@@ -119,9 +119,19 @@ function createFakePool() {
             scenes.push(row);
             return { rows: [{ scene_id: row.scene_id }] };
           }
+          // resolveScene's chat-state read (endpoint.md §5.1.8): the current scene pointer
+          // before the stamp — the extend-mode stamp advances previous_scene_id from it.
+          if (sql.startsWith('select scene_id from chat_sessions where chat_id')) {
+            return { rows: [chatSessions.get(params[0]) ?? { scene_id: null }] };
+          }
           if (sql.startsWith('update chat_sessions set scene_id')) {
-            const [sceneId, chatId] = params;
+            // extend mode (3 params: sceneId, previousSceneId, chatId) vs. replace/reuse
+            // (2 params: sceneId, chatId).
+            const isExtend = params.length === 3;
+            const [sceneId, second, third] = params;
+            const chatId = isExtend ? third : second;
             const row = chatSessions.get(chatId) ?? { scene_id: null };
+            if (isExtend && row.scene_id !== sceneId) row.previous_scene_id = row.scene_id;
             row.scene_id = sceneId;
             chatSessions.set(chatId, row);
             return { rows: [] };
@@ -367,6 +377,57 @@ Present: Mair, Seraphina, Mair`;
   assert(pool.characters.length === 2, 'the transient character is matched — only Seraphina is newly registered');
   assert(pool.characters[0].anchor_swipe_id === sb, 'the matched transient character is re-anchored to the current turn\'s swipe too');
   assert(pool.scenes.length === 1, 'one scene is resolved for the reused location');
+}
+
+// --- endpoint.md §5.1.8: previous_scene_id advances on extending turns, never on swipe regen ---
+// The last-turn location state: an extending turn whose location changes makes the old scene the
+// chat's previous_scene_id (the revert target for the chat background); a swipe regeneration
+// ('replace' mode) never advances it, so the target survives a chain of swipes.
+{
+  const pool = createFakePool();
+  const sb = randomUUID();
+  pool.chatMessages.push({ message_id: 'msg-5', chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: 'swipe-tavern' });
+  pool.chatMessages.push({ message_id: MSG, chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: sb });
+  pool.chatSessions.set(CHAT, { scene_id: 'scene-tavern' });
+  const tavern = {
+    location_id: 'loc-tavern',
+    user_id: USER,
+    name: 'The Drunken Kraken - Main Hall',
+    visual_description: 'Smoky.',
+    environment: {},
+    status: 'permanent',
+    anchor_chat_id: null,
+    anchor_swipe_id: null,
+  };
+  pool.locations.push(tavern);
+  pool.scenes.push({
+    scene_id: 'scene-tavern',
+    user_id: USER,
+    name: tavern.name,
+    chat_id: CHAT,
+    active_location_id: tavern.location_id,
+    last_active_at: '2026-01-01T00:00:00.000Z',
+  });
+
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+
+  // Extending turn: the story moves to a new location -> previous_scene_id = the old scene.
+  const harborHeader = `[ Morning | Thursday, July 1, 2026 AD | The Harbor - Docks ]
+Present: Seraphina`;
+  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, harborHeader, 'extend');
+  const afterExtendSceneId = pool.chatSessions.get(CHAT).scene_id;
+  assert(afterExtendSceneId !== 'scene-tavern' && pool.scenes.some((s) => s.scene_id === afterExtendSceneId), 'an extending turn stamps the new scene');
+  assert(pool.chatSessions.get(CHAT).previous_scene_id === 'scene-tavern', 'an extending turn that changes location advances previous_scene_id to the old scene (endpoint.md §5.1.8)');
+
+  // Replace (swipe regeneration): even a location change must not advance previous_scene_id —
+  // the revert target stays the last settled location across a chain of swipes.
+  const cliffsHeader = `[ Noon | Thursday, July 1, 2026 AD | The Cliffs - Lookout ]
+Present: Seraphina`;
+  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, cliffsHeader, 'replace');
+  const afterReplaceSceneId = pool.chatSessions.get(CHAT).scene_id;
+  assert(afterReplaceSceneId !== afterExtendSceneId, 'a swipe regeneration still stamps the regenerated turn\'s scene');
+  assert(pool.chatSessions.get(CHAT).previous_scene_id === 'scene-tavern', 'a swipe regeneration never advances previous_scene_id — the revert target survives the swipe chain (§5.1.8)');
 }
 
 // --- Fail-open 1: DB failure never throws --------------------------------------------------------

@@ -35,9 +35,12 @@
  *
  * @api-declaration
  * parseStoryHeader(text) -> StoryHeader | null — pure; the two-line header parse, no IO
- * scrapeTurnPresence(deps, userId, chatId, messageId, text) -> Promise<string | undefined> —
+ * scrapeTurnPresence(deps, userId, chatId, messageId, text, mode) -> Promise<string | undefined> —
  *   fail-open; parse, anchor the turn's active swipe, then extract location/scene/characters/
- *   presence, returning the resolved location id (the async image-gen trigger's target)
+ *   presence, returning the resolved location id (the async image-gen trigger's target). mode is
+ *   'extend' for a genuinely new turn (a location change advances chat_sessions.previous_scene_id)
+ *   or 'replace' for a swipe regeneration (the replaced turn's location must NOT become the
+ *   previous one — the revert target stays the last settled location, endpoint.md §5.1.8)
  *
  * @contract
  *   assertions:
@@ -120,6 +123,7 @@ export async function scrapeTurnPresence(
   chatId: string,
   messageId: string,
   text: string,
+  mode: 'extend' | 'replace' = 'extend',
 ): Promise<string | undefined> {
   try {
     const header = parseStoryHeader(text);
@@ -134,7 +138,7 @@ export async function scrapeTurnPresence(
       log.warn('post-cleanup scraper: turn has no anchorable swipe, skipping extraction', { chatId, messageId });
       return undefined;
     }
-    return await deps.db.withUserScope(userId, (session) => extractFromHeader(session, userId, chatId, swipeId, header));
+    return await deps.db.withUserScope(userId, (session) => extractFromHeader(session, userId, chatId, swipeId, header, mode));
   } catch (err) {
     // bi_principles.md §11: log the seam — a silent failure here would quietly lose trusted
     // scene state, but it must never take the turn down with it.
@@ -161,9 +165,10 @@ async function extractFromHeader(
   chatId: string,
   swipeId: string,
   header: StoryHeader,
+  mode: 'extend' | 'replace',
 ): Promise<string> {
   const locationId = await resolveLocation(session, userId, chatId, swipeId, header);
-  const sceneId = await resolveScene(session, userId, chatId, locationId);
+  const sceneId = await resolveScene(session, userId, chatId, locationId, mode);
   const characterIds = await resolvePresentCharacters(session, userId, chatId, swipeId, header.present);
   await replaceScenePresence(session, userId, sceneId, characterIds);
   log.info('post-cleanup scraper: extracted turn scene state', {
@@ -227,8 +232,21 @@ async function resolveLocation(
 /** segway.md §4.2.4: resolve-or-reuse the scene by its (chat_id, active_location_id) identity,
  *  then stamp chat_sessions.scene_id with it — the cache pointer other readers use for a cheap
  *  current-scene read (segway.md §2.2). No special-case fork handling needed here: a forked
- *  chat resolves-or-creates its own scenes through this same path. */
-async function resolveScene(session: DbSession, userId: string, chatId: string, locationId: string): Promise<string> {
+ *  chat resolves-or-creates its own scenes through this same path.
+ *
+ *  The "last-turn location state" (endpoint.md §5.1.8) is maintained on the same stamp: when an
+ *  *extending* turn moves the chat to a different scene, the scene that was current a moment ago
+ *  becomes chat_sessions.previous_scene_id — the revert target the chat-background UI shows while
+ *  the new location's render is pending or after a swipe. A 'replace' turn (swipe regeneration)
+ *  never advances it: the replaced turn's location is discarded, not a previous state, so the
+ *  revert target keeps pointing at the last settled location across a chain of swipes. */
+async function resolveScene(
+  session: DbSession,
+  userId: string,
+  chatId: string,
+  locationId: string,
+  mode: 'extend' | 'replace',
+): Promise<string> {
   const existing = await session.query<{ scene_id: string }>(
     `select scene_id from scenes where chat_id = $1 and active_location_id = $2 and user_id = $3`,
     [chatId, locationId, userId],
@@ -249,7 +267,19 @@ async function resolveScene(session: DbSession, userId: string, chatId: string, 
     );
     sceneId = created!.scene_id;
   }
-  await session.query('update chat_sessions set scene_id = $1 where chat_id = $2', [sceneId, chatId]);
+  const [before] = await session.query<{ scene_id: string | null }>(
+    'select scene_id from chat_sessions where chat_id = $1',
+    [chatId],
+  );
+  if (mode === 'extend' && before?.scene_id !== sceneId) {
+    await session.query('update chat_sessions set scene_id = $1, previous_scene_id = $2 where chat_id = $3', [
+      sceneId,
+      before?.scene_id ?? null,
+      chatId,
+    ]);
+  } else {
+    await session.query('update chat_sessions set scene_id = $1 where chat_id = $2', [sceneId, chatId]);
+  }
   return sceneId;
 }
 

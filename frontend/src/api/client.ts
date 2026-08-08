@@ -212,14 +212,26 @@ export function getChat(chatId: string, apiKey: string | null): Promise<ChatDeta
   return jsonRequest<ChatDetail>(`/v1/chats/${encodeURIComponent(chatId)}`, apiKey);
 }
 
-/** GET /v1/chats/:id/location-image — the active location's rendered image for the Chat View
- *  background layer (endpoint.md §6.4), resolved via chat_sessions.scene_id -> scenes
- *  .active_location_id -> locations.image_url and §2.6-filtered. Nulls mean the chat has no
- *  eligible rendered location image. */
+/** One side of the chat-background layer (endpoint.md §6.4): a location + its rendered image
+ *  URL. imageUrl null is only legal on `current` — the location exists but its image hasn't
+ *  rendered yet (the post-turn bg pass is still in flight, endpoint.md §5). */
+export interface ChatLocationImage {
+  locationId: string;
+  name: string;
+  imageUrl: string | null;
+}
+
+/** GET /v1/chats/:id/location-image — the chat-background layer (endpoint.md §6.4): the current
+ *  eligible location (scene_id pointer with an active-swipe fallback) plus the last settled one
+ *  (endpoint.md §5.1.8's last-turn location state — the revert target shown while the current
+ *  render is pending or after a swipe). current.imageUrl null = the location exists but its
+ *  image hasn't rendered yet — the Chat View keeps the previous background up until the pending
+ *  render replaces it. previous is only non-null when it has an image to show ("some background
+ *  is better than no background even if stale"). Both null = no location at all. */
 export async function getChatLocationImage(
   chatId: string,
   apiKey: string | null,
-): Promise<{ locationId: string; name: string; imageUrl: string } | { locationId: null; name: null; imageUrl: null }> {
+): Promise<{ current: ChatLocationImage | null; previous: ChatLocationImage | null }> {
   return jsonRequest(`/v1/chats/${encodeURIComponent(chatId)}/location-image`, apiKey);
 }
 

@@ -698,38 +698,111 @@ function fireLocationImageGeneration(deps: HttpServerDeps, userId: string, chatI
   );
 }
 
-// endpoint.md §6.4's chat-background read: chat_sessions.scene_id (the segway.md §2.2 cache
-// pointer) -> scenes.active_location_id -> locations.image_url, scoped to the requesting user and
-// §2.6-eligible (a demoted alternate-timeline location reads back as absent — the same filter the
-// model-facing getters apply). Returns null when the chat has no scene, its scene has no location,
-// the location is ineligible, or it has no rendered image yet — the client then shows no
-// background rather than a stale one.
+// endpoint.md §6.4's chat-background read: the eligible current location (via the scene_id cache
+// pointer, segway.md §2.2, falling back to the active swipe's own anchored/associated location so
+// a stale scene pointer on prev/next cycling can't blank the layer) plus the last settled
+// location (chat_sessions.previous_scene_id — endpoint.md §5.1.8's last-turn location state, the
+// revert target shown while the current render is pending or after a swipe). Scoped to the
+// requesting user. The current location is returned even before its image has rendered
+// (imageUrl null): the post-turn bg pass fires only after the reply is sent (endpoint.md §5), so
+// a location change lands with no image for a beat, and the client keeps the previous background
+// up until the pending render is ready to replace it (§5.1.8's "notify UI"). Null is reserved
+// for "no eligible location at all". The previous location is eligibility-relaxed (a historical
+// pointer, not model-facing — "some background is better than no background even if stale") and
+// only returned when it actually has an image to show.
 async function resolveChatLocationImage(
   db: PostgresClient,
   userId: string,
   chatId: string,
-): Promise<{ locationId: string; name: string; imageUrl: string } | null> {
+): Promise<{ current: { locationId: string; name: string; imageUrl: string | null } | null; previous: { locationId: string; name: string; imageUrl: string } | null }> {
   return db.withUserScope(userId, async (session) => {
-    const rows = await session.query<{ location_id: string; name: string; image_url: string | null }>(
-      `select l.location_id, l.name, l.image_url
-       from chat_sessions cs
-       join scenes s on s.scene_id = cs.scene_id
-       join locations l on l.location_id = s.active_location_id and l.user_id = $1
-       where cs.chat_id = $2
-         and l.image_url is not null
-         and (
-           l.status = 'permanent' or l.status is null or
-           (l.status = 'transient' and l.anchor_swipe_id in (
-             select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
-           ))
-         )
-       order by cs.updated_at desc
-       limit 1`,
-      [userId, chatId],
+    // The chat's scene pointers — current and last-turn/previous — which everything below
+    // resolves through.
+    const [chatState] = await session.query<{ scene_id: string | null; previous_scene_id: string | null }>(
+      'select scene_id, previous_scene_id from chat_sessions where chat_id = $1',
+      [chatId],
     );
-    const row = rows[0];
-    return row && row.image_url ? { locationId: row.location_id, name: row.name, imageUrl: row.image_url } : null;
+
+    let current: { locationId: string; name: string; imageUrl: string | null } | null = null;
+    if (chatState?.scene_id) {
+      // Primary path: the scene_id cache pointer (segway.md §2.2) -> scenes.active_location_id
+      // -> locations.image_url, §2.6-filtered. The filter makes this read as absent on a stale
+      // pointer — e.g. prev/next cycling flipped the active swipe but not the scene — which the
+      // fallback below catches.
+      const [sceneRow] = await session.query<{ location_id: string; name: string; image_url: string | null }>(
+        `select l.location_id, l.name, l.image_url
+         from scenes s
+         join locations l on l.location_id = s.active_location_id and l.user_id = $1
+         where s.scene_id = $2
+           and (
+             l.status = 'permanent' or l.status is null or
+             (l.status = 'transient' and l.anchor_swipe_id in (
+               select active_swipe_id from chat_messages where chat_id = $3 and active_swipe_id is not null
+             ))
+           )
+         limit 1`,
+        [userId, chatState.scene_id, chatId],
+      );
+      current = sceneRow ? { locationId: sceneRow.location_id, name: sceneRow.name, imageUrl: sceneRow.image_url } : null;
+    }
+    if (!current) {
+      // Fallback: the active swipe's own location — its anchored transient row, or its recorded
+      // location_swipe_images association (the cycle-back case: the location row was since
+      // re-anchored to a newer swipe, but this swipe's image is still valid for it — endpoint.md
+      // §5.1.8's "save the association, stays inactive, reuse on return").
+      const [swipeRow] = await session.query<{ location_id: string; name: string; image_url: string | null }>(
+        `select l.location_id, l.name, l.image_url
+         from locations l
+         where l.user_id = $1
+           and (
+             l.status = 'permanent' or l.status is null or
+             (l.status = 'transient' and l.anchor_swipe_id in (
+               select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
+             )) or
+             exists (select 1 from location_swipe_images a
+                     where a.chat_id = $2 and a.location_id = l.location_id
+                       and a.swipe_id in (
+                         select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
+                       ))
+           )
+         order by (l.status = 'transient') desc, l.updated_at desc
+         limit 1`,
+        [userId, chatId],
+      );
+      current = swipeRow ? { locationId: swipeRow.location_id, name: swipeRow.name, imageUrl: swipeRow.image_url } : null;
+    }
+
+    let previous: { locationId: string; name: string; imageUrl: string } | null = null;
+    if (chatState?.previous_scene_id) {
+      // The last settled location — shown while the current render is pending or after a swipe.
+      const [prevRow] = await session.query<{ location_id: string; name: string; image_url: string }>(
+        `select l.location_id, l.name, l.image_url
+         from scenes s
+         join locations l on l.location_id = s.active_location_id and l.user_id = $1
+         where s.scene_id = $2 and l.image_url is not null
+         limit 1`,
+        [userId, chatState.previous_scene_id],
+      );
+      previous = prevRow ? { locationId: prevRow.location_id, name: prevRow.name, imageUrl: prevRow.image_url } : null;
+    }
+
+    return { current, previous };
   });
+}
+
+/** endpoint.md §5.1.8's "restart bg discovery on return": after a chat load or a swipe cycle
+ *  that left the active location without a rendered image (a dropped or failed pass), fire the
+ *  cache-first generation pass so discovery resumes. Cache-first + the renderInFlight guard make
+ *  repeat triggers no-ops whenever the image already exists or a render is already running. */
+async function ensureActiveLocationImage(deps: HttpServerDeps, userId: string, chatId: string): Promise<void> {
+  try {
+    const state = await resolveChatLocationImage(deps.db, userId, chatId);
+    if (state.current && !state.current.imageUrl) {
+      fireLocationImageGeneration(deps, userId, chatId, state.current.locationId);
+    }
+  } catch (err) {
+    log.warn('ensureActiveLocationImage: resolution failed, skipping trigger', { chatId, err });
+  }
 }
 
 // endpoint.md §5.2's broken-link expiry recovery: the browser's Chat View hit an HTTP error (404/
@@ -746,9 +819,13 @@ async function handleLocationImageBroken(_req: IncomingMessage, res: ServerRespo
     return;
   }
   const locationId = decodeURIComponent(segments[0]!);
-  await deps.db.withUserScope(userId, (session) =>
-    session.query('update locations set image_url = null where location_id = $1 and user_id = $2', [locationId, userId]),
-  );
+  await deps.db.withUserScope(userId, async (session) => {
+    await session.query('update locations set image_url = null where location_id = $1 and user_id = $2', [locationId, userId]);
+    // endpoint.md §5.1.8: a per-swipe association must not resurrect the expired link on a
+    // cycle-back — clear its URL too. The association row stays (the location identity is still
+    // real); the next pass re-renders and re-records it.
+    await session.query('update location_swipe_images set image_url = null where location_id = $1', [locationId]);
+  });
   log.info('location image cleared after a client-side load failure (endpoint.md §5.2)', { locationId });
   sendJson(res, 200, { cleared: true });
 }
@@ -1107,13 +1184,16 @@ async function regenerateSwipe(
   // the regenerated text — recordSwipe above just made its swipe active, which is the anchor the
   // scraper's transient rows attach to. Fail-open inside the scraper: never blocks the turn. The
   // returned locationId feeds endpoint.md §5's decoupled image-generation trigger (fired by the
-  // caller after the response is sent — never awaited inline here).
+  // caller after the response is sent — never awaited inline here). 'replace' mode: the turn
+  // being regenerated is discarded, so previous_scene_id (the last-turn location state) is left
+  // pointing at the last *settled* location — the revert target must survive a chain of swipes.
   const locationId = await scrapeTurnPresence(
     { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
     userId,
     chatId,
     messageId,
     reply,
+    'replace',
   );
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
@@ -1354,12 +1434,16 @@ async function handleChatCompletions(
     // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
     const [assistantMessage] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply }]);
     if (assistantMessage) {
+      // 'extend': a genuinely new turn — a location change advances previous_scene_id
+      // (endpoint.md §5.1.8's last-turn location state), so the background can revert to the
+      // location that was showing before this turn while the new render is pending.
       scrapedLocationId = await scrapeTurnPresence(
         { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
         userId,
         body.chat_id,
         assistantMessage.messageId,
         reply,
+        'extend',
       );
     }
     // First exchange in a still-untitled session names it, once — bigBrain never retitles a
@@ -2241,6 +2325,11 @@ async function handleChatRoutes(
         );
       }
       sendJson(res, 200, detail);
+      // endpoint.md §5.1.8's "restart bg discovery on return": a chat (re)open may find its
+      // active location without a rendered image (a pass dropped by a swipe, or a failed
+      // render) — fire the cache-first generation pass so discovery resumes. No-op whenever the
+      // image already exists or a render is already in flight.
+      void ensureActiveLocationImage(deps, userId, chatId);
       return;
     }
     if (req.method === 'POST') {
@@ -2362,17 +2451,17 @@ async function handleChatRoutes(
   }
 
   if (segments[1] === 'location-image' && segments.length === 2 && req.method === 'GET') {
-    // endpoint.md §6.4's chat background layer: resolve the chat's active location image via the
-    // scene_id cache pointer (segway.md §2.2) — chat_sessions.scene_id -> scenes.active_location_id
-    // -> locations.image_url. The location is scoped by the §2.6 eligibility filter on the join, so
-    // an inactive/alternate-timeline location reads back as absent rather than leaking a stale
-    // render into the active chat's background.
+    // endpoint.md §6.4's chat background layer: resolve the chat's active location image — the
+    // current eligible location (scene_id pointer, active-swipe fallback) plus the last settled
+    // location (previous_scene_id). A current location whose image hasn't rendered yet comes
+    // back with imageUrl: null — the post-turn bg pass (endpoint.md §5) fires after the reply
+    // is sent, so the client keeps the previous background (or its current one) until the
+    // pending render lands, never blanking the layer (§5.1.8).
     const image = await resolveChatLocationImage(deps.db, userId, chatId);
-    if (!image) {
-      sendJson(res, 200, { locationId: null, name: null, imageUrl: null });
-      return;
-    }
-    sendJson(res, 200, image);
+    sendJson(res, 200, {
+      current: image.current ?? { locationId: null, name: null, imageUrl: null },
+      previous: image.previous ?? { locationId: null, name: null, imageUrl: null },
+    });
     return;
   }
 
@@ -2414,6 +2503,12 @@ async function handleChatRoutes(
       }
       if (cycled.status === 'switched') {
         sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, cycled.message) });
+        // endpoint.md §5.1.8's "restart bg discovery on return": cycling made a different swipe
+        // active — if its location has no rendered image yet (a pass dropped by the earlier
+        // swipe, or never run), fire the cache-first generation pass; if it has one, the
+        // per-swipe association makes the read a reuse, no provider call. No-op when the image
+        // exists or a render is already in flight.
+        void ensureActiveLocationImage(deps, userId, chatId);
         return;
       }
       if (cycled.status === 'no_earlier_swipe') {
