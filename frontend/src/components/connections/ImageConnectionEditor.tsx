@@ -11,7 +11,9 @@ import type { ImageConnectionSummary, ImageConnectionTestResult } from '../../ap
 
 // The image-connection editor draft. apiKey is write-only (never round-tripped back); '' means
 // "leave the stored key unchanged" when editing, and simply "no key" for keyless providers
-// (a local comfyui endpoint) on create. New connections default to fal.ai's Z-Image-Turbo
+// (a local comfyui endpoint) on create. Every other kind — including pollinations, which has
+// not been keyless since 2025 (io/imageGen/pollinations.ts throws without a key) — shows the
+// field. New connections default to fal.ai's Z-Image-Turbo
 // (docs/vistalyze_integration/endpoint.md §2.1) — the 8-step turbo model the upstream VLZ
 // extension uses for its falai source/previews.
 interface Draft {
@@ -304,17 +306,15 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             />
           </label>
 
-          {draft.kind !== 'pollinations' && (
-            <label>
-              API key
-              <input
-                type="password"
-                value={draft.apiKey}
-                onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                placeholder={isNew ? (draft.kind === 'comfyui' ? 'optional for a local endpoint' : 'required') : 'leave blank to keep the stored key'}
-              />
-            </label>
-          )}
+          <label>
+            API key
+            <input
+              type="password"
+              value={draft.apiKey}
+              onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+              placeholder={isNew ? (draft.kind === 'comfyui' ? 'optional for a local endpoint' : 'required') : 'leave blank to keep the stored key'}
+            />
+          </label>
 
           {(draft.kind === 'comfyui' || draft.kind === 'openai-images' || draft.kind === 'fal-ai') && (
             <label>
