@@ -179,7 +179,12 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
     });
   }, [result, tagStates, filters.recencyBucket]);
 
-  const topicOptions = useMemo(() => Array.from(topicVocab).sort(), [topicVocab]);
+  // Case-insensitive so uppercase tags interleave with lowercase ones instead of
+  // clustering separately (plain .sort() compares raw UTF-16 code units).
+  const topicOptions = useMemo(
+    () => Array.from(topicVocab).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })),
+    [topicVocab],
+  );
 
   function onSubmitSearch(e: FormEvent) {
     e.preventDefault();
