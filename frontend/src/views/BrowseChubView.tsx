@@ -4,6 +4,7 @@ import type { ChubCharacterSummary, ChubSearchResult, ImportedChubCharacter } fr
 import ChubFilterPanel, {
   CHUB_SORT_VALUES, RECENCY_BUCKETS, type ChubSort, type RecencyBucket, type TagState,
 } from '../components/ChubFilterPanel';
+import ChubCardModal from '../components/ChubCardModal';
 import ChubResultCard, { type ImportState } from '../components/ChubResultCard';
 import './BrowseChubView.css';
 
@@ -103,6 +104,7 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importStates, setImportStates] = useState<Record<string, ImportState>>({});
+  const [openCard, setOpenCard] = useState<ChubCharacterSummary | null>(null);
 
   const includeTags = useMemo(
     () => Object.entries(tagStates).filter(([, s]) => s === 'include').map(([t]) => t),
@@ -252,6 +254,7 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
                   apiKey={apiKey}
                   importState={importStates[card.fullPath] ?? { status: 'idle' }}
                   onImport={() => void importCharacter(card.fullPath)}
+                  onOpen={() => setOpenCard(card)}
                 />
               ))}
             </div>
@@ -289,6 +292,8 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         recencyBucket={filters.recencyBucket}
         onRecencyBucketChange={(recencyBucket) => setFilters((f) => ({ ...f, recencyBucket }))}
       />
+
+      {openCard && <ChubCardModal card={openCard} apiKey={apiKey} onClose={() => setOpenCard(null)} />}
     </div>
   );
 }

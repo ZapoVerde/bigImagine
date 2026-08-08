@@ -1,34 +1,46 @@
+import type { KeyboardEvent } from 'react';
 import type { ChubCharacterSummary } from '../api/types';
+import { formatRelativeDate } from '../lib/formatRelativeDate';
 import ChubAvatarThumb from './ChubAvatarThumb';
 
 export type ImportState = { status: 'idle' } | { status: 'importing' } | { status: 'imported' } | { status: 'error'; message: string };
-
-function formatRelativeDate(iso: string): string {
-  if (!iso) return '';
-  const then = Date.parse(iso);
-  if (Number.isNaN(then)) return '';
-  const diffDays = Math.round((then - Date.now()) / (24 * 60 * 60 * 1000));
-  const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-  if (Math.abs(diffDays) < 1) return 'today';
-  if (Math.abs(diffDays) < 30) return rtf.format(diffDays, 'day');
-  if (Math.abs(diffDays) < 365) return rtf.format(Math.round(diffDays / 30), 'month');
-  return rtf.format(Math.round(diffDays / 365), 'year');
-}
 
 interface ChubResultCardProps {
   card: ChubCharacterSummary;
   apiKey: string | null;
   importState: ImportState;
   onImport: () => void;
+  /** Opens the embiggened card modal (ChubCardModal.tsx). */
+  onOpen: () => void;
 }
 
 // One Browse Chub grid cell — pulled out of BrowseChubView.tsx to stay under the project's
 // 300-line file budget (bi_principles.md §10). Purely presentational: every stat comes straight
 // off ChubCharacterSummary (searchChubCharactersTool.ts's normalized shape), no fetching or state
-// of its own beyond what ChubAvatarThumb already owns.
-export default function ChubResultCard({ card, apiKey, importState, onImport }: ChubResultCardProps) {
+// of its own beyond what ChubAvatarThumb already owns. The whole card is one click target that
+// opens the detail modal; the Import button inside stops propagation so it stays its own target
+// (a div-with-role="button" rather than a <button> wrapping a <button>, which would be invalid
+// nesting).
+export default function ChubResultCard({ card, apiKey, importState, onImport, onOpen }: ChubResultCardProps) {
+  function onCardKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    // Only the card itself (not a focused child like the Import button) opens the modal with the
+    // keyboard — Enter on the Import button must import, not embiggen.
+    if (e.target !== e.currentTarget) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onOpen();
+    }
+  }
+
   return (
-    <div className="browse-chub-card">
+    <div
+      className="browse-chub-card"
+      role="button"
+      tabIndex={0}
+      title="Click to view full description and definition"
+      onClick={onOpen}
+      onKeyDown={onCardKeyDown}
+    >
       <ChubAvatarThumb avatarUrl={card.avatarUrl} apiKey={apiKey} className="browse-chub-card-avatar" />
       <div className="browse-chub-card-name">{card.name}</div>
       <div className="browse-chub-card-tagline">{card.tagline}</div>
@@ -49,7 +61,10 @@ export default function ChubResultCard({ card, apiKey, importState, onImport }: 
         type="button"
         className="browse-chub-import-btn"
         disabled={importState.status === 'importing' || importState.status === 'imported'}
-        onClick={onImport}
+        onClick={(e) => {
+          e.stopPropagation();
+          onImport();
+        }}
       >
         {importState.status === 'importing' && 'Importing…'}
         {importState.status === 'imported' && 'Imported ✓'}

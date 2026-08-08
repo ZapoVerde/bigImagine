@@ -182,6 +182,7 @@ import { type MarkerKey, type PromptStackFields, type PromptStackSlot } from '..
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
+import { handleChubCardDetail } from './handleChubCardDetail.js';
 import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatDetail, ChatParams, ChatSessionRow, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
@@ -2946,6 +2947,18 @@ async function handleRequest(
       return;
     }
     await handleChubAvatarProxy(req, res, deps);
+    return;
+  }
+  // Must sit before the generic GET /v1/characters/ prefix below, which would otherwise swallow
+  // it — same registration order as the chub-avatar route. Backs BrowseChubView.tsx's card modal.
+  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/chub-detail')) {
+    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+    if (!userId) {
+      sendJson(res, 401, { error: 'missing or unrecognized API key' });
+      return;
+    }
+    const result = await handleChubCardDetail(req, { settings: deps.settings });
+    sendJson(res, result.status, result.body);
     return;
   }
   if (req.method === 'GET' && req.url?.startsWith('/v1/characters/')) {

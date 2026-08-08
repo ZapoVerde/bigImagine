@@ -746,6 +746,33 @@ export interface ChubSearchResult {
   results: ChubCharacterSummary[];
 }
 
+// orchestrator/src/server/handleChubCardDetail.ts — what GET /v1/characters/chub-detail returns:
+// the search summary plus everything chub's search API doesn't carry (full description, the
+// bespoke `definition` object, and maxResUrl — the card PNG the Download button fetches).
+export interface ChubCardDetail {
+  fullPath: string;
+  name: string;
+  tagline: string;
+  description: string;
+  avatarUrl: string;
+  maxResUrl: string;
+  definition: Record<string, unknown>;
+  topics: string[];
+  starCount: number;
+  rating: number;
+  ratingCount: number;
+  nChats: number;
+  nMessages: number;
+  nFavorites: number;
+  nTokens: number;
+  forksCount: number;
+  createdAt: string;
+  lastActivityAt: string;
+  verified: boolean;
+  recommended: boolean;
+  hasGallery: boolean;
+}
+
 // import_character_card_from_url's return value — same shape as ImportedCharacter
 // (importCharacterCardFromUrlTool.ts calls the same insertCharacterFromCard.ts helper).
 export type ImportedChubCharacter = ImportedCharacter;

@@ -10,6 +10,7 @@ import type {
   ChatSessionRow,
   ChatSummary,
   ChatSyncStatus,
+  ChubCardDetail,
   CleanupJob,
   CleanupSettings,
   CleanupStatus,
@@ -690,6 +691,29 @@ export async function fetchChubAvatarUrl(chubAvatarUrl: string, apiKey: string |
   if (!res.ok) return null;
   const blob = await res.blob();
   return URL.createObjectURL(blob);
+}
+
+/** GET /v1/characters/chub-detail?fullPath= — the full card detail (description, bespoke
+ *  `definition` object, maxResUrl) behind ChubCardModal.tsx's embiggened view. Unlike
+ *  fetchChubAvatarUrl this throws on failure: a card the user explicitly clicked deserves a
+ *  visible error, not a silent null. */
+export async function fetchChubCardDetail(fullPath: string, apiKey: string | null): Promise<ChubCardDetail> {
+  const res = await fetch(`/v1/characters/chub-detail?fullPath=${encodeURIComponent(fullPath)}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return (await res.json()) as ChubCardDetail;
+}
+
+/** GET /v1/characters/chub-avatar?url= — same allowlisted-CDN proxy fetch as fetchChubAvatarUrl,
+ *  but for the card PNG behind the modal's Download button, and throwing with the server's reason
+ *  on failure (an explicit download deserves an explicit error, not a silent null). */
+export async function fetchChubCardPng(chubCardUrl: string, apiKey: string | null): Promise<Blob> {
+  const res = await fetch(`/v1/characters/chub-avatar?url=${encodeURIComponent(chubCardUrl)}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.blob();
 }
 
 /** pia_proxy_url (stacks/pia-proxy) — same no-restart, admin-only shape as timezone. */
