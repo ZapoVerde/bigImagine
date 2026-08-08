@@ -10,6 +10,12 @@
  * GET https://api.chub.ai/search?search=<query>&first=<pageSize>&page=<page> confirmed live
  * (2026-08-05, via a direct curl through pia-proxy) — response shape is
  * {data: {count, nodes: [{fullPath, name, tagline, avatar_url, topics, ...}]}}.
+ * Anonymous searches are SFW-filtered unless `nsfw=true` is sent — confirmed live (2026-08-08,
+ * via curl through pia-proxy): the same `search=test` query returns 2,473 results without it and
+ * 20,125 with it. This tool therefore always sends nsfw=true so the full public catalog is
+ * reachable, matching the site's logged-in "Show NSFW" setting. (A chub account token — not
+ * carried by this tool — would additionally be needed for private/locked cards and
+ * account-scoped fields like is_favorite.)
  * `tags=<comma-separated topics>` confirmed live the same way — AND semantics (a node must carry
  * every listed topic, not any), matching chub's own site filter behavior. `exclude_tags` confirmed
  * live too — a node carrying any listed topic is dropped.
@@ -179,7 +185,11 @@ export function createSearchChubCharactersTool(settings: OrchestratorSettingsSto
         );
       }
       const page = args.page ?? 1;
-      const params = new URLSearchParams({ first: String(PAGE_SIZE), page: String(page) });
+      // chub filters anonymous searches to SFW-only unless nsfw=true is sent (confirmed live
+      // 2026-08-08: search=test returns 2,473 results without it, 20,125 with it) — always ask
+      // for the full public catalog. Private/locked cards would additionally need a chub account
+      // token, which this tool deliberately does not carry.
+      const params = new URLSearchParams({ first: String(PAGE_SIZE), page: String(page), nsfw: 'true' });
       if (args.query) params.set('search', args.query);
       if (args.tags && args.tags.length > 0) params.set('tags', args.tags.join(','));
       if (args.excludeTags && args.excludeTags.length > 0) params.set('exclude_tags', args.excludeTags.join(','));

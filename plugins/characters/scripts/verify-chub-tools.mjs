@@ -74,6 +74,10 @@ assert(extractChubFullPath('botmaster/sabrina-abc') === 'botmaster/sabrina-abc',
     requestedUrl.startsWith('http://pia-proxy:8080/fetch?url=') && decodeURIComponent(requestedUrl).includes('search=sabrina') && decodeURIComponent(requestedUrl).includes('page=2'),
     'search_chub_characters builds the correct pia-proxy request with query and page',
   );
+  assert(
+    decodeURIComponent(requestedUrl).includes('nsfw=true'),
+    'search_chub_characters always sends nsfw=true so anonymous searches see the full (NSFW-inclusive) catalog',
+  );
   assert(result.count === 2 && result.page === 2, 'search_chub_characters returns the upstream count and requested page');
   assert(result.results.length === 2, 'search_chub_characters normalizes every node with a fullPath and name');
   assert(result.results[0].tagline === 'a tagline' && result.results[0].avatarUrl.includes('avatar.webp'), 'a normalized result keeps tagline/avatarUrl');
