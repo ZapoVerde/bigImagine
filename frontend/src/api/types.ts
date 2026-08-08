@@ -382,6 +382,19 @@ export interface ChatMemorySettings {
   lorebookCuratorPromptIsDefault: boolean;
   peopleCuratorPrompt: string;
   peopleCuratorPromptIsDefault: boolean;
+  autoRecallEnabled: boolean;
+  autoRecallPairs: number | null;
+  autoRecallChunkTopK: number | null;
+}
+
+// orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's two knobs:
+// recallTopK (how many approved canon facts recall_canon_facts / the RP auto-recall inject, read
+// live on every recall call, no restart) and extractionPrompt (the background extraction pass's
+// template — "default + bespoke" override per bi_principles.md §18, empty clears to built-in).
+export interface CanonSettings {
+  recallTopK: number;
+  extractionPrompt: string;
+  extractionPromptIsDefault: boolean;
 }
 
 // orchestrator/src/server/adminServer.ts getChatMemorySyncStatus() — one row per chat, the

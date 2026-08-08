@@ -976,6 +976,11 @@ export interface ChatMemorySettings {
   lorebookCuratorPromptIsDefault: boolean;
   peopleCuratorPrompt: string;
   peopleCuratorPromptIsDefault: boolean;
+  // RP read-path retrieval knobs (migration 0077, io/chatMemory/recallForPrompt.ts) — read live
+  // on every RP prompt assembly, no restart. null = unset (use the built-in default).
+  autoRecallEnabled: boolean;
+  autoRecallPairs: number | null;
+  autoRecallChunkTopK: number | null;
 }
 
 export async function getChatMemorySettings(store: OrchestratorSettingsStore): Promise<ChatMemorySettings> {
@@ -990,6 +995,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     bridgePrompt,
     lorebookCuratorPrompt,
     peopleCuratorPrompt,
+    autoRecallEnabledRaw,
+    autoRecallPairsRaw,
+    autoRecallChunkTopKRaw,
   ] = await Promise.all([
     store.get('chat_memory_profile'),
     store.get('chat_memory_live_window_pairs'),
@@ -1001,6 +1009,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_bridge_prompt'),
     store.get('chat_memory_lorebook_curator_prompt'),
     store.get('chat_memory_people_curator_prompt'),
+    store.get('chat_memory_auto_recall_enabled'),
+    store.get('chat_memory_auto_recall_pairs'),
+    store.get('chat_memory_auto_recall_chunk_top_k'),
   ]);
   return {
     profile: profile || null,
@@ -1019,6 +1030,11 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     lorebookCuratorPromptIsDefault: !lorebookCuratorPrompt,
     peopleCuratorPrompt: peopleCuratorPrompt || DEFAULT_PEOPLE_CURATOR_PROMPT,
     peopleCuratorPromptIsDefault: !peopleCuratorPrompt,
+    // autoRecallEnabled: default true when unset — only the literal string 'false' turns the
+    // silent per-turn recall off (recallForPrompt.ts treats any other value as on).
+    autoRecallEnabled: autoRecallEnabledRaw !== 'false',
+    autoRecallPairs: autoRecallPairsRaw ? Number(autoRecallPairsRaw) : null,
+    autoRecallChunkTopK: autoRecallChunkTopKRaw ? Number(autoRecallChunkTopKRaw) : null,
   };
 }
 
@@ -1033,6 +1049,9 @@ export interface SetChatMemorySettingsBody {
   bridgePrompt?: string;
   lorebookCuratorPrompt?: string;
   peopleCuratorPrompt?: string;
+  autoRecallEnabled?: boolean;
+  autoRecallPairs?: number;
+  autoRecallChunkTopK?: number;
 }
 
 // Every field is optional and independently settable; an empty string on any prompt field clears
@@ -1052,6 +1071,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     bridge_prompt,
     lorebook_curator_prompt,
     people_curator_prompt,
+    auto_recall_enabled,
+    auto_recall_pairs,
+    auto_recall_chunk_top_k,
   } = raw as Record<string, unknown>;
   if (
     profile === undefined &&
@@ -1063,7 +1085,10 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     household_memory_prompt === undefined &&
     bridge_prompt === undefined &&
     lorebook_curator_prompt === undefined &&
-    people_curator_prompt === undefined
+    people_curator_prompt === undefined &&
+    auto_recall_enabled === undefined &&
+    auto_recall_pairs === undefined &&
+    auto_recall_chunk_top_k === undefined
   ) {
     return undefined;
   }
@@ -1077,6 +1102,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (bridge_prompt !== undefined && typeof bridge_prompt !== 'string') return undefined;
   if (lorebook_curator_prompt !== undefined && typeof lorebook_curator_prompt !== 'string') return undefined;
   if (people_curator_prompt !== undefined && typeof people_curator_prompt !== 'string') return undefined;
+  if (auto_recall_enabled !== undefined && typeof auto_recall_enabled !== 'boolean') return undefined;
+  if (auto_recall_pairs !== undefined && (typeof auto_recall_pairs !== 'number' || auto_recall_pairs <= 0)) return undefined;
+  if (auto_recall_chunk_top_k !== undefined && (typeof auto_recall_chunk_top_k !== 'number' || auto_recall_chunk_top_k <= 0)) return undefined;
   return {
     profile: profile as string | undefined,
     liveWindowPairs: live_window_pairs as number | undefined,
@@ -1088,6 +1116,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     bridgePrompt: bridge_prompt as string | undefined,
     lorebookCuratorPrompt: lorebook_curator_prompt as string | undefined,
     peopleCuratorPrompt: people_curator_prompt as string | undefined,
+    autoRecallEnabled: auto_recall_enabled as boolean | undefined,
+    autoRecallPairs: auto_recall_pairs as number | undefined,
+    autoRecallChunkTopK: auto_recall_chunk_top_k as number | undefined,
   };
 }
 
@@ -1102,6 +1133,9 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.bridgePrompt !== undefined) await store.set('chat_memory_bridge_prompt', body.bridgePrompt);
   if (body.lorebookCuratorPrompt !== undefined) await store.set('chat_memory_lorebook_curator_prompt', body.lorebookCuratorPrompt);
   if (body.peopleCuratorPrompt !== undefined) await store.set('chat_memory_people_curator_prompt', body.peopleCuratorPrompt);
+  if (body.autoRecallEnabled !== undefined) await store.set('chat_memory_auto_recall_enabled', body.autoRecallEnabled ? 'true' : 'false');
+  if (body.autoRecallPairs !== undefined) await store.set('chat_memory_auto_recall_pairs', String(body.autoRecallPairs));
+  if (body.autoRecallChunkTopK !== undefined) await store.set('chat_memory_auto_recall_chunk_top_k', String(body.autoRecallChunkTopK));
 }
 
 // --- Cleanup settings (migration 0072, plan v2 §3 — the Cleanup page's setup surface) ---

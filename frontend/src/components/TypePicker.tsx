@@ -17,6 +17,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'settings', label: 'Settings' },
   { type: 'connections', label: 'Connections' },
   { type: 'canon', label: 'Canon' },
+  { type: 'rag', label: 'RAG' },
   { type: 'reviewpanel', label: 'Review Panel' },
   { type: 'cleanup', label: 'Cleanup' },
 ];

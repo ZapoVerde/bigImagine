@@ -64,6 +64,7 @@ const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }
   { type: 'documents', label: 'Documents', icon: '📄' },
   { type: 'characters', label: 'Characters', icon: '🎭' },
   { type: 'browse-chub', label: 'Browse Chub', icon: '🔍' },
+  { type: 'rag', label: 'RAG', icon: '🧠' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
   { type: 'connections', label: 'Connections', icon: '🔌' },
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },

@@ -20,11 +20,18 @@
  * (which includes the just-sent user message — the client sends complete history, and
  * handleChatCompletions only trims after assembly), embedded once, then two parallel searches:
  *
- *  1. chat_chunks — this chat's archived full-turn texts (the CNZ "chat lane"; fixed
- *     AUTO_RECALL_CHUNK_TOP_K, a handful of whole turns, content verbatim like the tool returns)
+ *  1. chat_chunks — this chat's archived full-turn texts (the CNZ "chat lane"; a handful of
+ *     whole turns, content verbatim like the tool returns; count = chat_memory_auto_recall_chunk_top_k,
+ *     default AUTO_RECALL_CHUNK_TOP_K)
  *  2. canon_facts — approved rows only, deduped to most-recent-approved per arc_tag/entity_key,
  *     top-k from the live canon_recall_top_k setting (default 8) — the same dedup query
  *     recallCanonFactsTool.ts runs, just scoped to "now" (no as_of filter)
+ *
+ * All three retrieval knobs are live settings read on every call (chat_memory_auto_recall_enabled,
+ * chat_memory_auto_recall_pairs, chat_memory_auto_recall_chunk_top_k — migration 0077); the
+ * exported AUTO_RECALL_* constants are the fallback defaults when a setting is unset or corrupt,
+ * same fail-open shape as canon_recall_top_k. `enabled === 'false'` silences the silent path
+ * without touching the recall tools, which stay in the RP allow-list.
  *
  * Both are scoped to this chat_id inside the caller's already-open withUserScope session (RLS
  * applies user_id, chat_id narrows to "this conversation" — same trusted-identity scoping as the
@@ -58,14 +65,15 @@ import { toPgVectorLiteral } from '../../util/pgvector.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
- *  default (3), which the user named as the reference behavior. A plain constant for now
- *  (chunkChatTranscript.ts's MESSAGES_PER_CHUNK is a constant for the same reason); a settings
- *  knob is the obvious follow-up once this proves out. */
+ *  default (3), which the user named as the reference behavior. This is the fallback default;
+ *  the live value is the chat_memory_auto_recall_pairs setting (migration 0077), read on every
+ *  call so a save takes effect on the next turn, no restart. */
 export const AUTO_RECALL_PAIRS = 3;
 
 /** How many full-turn chunks to pull. CNZ's chat lane defaults to 2-8 with a distributional
  *  cutoff; "a number of full turn text" (user) — a fixed handful, content verbatim, is the
- *  basics-shaped version of that. */
+ *  basics-shaped version of that. Same default/fallback split as AUTO_RECALL_PAIRS: the live
+ *  value is chat_memory_auto_recall_chunk_top_k. */
 export const AUTO_RECALL_CHUNK_TOP_K = 4;
 
 const DEFAULT_FACT_TOP_K = 8;
@@ -75,6 +83,12 @@ const DEFAULT_FACT_TOP_K = 8;
  *  token cost is real. recallCanonFactsTool.ts has no clamp (a tool call is one-off and
  *  model-sized); this runs every turn, so it bounds the steady-state prompt. */
 const MAX_FACT_TOP_K = 50;
+
+/** Sanity cap for chat_memory_auto_recall_chunk_top_k, same reasoning as MAX_FACT_TOP_K — this
+ *  injects *full turn text* verbatim, so an unbounded corrupt value would blow up the prompt
+ *  stack far faster than facts would. 12 is already generous (12 full turns of archive); the
+ *  setting UI will present a much smaller range. */
+const MAX_CHUNK_TOP_K = 12;
 
 interface ChunkRow {
   ordinal: number;
@@ -128,16 +142,36 @@ export function buildAutoRecallPrompt(
 ): Promise<string> {
   return (async () => {
     try {
-      const query = buildAutoRecallQuery(messages);
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw] = await Promise.all([
+        settings.get('chat_memory_auto_recall_enabled'),
+        settings.get('chat_memory_auto_recall_pairs'),
+        settings.get('chat_memory_auto_recall_chunk_top_k'),
+        settings.get('canon_recall_top_k'),
+      ]);
+
+      // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
+      // the RP allow-list either way — this knob only silences the silent path (CNZ's own
+      // enable/disable shape). Unset/any-other-value = on (the shipped default).
+      if (enabledRaw === 'false') return '';
+
+      const parsedPairs = pairsRaw ? parseInt(pairsRaw, 10) : NaN;
+      const pairs = Number.isFinite(parsedPairs) && parsedPairs > 0 ? parsedPairs : AUTO_RECALL_PAIRS;
+
+      const parsedChunkTopK = chunkTopKRaw ? parseInt(chunkTopKRaw, 10) : NaN;
+      const chunkTopK =
+        Number.isFinite(parsedChunkTopK) && parsedChunkTopK > 0
+          ? Math.min(parsedChunkTopK, MAX_CHUNK_TOP_K)
+          : AUTO_RECALL_CHUNK_TOP_K;
+
+      const parsedFactTopK = factTopKRaw ? parseInt(factTopKRaw, 10) : NaN;
+      const factTopK =
+        Number.isFinite(parsedFactTopK) && parsedFactTopK > 0 ? Math.min(parsedFactTopK, MAX_FACT_TOP_K) : DEFAULT_FACT_TOP_K;
+
+      const query = buildAutoRecallQuery(messages, pairs);
       if (!query) return '';
 
       const [vector] = await embeddings.embed([query]);
       if (!vector) return '';
-
-      const topKSetting = await settings.get('canon_recall_top_k');
-      const parsedTopK = topKSetting ? parseInt(topKSetting, 10) : NaN;
-      const topK =
-        Number.isFinite(parsedTopK) && parsedTopK > 0 ? Math.min(parsedTopK, MAX_FACT_TOP_K) : DEFAULT_FACT_TOP_K;
 
       const [chunks, facts] = await Promise.all([
         session.query<ChunkRow>(
@@ -145,7 +179,7 @@ export function buildAutoRecallPrompt(
            from chat_chunks
            where user_id = $1 and chat_id = $2
            order by vector_embed <-> $3
-           limit ${AUTO_RECALL_CHUNK_TOP_K}`,
+           limit ${chunkTopK}`,
           [userId, chatId, toPgVectorLiteral(vector)],
         ),
         session.query<CanonFactRow>(
@@ -163,7 +197,7 @@ export function buildAutoRecallPrompt(
            from ranked
            order by vector_embed <-> $3
            limit $4`,
-          [userId, chatId, toPgVectorLiteral(vector), topK],
+          [userId, chatId, toPgVectorLiteral(vector), factTopK],
         ),
       ]);
 

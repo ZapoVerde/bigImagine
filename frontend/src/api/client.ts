@@ -4,6 +4,7 @@ import type {
   ChatLineageNode,
   ChatMemorySettings,
   ChatMemorySyncStatusRow,
+  CanonSettings,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -772,6 +773,25 @@ export async function adminGetChatMemorySyncStatus(adminKey: string | null): Pro
   return body.chats;
 }
 
+export async function adminGetCanonSettings(adminKey: string | null): Promise<CanonSettings> {
+  const res = await fetch('/v1/admin/canon-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<CanonSettings>;
+}
+
+export async function adminSetCanonSettings(
+  patch: { recall_top_k?: number; extraction_prompt?: string },
+  adminKey: string | null,
+): Promise<CanonSettings> {
+  const res = await fetch('/v1/admin/canon-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<CanonSettings>;
+}
+
 export async function adminSetChatMemorySettings(
   patch: {
     profile?: string;
@@ -784,6 +804,9 @@ export async function adminSetChatMemorySettings(
     bridge_prompt?: string;
     lorebook_curator_prompt?: string;
     people_curator_prompt?: string;
+    auto_recall_enabled?: boolean;
+    auto_recall_pairs?: number;
+    auto_recall_chunk_top_k?: number;
   },
   adminKey: string | null,
 ): Promise<ChatMemorySettings> {

@@ -46,7 +46,14 @@ function createFakeSession({ chunkRows = [], factRows = [], throwOn = null } = {
 }
 
 function fakeSettings(value) {
-  const values = new Map(value ? [['canon_recall_top_k', String(value)]] : []);
+  // value may be a single canon_recall_top_k (legacy call sites) or a full map of key → raw.
+  const entries =
+    value && !(value instanceof Map)
+      ? [['canon_recall_top_k', String(value)]]
+      : value instanceof Map
+        ? [...value.entries()]
+        : [];
+  const values = new Map(entries);
   return { get: (k) => Promise.resolve(values.get(k)) };
 }
 
@@ -185,6 +192,126 @@ function fakeSettings(value) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(block === '', "an embedding failure resolves to '' (fail-open)");
+}
+
+// --- 4. The three retrieval knobs (migration 0077) drive the read path ---
+{
+  // enabled='false' must short-circuit before any embedding/DB call (the master switch).
+  const session = createFakeSession({ chunkRows: [{ ordinal: 1, summary: null, content: 't' }] });
+  const seen = [];
+  const probingEmbeddings = {
+    name: 's',
+    dimension: 8,
+    embed: async (texts) => {
+      seen.push(...texts);
+      return texts.map(() => [1, 2, 3, 4, 5, 6, 7, 8]);
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_enabled', 'false']])),
+    probingEmbeddings,
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(block === '', "auto_recall_enabled='false' disables the injection entirely");
+  assert(seen.length === 0, "enabled='false' never even embeds (no query, no DB call)");
+}
+{
+  // pairs + chunk top-k override the query size and the SQL limit, from settings not constants.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  const seenQueries = [];
+  const probingEmbeddings = {
+    name: 's',
+    dimension: 8,
+    embed: async (texts) => {
+      seenQueries.push(...texts);
+      return texts.map(() => [1, 2, 3, 4, 5, 6, 7, 8]);
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_pairs', '2'],
+        ['chat_memory_auto_recall_chunk_top_k', '2'],
+      ]),
+    ),
+    probingEmbeddings,
+    'user-1',
+    'chat-1',
+    [
+      { role: 'user', content: 'p1u' },
+      { role: 'assistant', content: 'p1a' },
+      { role: 'user', content: 'p2u' },
+      { role: 'assistant', content: 'p2a' },
+      { role: 'user', content: 'p3u' },
+      { role: 'assistant', content: 'p3a' },
+    ],
+  );
+  assert(block === '', 'no matches → empty block');
+  assert(
+    seenQueries[0] === 'User: p2u Assistant: p2a User: p3u Assistant: p3a',
+    'auto_recall_pairs=2 keeps only the last 2 turn-pairs in the query',
+  );
+  assert(seenSql.some((sql) => /from chat_chunks[\s\S]*limit 2/.test(sql)), 'auto_recall_chunk_top_k=2 becomes the chunks SQL limit');
+}
+{
+  // A corrupt chunk top-k falls back to the constant default, never a NaN limit.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_chunk_top_k', 'not-a-number']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 4/.test(sql)),
+    'a corrupt auto_recall_chunk_top_k falls back to the default limit (4), not NaN',
+  );
+}
+{
+  // A huge (corrupt or mis-set) chunk top-k clamps to MAX_CHUNK_TOP_K, never an unbounded limit.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_chunk_top_k', '999']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 12/.test(sql)),
+    'an oversized auto_recall_chunk_top_k clamps to the MAX_CHUNK_TOP_K cap (12)',
+  );
 }
 
 // --- Sanity: the exported constants are what the wiring depends on ---

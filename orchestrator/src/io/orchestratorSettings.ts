@@ -76,6 +76,18 @@
  * bespoke" override shape, run every tick alongside chat_memory_bridge_prompt, not in place of it.
  * Added to 0010's CHECK constraint by db/migrations/0065_chat_memory_curator_settings.sql.
  *
+ * chat_memory_auto_recall_enabled / chat_memory_auto_recall_pairs /
+ * chat_memory_auto_recall_chunk_top_k (io/chatMemory/recallForPrompt.ts, migration 0077) are the
+ * RP read path's three retrieval knobs, read live on every RP prompt assembly, no restart —
+ * mirrors the knobs Canonize exposes for its RAG retrieval (rag.md). auto_recall_enabled is
+ * 'true'/'false' (default 'true': the silent CNZ-style auto-recall is on; 'false' disables the
+ * injection without touching the recall tools, which stay in the RP allow-list), auto_recall_pairs
+ * is how many trailing turn-pairs form the query (default '3' — the old AUTO_RECALL_PAIRS
+ * constant), and auto_recall_chunk_top_k is how many archived full-turn chunks get injected
+ * (default '4' — the old AUTO_RECALL_CHUNK_TOP_K constant). The fact count (canon_recall_top_k)
+ * was already a key; it is read by the same module. Unset or corrupt values fall back to the
+ * built-in defaults, same fail-open shape as every other numeric setting here.
+ *
  * canon_recall_top_k/canon_extraction_prompt (docs/canonize-plan.md §6, plugins/canonize,
  * migration 0048) are the Canonize feature's two settings: canon_recall_top_k (integer-as-text,
  * default '8' — how many facts recall_canon_facts returns) is read live by the recall tool on
@@ -197,6 +209,9 @@ export const SETTING_NAMES = [
   'chat_memory_bridge_prompt',
   'chat_memory_lorebook_curator_prompt',
   'chat_memory_people_curator_prompt',
+  'chat_memory_auto_recall_enabled',
+  'chat_memory_auto_recall_pairs',
+  'chat_memory_auto_recall_chunk_top_k',
   'canon_recall_top_k',
   'canon_extraction_prompt',
   'screen_lock_password',

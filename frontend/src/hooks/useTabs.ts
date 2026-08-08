@@ -9,6 +9,7 @@ export type TabType =
   | 'settings'
   | 'connections'
   | 'canon'
+  | 'rag'
   | 'reviewpanel'
   | 'promptstacks'
   | 'characters'
@@ -36,6 +37,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   settings: 'Settings',
   connections: 'Connections',
   canon: 'Canon',
+  rag: 'RAG',
   reviewpanel: 'Review Panel',
   promptstacks: 'Prompt Stacks',
   characters: 'Characters',

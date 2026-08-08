@@ -398,3 +398,16 @@ Already applied by hand, not run automatically (see the file for the exact comma
   ring, 1 = the full-force ring (the pre-0075 look, which read as too strong). Read live at chat
   load by the same `GET /v1/chat-legibility-settings`; written by the admin-gated slider, no
   restart. Idempotent (drop/re-add of the CHECK; the usual hand-apply one-shot).
+- `0077_chat_memory_rag_retrieval_settings.sql` — widens `orchestrator_settings.key`'s CHECK with
+  the RP read path's three retrieval knobs (`io/chatMemory/recallForPrompt.ts` — the CNZ-style
+  auto-recall shipped in f9b8dc6): `chat_memory_auto_recall_enabled` (`'true'`/`'false'`, default
+  `'true'` — the silent per-turn recall master switch; `'false'` silences the injection without
+  touching the recall tools, which stay in the RP allow-list), `chat_memory_auto_recall_pairs`
+  (integer-as-text, default `'3'` — how many trailing turn-pairs form the query, the knob behind
+  the `AUTO_RECALL_PAIRS` constant), and `chat_memory_auto_recall_chunk_top_k` (integer-as-text,
+  default `'4'` — how many archived full-turn chunks are injected, the knob behind the
+  `AUTO_RECALL_CHUNK_TOP_K` constant). `canon_recall_top_k` (facts injected) was already a key.
+  Read live on every RP prompt assembly, no restart; unset/corrupt values fall back to the
+  constants (same fail-open shape as every numeric setting). The key list is the *complete*
+  current vocabulary (all of 0010–0076), not the diff — the CHECK is rebuilt wholesale, so a
+  fresh volume must land on the same constraint the live DB has. Idempotent hand-apply one-shot.
