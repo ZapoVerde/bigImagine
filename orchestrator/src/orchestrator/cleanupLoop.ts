@@ -27,9 +27,9 @@
  *      cleanup_footer_regex/cleanup_footer_prompt, DEFAULT_CLEANUP_CONFIG fallback) and the slop
  *      rules from cleanup_slop_rules (RLS-exempt household config). Both are re-read every tick,
  *      exactly like chatMemorySync.ts's resolveSyncSettings.
- *   3. planCleanup(text, rules, header, footer, { history }) — history is the tail of the chat's
- *      messages before this one (capped read; formatHistoryPairs slices to the prompt's own
- *      {{history, N}} anyway).
+ *   3. planCleanup(text, rules, header, footer, { history, userName }) — history is the tail of the
+ *      chat's messages before this one (capped read; formatHistoryPairs slices to the prompt's own
+ *      {{history, N}} anyway); userName is the household's persona_name for {{user}}.
  *   4. No steps → record job 'done', changed=false. Nothing to fix, no LLM call at all.
  *   5. Steps exist → dispatch each fully-resolved step prompt serially through deps.llm (TRG's
  *      runQueued shape), under runWithCallContext kind 'system' with taskId = chatId — metered but
@@ -156,22 +156,25 @@ export interface CleanupStatus {
   latest: { messageId: string; state: CleanupMessageState } | null;
 }
 
-/** The header/footer config resolved live for one tick. */
-interface ResolvedRegionConfigs {
+/** The header/footer config + persona_name resolved live for one tick. */
+interface ResolvedCleanupConfig {
   header: RegionConfig;
   footer: RegionConfig;
+  /** persona_name for {{user}} in the repair prompts; '' when unset (matches interpolateMacros). */
+  userName: string;
 }
 
 // ---------------------------------------------------------------------------
 // Config loading — re-read every tick (bi_principles.md §13, chatMemorySync pattern)
 // ---------------------------------------------------------------------------
 
-async function resolveRegionConfigs(settings: OrchestratorSettingsStore): Promise<ResolvedRegionConfigs> {
-  const [headerRegex, headerPrompt, footerRegex, footerPrompt] = await Promise.all([
+async function resolveCleanupConfig(settings: OrchestratorSettingsStore): Promise<ResolvedCleanupConfig> {
+  const [headerRegex, headerPrompt, footerRegex, footerPrompt, userName] = await Promise.all([
     settings.get('cleanup_header_regex'),
     settings.get('cleanup_header_prompt'),
     settings.get('cleanup_footer_regex'),
     settings.get('cleanup_footer_prompt'),
+    settings.get('persona_name'),
   ]);
   return {
     header: {
@@ -184,6 +187,7 @@ async function resolveRegionConfigs(settings: OrchestratorSettingsStore): Promis
       flags: DEFAULT_CLEANUP_CONFIG.footerFlags,
       prompt: footerPrompt ?? DEFAULT_CLEANUP_CONFIG.footerPrompt,
     },
+    userName: userName ?? '',
   };
 }
 
@@ -277,7 +281,7 @@ async function processDueMessage(
   userId: string,
   chatId: string,
   message: DueMessageRow,
-  regionConfigs: ResolvedRegionConfigs,
+  config: ResolvedCleanupConfig,
   rules: SlopRule[],
 ): Promise<void> {
   try {
@@ -288,7 +292,7 @@ async function processDueMessage(
     }
 
     const history = await loadHistory(deps.db, userId, chatId, message.message_id, message.created_at);
-    const plan = planCleanup(message.content, rules, regionConfigs.header, regionConfigs.footer, { history });
+    const plan = planCleanup(message.content, rules, config.header, config.footer, { history, userName: config.userName });
     const steps = plan.steps;
 
     // applyRepairSteps always runs against plan.text (the post-'remove' text) — so even with zero
@@ -449,7 +453,7 @@ async function findDueMessages(db: PostgresClient, userId: string, chatId: strin
  *  drive it directly and POST /v1/cleanup/run can trigger it on demand. Never throws. */
 export async function runCleanupTick(deps: CleanupLoopDeps): Promise<void> {
   try {
-    const regionConfigs = await resolveRegionConfigs(deps.settings);
+    const config = await resolveCleanupConfig(deps.settings);
     const rules = await loadSlopRules(deps.db);
     const users = await deps.db.withSystemScope((session) => session.query<UserRow>('select user_id from users'));
     for (const { user_id: userId } of users) {
@@ -457,7 +461,7 @@ export async function runCleanupTick(deps: CleanupLoopDeps): Promise<void> {
       for (const chat of chats) {
         const due = await findDueMessages(deps.db, userId, chat.chat_id, chat.cleanup_enabled_at);
         for (const message of due) {
-          await processDueMessage(deps, userId, chat.chat_id, message, regionConfigs, rules);
+          await processDueMessage(deps, userId, chat.chat_id, message, config, rules);
         }
       }
     }
@@ -542,7 +546,7 @@ export async function getCleanupStatus(db: PostgresClient, userId: string, chatI
  *  Same per-message pipeline as the tick — fail-open throughout, so it never rejects. */
 export async function runCleanupNow(deps: CleanupLoopDeps, userId: string, chatId: string): Promise<void> {
   try {
-    const regionConfigs = await resolveRegionConfigs(deps.settings);
+    const config = await resolveCleanupConfig(deps.settings);
     const rules = await loadSlopRules(deps.db);
     const [chat] = await deps.db.withUserScope(userId, (session) =>
       session.query<ChatRow>(
@@ -557,7 +561,7 @@ export async function runCleanupNow(deps: CleanupLoopDeps, userId: string, chatI
     }
     const due = await findDueMessages(deps.db, userId, chatId, chat.cleanup_enabled_at);
     for (const message of due) {
-      await processDueMessage(deps, userId, chatId, message, regionConfigs, rules);
+      await processDueMessage(deps, userId, chatId, message, config, rules);
     }
   } catch (err) {
     log.error(`cleanup run-now failed for chat ${chatId}`, err);

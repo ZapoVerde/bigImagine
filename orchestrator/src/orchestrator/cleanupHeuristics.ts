@@ -50,7 +50,7 @@
  * formatHistoryPairs(history, pairs)                 — {{history, N}} expansion: last N turn pairs as labeled User:/Assistant: lines (mirrors the old formatPreviousTurns)
  * parseHistoryPairs(arg)                             — the N of {{history, N}}; 2 when missing/unparsable (cleanup_prompt.md §3.2's default)
  * interpolateSlopPrompt(template, vars)              — slop prompt resolution: {{keyword}}/{{paragraph}} literal pass + macro pass
- * buildRepairPrompt(template, vars)                  — repair prompt resolution: {{history, N}}/{{prev_turns, N}} via the resolveArg hook, {{message}} via snapshot
+ * buildRepairPrompt(template, vars)                  — repair prompt resolution: {{history, N}}/{{prev_turns, N}} via the resolveArg hook, {{message}} and {{user}} via snapshot
  * planCleanup(text, rules, header, footer, opts)     — the full decision: post-remove text + ordered RepairStep list + region statuses + invalid rules
  * applyRepairSteps(text, steps, outputs)             — pure executor: splices LLM outputs back (skip overlapping spans), header insert/replace, footer append/replace, llm-message terminal
  * DEFAULT_CLEANUP_CONFIG                             — fallback header/footer regex+flags+prompt when a settings key is unset
@@ -136,6 +136,9 @@ export interface RepairVars {
   /** {{history, N}} / {{prev_turns, N}} — the turn-pair history the header repair may cite. */
   history?: LlmMessage[];
   historyPairs?: number;
+  /** {{user}} — the household's persona_name setting, resolved the same way the rest of the
+   *  app resolves {{user}} (interpolateMacros.ts's userName; empty when unset). */
+  userName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,10 +343,10 @@ export function parseHistoryPairs(arg: string | undefined): number {
 }
 
 /** Resolves a repair (or slop) prompt template: {{history, N}}/{{prev_turns, N}} through the
- *  interpolateMacros resolveArg hook, everything else ({{message}}, {{char}}, …) through the
- *  registry. Deterministic given the same vars (bi_principles.md §8). */
+ *  interpolateMacros resolveArg hook, {{message}} and {{user}} (the household's persona_name)
+ *  through the registry. Deterministic given the same vars (bi_principles.md §8). */
 export function buildRepairPrompt(template: string, vars: RepairVars): string {
-  return interpolateMacros(template, { message: vars.message }, (name, arg) => {
+  return interpolateMacros(template, { message: vars.message, userName: vars.userName }, (name, arg) => {
     if (name === 'history' || name === 'prev_turns') {
       return formatHistoryPairs(vars.history ?? [], parseHistoryPairs(arg));
     }
@@ -390,10 +393,10 @@ export function planCleanup(
   rules: SlopRule[],
   header: RegionConfig,
   footer: RegionConfig,
-  opts: { history?: LlmMessage[]; historyPairs?: number } = {},
+  opts: { history?: LlmMessage[]; historyPairs?: number; userName?: string } = {},
 ): CleanupPlan {
   const slop = evaluateSlopRules(text, rules);
-  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs };
+  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs, userName: opts.userName };
   const h = inspectHeader(slop.text, header);
   const f = inspectFooter(slop.text, footer);
 

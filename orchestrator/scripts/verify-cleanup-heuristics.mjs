@@ -159,6 +159,8 @@ const SLOP = [
   const alias = buildRepairPrompt('{{prev_turns, 1}}', { message: '', history: h });
   assert(alias === 'User: Where are we?\nAssistant: In the hall.', 'repair prompt: {{prev_turns, N}} alias still resolves');
   assert(buildRepairPrompt('{{history, 2}}', { message: '' }).trim() === '', 'repair prompt: no history supplied renders an empty block, never an error');
+  assert(buildRepairPrompt('Character: {{user}}', { message: '', userName: 'Alex' }) === 'Character: Alex', 'repair prompt: {{user}} resolves to persona_name');
+  assert(buildRepairPrompt('{{user}}', { message: '' }) === '', 'repair prompt: unset persona_name renders an empty {{user}}, never an error');
 }
 
 // --- planCleanup -------------------------------------------------------------------------------

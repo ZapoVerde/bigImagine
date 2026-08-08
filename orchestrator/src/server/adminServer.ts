@@ -915,7 +915,7 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
 // The four cleanup config keys (the header/footer trigger regex + repair prompt — "the format
 // expressed as a prompt") plus the slop-rules table, read/written together as the page's single
 // settings block. Same live-read shape as the other Settings-tab fields: the subloop re-reads
-// both every tick (cleanupLoop.ts's resolveRegionConfigs/loadSlopRules), so a save here takes
+// both every tick (cleanupLoop.ts's resolveCleanupConfig/loadSlopRules), so a save here takes
 // effect on the very next poll, no restart. Slop rules are a full-set replace (delete-all +
 // insert-each in one system-scoped transaction, cleanupLoop.ts's replaceSlopRules) — the page
 // edits the whole set and saves; there is no per-rule CRUD surface.

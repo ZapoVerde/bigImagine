@@ -282,8 +282,8 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
         <h2>Header format</h2>
         <p className="cleanup-note">
           The trigger regex that recognizes a conforming scene header, and the repair prompt — the format expressed as a
-          prompt — used when a reply's header is missing or malformed. <code>{'{{history, N}}'}</code> and{' '}
-          <code>{'{{message}}'}</code> macros resolve at run time.
+          prompt — used when a reply's header is missing or malformed. <code>{'{{history, N}}'}</code>,{' '}
+          <code>{'{{message}}'}</code> and <code>{'{{user}}'}</code> macros resolve at run time.
         </p>
         <label>
           Header regex
