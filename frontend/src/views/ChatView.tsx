@@ -18,6 +18,7 @@ import {
   getChat,
   getChatLocationImage,
   getChatBackgroundSettings,
+  getChatLegibilitySettings,
   getChatTurnStatus,
   listFolders,
   listToolNames,
@@ -33,6 +34,7 @@ import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
   ApplyPromptStackToChatResult,
   ChatBackgroundSettings,
+  ChatLegibilitySettings,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -49,6 +51,7 @@ import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPane
 import CleanupStatusPill from '../components/cleanup/CleanupStatusPill';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
+import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
@@ -194,6 +197,32 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       .then(setBgSettings)
       .catch(() => setBgSettings(null));
   }, [apiKey]);
+
+  // The "Text legibility" toggles (migration 0074): five opt-in text-rendering tricks for prose
+  // on the translucent bubbles (components/chat/LegibilityMenu.tsx, collapsible menu at the top
+  // of the chat settings rail). Read live at chat load like bgSettings — household-wide, so one
+  // set applies to every chat. null until the fetch resolves = all toggles off (the built-in
+  // look); the active flags become space-separated data-legibility tokens on the view root, and
+  // the rule sets of the same names in ChatView.css key off [data-legibility~=…].
+  const [legSettings, setLegSettings] = useState<ChatLegibilitySettings | null>(null);
+
+  useEffect(() => {
+    getChatLegibilitySettings(apiKey)
+      .then(setLegSettings)
+      .catch(() => setLegSettings(null));
+  }, [apiKey]);
+
+  const legibilityFlags = legSettings
+    ? [
+        legSettings.halo && 'halo',
+        legSettings.outline && 'outline',
+        legSettings.solidCode && 'solid-code',
+        legSettings.weightBump && 'weight',
+        legSettings.hoverFocus && 'hover-focus',
+      ]
+        .filter((f): f is string => typeof f === 'string')
+        .join(' ')
+    : '';
 
   // The settings, as CSS custom properties for ChatView.css: the overlay veil (opacity is a
   // plain 0..1 number — the CSS `opacity` property accepts it directly) and the bubble fill
@@ -964,7 +993,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   );
 
   return (
-    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={chatBgStyle}>
+    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={chatBgStyle} data-legibility={legibilityFlags}>
       {promptInspectorOpen && activeChat?.kind === 'rp' && (
         <PromptInspectorPanel
           apiKey={apiKey}
@@ -1407,6 +1436,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         </div>
         {!settingsCollapsed && (
           <div className="chat-settings-rail-content">
+            <LegibilityMenu settings={legSettings} onChange={setLegSettings} />
             <ChatSettings apiKey={apiKey} session={activeChat} folders={folders} allToolNames={allToolNames} onSave={saveSettings} />
           </div>
         )}

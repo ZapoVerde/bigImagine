@@ -1,0 +1,84 @@
+/* The ChatView "Text legibility" menu (migration 0074) — a collapsible section at the top of the
+   chat settings rail. Native <details>/<summary> for the collapse, checkbox rows for the five
+   opt-in text-rendering toggles. Visual language matches the rail's .chat-settings sections. */
+
+.legibility-menu {
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.legibility-menu-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.7rem 1rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  user-select: none;
+}
+
+/* Native disclosure triangle is hidden (list-style: none above); draw a chevron that flips. */
+.legibility-menu-summary::before {
+  content: '▸';
+  color: var(--color-text-muted);
+  transition: transform 0.15s ease;
+  font-size: 0.85em;
+}
+
+.legibility-menu[open] .legibility-menu-summary::before {
+  transform: rotate(90deg);
+}
+
+.legibility-menu-summary:hover {
+  color: var(--color-text-primary);
+}
+
+.legibility-menu-body {
+  padding: 0 1rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.legibility-toggle {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.legibility-toggle input {
+  margin-top: 0.2rem;
+  accent-color: var(--color-accent, var(--color-secondary));
+  flex-shrink: 0;
+}
+
+.legibility-toggle.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.legibility-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.legibility-toggle-label {
+  color: var(--color-text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.legibility-toggle-desc {
+  color: var(--color-text-muted);
+  font-size: 0.85em;
+  line-height: 1.35;
+}
+
+.legibility-menu-status {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}

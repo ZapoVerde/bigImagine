@@ -592,6 +592,86 @@ export async function setChatBackgroundSettings(store: OrchestratorSettingsStore
   for (const [key, value] of writes) await store.set(key, value);
 }
 
+/**
+ * The ChatView "Text legibility" toggles (migration 0074) — opt-in text-rendering tricks for
+ * prose on translucent bubbles over the location background, exposed as a collapsible menu in the
+ * chat settings rail (components/chat/LegibilityMenu.tsx). Each is stored as text
+ * ('true'/'false'), default false when unset — opt-in, so an untouched install keeps the built-in
+ * look exactly. Household-wide settings: one set applies to every chat. The frontend reads them
+ * live at chat load (GET /v1/chat-legibility-settings, same no-restart shape as
+ * household_timezone) and applies them as data-legibility tokens on the chat view root; the CSS
+ * rule sets of the same names (ChatView.css) key off [data-legibility~=…]. The menu POSTs each
+ * toggle immediately (partial patch, admin-gated) — no Save button.
+ */
+export interface ChatLegibilitySettings {
+  /** text-shadow halo ring around bubble prose (subtitle-renderer trick). */
+  halo: boolean;
+  /** crisp 0.5px -webkit-text-stroke on quoted dialogue, headings, <summary>. */
+  outline: boolean;
+  /** solid near-black code chips + <pre> blocks with light text. */
+  solidCode: boolean;
+  /** font-weight 500 on em/i, blockquotes, and pending bubbles' muted text. */
+  weightBump: boolean;
+  /** hovering a bubble raises its fill opacity to 92% just for that message. */
+  hoverFocus: boolean;
+}
+
+/** A partial update: every field optional, at least one present (enforced by the parser). */
+export interface ChatLegibilitySettingsPatch {
+  halo?: boolean;
+  outline?: boolean;
+  solidCode?: boolean;
+  weightBump?: boolean;
+  hoverFocus?: boolean;
+}
+
+export async function getChatLegibilitySettings(store: OrchestratorSettingsStore): Promise<ChatLegibilitySettings> {
+  const [halo, outline, solidCode, weightBump, hoverFocus] = await Promise.all([
+    store.get('chat_legibility_halo'),
+    store.get('chat_legibility_outline'),
+    store.get('chat_legibility_solid_code'),
+    store.get('chat_legibility_weight'),
+    store.get('chat_legibility_hover_focus'),
+  ]);
+  return {
+    halo: halo === 'true',
+    outline: outline === 'true',
+    solidCode: solidCode === 'true',
+    weightBump: weightBump === 'true',
+    hoverFocus: hoverFocus === 'true',
+  };
+}
+
+export function parseSetChatLegibilitySettingsBody(raw: unknown): ChatLegibilitySettingsPatch | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { halo, outline, solidCode, weightBump, hoverFocus } = raw as Record<string, unknown>;
+  if (halo !== undefined && typeof halo !== 'boolean') return undefined;
+  if (outline !== undefined && typeof outline !== 'boolean') return undefined;
+  if (solidCode !== undefined && typeof solidCode !== 'boolean') return undefined;
+  if (weightBump !== undefined && typeof weightBump !== 'boolean') return undefined;
+  if (hoverFocus !== undefined && typeof hoverFocus !== 'boolean') return undefined;
+  if (halo === undefined && outline === undefined && solidCode === undefined && weightBump === undefined && hoverFocus === undefined) {
+    return undefined;
+  }
+  return {
+    halo: typeof halo === 'boolean' ? halo : undefined,
+    outline: typeof outline === 'boolean' ? outline : undefined,
+    solidCode: typeof solidCode === 'boolean' ? solidCode : undefined,
+    weightBump: typeof weightBump === 'boolean' ? weightBump : undefined,
+    hoverFocus: typeof hoverFocus === 'boolean' ? hoverFocus : undefined,
+  };
+}
+
+export async function setChatLegibilitySettings(store: OrchestratorSettingsStore, patch: ChatLegibilitySettingsPatch): Promise<void> {
+  const writes: Array<[SettingName, string]> = [];
+  if (patch.halo !== undefined) writes.push(['chat_legibility_halo', patch.halo ? 'true' : 'false']);
+  if (patch.outline !== undefined) writes.push(['chat_legibility_outline', patch.outline ? 'true' : 'false']);
+  if (patch.solidCode !== undefined) writes.push(['chat_legibility_solid_code', patch.solidCode ? 'true' : 'false']);
+  if (patch.weightBump !== undefined) writes.push(['chat_legibility_weight', patch.weightBump ? 'true' : 'false']);
+  if (patch.hoverFocus !== undefined) writes.push(['chat_legibility_hover_focus', patch.hoverFocus ? 'true' : 'false']);
+  for (const [key, value] of writes) await store.set(key, value);
+}
+
 export async function getImageSettings(store: OrchestratorSettingsStore): Promise<ImageSettings> {
   const template = (await store.get('image_prompt_template')) ?? '';
   return { template, templateIsDefault: !template };

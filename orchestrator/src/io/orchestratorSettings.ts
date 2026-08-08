@@ -134,6 +134,16 @@
  * frontend applies them as CSS custom properties on the chat view, so no restart and no rebuild
  * for a look change.
  *
+ * chat_legibility_halo / chat_legibility_outline / chat_legibility_solid_code /
+ * chat_legibility_weight / chat_legibility_hover_focus (migration 0074) are the ChatView "Text
+ * legibility" toggles — opt-in text-rendering tricks for prose on translucent bubbles over the
+ * location background, exposed as a collapsible menu in the chat settings rail (frontend module
+ * components/chat/LegibilityMenu.tsx). Stored as text 'true'/'false', default false when unset
+ * (opt-in, matching the built-in look). Read live by ChatView at chat load via
+ * GET /v1/chat-legibility-settings and applied as data-legibility tokens on the chat view root;
+ * each toggle immediately POSTs its partial patch to the admin-gated
+ * POST /v1/admin/chat-legibility-settings — household-wide, so one set applies to all chats.
+ *
  * cleanup_header_regex/cleanup_header_prompt/cleanup_footer_regex/cleanup_footer_prompt
  * (migration 0072, the async heuristic cleanup subloop) are the Cleanup page's setup config:
  * the two editable regex triggers (header two-line shape `[ … | … | …]` + `Present: …`; footer
@@ -203,6 +213,11 @@ export const SETTING_NAMES = [
   'chat_background_bubble_opacity',
   'chat_background_bubble_user_shade',
   'chat_background_bubble_assistant_shade',
+  'chat_legibility_halo',
+  'chat_legibility_outline',
+  'chat_legibility_solid_code',
+  'chat_legibility_weight',
+  'chat_legibility_hover_focus',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

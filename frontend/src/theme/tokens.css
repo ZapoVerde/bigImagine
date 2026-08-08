@@ -54,6 +54,11 @@
      Settings "Chat Background" fieldset (migration 0073) is first saved. */
   --color-bubble-user-shade: #222222;
   --color-bubble-user-text: #ffffff;
+  /* Halo ring color behind bubble text (migration 0074's legibility toggles): chosen to contrast
+     with the *text* color, so where the halo merges into the background the text already
+     contrasts with it. White user text → dark ring; dark assistant text → light ring. */
+  --color-bubble-user-halo: rgba(0, 0, 0, 0.75);
+  --color-bubble-assistant-halo: rgba(255, 255, 255, 0.85);
   --color-bubble-assistant-shade: #f0f0f0;
   --color-bubble-assistant-text: #111111;
 
@@ -138,6 +143,9 @@ body.dark {
      and the shade here is solid) */
   --color-bubble-user-shade: #4f46e5;
   --color-bubble-user-text: #ffffff;
+  /* Dark theme: both bubble texts are light, so both halos are dark rings. */
+  --color-bubble-user-halo: rgba(0, 0, 0, 0.75);
+  --color-bubble-assistant-halo: rgba(0, 0, 0, 0.75);
   --color-bubble-assistant-shade: #26272c;
   --color-bubble-assistant-text: #f2f2f2;
 

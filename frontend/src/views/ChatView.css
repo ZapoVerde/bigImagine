@@ -504,6 +504,87 @@
   color: var(--color-text-muted);
 }
 
+/* --- Text legibility toggles (migration 0074) -----------------------------------------------
+   The "Text legibility" collapsible menu in the chat settings rail (LegibilityMenu.tsx) applies
+   its five opt-in tricks as space-separated data-legibility tokens on the .chat-view root; each
+   rule set below is keyed on the token of the same name, so the built-in look is untouched until
+   a toggle flips. Household-wide settings read live at chat load — no restart, no rebuild.    */
+
+/* The halo color per bubble role, chosen to contrast with that role's *text* color (the theme
+   tokens above): dark ring under light text, light ring under dark text. Inherits into every
+   markdown descendant (quotes, em, code) so one var covers the whole bubble. */
+.chat-bubble.user {
+  --bubble-halo: var(--color-bubble-user-halo);
+}
+.chat-bubble.assistant {
+  --bubble-halo: var(--color-bubble-assistant-halo);
+}
+
+/* 1. halo — a tight ring of directional text-shadows (the subtitle-renderer trick). Because the
+   ring contrasts with the text itself, it separates the glyphs from *any* local background the
+   translucent bubble happens to sit on: where the halo merges into the background image, the
+   text already contrasts with it. Excluded on code, which has its own background (chips carry a
+   translucent chip fill; solid-code mode gives it a solid one). */
+.chat-view[data-legibility~="halo"] .chat-bubble .markdown-content {
+  text-shadow:
+    0 1px 1px var(--bubble-halo),
+    0 -1px 1px var(--bubble-halo),
+    1px 0 1px var(--bubble-halo),
+    -1px 0 1px var(--bubble-halo),
+    0 0 2px var(--bubble-halo),
+    0 0 4px var(--bubble-halo);
+}
+.chat-view[data-legibility~="halo"] .chat-bubble .markdown-content code {
+  text-shadow: none;
+}
+
+/* 2. outline — a crisp 0.5px stroke on the accent text that most needs definition over a busy
+   background: quoted dialogue (the amber narrative-quote), headings, and spoiler summaries. */
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content q,
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content summary,
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content h1,
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content h2,
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content h3,
+.chat-view[data-legibility~="outline"] .chat-bubble .markdown-content h4 {
+  -webkit-text-stroke: 0.5px var(--bubble-halo);
+}
+
+/* 3. solid-code — chips and <pre> blocks stop being translucent grey-on-grey over a translucent
+   bubble and become solid near-black with light text, so the multi-color code tokens (grey /
+   white / yellow) always sit on a known high-contrast fill regardless of the bubble shade or the
+   image behind it. */
+.chat-view[data-legibility~="solid-code"] .chat-bubble .markdown-content :not(pre) > code,
+.chat-view[data-legibility~="solid-code"] .chat-bubble .markdown-content pre {
+  background: #16171c;
+  color: #f0f0f2;
+}
+.chat-view[data-legibility~="solid-code"] .chat-bubble .markdown-content pre code {
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+
+/* 4. weight-bump — the weakest legibility cases (the grey muted text) get medium weight:
+   italicized action/emphasis, blockquotes, and the pending bubble. */
+.chat-view[data-legibility~="weight"] .chat-bubble .markdown-content em,
+.chat-view[data-legibility~="weight"] .chat-bubble .markdown-content i,
+.chat-view[data-legibility~="weight"] .chat-bubble .markdown-content blockquote,
+.chat-view[data-legibility~="weight"] .chat-bubble.pending {
+  font-weight: var(--font-weight-medium);
+}
+
+/* 5. hover-focus — hovering (or touch-tapping) a message temporarily solidifies just that
+   bubble for reading long replies: the fill reads --chat-bubble-opacity (ChatView sets it on the
+   view root from the background settings; 70% built-in fallback), so this is a per-bubble
+   override of that var with a quick transition so it doesn't flash. Everything else stays
+   translucent. */
+.chat-view[data-legibility~="hover-focus"] .chat-bubble {
+  transition: background-color 0.15s ease;
+}
+.chat-view[data-legibility~="hover-focus"] .chat-bubble:hover {
+  --chat-bubble-opacity: 92%;
+}
+
 .chat-empty-landing {
   flex: 1;
   display: flex;

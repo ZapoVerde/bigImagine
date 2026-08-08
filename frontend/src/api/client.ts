@@ -21,6 +21,8 @@ import type {
   ImageConnectionTestResult,
   ImageSettings,
   ChatBackgroundSettings,
+  ChatLegibilitySettings,
+  ChatLegibilitySettingsPatch,
   ImportedCharacter,
   LlmConnectionSummary,
   ModelProvidersResult,
@@ -229,6 +231,15 @@ export async function getChatBackgroundSettings(apiKey: string | null): Promise<
   const res = await fetch('/v1/chat-background-settings', { headers: authHeaders(apiKey) });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return (await res.json()) as ChatBackgroundSettings;
+}
+
+/** GET /v1/chat-legibility-settings — the ChatView "Text legibility" toggle set (migration
+ *  0074), same household-key/Access auth as getChatBackgroundSettings: ChatView reads it live at
+ *  chat load. Defaults false when unset (opt-in look). */
+export async function getChatLegibilitySettings(apiKey: string | null): Promise<ChatLegibilitySettings> {
+  const res = await fetch('/v1/chat-legibility-settings', { headers: authHeaders(apiKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return (await res.json()) as ChatLegibilitySettings;
 }
 
 /** POST /v1/locations/:id/image-broken (endpoint.md §5.2) — the Chat View's background <img>
@@ -550,6 +561,20 @@ export function adminSetChatBackgroundSettings(
   return jsonRequest<ChatBackgroundSettings>('/v1/admin/chat-background-settings', adminKey, {
     method: 'POST',
     body: value,
+  });
+}
+
+/** POST /v1/admin/chat-legibility-settings — the ChatView "Text legibility" menu's write side
+ *  (migration 0074): the collapsible menu in the chat settings rail POSTs each toggle
+ *  immediately, no Save button. Partial patch (any subset of the five booleans); the server
+ *  rejects a body with zero fields or non-boolean values. Returns the full updated set. */
+export function adminSetChatLegibilitySettings(
+  patch: ChatLegibilitySettingsPatch,
+  adminKey: string | null,
+): Promise<ChatLegibilitySettings> {
+  return jsonRequest<ChatLegibilitySettings>('/v1/admin/chat-legibility-settings', adminKey, {
+    method: 'POST',
+    body: patch,
   });
 }
 

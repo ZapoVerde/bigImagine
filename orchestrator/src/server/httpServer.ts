@@ -189,6 +189,7 @@ import {
   getChatMemorySettings,
   getChatMemorySyncStatus,
   getChatBackgroundSettings,
+  getChatLegibilitySettings,
   getCleanupSettings,
   getHouseholdTimezone,
   getImageSettings,
@@ -204,6 +205,7 @@ import {
   parseSetCanonSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetChatBackgroundSettingsBody,
+  parseSetChatLegibilitySettingsBody,
   parseSetCleanupSettingsBody,
   parseSetCredentialBody,
   parseSetImageSettingsBody,
@@ -217,6 +219,7 @@ import {
   setCanonSettings,
   setChatMemorySettings,
   setChatBackgroundSettings,
+  setChatLegibilitySettings,
   setCleanupSettings,
   setCredential,
   setHouseholdTimezone,
@@ -1868,6 +1871,33 @@ async function handleChatBackgroundSettingsSet(req: IncomingMessage, res: Server
   sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
 }
 
+// migration 0074's admin write side — the ChatView "Text legibility" collapsible menu in the
+// chat settings rail (components/chat/LegibilityMenu.tsx). Same admin gate and no-restart shape
+// as /v1/admin/timezone / the chat-background pair: each toggle POSTs its partial patch
+// immediately (household-wide, applies to all chats), ChatView re-reads the set live at chat
+// load, so there is no restart and no rebuild for a look change.
+async function handleChatLegibilitySettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const value = parseSetChatLegibilitySettingsBody(raw);
+  if (!value) {
+    sendJson(res, 400, {
+      error:
+        'expected a partial { halo?, outline?, solidCode?, weightBump?, hoverFocus? } with at least one field',
+    });
+    return;
+  }
+
+  await setChatLegibilitySettings(deps.settings, value);
+  sendJson(res, 200, await getChatLegibilitySettings(deps.settings));
+}
+
 // docs/chat-memory.md — profileNames comes from deps.llmConnections.list() (the live, admin-managed
 // set, io/llmConnections.ts), everything else is live-read via adminServer.ts.
 async function handleChatMemorySettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -2510,6 +2540,18 @@ async function handleChatBackgroundSettingsGet(req: IncomingMessage, res: Server
   sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
 }
 
+// migration 0074's read side for ChatView's "Text legibility" menu — same household-key/Access
+// gate as the chat-background pair above: any authenticated user reads the current toggle set
+// (nothing secret here), only the admin-gated POST below writes it.
+async function handleChatLegibilitySettingsGet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  sendJson(res, 200, await getChatLegibilitySettings(deps.settings));
+}
+
 // screen_lock_password isn't a secret (bi_principles.md §12 — see adminServer.ts's own note), and
 // ScreenLockOverlay.tsx needs it as a regular authenticated user, not an admin: it has to poll
 // this the moment the app itself is authenticated, before anyone would have entered the separate
@@ -2677,6 +2719,10 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url === '/v1/chat-background-settings') {
     await handleChatBackgroundSettingsGet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/chat-legibility-settings') {
+    await handleChatLegibilitySettingsGet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/screen-lock-settings') {
@@ -2860,6 +2906,22 @@ async function handleRequest(
       return;
     }
     await handleChatBackgroundSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/chat-legibility-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatLegibilitySettingsGet(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/chat-legibility-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleChatLegibilitySettingsSet(req, res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/notification-settings') {

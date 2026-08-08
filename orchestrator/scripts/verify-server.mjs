@@ -2433,6 +2433,76 @@ server.close();
     'the user-scoped GET reflects the newly saved values with no restart',
   );
 
+  // --- Chat legibility settings routes (migration 0074, the ChatView "Text legibility" menu) ---
+  // Same server4/settings4 — the user-scoped GET and the admin POST share the store. All five
+  // toggles default off (opt-in look); each toggle POSTs its partial patch immediately.
+  const legUserNoAuthRes = await fetch(`${base4}/v1/chat-legibility-settings`);
+  assert(legUserNoAuthRes.status === 401, 'GET /v1/chat-legibility-settings with no auth header returns 401');
+
+  const legUserRes = await fetch(`${base4}/v1/chat-legibility-settings`, {
+    headers: { authorization: 'Bearer good-key-4' },
+  });
+  const legUserBody = await legUserRes.json();
+  assert(
+    legUserRes.status === 200 &&
+      legUserBody.halo === false &&
+      legUserBody.outline === false &&
+      legUserBody.solidCode === false &&
+      legUserBody.weightBump === false &&
+      legUserBody.hoverFocus === false,
+    'GET /v1/chat-legibility-settings defaults to all five toggles off before anything has been saved',
+  );
+
+  const legAdminNoAuthRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`);
+  assert(legAdminNoAuthRes.status === 401, 'GET /v1/admin/chat-legibility-settings with no auth header returns 401');
+
+  const legBadRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ halo: 'on' }),
+  });
+  assert(legBadRes.status === 400, 'POST /v1/admin/chat-legibility-settings rejects a non-boolean halo');
+
+  const legEmptyRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({}),
+  });
+  assert(legEmptyRes.status === 400, 'POST /v1/admin/chat-legibility-settings rejects an empty body');
+
+  const legOkRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ halo: true, solidCode: true, hoverFocus: true }),
+  });
+  const legOkBody = await legOkRes.json();
+  assert(
+    legOkRes.status === 200 &&
+      legOkBody.halo === true &&
+      legOkBody.outline === false &&
+      legOkBody.solidCode === true &&
+      legOkBody.weightBump === false &&
+      legOkBody.hoverFocus === true,
+    'POST /v1/admin/chat-legibility-settings accepts a partial patch and returns the full updated set (toggles left out stay as-is)',
+  );
+  assert(
+    settings4.setCalls.some((c) => c.key === 'chat_legibility_halo' && c.value === 'true') &&
+      settings4.setCalls.some((c) => c.key === 'chat_legibility_solid_code' && c.value === 'true') &&
+      settings4.setCalls.some((c) => c.key === 'chat_legibility_hover_focus' && c.value === 'true') &&
+      !settings4.setCalls.some((c) => c.key === 'chat_legibility_outline') &&
+      !settings4.setCalls.some((c) => c.key === 'chat_legibility_weight'),
+    'the settings store recorded only the patched legibility writes as text',
+  );
+
+  const legAfterSaveRes = await fetch(`${base4}/v1/chat-legibility-settings`, {
+    headers: { authorization: 'Bearer good-key-4' },
+  });
+  const legAfterSaveBody = await legAfterSaveRes.json();
+  assert(
+    legAfterSaveBody.halo === true && legAfterSaveBody.hoverFocus === true && legAfterSaveBody.outline === false,
+    'the user-scoped GET reflects the newly saved legibility toggles with no restart',
+  );
+
   server4.close();
 }
 

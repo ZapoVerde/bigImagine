@@ -267,6 +267,34 @@ export interface ChatBackgroundSettings {
   bubbleAssistantShade: string;
 }
 
+/** orchestrator/src/server/adminServer.ts ChatLegibilitySettings — migration 0074: the ChatView
+ *  "Text legibility" toggles (opt-in text-rendering tricks for prose on translucent bubbles over
+ *  the location background). Stored as text 'true'/'false'; default false when unset (opt-in, so
+ *  an untouched install keeps the built-in look). Household-wide: one set applies to every chat.
+ *  ChatView applies them as data-legibility tokens on the chat view root; the menu in the chat
+ *  settings rail POSTs each toggle immediately (admin-gated), no Save button. */
+export interface ChatLegibilitySettings {
+  /** text-shadow halo ring around bubble prose (subtitle-renderer trick). */
+  halo: boolean;
+  /** crisp 0.5px -webkit-text-stroke on quoted dialogue, headings, <summary>. */
+  outline: boolean;
+  /** solid near-black code chips + <pre> blocks with light text. */
+  solidCode: boolean;
+  /** font-weight 500 on em/i, blockquotes, and pending bubbles' muted text. */
+  weightBump: boolean;
+  /** hovering a bubble raises its fill opacity to 92% just for that message. */
+  hoverFocus: boolean;
+}
+
+/** A partial update — every field optional, at least one present. */
+export interface ChatLegibilitySettingsPatch {
+  halo?: boolean;
+  outline?: boolean;
+  solidCode?: boolean;
+  weightBump?: boolean;
+  hoverFocus?: boolean;
+}
+
 // orchestrator/src/server/adminServer.ts ImageSettings — the master image prompt template
 // (endpoint.md §2.2); '' means "use the built-in default" (bi_principles.md §18).
 export interface ImageSettings {
