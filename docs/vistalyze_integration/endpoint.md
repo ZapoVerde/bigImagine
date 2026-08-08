@@ -56,7 +56,7 @@ built yet." Migration 0068 must rename it (`alter table locations rename column 
 and drop that now-stale comment, rather than treating "Image URL" as something that already exists:
 * **Visual Description**: Text column holding the physical description of the place.
 * **Environment**: JSONB object holding time of day, weather, mood, and lighting parameters.
-* **Seed**: Optional 64-bit integer seed for deterministic re-renders.
+* **Seed**: Optional 64-bit integer seed for deterministic re-renders. **Fixed in practice**: every image-gen call (bg renders and the Connections test button) uses the shared `IMAGE_GEN_SEED = 12345` (`util/synthesizeImagePrompt.ts`) — same prompt ⇒ same image, so a re-render after row churn is pixel-identical to the cached one. `locations.seed` is a legacy/carry slot; the engine falls back to the fixed seed when it's null. Text LLM calls stay seed-less (provider-random) so reruns/swipes vary — only image gen is deterministic.
 * **Image URL** (`image_path`, renamed by Migration 0068): Text column storing the direct, remote HTTPS CDN link returned by the provider (replaces local file paths).
 * **Image Generated At**: Timestamp marking when the current image was successfully rendered.
 
@@ -104,12 +104,14 @@ The synthesis engine accepts:
 * Master Image Prompt Template from orchestrator settings.
 
 ### 4.2 Template Macro Expansion
-The Master Image Prompt Template is evaluated using macro interpolation. The template combines:
+The Master Image Prompt Template is evaluated using macro interpolation. The template supports:
 * The visual description of the space.
 * The time of day.
 * The weather conditions.
 * The emotional mood or lighting atmosphere.
 * The connection's master positive style prefix.
+
+**The default template deliberately excludes the time of day** (and weather/mood/lighting — the scraper never fills them today, so they'd expand empty anyway): the physical description is the room alone, so the same room always produces the same prompt, the same render hash (endpoint.md §5.1 step 2), and — with the shared fixed seed — the same image. The macros remain available to a user who overrides the template and wants time-conditioned imagery.
 
 The result is a clean, single-string positive prompt tailored for diffusion and Flux models.
 
@@ -121,10 +123,10 @@ Image generation is executed through an asynchronous background pass (`generateL
 
 ### 5.1 Execution Flow
 
-1. **Location Trigger**: A location change or environment update is detected during the post-cleanup heuristic pass. On the first LLM turn of a new RP chat, the scene header (the pass's only input) is repaired synchronously first — one small LLM call via `ensureFirstTurnHeader.ts`, only when the raw reply lacks a conforming header — so the very first turn resolves a location and fires the pass instead of waiting for the async cleanup subloop to add the header after the reply was already scraped (the subloop then finds nothing to repair: zero second LLM cost). Fail-open: a failed repair stores/sends the raw reply unchanged.
+1. **Location Trigger**: A location change or environment update is detected during the post-cleanup heuristic pass. On the first LLM turn of a new RP chat, the scene header (the pass's only input) is repaired synchronously first — one small LLM call via `ensureFirstTurnHeader.ts`, only when the raw reply lacks a conforming header — so the very first turn resolves a location and fires the pass instead of waiting for the async cleanup subloop to add the header after the reply was already scraped (the subloop then finds nothing to repair: zero second LLM cost). Fail-open: a failed repair stores/sends the raw reply unchanged. **Same-place carry (segway.md §4.2 step 3)**: when a rerun supersedes the turn that anchored a row, the scraper's next mint of the same room inherits the prior row's `seed`/`image_url`/`image_rendered_input`/`image_render_hash` — the pass then sees a hash hit below instead of re-rendering a pixel-identical background.
 2. **Cache Validation Check** (re-keyed to the prompt render hash, migration 0076):
    * The engine synthesizes the actual prompt first (template + location description/environment + connection style prefix + negative prompt) and hashes it together with every other output-affecting provider input (model, dims, steps, cfg, sampler, workflow params, seed) into a single `image_render_hash`.
-   * **Cache Hit**: If Image URL is present AND the row's stored hash equals the freshly computed one, rendering is skipped entirely. The existing Image URL is retained (zero cost). The hash — not the raw inputs — is the variant: the same prompt reuses the URL, a changed prompt (a varied bg description, or eventually a mood/time slot, or a different connection) renders.
+   * **Cache Hit**: If Image URL is present AND the row's stored hash equals the freshly computed one, rendering is skipped entirely. The existing Image URL is retained (zero cost). The hash — not the raw inputs — is the variant: the same prompt reuses the URL, a changed prompt (a varied bg description, a different connection, or a user template that includes time-of-day) renders. The seed in the hash is the shared fixed seed (see §1's Seed bullet), so it never varies the hash by itself.
    * **Cache Miss**: If parameters changed, Image URL is missing/null, or the row predates 0076 (hash null — one-time legacy snapshot comparison), proceed to generation.
 3. **Resolve Image Connection**: The engine fetches the active image connection (or chat/scene override) and decrypts its API key.
 4. **Prompt Synthesis**: Expands the Master Image Prompt Template using the location's description and environment parameters.

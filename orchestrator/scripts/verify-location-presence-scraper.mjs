@@ -54,6 +54,35 @@ function createFakePool() {
             return { rows: [] };
           }
 
+          // §4.2.5 same-place carry: the mint-path clone-source read — the most recent
+          // same-named row rendered in THIS chat (anchor_chat_id-scoped so another chat's row
+          // of the same name never leaks in).
+          if (sql.includes('from locations') && sql.includes('image_url is not null')) {
+            const [userId, name, chatId] = params;
+            const matches = locations
+              .filter(
+                (l) =>
+                  l.user_id === userId &&
+                  l.name === name &&
+                  l.anchor_chat_id === chatId &&
+                  l.image_url !== null &&
+                  l.image_url !== undefined,
+              )
+              .sort((a, b) => String(b.image_generated_at ?? '').localeCompare(String(a.image_generated_at ?? '')));
+            return {
+              rows: matches.length
+                ? [
+                    {
+                      image_url: matches[0].image_url,
+                      image_rendered_input: matches[0].image_rendered_input ?? null,
+                      image_render_hash: matches[0].image_render_hash ?? null,
+                      seed: matches[0].seed ?? null,
+                    },
+                  ]
+                : [],
+            };
+          }
+
           // §4.2 location lookup (eligible rows only) / update / create. The eligibility
           // subquery embeds `select active_swipe_id from chat_messages …` inside the outer
           // `select … from locations … where user_id = $1 and name = $2`, so the matchers are
@@ -83,13 +112,17 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into locations')) {
-            const [userId, name, visualDescription, environmentJson, chatId, swipeId] = params.slice(0, 6);
+            const [userId, name, visualDescription, environmentJson, seed, imageUrl, renderedInput, renderHash, chatId, swipeId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
               name,
               visual_description: visualDescription,
               environment: JSON.parse(environmentJson),
+              seed,
+              image_url: imageUrl,
+              image_rendered_input: renderedInput,
+              image_render_hash: renderHash,
               status: 'transient',
               anchor_chat_id: chatId,
               anchor_swipe_id: swipeId,
@@ -262,6 +295,7 @@ Present: Mair, Seraphina, Mair`;
   );
   assert(pool.locations[0].visual_description === 'The Drunken Kraken - Main Hall', 'visual_description is seeded from the extracted name (§4.2.3)');
   assert(pool.locations[0].environment.time_of_day === 'Late Evening', 'environment is seeded from the extracted time/date');
+  assert(pool.locations[0].seed === 12345, 'a newly minted location carries the shared fixed image-gen seed');
 
   assert(pool.scenes.length === 1 && pool.scenes[0].chat_id === CHAT && pool.scenes[0].active_location_id === pool.locations[0].location_id, 'a scene keyed by (chat_id, active_location_id) is created');
   assert(pool.chatSessions.get(CHAT).scene_id === pool.scenes[0].scene_id, 'chat_sessions.scene_id is stamped with the resolved scene (§2.2 cache pointer)');
@@ -334,6 +368,40 @@ Present: Mair, Seraphina, Mair`;
   const db = createPostgresClient(pool);
   await scrapeTurnPresence({ db, ensureActiveSwipe: fakeEnsureActiveSwipe(pool).fn }, USER, CHAT, MSG, HEADER);
   assert(pool.locations.length === 2, 'an ineligible (inactive/alternate-swipe) location is not matched — a fresh transient row is created instead of resurrecting it');
+}
+
+// --- §4.2.5 same-place carry: a rerun-superseded row's rendered image is inherited -----------
+// The rerun of the turn that anchored a row supersedes its swipe -> the row is ineligible on
+// the next scrape of the same room. Without the carry this mints a blank row and re-renders a
+// pixel-identical bg; with it the fresh row inherits image_url + render hash, so the follow-up
+// generation pass is a §5.1.2 cache hit (zero provider cost, bg never changes for the room).
+{
+  const pool = poolWithActiveSwipe(createFakePool());
+  pool.locations.push({
+    location_id: 'eeeeeeee-0000-0000-0000-000000000005',
+    user_id: USER,
+    name: 'The Drunken Kraken - Main Hall',
+    visual_description: 'The Drunken Kraken - Main Hall',
+    environment: {},
+    status: 'transient',
+    anchor_chat_id: CHAT,
+    anchor_swipe_id: '99999999-9999-9999-9999-999999999999', // superseded by a rerun — ineligible
+    seed: 12345,
+    image_url: 'https://cdn.example.com/kraken.png',
+    image_rendered_input: { visual_description: 'The Drunken Kraken - Main Hall', environment: {}, seed: 12345 },
+    image_render_hash: 'hash-kraken',
+    image_generated_at: '2026-08-08T10:00:00.000Z',
+  });
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+
+  assert(pool.locations.length === 2, 'the superseded row is not matched — a fresh row is minted (timeline semantics unchanged)');
+  const fresh = pool.locations.find((l) => l.location_id !== 'eeeeeeee-0000-0000-0000-000000000005');
+  assert(fresh.image_url === 'https://cdn.example.com/kraken.png', 'the fresh row inherits the prior same-named row\'s image_url (§4.2.5 carry)');
+  assert(fresh.image_render_hash === 'hash-kraken', 'the fresh row inherits the render hash — the follow-up generation pass is a §5.1.2 cache hit');
+  assert(fresh.seed === 12345, 'the fresh row inherits the seed');
+  assert(fresh.visual_description === 'The Drunken Kraken - Main Hall', 'visual_description is still seeded from the extracted name');
 }
 
 // --- Re-anchor: a transient row reused by a later turn follows the live timeline's swipe -------

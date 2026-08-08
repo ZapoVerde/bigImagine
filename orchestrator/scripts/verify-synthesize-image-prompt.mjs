@@ -55,8 +55,14 @@ function assert(cond, message) {
   assert(positive === 'x {{typo_macro}}', 'unknown macros are left untouched so a typo is diagnosable');
 }
 
-// An empty override falls back to the built-in default (bi_principles.md §18).
+// An empty override falls back to the built-in default (bi_principles.md §18). The default
+// carries NO {{time_of_day}} — the physical description is the room alone, so the same room
+// always produces the same prompt (and, with the shared fixed seed, the same image).
 {
+  assert(
+    !DEFAULT_IMAGE_PROMPT_TEMPLATE.includes('{{time_of_day}}'),
+    'the default template excludes TOD from the physical description (room image is fixed)',
+  );
   const { positive } = synthesizeImagePrompt({
     template: '',
     visualDescription: 'the harbor at night',
@@ -68,7 +74,6 @@ function assert(cond, message) {
     positive === DEFAULT_IMAGE_PROMPT_TEMPLATE
       .replace('{{style_prefix}}', 'Watercolor')
       .replace('{{visual_description}}', 'the harbor at night')
-      .replace('{{time_of_day}}', 'night')
       .replace('{{weather}}', '')
       .replace('{{mood}}', ''),
     'an empty template falls back to DEFAULT_IMAGE_PROMPT_TEMPLATE and expands against it',

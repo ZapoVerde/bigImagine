@@ -33,9 +33,15 @@
  *     external_io:     []
  */
 
-export const DEFAULT_IMAGE_PROMPT_TEMPLATE = `{{style_prefix}} Concept Art for Video Games, {{visual_description}}, {{time_of_day}}, {{weather}}, {{mood}} lighting, a wide angled background, cinematic lighting, high detail, uncluttered in the centre.
+export const DEFAULT_IMAGE_PROMPT_TEMPLATE = `{{style_prefix}} Concept Art for Video Games, {{visual_description}}, a wide angled background, cinematic lighting, high detail, uncluttered in the centre.
 
 Style: Concept Art for Video Games, in the style of Frank Cho, comic book style.`;
+
+/** The one seed used for every image-gen call (bg renders + the Connections test button). A
+ *  fixed seed makes the same prompt deterministically produce the same image — the room's bg is
+ *  canonical, never re-varied by chance, and a re-render (e.g. after row churn) is pixel-identical
+ *  to the cached one. Text LLM calls stay seed-less (provider-random) so reruns/swipes vary. */
+export const IMAGE_GEN_SEED = 12345;
 
 /** A location's environment jsonb (db/migrations/0045_locations.sql) — time of day, weather, mood
  *  and lighting are the four environmental parameters endpoint.md §2.3/§4.2 names. Each may be

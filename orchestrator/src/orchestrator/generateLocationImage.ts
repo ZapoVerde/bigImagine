@@ -78,7 +78,7 @@ import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
-import { synthesizeImagePrompt } from '../util/synthesizeImagePrompt.js';
+import { synthesizeImagePrompt, IMAGE_GEN_SEED } from '../util/synthesizeImagePrompt.js';
 
 export interface LocationImageGenDeps {
   db: PostgresClient;
@@ -119,7 +119,9 @@ function currentInputs(row: LocationRow): RenderInputSnapshot {
   return {
     visual_description: row.visual_description,
     environment: row.environment,
-    seed: row.seed,
+    // The effective seed — legacy rows have locations.seed null, but every render now runs on
+    // the shared fixed seed, and the snapshot must record what was actually sent to the provider.
+    seed: row.seed ?? IMAGE_GEN_SEED,
   };
 }
 
@@ -129,7 +131,7 @@ function inputsMatchSnapshot(row: LocationRow): boolean {
   return (
     snapshot.visual_description === row.visual_description &&
     JSON.stringify(snapshot.environment ?? {}) === JSON.stringify(row.environment ?? {}) &&
-    snapshot.seed === row.seed
+    snapshot.seed === (row.seed ?? IMAGE_GEN_SEED)
   );
 }
 
@@ -264,7 +266,7 @@ export async function generateLocationImage(
       cfgScale: profile.cfgScale ?? null,
       samplerName: profile.samplerName ?? null,
       workflowParameters: profile.workflowParameters ?? null,
-      seed: row.seed,
+      seed: row.seed ?? IMAGE_GEN_SEED,
     });
 
     // §5.1.2 cache validation, re-keyed to the prompt hash: an image URL whose render hash
@@ -319,7 +321,7 @@ export async function generateLocationImage(
         baseUrl: profile.baseUrl,
         width: profile.width,
         height: profile.height,
-        seed: row.seed,
+        seed: row.seed ?? IMAGE_GEN_SEED,
         steps: profile.samplingSteps,
         cfgScale: profile.cfgScale,
         samplerName: profile.samplerName,

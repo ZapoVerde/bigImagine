@@ -125,7 +125,7 @@ import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
 import type { ImageConnectionInit, ImageConnectionKind, ImageConnectionPatch, ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
-import { synthesizeImagePrompt } from '../util/synthesizeImagePrompt.js';
+import { synthesizeImagePrompt, IMAGE_GEN_SEED } from '../util/synthesizeImagePrompt.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
@@ -755,7 +755,7 @@ export async function testImageConnection(
       baseUrl: profile.baseUrl,
       width: profile.width,
       height: profile.height,
-      seed: null,
+      seed: IMAGE_GEN_SEED,
       steps: profile.samplingSteps,
       cfgScale: profile.cfgScale,
       samplerName: profile.samplerName,

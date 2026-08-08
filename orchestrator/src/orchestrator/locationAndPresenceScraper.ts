@@ -55,6 +55,7 @@
 import type { PostgresClient } from '../io/postgres.js';
 import type { DbSession } from '../io/postgres.js';
 import { log } from '../io/logger.js';
+import { IMAGE_GEN_SEED } from '../util/synthesizeImagePrompt.js';
 
 /** The two-line header block (docs/vistalyze_integration/cleanup_prompt.md §2.4), parsed. */
 export interface StoryHeader {
@@ -188,9 +189,17 @@ async function extractFromHeader(
  *  active-timeline signal, so the row must follow the current turn's swipe, not stay pinned to
  *  the turn that first created it (which the sync tick may otherwise demote as an alternate
  *  timeline even though the live story still stands in it). Permanent/user-authored rows keep
- *  their identity untouched. Known edge, consistent with the timeline model: regenerating the
- *  turn that last re-anchored a row makes that row ineligible (its swipe became an alternate)
- *  and the next scrape legitimately starts a fresh row for the new branch. */
+ *  their identity untouched.
+ *
+ *  The no-match mint path carries the rendered image fingerprint (§4.2.5, endpoint.md §5.1.2's
+ *  "same place reuses its image" rule): a rerun/regeneration of the turn that anchored a row
+ *  supersedes that row's swipe, making the row ineligible for a later revisit — the same room
+ *  would otherwise mint a fresh row and re-render a pixel-identical bg (identical name and, with
+ *  the shared fixed seed, an identical provider output). Instead the new row clones the most
+ *  recent same-named row's seed/image_url/image_rendered_input/image_render_hash (scoped to this
+ *  chat, so another chat's row of the same name never leaks in), which makes the follow-up
+ *  generation pass a §5.1.2 cache hit: zero provider cost, and the visible bg never changes for
+ *  the same room. A genuinely new place (no prior image) mints blank and renders as before. */
 async function resolveLocation(
   session: DbSession,
   userId: string,
@@ -220,11 +229,38 @@ async function resolveLocation(
     );
     return matched[0].location_id;
   }
+
+  // §4.2.5 same-place carry — the row-churn reuse described in the docstring above.
+  const [prior] = await session.query<{
+    image_url: string | null;
+    image_rendered_input: unknown;
+    image_render_hash: string | null;
+    seed: number | null;
+  }>(
+    `select image_url, image_rendered_input, image_render_hash, seed
+     from locations
+     where user_id = $1 and name = $2 and anchor_chat_id = $3 and image_url is not null
+     order by image_generated_at desc nulls last
+     limit 1`,
+    [userId, header.location, chatId],
+  );
+
   const [created] = await session.query<{ location_id: string }>(
-    `insert into locations (user_id, name, visual_description, environment, status, anchor_chat_id, anchor_swipe_id)
-     values ($1, $2, $3, $4::jsonb, 'transient', $5, $6)
+    `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
+     values ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, 'transient', $9, $10)
      returning location_id`,
-    [userId, header.location, header.location, environment, chatId, swipeId],
+    [
+      userId,
+      header.location,
+      header.location,
+      environment,
+      prior?.seed ?? IMAGE_GEN_SEED,
+      prior?.image_url ?? null,
+      prior?.image_rendered_input ?? null,
+      prior?.image_render_hash ?? null,
+      chatId,
+      swipeId,
+    ],
   );
   return created!.location_id;
 }
