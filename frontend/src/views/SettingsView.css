@@ -31,6 +31,24 @@
   box-sizing: border-box;
 }
 
+/* The Chat Background fieldset's sliders/color pickers: range gets a full-width track with the
+   accent color, color stays a compact swatch (the generic input rule above would stretch it). */
+.settings-view input[type='range'] {
+  padding: 0;
+  margin: 0.3rem 0;
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.settings-view input[type='color'] {
+  padding: 0.1rem;
+  margin: 0.2rem 0;
+  width: 3.5rem;
+  height: 2rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
 .badge-yes {
   color: var(--color-success);
 }

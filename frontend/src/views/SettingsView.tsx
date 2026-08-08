@@ -141,10 +141,21 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedImageTemplate, setSelectedImageTemplate] = useState('');
   const [imageStatus, setImageStatus] = useState('');
 
-  // Chat background parallax (parallax_fade_teststep.md §2.2) — the saved value and the
-  // in-progress selection, mirroring the other toggle fieldsets.
+  // Chat background (parallax_fade_teststep.md §2.2 + migration 0073) — the parallax pan
+  // toggle, the dimming veil ("overlay") over the location background, and the bubble fill.
+  // Saved values + in-progress selections, mirroring the other fieldsets.
   const [chatBackgroundParallax, setChatBackgroundParallax] = useState(false);
   const [selectedParallax, setSelectedParallax] = useState(false);
+  const [chatBackgroundOverlayOpacity, setChatBackgroundOverlayOpacity] = useState(0.5);
+  const [selectedOverlayOpacity, setSelectedOverlayOpacity] = useState(0.5);
+  const [chatBackgroundOverlayShade, setChatBackgroundOverlayShade] = useState('#000000');
+  const [selectedOverlayShade, setSelectedOverlayShade] = useState('#000000');
+  const [chatBackgroundBubbleOpacity, setChatBackgroundBubbleOpacity] = useState(0.7);
+  const [selectedBubbleOpacity, setSelectedBubbleOpacity] = useState(0.7);
+  const [chatBackgroundBubbleUserShade, setChatBackgroundBubbleUserShade] = useState('#4f46e5');
+  const [selectedBubbleUserShade, setSelectedBubbleUserShade] = useState('#4f46e5');
+  const [chatBackgroundBubbleAssistantShade, setChatBackgroundBubbleAssistantShade] = useState('#26272c');
+  const [selectedBubbleAssistantShade, setSelectedBubbleAssistantShade] = useState('#26272c');
   const [chatBackgroundStatus, setChatBackgroundStatus] = useState('');
 
   function applyNotificationSettings(settings: NotificationSettings) {
@@ -190,6 +201,16 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
     setChatBackgroundParallax(settings.parallaxEnabled);
     setSelectedParallax(settings.parallaxEnabled);
+    setChatBackgroundOverlayOpacity(settings.overlayOpacity);
+    setSelectedOverlayOpacity(settings.overlayOpacity);
+    setChatBackgroundOverlayShade(settings.overlayShade);
+    setSelectedOverlayShade(settings.overlayShade);
+    setChatBackgroundBubbleOpacity(settings.bubbleOpacity);
+    setSelectedBubbleOpacity(settings.bubbleOpacity);
+    setChatBackgroundBubbleUserShade(settings.bubbleUserShade);
+    setSelectedBubbleUserShade(settings.bubbleUserShade);
+    setChatBackgroundBubbleAssistantShade(settings.bubbleAssistantShade);
+    setSelectedBubbleAssistantShade(settings.bubbleAssistantShade);
   }
 
   // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
@@ -270,10 +291,27 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   }
 
   async function saveChatBackgroundSettings() {
-    if (selectedParallax === chatBackgroundParallax) return;
+    const value: ChatBackgroundSettings = {
+      parallaxEnabled: selectedParallax,
+      overlayOpacity: selectedOverlayOpacity,
+      overlayShade: selectedOverlayShade,
+      bubbleOpacity: selectedBubbleOpacity,
+      bubbleUserShade: selectedBubbleUserShade,
+      bubbleAssistantShade: selectedBubbleAssistantShade,
+    };
+    if (
+      value.parallaxEnabled === chatBackgroundParallax &&
+      value.overlayOpacity === chatBackgroundOverlayOpacity &&
+      value.overlayShade === chatBackgroundOverlayShade &&
+      value.bubbleOpacity === chatBackgroundBubbleOpacity &&
+      value.bubbleUserShade === chatBackgroundBubbleUserShade &&
+      value.bubbleAssistantShade === chatBackgroundBubbleAssistantShade
+    ) {
+      return;
+    }
     setChatBackgroundStatus('');
     try {
-      const updated = await adminSetChatBackgroundSettings(selectedParallax, adminKey);
+      const updated = await adminSetChatBackgroundSettings(value, adminKey);
       applyChatBackgroundSettings(updated);
       setChatBackgroundStatus('Saved — takes effect on the next chat view load, no restart needed.');
     } catch (err) {
@@ -594,8 +632,76 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           (parallax_fade_teststep.md §2), matching SillyTavern-Vistalyze's parallax. Off by
           default; takes effect on the next chat view load.
         </div>
+        <label>
+          Background overlay opacity ({Math.round(selectedOverlayOpacity * 100)}%)
+          <br />
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(selectedOverlayOpacity * 100)}
+            onChange={(e) => setSelectedOverlayOpacity(Number(e.target.value) / 100)}
+          />
+        </label>
+        <div className="status">
+          The dimming veil over the location image — lower it to let the background show more
+          clearly between the bubbles (which keep their own opacity below).
+        </div>
+        <label>
+          Background overlay shade
+          <br />
+          <input
+            type="color"
+            value={selectedOverlayShade}
+            onChange={(e) => setSelectedOverlayShade(e.target.value)}
+          />
+        </label>
+        <div className="status">The veil's color — black by default; pick a tint to warm or cool the background.</div>
+        <label>
+          Bubble opacity ({Math.round(selectedBubbleOpacity * 100)}%)
+          <br />
+          <input
+            type="range"
+            min={0}
+            max={100}
+            value={Math.round(selectedBubbleOpacity * 100)}
+            onChange={(e) => setSelectedBubbleOpacity(Number(e.target.value) / 100)}
+          />
+        </label>
+        <div className="status">
+          How much of the background shows through the bubbles' fill (the bubble text stays fully
+          opaque).
+        </div>
+        <label>
+          User bubble shade
+          <br />
+          <input
+            type="color"
+            value={selectedBubbleUserShade}
+            onChange={(e) => setSelectedBubbleUserShade(e.target.value)}
+          />
+        </label>
+        <label>
+          Assistant bubble shade
+          <br />
+          <input
+            type="color"
+            value={selectedBubbleAssistantShade}
+            onChange={(e) => setSelectedBubbleAssistantShade(e.target.value)}
+          />
+        </label>
         <br />
-        <button onClick={saveChatBackgroundSettings} disabled={selectedParallax === chatBackgroundParallax}>
+        <button
+          onClick={saveChatBackgroundSettings}
+          disabled={
+            selectedParallax === chatBackgroundParallax &&
+            selectedOverlayOpacity === chatBackgroundOverlayOpacity &&
+            selectedOverlayShade === chatBackgroundOverlayShade &&
+            selectedBubbleOpacity === chatBackgroundBubbleOpacity &&
+            selectedBubbleUserShade === chatBackgroundBubbleUserShade &&
+            selectedBubbleAssistantShade === chatBackgroundBubbleAssistantShade
+          }
+        >
           Save
         </button>
         <div className="status">{chatBackgroundStatus}</div>

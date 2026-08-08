@@ -25,8 +25,11 @@
   flex-direction: column;
   min-width: 0;
   /* The location background layer (endpoint.md §6.4) sits absolutely behind the scroll area —
-     .chat-main is the positioning context, the header/history/rail paint above it. */
+     .chat-main is the positioning context, the header/history/rail paint above it. overflow:
+     hidden clips the parallax-oversized layer (100% + 400px, shifted -200px, §2) to this pane,
+     so the pan can never paint over the side panels (CanvasPanel / settings rail) beside it. */
   position: relative;
+  overflow: hidden;
 }
 
 .chat-location-background {
@@ -35,27 +38,40 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* Resting opacity: high enough that the location image reads clearly in the gaps between
-     bubbles (it sits behind the conversation — see the z-index rule below), while the bubbles
-     themselves, which let the image through at ~15% (see tokens.css's rgba bubble backgrounds),
-     keep their partially-opaque look. */
-  opacity: 0.5;
+  /* Full opacity here — the dimming is the .chat-location-overlay veil (settings-controlled,
+     migration 0073), not a translucent image over the page background. The veil's resting 50%
+     black preserves the pre-0073 look (bg reading clearly in the gaps between bubbles, the
+     bubbles themselves keeping their own partially-opaque fill). */
+  opacity: 1;
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* The dimming veil over the location background (migration 0073): paints above the image (both
+   are z-index 0 siblings, DOM order decides) and below every content child (z-index 1, the rule
+   below). Its opacity + shade come from the Settings "Chat Background" fieldset via CSS custom
+   properties on .chat-view; the fallbacks are the built-in defaults (50% black). */
+.chat-location-overlay {
+  position: absolute;
+  inset: 0;
+  background: var(--chat-bg-overlay-shade, #000000);
+  opacity: var(--chat-bg-overlay-opacity, 0.5);
   pointer-events: none;
   z-index: 0;
 }
 
 /* Fade transition classes (parallax_fade_teststep.md §3): ST Vistalyze's single-layer rhythm —
-   fade the old layer out (0.3s), swap src, fade the new one in (0.6s). The resting state is the
-   base .chat-location-background opacity (0.5); .vistalyze-fade-out animates to 0 and
-   .vistalyze-fade-in animates back from 0 to 0.5. The img is not keyed by URL — these classes
-   drive the transition on one persistent element. */
+   fade the old layer out (0.3s), swap src, fade the new one in (0.6s). The resting image is at
+   full opacity (the .chat-location-overlay veil does the dimming); .vistalyze-fade-out animates
+   to 0 and .vistalyze-fade-in animates back from 0 to 1. The img is not keyed by URL — these
+   classes drive the transition on one persistent element. */
 .chat-location-background.vistalyze-fade-out {
   opacity: 0;
   transition: opacity 0.3s ease-in-out;
 }
 
 .chat-location-background.vistalyze-fade-in {
-  opacity: 0.5;
+  opacity: 1;
   transition: opacity 0.6s ease-in-out;
 }
 
@@ -70,12 +86,12 @@
   will-change: transform;
 }
 
-/* The location background layer sits behind the conversation: every other child of .chat-main
-   (history, input row, staging/delete bars) paints above it, so the gaps between bubbles show
-   the location image and the bubbles stay legible. The rule is deliberately before
+/* The location background + its overlay veil sit behind the conversation: every other child of
+   .chat-main (history, input row, staging/delete bars) paints above them, so the gaps between
+   bubbles show the location image and the bubbles stay legible. The rule is deliberately before
    `.chat-main > .chat-top-bar` below (equal specificity — later wins), which re-raises the
    header and its dropdown menu above the history. */
-.chat-main > :not(.chat-location-background) {
+.chat-main > :not(.chat-location-background, .chat-location-overlay) {
   position: relative;
   z-index: 1;
 }
@@ -462,13 +478,25 @@
 
 .chat-bubble.user {
   align-self: flex-end;
-  background: var(--color-bubble-user-bg);
+  /* The fill is a solid shade at a settings-controlled alpha (migration 0073): ChatView sets
+     --chat-bubble-user-shade / --chat-bubble-opacity as custom properties, falling back to the
+     per-theme token color and the built-in 70% alpha. color-mix with transparent turns the
+     solid shade into the same partially-opaque fill the old hardcoded rgba tokens carried. */
+  background: color-mix(
+    in srgb,
+    var(--chat-bubble-user-shade, var(--color-bubble-user-shade)) var(--chat-bubble-opacity, 70%),
+    transparent
+  );
   color: var(--color-bubble-user-text);
 }
 
 .chat-bubble.assistant {
   align-self: flex-start;
-  background: var(--color-bubble-assistant-bg);
+  background: color-mix(
+    in srgb,
+    var(--chat-bubble-assistant-shade, var(--color-bubble-assistant-shade)) var(--chat-bubble-opacity, 70%),
+    transparent
+  );
   color: var(--color-bubble-assistant-text);
 }
 

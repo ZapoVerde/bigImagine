@@ -124,6 +124,16 @@
  * household_timezone (the value is fetched fresh, never baked in at boot), written by the
  * admin-gated SettingsView "Chat Background" toggle.
  *
+ * chat_background_overlay_opacity / chat_background_overlay_shade /
+ * chat_background_bubble_opacity / chat_background_bubble_user_shade /
+ * chat_background_bubble_assistant_shade (migration 0073, the ChatView background FX settings)
+ * are the rest of that same "Chat Background" fieldset: the dimming veil over the location
+ * background (opacity text '0'..'1' default 0.5, shade hex default '#000000') and the bubble
+ * fill (opacity text '0'..'1' default 0.7, user/assistant shade hexes defaulting to the dark-
+ * theme bubble colors '#4f46e5'/'#26272c'). Same read-live-at-chat-load shape as parallax; the
+ * frontend applies them as CSS custom properties on the chat view, so no restart and no rebuild
+ * for a look change.
+ *
  * cleanup_header_regex/cleanup_header_prompt/cleanup_footer_regex/cleanup_footer_prompt
  * (migration 0072, the async heuristic cleanup subloop) are the Cleanup page's setup config:
  * the two editable regex triggers (header two-line shape `[ … | … | …]` + `Present: …`; footer
@@ -188,6 +198,11 @@ export const SETTING_NAMES = [
   'cleanup_header_prompt',
   'cleanup_footer_regex',
   'cleanup_footer_prompt',
+  'chat_background_overlay_opacity',
+  'chat_background_overlay_shade',
+  'chat_background_bubble_opacity',
+  'chat_background_bubble_user_shade',
+  'chat_background_bubble_assistant_shade',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

@@ -1857,11 +1857,14 @@ async function handleChatBackgroundSettingsSet(req: IncomingMessage, res: Server
 
   const value = parseSetChatBackgroundSettingsBody(raw);
   if (!value) {
-    sendJson(res, 400, { error: 'expected { parallaxEnabled: true | false }' });
+    sendJson(res, 400, {
+      error:
+        'expected a partial { parallaxEnabled?, overlayOpacity?, overlayShade?, bubbleOpacity?, bubbleUserShade?, bubbleAssistantShade? } with at least one field',
+    });
     return;
   }
 
-  await setChatBackgroundSettings(deps.settings, value.parallaxEnabled ?? false);
+  await setChatBackgroundSettings(deps.settings, value);
   sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
 }
 

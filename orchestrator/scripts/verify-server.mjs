@@ -2340,7 +2340,7 @@ server.close();
   const tzAfterSaveBody = await tzAfterSaveRes.json();
   assert(tzAfterSaveBody.timezone === 'America/New_York', 'GET /v1/admin/timezone reflects the newly saved value with no restart required');
 
-  // --- Chat background settings routes (parallax_fade_teststep.md §2.2) ---
+  // --- Chat background settings routes (parallax_fade_teststep.md §2.2 + migration 0073) ---
   // Same server4/settings4 — the user-scoped GET and the admin POST share the store.
   const bgUserNoAuthRes = await fetch(`${base4}/v1/chat-background-settings`);
   assert(bgUserNoAuthRes.status === 401, 'GET /v1/chat-background-settings with no auth header returns 401');
@@ -2350,8 +2350,14 @@ server.close();
   });
   const bgUserBody = await bgUserRes.json();
   assert(
-    bgUserRes.status === 200 && bgUserBody.parallaxEnabled === false,
-    'GET /v1/chat-background-settings defaults to false (parallax off) before anything has been saved',
+    bgUserRes.status === 200 &&
+      bgUserBody.parallaxEnabled === false &&
+      bgUserBody.overlayOpacity === 0.5 &&
+      bgUserBody.overlayShade === '#000000' &&
+      bgUserBody.bubbleOpacity === 0.7 &&
+      bgUserBody.bubbleUserShade === '#4f46e5' &&
+      bgUserBody.bubbleAssistantShade === '#26272c',
+    'GET /v1/chat-background-settings defaults (parallax off, veil 0.5 black, bubbles 0.7 dark-theme shades) before anything has been saved',
   );
 
   const bgAdminNoAuthRes = await fetch(`${base4}/v1/admin/chat-background-settings`);
@@ -2364,26 +2370,68 @@ server.close();
   });
   assert(bgBadRes.status === 400, 'POST /v1/admin/chat-background-settings rejects a non-boolean parallaxEnabled');
 
+  const bgBadOpacityRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ overlayOpacity: 1.5 }),
+  });
+  assert(bgBadOpacityRes.status === 400, 'POST /v1/admin/chat-background-settings rejects an out-of-range overlayOpacity');
+
+  const bgBadShadeRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ bubbleUserShade: 'indigo' }),
+  });
+  assert(bgBadShadeRes.status === 400, 'POST /v1/admin/chat-background-settings rejects a non-hex bubbleUserShade');
+
+  const bgEmptyRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({}),
+  });
+  assert(bgEmptyRes.status === 400, 'POST /v1/admin/chat-background-settings rejects an empty body');
+
   const bgOkRes = await fetch(`${base4}/v1/admin/chat-background-settings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-    body: JSON.stringify({ parallaxEnabled: true }),
+    body: JSON.stringify({
+      parallaxEnabled: true,
+      overlayOpacity: 0.35,
+      overlayShade: '#1a1024',
+      bubbleOpacity: 0.8,
+      bubbleUserShade: '#7c3aed',
+      bubbleAssistantShade: '#1f2937',
+    }),
   });
   const bgOkBody = await bgOkRes.json();
   assert(
-    bgOkRes.status === 200 && bgOkBody.parallaxEnabled === true,
-    'POST /v1/admin/chat-background-settings returns 200 with the saved value (no restart)',
+    bgOkRes.status === 200 &&
+      bgOkBody.parallaxEnabled === true &&
+      bgOkBody.overlayOpacity === 0.35 &&
+      bgOkBody.overlayShade === '#1a1024' &&
+      bgOkBody.bubbleOpacity === 0.8 &&
+      bgOkBody.bubbleUserShade === '#7c3aed' &&
+      bgOkBody.bubbleAssistantShade === '#1f2937',
+    'POST /v1/admin/chat-background-settings returns 200 with every saved value (no restart)',
   );
   assert(
-    settings4.setCalls.some((c) => c.key === 'chat_background_parallax' && c.value === 'true'),
-    'the settings store recorded the parallax write as text true',
+    settings4.setCalls.some((c) => c.key === 'chat_background_parallax' && c.value === 'true') &&
+      settings4.setCalls.some((c) => c.key === 'chat_background_overlay_opacity' && c.value === '0.35') &&
+      settings4.setCalls.some((c) => c.key === 'chat_background_overlay_shade' && c.value === '#1a1024') &&
+      settings4.setCalls.some((c) => c.key === 'chat_background_bubble_opacity' && c.value === '0.8') &&
+      settings4.setCalls.some((c) => c.key === 'chat_background_bubble_user_shade' && c.value === '#7c3aed') &&
+      settings4.setCalls.some((c) => c.key === 'chat_background_bubble_assistant_shade' && c.value === '#1f2937'),
+    'the settings store recorded every FX write as text',
   );
 
   const bgAfterSaveRes = await fetch(`${base4}/v1/chat-background-settings`, {
     headers: { authorization: 'Bearer good-key-4' },
   });
   const bgAfterSaveBody = await bgAfterSaveRes.json();
-  assert(bgAfterSaveBody.parallaxEnabled === true, 'the user-scoped GET reflects the newly saved value with no restart');
+  assert(
+    bgAfterSaveBody.parallaxEnabled === true && bgAfterSaveBody.bubbleUserShade === '#7c3aed',
+    'the user-scoped GET reflects the newly saved values with no restart',
+  );
 
   server4.close();
 }

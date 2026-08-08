@@ -221,10 +221,10 @@ export async function getChatLocationImage(
   return jsonRequest(`/v1/chats/${encodeURIComponent(chatId)}/location-image`, apiKey);
 }
 
-/** GET /v1/chat-background-settings — the ChatView location-background parallax toggle
- *  (parallax_fade_teststep.md §2.2), same household-key/Access auth as getTimezone: ChatView
- *  reads it live at chat load, before anyone would have entered the separate admin key. Defaults
- *  to false when unset. */
+/** GET /v1/chat-background-settings — the ChatView location-background controls (parallax
+ *  toggle + the overlay/bubble FX, parallax_fade_teststep.md §2.2 + migration 0073), same
+ *  household-key/Access auth as getTimezone: ChatView reads them live at chat load, before
+ *  anyone would have entered the separate admin key. Defaults when unset. */
 export async function getChatBackgroundSettings(apiKey: string | null): Promise<ChatBackgroundSettings> {
   const res = await fetch('/v1/chat-background-settings', { headers: authHeaders(apiKey) });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
@@ -532,21 +532,24 @@ export function adminSetImageSettings(template: string, adminKey: string | null)
   return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey, { method: 'POST', body: { template } });
 }
 
-/** GET /v1/admin/chat-background-settings — the SettingsView "Chat Background" toggle's saved
- *  value (parallax_fade_teststep.md §2.2), admin-gated like every other Settings-tab GET. */
+/** GET /v1/admin/chat-background-settings — the SettingsView "Chat Background" fieldset's saved
+ *  values (parallax_fade_teststep.md §2.2 + migration 0073), admin-gated like every other
+ *  Settings-tab GET. */
 export function adminGetChatBackgroundSettings(adminKey: string | null): Promise<ChatBackgroundSettings> {
   return jsonRequest<ChatBackgroundSettings>('/v1/admin/chat-background-settings', adminKey);
 }
 
-/** POST /v1/admin/chat-background-settings — the SettingsView "Chat Background" toggle
- *  (parallax_fade_teststep.md §2.2). No restart: ChatView re-reads the value live at chat load. */
+/** POST /v1/admin/chat-background-settings — the SettingsView "Chat Background" fieldset
+ *  (parallax_fade_teststep.md §2.2 + migration 0073). Sends the full settings object (the
+ *  server treats it as a partial patch). No restart: ChatView re-reads the values live at chat
+ *  load. */
 export function adminSetChatBackgroundSettings(
-  parallaxEnabled: boolean,
+  value: ChatBackgroundSettings,
   adminKey: string | null,
 ): Promise<ChatBackgroundSettings> {
   return jsonRequest<ChatBackgroundSettings>('/v1/admin/chat-background-settings', adminKey, {
     method: 'POST',
-    body: { parallaxEnabled },
+    body: value,
   });
 }
 

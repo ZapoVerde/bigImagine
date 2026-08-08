@@ -248,12 +248,23 @@ export interface ImageConnectionTestResult {
   error?: string;
 }
 
-/** orchestrator/src/server/adminServer.ts ChatBackgroundSettings — parallax_fade_teststep.md §2.2:
- *  the ChatView location-background parallax toggle. Stored as 'true'/'false' text in
- *  orchestrator_settings (migration 0069); defaults to false when unset (ST's parallaxEnabled
- *  default). */
+/** orchestrator/src/server/adminServer.ts ChatBackgroundSettings — parallax_fade_teststep.md §2.2
+ *  + migration 0073: the ChatView location-background controls (parallax pan toggle, the dimming
+ *  veil over the location image, and the bubble fill). Stored as text in orchestrator_settings;
+ *  defaults when unset: parallax false, veil 0.5 '#000000', bubbles 0.7 '#4f46e5'/'#26272c' (the
+ *  dark-theme colors). ChatView applies them as CSS custom properties at chat load. */
 export interface ChatBackgroundSettings {
   parallaxEnabled: boolean;
+  /** 0..1 — the veil's strength over the location background (default 0.5). */
+  overlayOpacity: number;
+  /** '#rrggbb' — the veil's color (default '#000000'). */
+  overlayShade: string;
+  /** 0..1 — bubble background alpha (default 0.7). */
+  bubbleOpacity: number;
+  /** '#rrggbb' — user bubble fill (default '#4f46e5'). */
+  bubbleUserShade: string;
+  /** '#rrggbb' — assistant bubble fill (default '#26272c'). */
+  bubbleAssistantShade: string;
 }
 
 // orchestrator/src/server/adminServer.ts ImageSettings — the master image prompt template

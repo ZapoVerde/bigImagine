@@ -32,6 +32,7 @@ import { formatPricePerMillion } from '../api/pricing';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
   ApplyPromptStackToChatResult,
+  ChatBackgroundSettings,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -177,31 +178,49 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [bgFadeClass, setBgFadeClass] = useState('');
   const bgFadeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Parallax (parallax_fade_teststep.md §2): read live from the orchestrator at chat load (the
-  // household-key user gate, same shape as /v1/timezone); the attach effect below only engages
-  // when it's on AND a background image is present.
-  const [parallaxEnabled, setParallaxEnabled] = useState(false);
+  // Chat background settings (parallax_fade_teststep.md §2.2 + migration 0073): the whole set —
+  // parallax toggle, overlay veil opacity/shade, bubble opacity/shades — read live from the
+  // orchestrator at chat load (the household-key user gate, same shape as /v1/timezone). The
+  // parallax attach effect below only engages when it's on AND a background image is present;
+  // the other fields become CSS custom properties on the view root (chatBgStyle below), which
+  // the overlay/bubble rules in ChatView.css consume. null until the fetch resolves = the CSS
+  // fallbacks (theme tokens + built-in 0.5/70% defaults) apply.
+  const [bgSettings, setBgSettings] = useState<ChatBackgroundSettings | null>(null);
   const chatMainRef = useRef<HTMLDivElement | null>(null);
   const bgRef = useRef<HTMLImageElement | null>(null);
 
   useEffect(() => {
     getChatBackgroundSettings(apiKey)
-      .then((s) => setParallaxEnabled(s.parallaxEnabled))
-      .catch(() => setParallaxEnabled(false));
+      .then(setBgSettings)
+      .catch(() => setBgSettings(null));
   }, [apiKey]);
+
+  // The settings, as CSS custom properties for ChatView.css: the overlay veil (opacity is a
+  // plain 0..1 number — the CSS `opacity` property accepts it directly) and the bubble fill
+  // (opacity as a percentage — color-mix needs one). Unitless/percentage strings so the rules
+  // below can just var() them.
+  const chatBgStyle = bgSettings
+    ? ({
+        '--chat-bg-overlay-opacity': String(bgSettings.overlayOpacity),
+        '--chat-bg-overlay-shade': bgSettings.overlayShade,
+        '--chat-bubble-opacity': `${Math.round(bgSettings.bubbleOpacity * 100)}%`,
+        '--chat-bubble-user-shade': bgSettings.bubbleUserShade,
+        '--chat-bubble-assistant-shade': bgSettings.bubbleAssistantShade,
+      } as React.CSSProperties)
+    : undefined;
 
   // Attach/dispose the parallax pan (parallax_fade_teststep.md §2.3): the img element persists
   // across URL fades (it is not keyed), so this effect keys on whether an image is present at
   // all + the toggle, not on the URL itself. Disposing is mandatory on unmount/disable/chat
   // switch so no rAF loop outlives this view.
   useEffect(() => {
-    if (!parallaxEnabled || !bgUrl) return;
+    if (!bgSettings?.parallaxEnabled || !bgUrl) return;
     const container = chatMainRef.current;
     const img = bgRef.current;
     if (!container || !img) return;
     const handle = attachBackgroundParallax(container, img);
     return () => handle.dispose();
-  }, [parallaxEnabled, bgUrl !== null]);
+  }, [bgSettings?.parallaxEnabled, bgUrl !== null]);
 
   useEffect(() => {
     const next = locationImage?.imageUrl ?? null;
@@ -209,7 +228,13 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // image bounced back to the current URL mid-fade), the old timer must not fire and swap to a
     // stale URL.
     if (bgFadeTimerRef.current) clearTimeout(bgFadeTimerRef.current);
-    if (next === bgUrl) return;
+    if (next === bgUrl) {
+      // Bounced back to the currently displayed URL mid-fade: the pending swap is cancelled
+      // above, and the layer must return to its resting state too — otherwise the fade-out
+      // class (opacity 0) sticks until the next URL change leaves the background invisible.
+      setBgFadeClass('');
+      return;
+    }
     if (bgUrl === null) {
       // First paint (or recovery from a broken link): show immediately — no fade-out of nothing.
       setBgUrl(next);
@@ -939,7 +964,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   );
 
   return (
-    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}>
+    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={chatBgStyle}>
       {promptInspectorOpen && activeChat?.kind === 'rp' && (
         <PromptInspectorPanel
           apiKey={apiKey}
@@ -957,17 +982,24 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           // faded between URLs by the state machine above (parallax_fade_teststep.md §3).
           // onError = §5.2's broken-link expiry recovery — notify the server to clear the stale
           // URL (next visit re-renders), then drop the layer rather than showing a broken image.
-          <img
-            ref={bgRef}
-            className={`chat-location-background ${bgFadeClass}`.trim()}
-            src={bgUrl}
-            alt=""
-            aria-hidden="true"
-            onError={() => {
-              reportBrokenLocationImage(locationImage?.locationId ?? '', apiKey).catch(() => {});
-              setLocationImage(null);
-            }}
-          />
+          // The sibling .chat-location-overlay div is the dimming veil: the image itself renders
+          // at full opacity and the veil (settings-controlled opacity + shade, migration 0073)
+          // darkens it, so the background stays visible between bubbles and the content above
+          // stays legible.
+          <>
+            <img
+              ref={bgRef}
+              className={`chat-location-background ${bgFadeClass}`.trim()}
+              src={bgUrl}
+              alt=""
+              aria-hidden="true"
+              onError={() => {
+                reportBrokenLocationImage(locationImage?.locationId ?? '', apiKey).catch(() => {});
+                setLocationImage(null);
+              }}
+            />
+            <div className="chat-location-overlay" aria-hidden="true" />
+          </>
         )}
 
         <div className="chat-top-bar">

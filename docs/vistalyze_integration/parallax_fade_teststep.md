@@ -67,11 +67,22 @@ frontend constant:
 
 * **`chat_background_parallax`**: boolean, **default `false`** (matches ST's
   `parallaxEnabled=false`, `settings/data.js:49`).
-* New user-scoped `GET /v1/chat-background-settings` → `{ parallaxEnabled }` (ChatView reads it
-  at mount and after each settings save), plus admin-gated `POST /v1/admin/chat-background-settings`
-  — same shape as the existing `household_timezone` pair (`GET /v1/timezone` /
+* **`chat_background_overlay_opacity`** / **`chat_background_overlay_shade`** /
+  **`chat_background_bubble_opacity`** / **`chat_background_bubble_user_shade`** /
+  **`chat_background_bubble_assistant_shade`** (migration 0073, added 2026-08-08 after real
+  friction): the rest of the "Chat Background" fieldset. The location background renders at
+  full opacity behind a real **veil** layer (`.chat-location-overlay`, opacity 0..1 default
+  `0.5`, shade `#rrggbb` default `#000000`) so the user can dial the dimming — and tint it —
+  instead of a fixed translucent image; the bubbles' fill is a solid shade composited at an
+  alpha (opacity 0..1 default `0.7`, user shade default `#4f46e5`, assistant shade default
+  `#26272c`, the dark-theme colors). Unset = the built-in defaults above; the frontend applies
+  them as CSS custom properties on the chat view at load, no restart.
+* New user-scoped `GET /v1/chat-background-settings` → the full settings object (ChatView reads
+  it at mount and after each settings save), plus admin-gated
+  `POST /v1/admin/chat-background-settings` accepting a **partial** patch of any of the six
+  fields — same shape as the existing `household_timezone` pair (`GET /v1/timezone` /
   `POST /v1/admin/timezone` precedent).
-* Surfaced in SettingsView as a "Chat Background" fieldset toggle (bi_principles §13).
+* Surfaced in SettingsView as a "Chat Background" fieldset (bi_principles §13).
 
 ### 2.3 File Shape
 
@@ -104,11 +115,13 @@ should not play a fade-out of nothing (fade-in on first paint is fine).
 ### 3.2 CSS
 
 * `.chat-location-background.vistalyze-fade-out` → `opacity: 0; transition: opacity 0.3s ease-in-out`
-* `.chat-location-background.vistalyze-fade-in` → `opacity: 0.5; transition: opacity 0.6s ease-in-out`
-  (0.5 is the resting opacity, `ChatView.css` — the background layer sits behind the
-  conversation, and the bubble backgrounds carry a 0.7 alpha so it shows through them too)
-* The fade and parallax compose: parallax transforms the element, fade animates its opacity —
-  no conflict.
+* `.chat-location-background.vistalyze-fade-in` → `opacity: 1; transition: opacity 0.6s ease-in-out`
+  (the image renders at full opacity; the dimming that used to be the resting `0.5` opacity is
+  now the separate `.chat-location-overlay` veil, §2.2 migration 0073 — the fade stays a pure
+  image opacity rhythm and composes with the veil and the parallax pan)
+* The bubbles' partially-opaque fill (0.7 alpha) is now the shade tokens at a
+  settings-controlled alpha via `color-mix` (ChatView.css), so the location image shows through
+  the bubbles and the gaps between them, exactly as before — just user-adjustable.
 
 ### 3.3 File Shape
 
@@ -190,7 +203,10 @@ see is half a feature. Replace the text line with a **test-step result panel**:
 ### 5.1 Database
 * **`db/migrations/0069_chat_background_settings.sql`**: add `chat_background_parallax` to the
   `orchestrator_settings` key CHECK (widen the 0068 list) + grant to `bigimagine_app`.
-  *(Confirm 0069 is free before writing — 0068 was the last migration.)*
+  **`db/migrations/0073_chat_background_fx_settings.sql`** (added 2026-08-08): widen the same
+  CHECK with the five §2.2 FX keys.
+  *(0069 was applied when free — 0068 was the last migration then; both are applied to the live
+  DB by hand.)*
 
 ### 5.2 Orchestrator Core & IO
 * **`orchestrator/src/io/orchestratorSettings.ts`**: add `'chat_background_parallax'` to
