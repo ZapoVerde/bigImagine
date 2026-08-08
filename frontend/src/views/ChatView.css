@@ -199,6 +199,11 @@
   background: var(--color-hover-surface);
 }
 
+/* Inline branch icon (GitHub git-branch octicon) — sits on the text baseline at 1em. */
+.git-branch-icon {
+  vertical-align: -0.125em;
+}
+
 .chat-title {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
