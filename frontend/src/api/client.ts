@@ -820,7 +820,26 @@ export async function adminSetCleanupSettings(
   const res = await fetch('/v1/admin/cleanup-settings', {
     method: 'POST',
     headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
-    body: JSON.stringify(patch),
+    // Request bodies are snake_case on the wire (the server parses set_name/llm_prompt, etc.);
+    // responses come back camelCase — see CleanupSettings/SlopRule in types.ts. The caller
+    // works in camelCase (the GET shape); translate only for the POST.
+    body: JSON.stringify(
+      patch.slop_rules === undefined
+        ? patch
+        : {
+            ...patch,
+            slop_rules: patch.slop_rules.map((r) => ({
+              set_name: r.setName,
+              position: r.position,
+              pattern: r.pattern,
+              flags: r.flags,
+              action: r.action,
+              replacement: r.replacement,
+              llm_prompt: r.llmPrompt,
+              enabled: r.enabled,
+            })),
+          },
+    ),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<CleanupSettings>;
