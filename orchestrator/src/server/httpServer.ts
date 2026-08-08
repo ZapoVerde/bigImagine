@@ -135,13 +135,11 @@
  *
  * @api-declaration
  * startHttpServer(deps) — binds and listens on deps.port, returns the underlying http.Server
- * runCleanupPass(db, userId, chatId, cleanupPresetId, turnLlm, reply, historyMessages, settings?) —
- *   the fail-open post-turn cleanup LLM call (docs/vistalyze_integration/cleanup_prompt.md §4), with
- *   the last 2 turn pairs of historyMessages prepended for header/cast context (§3.2) unless the
- *   preset text opts into {{prev_turns, N}} — the macro's expansion (default 2 pairs); the
- *   optional settings store feeds {{user}}/{{char}} resolution (persona_name + the chat's linked
- *   character); exported
- *   only so orchestrator/scripts/verify-cleanup-pass.mjs can exercise it against stubs
+ *
+ * The legacy inline cleanup LLM pass (runCleanupPass) is gone — the reply lands raw and the async
+ * heuristic subloop (orchestrator/cleanupLoop.ts, migration 0072) rewrites it after the fact:
+ * GET /v1/cleanup/status is the pill's read surface and POST /v1/cleanup/run is the page's
+ * run-now trigger. See cleanupLoop.ts for the loop itself.
  *
  * @contract
  *   assertions:
@@ -162,16 +160,17 @@ import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { generateLocationImage } from '../orchestrator/generateLocationImage.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
-import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceItem } from '../io/promptTrace.js';
+import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promptTrace.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
+import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
-import { assemblePromptStack, type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
+import { type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
@@ -190,6 +189,7 @@ import {
   getChatMemorySettings,
   getChatMemorySyncStatus,
   getChatBackgroundSettings,
+  getCleanupSettings,
   getHouseholdTimezone,
   getImageSettings,
   getNotificationSettings,
@@ -204,6 +204,7 @@ import {
   parseSetCanonSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetChatBackgroundSettingsBody,
+  parseSetCleanupSettingsBody,
   parseSetCredentialBody,
   parseSetImageSettingsBody,
   parseSetNotificationSettingsBody,
@@ -216,6 +217,7 @@ import {
   setCanonSettings,
   setChatMemorySettings,
   setChatBackgroundSettings,
+  setCleanupSettings,
   setCredential,
   setHouseholdTimezone,
   setImageSettings,
@@ -669,163 +671,6 @@ async function assembleNarratorSystemText(
   return items.map((i) => i.content).join('\n\n');
 }
 
-// docs/turn-loop-plan.md §4: an optional, unconditional-when-set post-processing pass over the
-// raw generated turn — BigImagine's analogue of the user's real-world Triggeryze sideCall (banned
-// constructions/names/words, header reconstruction, internal-thoughts-suffix fixups). Per the
-// user's own direction, exposed as its own context_stack_presets row (mostly custom-type slots,
-// {{message}} embedded in their text) rather than a second, simpler "instruction content" schema —
-// so this reuses loadPromptStackSlots/assemblePromptStack exactly like the narrator does, just
-// with an empty fields object (a cleanup preset has no card/persona/memory fields to draw from,
-// only {{message}}) and each slot's own chosen role preserved rather than collapsed into one
-// system string, since this becomes its own fresh messages array, not a system-prompt fragment.
-//
-// Runs through the same gated llm.complete() (kind: 'chat', same taskId as the main turn — this
-// is part of the turn the user is waiting on, not a background job, so it should never be
-// throttled by agent_routine caps and gets the standard retry/backoff for free from llmGate.ts).
-// Exported only so orchestrator/scripts/verify-cleanup-pass.mjs can prove the fail-open contract
-// against a stub db/llm without booting a server.
-//
-// docs/vistalyze_integration/cleanup_prompt.md §3.2: historyMessages carries the turn's active
-// history (already trimToLiveWindow'd by the caller). A preset whose text references
-// {{prev_turns, N}} opts into text-form history: the macro expands to the last N turn pairs as
-// labeled User:/Assistant: lines, interpolated through interpolateMacros's resolveArg hook
-// (util/interpolateMacros.ts), N defaulting to 2 when the argument is omitted — the pair count is
-// prompt-controlled, not hardcoded. A preset that never references it keeps the legacy behavior:
-// the last 2 turn pairs prepended as messages, so a preset written before the macro existed
-// doesn't silently lose the history it was built against. Either way the cleanup model's source
-// for the ongoing conversation's voice, header (location/date/time), and cast state is previous
-// context — the user's explicit call: location and cast must be updatable from previous context,
-// not just from the raw reply. The built-in "Cleanup Pass" preset ships with {{prev_turns, 2}}.
-//
-// The interpolation snapshot is `{ message: reply }` plus {{user}}/{{char}}: the household
-// persona_name setting and the chat's linked character's name, resolved live per cleanup call
-// (resolveCleanupMacroSnapshot below) so an edit after Apply is reflected on the next turn. Both
-// are fail-soft — a lookup failure degrades them to empty rather than skipping the pass, which
-// would be a cosmetic macro costing the whole cleanup.
-//
-// docs/vistalyze_integration/cleanup_prompt.md §1's fail-open contract covers the whole function,
-// not just the LLM call: a slot-load failure (preset deleted mid-turn, DB hiccup), an empty
-// enabled-slot set, a provider timeout, or empty output all log and keep the raw reply unchanged.
-// Cleanup failing never blocks or degrades the turn itself.
-
-/** {{prev_turns, N}}'s expansion — the last N turn pairs of the active history, rendered as
- *  labeled User:/Assistant: lines, oldest first. "Pair" is the last 2N messages (a turn pair is
- *  one user + one assistant message; a history that ends mid-pair renders the messages it has,
- *  labeled by their actual role). Pure and deterministic (bi_principles.md §8): given the same
- *  history and pair count the text is byte-identical, so the same history yields the same
- *  expansion at every macro occurrence within one preset. */
-function formatPreviousTurns(history: LlmMessage[], pairs: number): string {
-  const kept = pairs > 0 ? history.slice(-pairs * 2) : [];
-  return kept
-    .map((m) => `${m.role === 'user' ? 'User' : m.role === 'assistant' ? 'Assistant' : m.role}: ${m.content}`)
-    .join('\n');
-}
-
-/** The {{prev_turns, N}} argument: a non-negative integer pair count; 2 (cleanup_prompt.md §3.2's
- *  default pair count) when the argument is missing or unparsable. */
-function parsePrevTurnPairs(arg: string | undefined): number {
-  if (arg === undefined) return 2;
-  const n = Number(arg);
-  return Number.isInteger(n) && n >= 0 ? n : 2;
-}
-
-/** The cleanup snapshot's non-message fields — {{user}} from the household persona_name setting
- *  and {{char}} from the chat's linked character's name (cleanup_prompt.md §3.1). Read live per
- *  cleanup call, same reasoning as resolveMacrosInSystemPrompt: a persona/card edited after Apply
- *  should be reflected on the very next cleanup. Fail-soft by design — this is cosmetic macro
- *  context, so a lookup failure logs and degrades to empty names rather than taking the whole
- *  cleanup pass down with it (the fail-open contract covers the cleanup call, not its decoration). */
-async function resolveCleanupMacroSnapshot(
-  db: PostgresClient,
-  settings: OrchestratorSettingsStore | undefined,
-  userId: string,
-  chatId: string,
-): Promise<{ userName?: string; charName?: string }> {
-  try {
-    const [characterRows, persona] = await Promise.all([
-      db.withUserScope(userId, (session) =>
-        session.query<{ name: string }>(
-          `select c.name from chat_sessions s
-           join characters c on c.character_id = s.character_id and c.user_id = s.user_id
-           where s.chat_id = $1 and s.user_id = $2`,
-          [chatId, userId],
-        ),
-      ),
-      settings ? getPersonaSettings(settings) : Promise.resolve({ name: '', description: '' }),
-    ]);
-    return { userName: persona.name || undefined, charName: characterRows[0]?.name };
-  } catch (err) {
-    // bi_principles.md §11: log the seam — macro names are decoration, never a reason to skip
-    // the cleanup pass itself.
-    log.debug('cleanup pass: user/char macro lookup failed, resolving without them', { chatId, err });
-    return {};
-  }
-}
-
-export async function runCleanupPass(
-  db: PostgresClient,
-  userId: string,
-  chatId: string,
-  cleanupPresetId: string,
-  turnLlm: LlmProvider,
-  reply: string,
-  historyMessages: LlmMessage[],
-  settings?: OrchestratorSettingsStore,
-): Promise<string> {
-  try {
-    const slots = await loadPromptStackSlots(db, userId, cleanupPresetId);
-    // A preset that references {{prev_turns, N}} opts into text-form history (pair count
-    // prompt-controlled, resolved below). A preset that never mentions it keeps the legacy
-    // behavior — the last 2 turn pairs prepended as messages — so a preset written before the
-    // macro existed doesn't silently lose the history it was built against. Enabled-only: a
-    // macro sitting in a disabled slot is not an opt-in.
-    const usesPrevTurns = slots.some(
-      (s) => s.enabled !== false && typeof s.customContent === 'string' && s.customContent.includes('{{prev_turns'),
-    );
-    const assembled = assemblePromptStack({}, slots);
-    if (assembled.length === 0) {
-      log.warn(`cleanup pass preset ${cleanupPresetId} resolved to no messages for chat ${chatId}, keeping the raw reply`);
-      return reply;
-    }
-    // {{user}}/{{char}} are decoration, resolved after the empty-slot check so a preset that
-    // resolves to nothing never pays for the persona/character reads.
-    const macroSnapshot = await resolveCleanupMacroSnapshot(db, settings, userId, chatId);
-    const presetMessages = assembled.map((m) => ({
-      ...m,
-      content: interpolateMacros(m.content, { message: reply, ...macroSnapshot }, (name, arg) =>
-        name === 'prev_turns' ? formatPreviousTurns(historyMessages, parsePrevTurnPairs(arg)) : undefined,
-      ),
-    }));
-    const messages = usesPrevTurns ? presetMessages : [...historyMessages.slice(-4), ...presetMessages];
-
-    // Record the exact text before it goes out — the cleanup prompt embeds {{message}} = the raw
-    // pre-cleanup reply, which is discarded when cleanup rewrites it, so this trace (io/promptTrace.ts)
-    // is the only place the full cleanup prompt ever exists. Record before the call, success or not.
-    // Roles are system/user/assistant by construction (preset slots + conversation history) — the
-    // LlmMessage type is wider ('tool'), which never occurs here.
-    recordPromptTrace(chatId, {
-      kind: 'cleanup',
-      title: 'Cleanup Prompt',
-      items: messages.map((m) => ({
-        role: m.role as PromptTraceItem['role'],
-        content: m.content,
-        chars: m.content.length,
-        estimatedTokens: estimateTokens(m.content.length),
-      })),
-      capturedAt: Date.now(),
-    });
-
-    const turn = await runWithCallContext({ taskId: chatId, kind: 'chat', userId }, () => turnLlm.complete(messages, []));
-    // Whitespace-only output counts as empty under the fail-open contract — never let a cleanup
-    // call blank out the user's turn.
-    const cleaned = turn.message.content;
-    return cleaned && cleaned.trim() ? cleaned : reply;
-  } catch (err) {
-    log.error(`cleanup pass failed for chat ${chatId}, keeping the raw reply`, err);
-    return reply;
-  }
-}
-
 // The other half: raw history older than the live window is never sent at all — only reachable via
 // recall_chat_history. Same knob (chat_memory_live_window_pairs) orchestrator/src/orchestrator/
 // chatMemorySync.ts's own sync pipeline uses for where the live window ends, read live so the two
@@ -1242,12 +1087,7 @@ async function regenerateSwipe(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 
-  if (session.cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, chatId, session.cleanupPresetId, turnLlm, reply, trimmed, deps.settings);
-  }
-
-  const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
-  if (!updated) {
+  const updated = await chats.recordSwipe(userId, chatId, messageId, reply);  if (!updated) {
     return { ok: false, error: 'message no longer exists' };
   }
   // Stage 2 (docs/vistalyze_integration/segway.md §4): post-cleanup heuristic extraction against
@@ -1340,22 +1180,19 @@ async function handleChatCompletions(
   // everything else about the turn is indifferent to it.
   let sessionCharacterId: string | null = null;
   // Which context_stack_presets row (if any) drives this turn's per-turn narrator assembly
-  // (docs/turn-loop-plan.md §3.2) and, separately, the post-runTurn cleanup pass (§4). Two
-  // independent optional presets, only the first read here — cleanupPresetId is read straight off
-  // detail.session where it's used, below.
+  // (docs/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
+  // the async heuristic subloop (cleanupLoop.ts), opted in per chat via cleanup_enabled_at.
   let sessionPromptStackPresetId: string | null = null;
   // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
   // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
   // use even when this turn doesn't add a fresh chat_messages row of its own.
   let existingLatestUserMessageId: string | undefined;
-  let sessionDetail: Awaited<ReturnType<ChatSessionStore['getChat']>> | undefined;
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
       sendJson(res, 404, { error: 'unknown chat_id' });
       return;
     }
-    sessionDetail = detail;
     sessionParams = detail.session.params;
     sessionWasEmpty = detail.messages.length === 0;
     sessionTitle = detail.session.title;
@@ -1444,10 +1281,11 @@ async function handleChatCompletions(
   }
 
   // The Prompt Inspector's "Main Prompt" is the exact text this turn sends, captured at send time
-  // (io/promptTrace.ts) — the same record-before-the-call rule as the cleanup pass in
-  // runCleanupPass. runTurn prepends systemPrompt to messagesForLlm; that final array is what the
-  // model sees, so that's what the trace records. This is what lets the inspector show "the last
-  // turn that was sent" (bi_principles.md §18) instead of a live reconstruction of the next one.
+  // (io/promptTrace.ts) — record-before-the-call, same rule the cleanup subloop's repair prompts
+  // follow (cleanupLoop.ts's dispatchStep). runTurn prepends systemPrompt to messagesForLlm; that
+  // final array is what the model sees, so that's what the trace records. This is what lets the
+  // inspector show "the last turn that was sent" (bi_principles.md §18) instead of a live
+  // reconstruction of the next one.
   // Persisted chats only — no chat_id is stateless Open WebUI traffic with nothing to trace
   // against. Images ride on LlmMessage.images (util/attachmentContext.ts), never in content, so
   // this never embeds base64 blobs into the trace.
@@ -1495,14 +1333,6 @@ async function handleChatCompletions(
     return;
   }
   const echoedModel = model ?? turnDefaultModel;
-
-  // Step 5 of the seven-step turn loop (docs/turn-loop-plan.md §4.2): between runTurn resolving
-  // and the assistant message being persisted. Skipped entirely (zero cost) for the common case —
-  // no chat_id, or a chat that hasn't opted into a cleanup preset.
-  const cleanupPresetId = sessionDetail?.session.cleanupPresetId;
-  if (body.chat_id && cleanupPresetId) {
-    reply = await runCleanupPass(db, userId, body.chat_id, cleanupPresetId, turnLlm, reply, messagesForLlm, deps.settings);
-  }
 
   if (body.chat_id) {
     // The user message (if this was a genuinely new turn) is already persisted above, before
@@ -2269,6 +2099,7 @@ function isChatPatchBody(value: unknown): value is {
   tool_names?: string[] | null;
   canvas_note_id?: string | null;
   cleanup_preset_id?: string | null;
+  cleanup_enabled_at?: string | null;
 } {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -2291,6 +2122,10 @@ function isChatPatchBody(value: unknown): value is {
   // '' is never a valid preset id — rejecting it here (instead of letting it reach Postgres's
   // uuid cast and 500) keeps a malformed patch a 400 like every other bad field.
   if (v.cleanup_preset_id === '') return false;
+  if (v.cleanup_enabled_at !== undefined && v.cleanup_enabled_at !== null && typeof v.cleanup_enabled_at !== 'string') {
+    return false;
+  }
+  if (v.cleanup_enabled_at === '') return false;
   return true;
 }
 
@@ -2368,7 +2203,7 @@ async function handleChatRoutes(
     if (req.method === 'POST') {
       const body = await readJsonBody(req);
       if (!isChatPatchBody(body)) {
-        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id?, cleanup_preset_id? }' });
+        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id?, cleanup_preset_id?, cleanup_enabled_at? }' });
         return;
       }
       const updated = await deps.chats.updateChat(userId, chatId, {
@@ -2378,6 +2213,7 @@ async function handleChatRoutes(
         toolNames: body.tool_names,
         canvasNoteId: body.canvas_note_id,
         cleanupPresetId: body.cleanup_preset_id,
+        cleanupEnabledAt: body.cleanup_enabled_at,
       });
       if (!updated) {
         sendJson(res, 404, { error: 'not found' });
@@ -2690,6 +2526,104 @@ async function handleChatTurnStatus(req: IncomingMessage, res: ServerResponse, d
   sendJson(res, 200, { status: chatId ? (getTurnStatus(chatId) ?? null) : null });
 }
 
+// The async cleanup subloop's (cleanupLoop.ts) read surface for the chat's floating status pill —
+// the TRG-style unchanged | thinking | modified | ⚠flagged state of the newest eligible message,
+// plus how many messages are still pending. Polled by the frontend the same way it polls
+// /v1/chat/status; the loop's per-message jobs in cleanup_jobs are the source of truth.
+async function handleCleanupStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
+  if (!chatId) {
+    sendJson(res, 400, { error: 'expected a ?chat_id= query parameter' });
+    return;
+  }
+  const status = await getCleanupStatus(deps.db, userId, chatId);
+  if (!status) {
+    sendJson(res, 404, { error: 'unknown chat_id' });
+    return;
+  }
+  sendJson(res, 200, status);
+}
+
+// The Cleanup page's run-now: one immediate pass over one chat (the poll tick keeps every other
+// enabled chat). Fire-and-forget like fireLocationImageGeneration — the request returns at once
+// and the caller polls GET /v1/cleanup/status for the results; the loop is fail-open throughout,
+// so there's no partial-success error shape to surface.
+async function handleCleanupRunNow(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  let body: { chat_id?: string };
+  try {
+    body = (await readJsonBody(req)) as { chat_id?: string };
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  if (typeof body.chat_id !== 'string' || !body.chat_id) {
+    sendJson(res, 400, { error: 'expected { chat_id: string }' });
+    return;
+  }
+  void runCleanupNow({ db: deps.db, llm: deps.llm, settings: deps.settings, chats: deps.chats }, userId, body.chat_id);
+  sendJson(res, 202, { started: true });
+}
+
+// The Cleanup page's "recent activity" read: the newest cleanup_jobs rows for one chat (the page
+// picks the chat via a selector), each with a short content preview and the fail-open notes.
+// User-scoped by cleanup_jobs' own RLS (via chat_messages.user_id) — a user only ever sees their
+// own chats' jobs, same as /v1/cleanup/status.
+async function handleCleanupJobs(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  const url = new URL(req.url ?? '', 'http://placeholder');
+  const chatId = url.searchParams.get('chat_id');
+  if (!chatId) {
+    sendJson(res, 400, { error: 'expected a ?chat_id= query parameter' });
+    return;
+  }
+  const limitRaw = url.searchParams.get('limit');
+  const limit = limitRaw ? Math.min(Math.max(Number(limitRaw) || 20, 1), 100) : 20;
+  sendJson(res, 200, { jobs: await getCleanupJobs(deps.db, userId, chatId, limit) });
+}
+
+// Admin-gated counterpart of the cleanup setup surface: the four header/footer config keys +
+// the slop-rules table, read/written as one block (adminServer.ts's get/parse/set trio). The
+// subloop re-reads both live every tick (cleanupLoop.ts), so a save takes effect on the next
+// poll — no restart, same shape as notification/canon settings above.
+async function handleCleanupSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getCleanupSettings(deps.settings, deps.db));
+}
+
+async function handleCleanupSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetCleanupSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected at least one of { header_regex?, header_prompt?, footer_regex?, footer_prompt?, slop_rules?: [...] }',
+    });
+    return;
+  }
+
+  await setCleanupSettings(deps.settings, deps.db, parsed);
+  sendJson(res, 200, await getCleanupSettings(deps.settings, deps.db));
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -2738,6 +2672,18 @@ async function handleRequest(
   }
   if (req.method === 'GET' && req.url?.startsWith('/v1/chat/status')) {
     await handleChatTurnStatus(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/cleanup/status')) {
+    await handleCleanupStatus(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/v1/cleanup/jobs')) {
+    await handleCleanupJobs(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/cleanup/run') {
+    await handleCleanupRunNow(req, res, deps);
     return;
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
@@ -3005,6 +2951,22 @@ async function handleRequest(
       return;
     }
     await handleCanonSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/cleanup-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCleanupSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/cleanup-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleCleanupSettingsSet(req, res, deps);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

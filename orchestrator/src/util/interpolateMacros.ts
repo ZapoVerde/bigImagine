@@ -31,12 +31,13 @@
  * matches neither form (e.g. `{{foo, bar}}`) fails the whole pattern and passes through verbatim.
  *
  * Cleanup-only macros: the registry below is the closed core. `{{prev_turns, N}}` is deliberately
- * NOT in it — it needs the turn's history messages, which only the cleanup call site has, so
- * server/httpServer.ts's runCleanupPass supplies it through the optional `resolveArg` hook (pure:
- * the resolver is an input, resolved deterministically like everything else). The cleanup-pass
- * resolver sees every token and returns undefined for ones it doesn't own; interpolation then
- * falls through to the registry. Outside the cleanup pass (no resolver), `{{prev_turns, N}}` is an
- * unrecognized token and passes through verbatim — diagnosable, never silently deleted.
+ * NOT in it — it needs the turn's history messages, which only the cleanup repair prompts have, so
+ * orchestrator/cleanupHeuristics.ts's buildRepairPrompt supplies it through the optional
+ * `resolveArg` hook (pure: the resolver is an input, resolved deterministically like everything
+ * else). The cleanup resolver sees every token and returns undefined for ones it doesn't own;
+ * interpolation then falls through to the registry. Outside the cleanup prompts (no resolver),
+ * `{{prev_turns, N}}` is an unrecognized token and passes through verbatim — diagnosable, never
+ * silently deleted.
  *
  * @api-declaration
  * MacroSnapshot — the turn-scoped values macros resolve against

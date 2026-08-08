@@ -303,10 +303,16 @@ export interface ChatSessionRow {
   characterId: string | null;
   /** The last context_stack_presets row applied via apply_prompt_stack_to_chat, if any. */
   promptStackPresetId: string | null;
-  /** The context_stack_presets row the turn-loop cleanup pass runs for this chat, if any
-   *  (orchestrator/src/server/httpServer.ts's post-runTurn runCleanupPass). Null (the default)
-   *  means the cleanup pass is off for this chat. */
+  /** The retired preset-based cleanup pass's per-chat preset id — the inline runCleanupPass is
+   *  gone (migration 0072, orchestrator/cleanupLoop.ts); the async heuristic subloop is opted in
+   *  via cleanupEnabledAt below instead. Column deliberately left in place, unread.
+   *  @deprecated superseded by cleanupEnabledAt; nothing new reads this. */
   cleanupPresetId: string | null;
+  /** When this chat opted into the async heuristic cleanup subloop (migration 0072): the RP-only
+   *  background pass that strips antislop and repairs the header/footer regex shapes after a
+   *  reply lands. A timestamp, not a bool — the subloop only processes messages created after
+   *  this stamp, so enabling never re-processes old history. Null = cleanup off. */
+  cleanupEnabledAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -371,6 +377,57 @@ export interface ChatSyncStatus {
   canonLastProposedAt: string | null;
   unsyncedMessages: number;
   dueAfterMessages: number;
+}
+
+// GET /v1/cleanup/status — the async cleanup subloop's per-chat read surface (cleanupLoop.ts's
+// CleanupStatus), polled by the floating chat status pill. TRG-style states on the newest
+// eligible message: thinking (landed, loop hasn't covered it yet), unchanged, modified, flagged
+// (repair needed but produced nothing / unexpected error). enabled:false means the chat is not
+// opted in (or not RP / archived) — the pill renders nothing, not a fake 'unchanged'.
+export type CleanupMessageState = 'thinking' | 'unchanged' | 'modified' | 'flagged';
+export interface CleanupStatus {
+  enabled: boolean;
+  pending: number;
+  latest: { messageId: string; state: CleanupMessageState } | null;
+}
+
+// GET /v1/cleanup/jobs — one chat's recent cleanup activity (cleanupLoop.ts's CleanupJobInfo),
+// the Cleanup page's "recently cleaned / flagged" list. status is the job's fail-open outcome;
+// notes carries what changed / why it was flagged; preview is the first ~120 chars of the
+// message content.
+export interface CleanupJob {
+  jobId: string;
+  messageId: string;
+  status: 'done' | 'flagged' | 'error';
+  changed: boolean;
+  notes: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  preview: string;
+}
+
+// GET/POST /v1/admin/cleanup-settings — the Cleanup page's setup block (adminServer.ts's
+// CleanupSettings): the header/footer trigger regex + repair prompt ("the format expressed as a
+// prompt") plus the full slop-rules table. POST sends the whole edited set; slop rules are a
+// full-set replace.
+export type SlopAction = 'remove' | 'replace-paragraph' | 'llm';
+export interface SlopRule {
+  ruleId: string;
+  setName: string;
+  position: number;
+  pattern: string;
+  flags: string;
+  action: SlopAction;
+  replacement: string | null;
+  llmPrompt: string | null;
+  enabled: boolean;
+}
+export interface CleanupSettings {
+  headerRegex: string;
+  headerPrompt: string;
+  footerRegex: string;
+  footerPrompt: string;
+  slopRules: SlopRule[];
 }
 
 export interface StoredChatMessage {

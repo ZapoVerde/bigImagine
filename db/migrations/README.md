@@ -375,3 +375,18 @@ Already applied by hand, not run automatically (see the file for the exact comma
   on preset rows, so a builtin default stays household-safe. Idempotent (a plain add-column;
   re-running on an already-migrated DB errors only if the column already exists — the usual
   hand-apply one-shot).
+- `0072_cleanup_heuristic_settings.sql` — the async heuristic cleanup subloop (plan v2), which
+  **replaces** the preset-based inline cleanup pass of 0057/0066/0070/0071: a reply now lands
+  raw, then a background subloop strips antislop and repairs the header/footer regex shapes,
+  rewriting the message in place via `recordSwipe` (original preserved as swipe #0). Adds
+  `chat_sessions.cleanup_enabled_at` (timestamptz; null = off — the timestamp doubles as the
+  retro-flood guard, the subloop only processes messages created after it), the `cleanup_slop_rules`
+  table (RLS-exempt household config like `orchestrator_settings`: named regex sets, per-rule
+  `action` of `remove`/`replace-paragraph`/`llm`, seeded with a small starter set), the
+  `cleanup_jobs` ledger (user-scoped via `chat_messages`, unique per `(message_id, swipe_id)` for
+  exact dedup), and widens `orchestrator_settings.key`'s CHECK with `cleanup_header_regex`/
+  `cleanup_header_prompt`/`cleanup_footer_regex`/`cleanup_footer_prompt` (the two editable regex
+  triggers + the repair prompts fired when they fail to match; header prompt resolves
+  `{{history, x}}` + `{{message}}`, footer prompt `{{message}}` only; empty = built-in default).
+  The old `cleanup_preset_id`/`users.default_cleanup_preset_id` columns stay in place, unread —
+  migrations are append-only; the inline pass's call sites are removed with the feature itself.

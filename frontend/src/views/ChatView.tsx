@@ -45,6 +45,7 @@ import CanvasPanel from '../components/canvas/CanvasPanel';
 import PromptInspectorPanel from '../components/promptInspector/PromptInspectorPanel';
 import BranchMapPanel from '../components/branchMap/BranchMapPanel';
 import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPanel';
+import CleanupStatusPill from '../components/cleanup/CleanupStatusPill';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
@@ -61,6 +62,7 @@ const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }
   { type: 'browse-chub', label: 'Browse Chub', icon: '🔍' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
   { type: 'connections', label: 'Connections', icon: '🔌' },
+  { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
 ];
 
 interface ChatViewProps {
@@ -821,6 +823,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     folder_id?: string | null;
     title?: string;
     cleanup_preset_id?: string | null;
+    cleanup_enabled_at?: string | null;
   }) {
     if (!activeChat) {
       // No chat exists yet — stash the draft, send() applies it right after createChat().
@@ -940,6 +943,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         <div className="chat-top-bar">
           <div className="chat-header">
             <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
+            {activeChat?.kind === 'rp' && activeChat.cleanupEnabledAt && (
+              <CleanupStatusPill apiKey={apiKey} chatId={activeChat.chatId} />
+            )}
             {activeChat && !activeChat.archivedAt && (
               <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
                 Archive
@@ -1356,6 +1362,7 @@ interface ChatSettingsProps {
     folder_id?: string | null;
     title?: string;
     cleanup_preset_id?: string | null;
+    cleanup_enabled_at?: string | null;
   }) => Promise<void>;
 }
 
@@ -1455,14 +1462,20 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     }
   }
 
-  // Prompt-stack pickers — the same get_context_stack_presets list backs both the RP-only Prompt
-  // stack selector below and the Cleanup Preset selector (which applies to any chat kind), so it's
-  // loaded whenever a session exists rather than gated on session.kind.
+  // Prompt-stack picker — the same get_context_stack_presets list backs the RP-only Prompt
+  // stack selector below. (The old Cleanup Preset selector is gone — cleanup is now the async
+  // heuristic subloop, toggled per chat below and configured on the Cleanup page.)
   const [stacks, setStacks] = useState<ContextStackPreset[]>([]);
   const [selectedStackId, setSelectedStackId] = useState(session?.promptStackPresetId ?? '');
-  const [selectedCleanupId, setSelectedCleanupId] = useState(session?.cleanupPresetId ?? '');
   const [applyingStack, setApplyingStack] = useState(false);
   const [stackError, setStackError] = useState('');
+  // The async heuristic cleanup subloop toggle. Enabled if either the new timestamp switch or a
+  // legacy preset id is set (a pre-migration chat that had a cleanup preset is still being
+  // cleaned by the inline pass until this is touched — saving the toggle migrates it: enabling
+  // clears the legacy preset so the new subloop owns it, disabling turns everything off).
+  const [cleanupEnabled, setCleanupEnabled] = useState(
+    session?.cleanupEnabledAt != null || session?.cleanupPresetId != null,
+  );
 
   useEffect(() => {
     if (!session) return;
@@ -1514,7 +1527,13 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
       params,
       tool_names: allSelected ? null : [...selectedTools],
       folder_id: folderId || null,
-      cleanup_preset_id: selectedCleanupId || null,
+      // The toggle is the only cleanup switch now: enabled stamps the loop's window at now()
+      // (so only messages that land from here on are cleaned — never a retro pass over old
+      // history); disabled clears it. The legacy preset id is always cleared alongside — the
+      // preset-based inline pass is retired, so a saved toggle migrates the chat off it in
+      // whichever direction.
+      cleanup_enabled_at: cleanupEnabled ? new Date().toISOString() : null,
+      cleanup_preset_id: null,
     });
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2000);
@@ -1612,21 +1631,19 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         </label>
       )}
 
-      <label>
-        Cleanup Preset
-        <select value={selectedCleanupId} onChange={(e) => setSelectedCleanupId(e.target.value)}>
-          <option value="">(none)</option>
-          {stacks.map((s) => (
-            <option key={s.presetId} value={s.presetId}>
-              {s.name}
-              {s.isCleanupDefault ? ' (default)' : ''}
-            </option>
-          ))}
-        </select>
+      <label className="settings-toggle">
+        <input
+          type="checkbox"
+          checked={cleanupEnabled}
+          onChange={(e) => setCleanupEnabled(e.target.checked)}
+          disabled={session?.kind !== 'rp'}
+        />
+        Async cleanup pass
+        {session?.kind !== 'rp' && <span className="model-connection-note"> RP chats only.</span>}
         <span className="model-connection-note">
-          Post-processes each reply before it's saved — pick the built-in "Cleanup Pass" preset or a
-          customized copy (Prompt Stacks → Cleanup Pass → Duplicate to customize). The preset marked
-          "default" is auto-applied to new RP chats. Saved with Save settings.
+          Strips antislop and repairs the header/footer shapes in the background after each reply
+          lands — the original stays available as a swipe. Rules and prompts are configured on the
+          Cleanup page.
         </span>
       </label>
 

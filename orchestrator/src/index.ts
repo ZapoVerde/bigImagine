@@ -52,6 +52,7 @@ import { createLlmProviderForProfile } from './io/llm/index.js';
 import { createGatedLlmProvider } from './io/llm/llmGate.js';
 import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispatch.js';
 import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
+import { startCleanupLoop } from './orchestrator/cleanupLoop.js';
 import { parseLlmProfiles } from './io/llm/profiles.js';
 import { createLlmConnectionStore } from './io/llmConnections.js';
 import { createImageConnectionStore } from './io/imageConnections.js';
@@ -186,6 +187,14 @@ async function main(): Promise<void> {
   // chat_memory_profile names one, the same per-call construction httpServer.ts's own per-chat
   // connection override uses.
   startChatMemorySyncLoop({ db, llm, embeddings, settings, llmConnections });
+
+  // Async heuristic cleanup (migration 0072, plan v2) — the TRG-style rewrite subloop that
+  // replaced the inline post-runTurn cleanup LLM preset. Same composition-root tier as the sync
+  // loop above and for the same reason (it drives repair prompts through the shared gated llm
+  // under callContext's kind 'system' — never capped, per the user's "no cap" call). Needs the
+  // chats store for recordSwipe/ensureActiveSwipe writebacks; the engine it runs
+  // (orchestrator/cleanupHeuristics.ts) is pure and shared.
+  startCleanupLoop({ db, llm, settings, chats });
 
   // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
   // io/accessIdentity.ts.

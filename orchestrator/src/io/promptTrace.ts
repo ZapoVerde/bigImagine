@@ -26,7 +26,8 @@
  * messages array you're about to send, then `recordPromptTrace(chatId, { kind, title, items })`
  * immediately before the llm.complete() call — record before, regardless of whether the call later
  * throws (the prompt was sent either way). handleChatCompletions/regenerateSwipe record kind
- * 'main' this way (system prompt prepended, in send order); runCleanupPass records kind 'cleanup'.
+ * 'main' this way (system prompt prepended, in send order); the cleanup subloop's repair prompts
+ * (orchestrator/cleanupLoop.ts's dispatchStep) record kind 'cleanup'.
  *
  * @api-declaration
  * recordPromptTrace(chatId, entry) — append one fired prompt to the chat's trace

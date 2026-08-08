@@ -90,11 +90,11 @@ function createFakePool() {
           // Discriminated by param count, not sql.includes('parent_chat_id') — SESSION_COLUMNS
           // (used in every `returning` clause here, including createChat's) already contains that
           // substring, so a text match alone can't tell the two inserts apart.
-          if (sql.includes('insert into chat_sessions') && params.length === 11) {
+          if (sql.includes('insert into chat_sessions') && params.length === 12) {
             // forkChat's insert — column order per chatSessions.ts:
             // (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind,
-            //  character_id, prompt_stack_preset_id, cleanup_preset_id)
-            const [userId, title, folderId, paramsJson, toolNames, parentChatId, forkMessageId, kind, characterId, promptStackPresetId, cleanupPresetId] =
+            //  character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
+            const [userId, title, folderId, paramsJson, toolNames, parentChatId, forkMessageId, kind, characterId, promptStackPresetId, cleanupPresetId, cleanupEnabledAt] =
               params;
             const row = {
               chat_id: randomUUID(),
@@ -111,6 +111,7 @@ function createFakePool() {
               character_id: characterId ?? null,
               prompt_stack_preset_id: promptStackPresetId ?? null,
               cleanup_preset_id: cleanupPresetId ?? null,
+              cleanup_enabled_at: cleanupEnabledAt ?? null,
               created_at: now(),
               updated_at: now(),
             };
@@ -134,6 +135,7 @@ function createFakePool() {
               character_id: null,
               prompt_stack_preset_id: null,
               cleanup_preset_id: null,
+              cleanup_enabled_at: null,
               created_at: now(),
               updated_at: now(),
             };
@@ -237,6 +239,7 @@ function createFakePool() {
             if (setParts.includes('tool_names =')) row.tool_names = params[idx++];
             if (setParts.includes('canvas_note_id =')) row.canvas_note_id = params[idx++];
             if (setParts.includes('cleanup_preset_id =')) row.cleanup_preset_id = params[idx++];
+            if (setParts.includes('cleanup_enabled_at =')) row.cleanup_enabled_at = params[idx++];
             return { rows: sql.includes('returning') ? [row] : [] };
           }
           // chat_messages — always returns the inserted row (real Postgres only does with
@@ -487,6 +490,19 @@ await store.appendMessages(USER_A, created.chatId, [
 
   const cleared = await store.updateChat(USER_A, created.chatId, { canvasNoteId: null });
   assert(cleared.canvasNoteId === null, 'canvasNoteId can be explicitly cleared back to null');
+}
+
+// --- updateChat: cleanup_enabled_at (async cleanup subloop toggle, migration 0072) round trip ---
+{
+  assert(created.cleanupEnabledAt === null, 'a new chat starts with cleanup disabled');
+  const enabled = await store.updateChat(USER_A, created.chatId, { cleanupEnabledAt: '2026-08-07T00:00:00.000Z' });
+  assert(enabled.cleanupEnabledAt === '2026-08-07T00:00:00.000Z', 'cleanup_enabled_at round-trips through updateChat');
+
+  const untouched = await store.updateChat(USER_A, created.chatId, { title: 'Groceries planning (renamed)' });
+  assert(untouched.cleanupEnabledAt === '2026-08-07T00:00:00.000Z', 'a patch that omits cleanup_enabled_at leaves the toggle alone');
+
+  const off = await store.updateChat(USER_A, created.chatId, { cleanupEnabledAt: null });
+  assert(off.cleanupEnabledAt === null, 'cleanup_enabled_at can be explicitly cleared back to null (turning cleanup off)');
 }
 
 // --- folders ---

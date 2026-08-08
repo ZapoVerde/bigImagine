@@ -298,10 +298,11 @@ export default function CharactersView({ apiKey, onOpenRp }: CharactersViewProps
 
   // Best-effort — same "won't block on this" shape removePreset's delete_prompt_preset call uses:
   // a missing or failed default stack shouldn't stop the RP chat from opening, just leave it with
-  // no system prompt yet (the same state it started in before this feature existed). Applies both
-  // defaults the user has named: the prompt stack (migration 0061, apply_prompt_stack_to_chat)
-  // and the cleanup preset (migration 0071 — a plain chat patch, the same write ChatView's
-  // Cleanup Preset dropdown saves). Either can be absent independently.
+  // no system prompt yet (the same state it started in before this feature existed). Applies the
+  // user's named default prompt stack (migration 0061, apply_prompt_stack_to_chat), and enables
+  // the async heuristic cleanup subloop — the cleanup shape (header/footer/antislop) is RP-only
+  // by design, so every new RP chat opts in at creation, stamped at now() so the subloop only
+  // ever touches messages that land after this point. Either can fail independently.
   async function applyDefaultStack(chatId: string) {
     try {
       const stacks = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
@@ -309,10 +310,7 @@ export default function CharactersView({ apiKey, onOpenRp }: CharactersViewProps
       if (defaultStack) {
         await callTool('apply_prompt_stack_to_chat', { chatId, presetId: defaultStack.presetId }, apiKey);
       }
-      const defaultCleanup = stacks.find((s) => s.isCleanupDefault);
-      if (defaultCleanup) {
-        await updateChat(chatId, { cleanup_preset_id: defaultCleanup.presetId }, apiKey);
-      }
+      await updateChat(chatId, { cleanup_enabled_at: new Date().toISOString() }, apiKey);
     } catch {
       // best-effort
     }

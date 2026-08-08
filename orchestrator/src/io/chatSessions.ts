@@ -139,8 +139,18 @@ export interface ChatSessionRow {
    *  runs for this chat (docs/turn-loop-plan.md §4, migration 0057) — resolved via {{message}}
    *  (util/interpolateMacros.ts), not the narrator's own field set. Null (the default) means
    *  cleanup is off; nothing sets this yet (no dedicated tool/UI in this pass — settable today
-   *  only via updateChat's patch, same as any other session field). */
+   *  only via updateChat's patch, same as any other session field).
+   *  @deprecated retirement in progress (plan v2): the preset-based inline cleanup pass is being
+   *  replaced by the async heuristic subloop (migration 0072). Nothing new writes this column;
+   *  the field stays until the inline pass's call sites are removed, then it is dropped. */
   cleanupPresetId: string | null;
+  /** When this chat opted into the async heuristic cleanup subloop (migration 0072, plan v2) —
+   *  the RP-only background pass that strips antislop and repairs the header/footer regex shapes
+   *  after a reply lands. A timestamp, not a bool: the subloop only processes messages created
+   *  after this stamp, so enabling cleanup never retro-actively re-processes an old history.
+   *  Null = cleanup off. Set by CharactersView's startRp for every new RP chat, and by the
+   *  ChatView Chat Settings toggle. */
+  cleanupEnabledAt: string | null;
   /** Cache pointer to the chat's current scene (db/migrations/0067, docs/vistalyze_integration/
    *  segway.md §2.2) — kept stamped by the post-cleanup scraper (orchestrator/
    *  locationAndPresenceScraper.ts). A *cache*, not the source of truth: the real scene identity
@@ -267,6 +277,10 @@ export interface ChatSessionStore {
       toolNames?: string[] | null;
       canvasNoteId?: string | null;
       cleanupPresetId?: string | null;
+      /** Toggle the async heuristic cleanup subloop (migration 0072). The value is the enable
+       *  stamp the loop filters messages against (see ChatSessionRow.cleanupEnabledAt); null/''
+       *  turns cleanup off. Sending a fresh timestamp re-stamps (restarts the window). */
+      cleanupEnabledAt?: string | null;
     },
   ): Promise<ChatSessionRow | undefined>;
   deleteChat(userId: string, chatId: string): Promise<boolean>;
@@ -295,6 +309,23 @@ export interface ChatSessionStore {
    *  (so 'prev' can always return to the original reply), and newContent becomes both the row's
    *  content and a fresh swipe of its own. Returns undefined if messageId isn't in this chat. */
   recordSwipe(userId: string, chatId: string, messageId: string, newContent: string): Promise<StoredChatMessage | undefined>;
+  /** The cleanup subloop's writeback (orchestrator/cleanupLoop.ts): recordSwipe with a
+   *  mid-flight guard. Reads the message's current content in the SAME transaction as the
+   *  writeback, and returns undefined (writing nothing) when it no longer equals expectedContent
+   *  — i.e. the user regenerated or swiped while the repair LLM was running, and this writeback
+   *  must not clobber it (the new content carries no job, so the next tick picks it up instead).
+   *  The returned newSwipeId is the swipe that now holds newContent — the exact (message, swipe)
+   *  pair the caller should key its cleanup_jobs row to, so dedup covers the content this call
+   *  produced even if the user cycles to a different swipe immediately after (that alternate
+   *  swipe then legitimately starts its own job, per migration 0072's own comment). Undefined
+   *  when the message is gone or its content changed mid-flight. */
+  recordSwipeIfContent(
+    userId: string,
+    chatId: string,
+    messageId: string,
+    expectedContent: string | undefined,
+    newContent: string,
+  ): Promise<{ message: StoredChatMessage; newSwipeId: string } | undefined>;
   /** Cycles messageId's active content to an existing sibling swipe — a pure content swap, no LLM
    *  call. See CycleSwipeResult's own doc for what each outcome means. */
   cycleSwipe(userId: string, chatId: string, messageId: string, direction: 'prev' | 'next'): Promise<CycleSwipeResult>;
@@ -340,6 +371,7 @@ interface SessionDbRow {
   character_id: string | null;
   prompt_stack_preset_id: string | null;
   cleanup_preset_id: string | null;
+  cleanup_enabled_at: string | null;
   scene_id: string | null;
   created_at: string;
   updated_at: string;
@@ -360,6 +392,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     characterId: row.character_id,
     promptStackPresetId: row.prompt_stack_preset_id,
     cleanupPresetId: row.cleanup_preset_id,
+    cleanupEnabledAt: row.cleanup_enabled_at,
     sceneId: row.scene_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -367,7 +400,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, scene_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
 
 interface LineageDbRow {
   chat_id: string;
@@ -597,6 +630,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           params.push(patch.cleanupPresetId);
           sets.push(`cleanup_preset_id = $${params.length}`);
         }
+        if (patch.cleanupEnabledAt !== undefined) {
+          params.push(patch.cleanupEnabledAt);
+          sets.push(`cleanup_enabled_at = $${params.length}`);
+        }
         const rows = await session.query<SessionDbRow>(
           `update chat_sessions set ${sets.join(', ')} where chat_id = $1 returning ${SESSION_COLUMNS}`,
           params,
@@ -665,13 +702,28 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
     },
 
     async recordSwipe(userId, chatId, messageId, newContent) {
+      const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent);
+      return result?.message;
+    },
+
+    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent) {
       return db.withUserScope(userId, async (session) => {
         const rows = await session.query<{ role: 'user' | 'assistant'; content: string; created_at: string; active_swipe_id: string | null }>(
-          'select role, content, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+          // FOR UPDATE: the guard + writeback must be atomic even under READ COMMITTED — without
+          // the row lock, a user regeneration committing between this SELECT and the UPDATE below
+          // still gets clobbered (this UPDATE would land second and silently replace the fresh
+          // reply). Same claim-atomicity pattern as agentRoutineDispatch.ts's job claim.
+          'select role, content, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2 for update',
           [messageId, chatId],
         );
         const current = rows[0];
         if (!current) return undefined;
+        // Mid-flight guard: the caller (cleanupLoop.ts's processDueMessage) planned against
+        // expectedContent; if the message has since been regenerated or swiped, this writeback
+        // would clobber the user's new content — refuse instead, same transaction, so nothing
+        // was partially written. The new content has no cleanup_jobs row, so the next tick picks
+        // it up on its own.
+        if (expectedContent !== undefined && current.content !== expectedContent) return undefined;
 
         // First-ever regeneration of this message: stash the original content as swipe #0 before
         // the new reply takes over, so 'prev' can always cycle back to what was there originally.
@@ -700,11 +752,14 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           [messageId],
         );
         return {
-          messageId,
-          role: current.role,
-          content: newContent,
-          createdAt: current.created_at,
-          swipes: { index: swipeRows.findIndex((s) => s.swipe_id === newSwipe!.swipe_id), count: swipeRows.length },
+          newSwipeId: newSwipe!.swipe_id,
+          message: {
+            messageId,
+            role: current.role,
+            content: newContent,
+            createdAt: current.created_at,
+            swipes: { index: swipeRows.findIndex((s) => s.swipe_id === newSwipe!.swipe_id), count: swipeRows.length },
+          },
         };
       });
     },
@@ -806,8 +861,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         const newRows = await session.query<SessionDbRow>(
           `insert into chat_sessions
-             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
@@ -821,6 +876,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             parent.characterId,
             parent.promptStackPresetId,
             parent.cleanupPresetId,
+            parent.cleanupEnabledAt,
           ],
         );
         const newChatId = newRows[0]!.chat_id;

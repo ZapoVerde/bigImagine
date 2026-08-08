@@ -124,6 +124,16 @@
  * household_timezone (the value is fetched fresh, never baked in at boot), written by the
  * admin-gated SettingsView "Chat Background" toggle.
  *
+ * cleanup_header_regex/cleanup_header_prompt/cleanup_footer_regex/cleanup_footer_prompt
+ * (migration 0072, the async heuristic cleanup subloop) are the Cleanup page's setup config:
+ * the two editable regex triggers (header two-line shape `[ … | … | …]` + `Present: …`; footer
+ * `<details>` inner-thoughts block) and the two repair prompts fired when the regex fails to
+ * match. The header prompt resolves {{history, x}} (last x turn pairs) and {{message}}; the
+ * footer prompt resolves {{message}} only. Empty regex = the loop's built-in default pattern;
+ * empty prompt = the built-in default repair text — same "empty override means built-in"
+ * fallback shape as every other prompt key (bi_principles.md §18). Written by the admin-gated
+ * cleanup-settings endpoint, read live by the subloop, no restart.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -174,6 +184,10 @@ export const SETTING_NAMES = [
   'llm_gate_retry_max_ms',
   'image_prompt_template',
   'chat_background_parallax',
+  'cleanup_header_regex',
+  'cleanup_header_prompt',
+  'cleanup_footer_regex',
+  'cleanup_footer_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

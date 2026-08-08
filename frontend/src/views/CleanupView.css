@@ -1,0 +1,204 @@
+/* The Cleanup page — the async cleanup subloop's setup + activity surface. Mirrors the other
+ * settings-view conventions (max-width column, fieldset sections, save-status line). */
+.cleanup-view {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem 3rem;
+}
+
+.cleanup-view h1 {
+  font-size: var(--font-size-xl);
+  margin: 0 0 0.25rem;
+}
+
+.cleanup-subtitle {
+  color: var(--color-text-secondary);
+  margin: 0 0 1.25rem;
+}
+
+.cleanup-section {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+  background: var(--color-bg-surface);
+}
+
+.cleanup-section h2 {
+  font-size: var(--font-size-md);
+  margin: 0 0 0.4rem;
+}
+
+.cleanup-note {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin: 0 0 0.75rem;
+}
+
+.cleanup-note code {
+  background: var(--color-bg-subtle);
+  padding: 0 0.25rem;
+  border-radius: var(--radius-sm);
+}
+
+.cleanup-view label {
+  display: block;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  margin-bottom: 0.6rem;
+}
+
+.cleanup-view input,
+.cleanup-view select,
+.cleanup-view textarea {
+  display: block;
+  width: 100%;
+  margin-top: 0.2rem;
+  font-size: var(--font-size-sm);
+  padding: 0.35rem 0.5rem;
+  background: var(--color-bg-input, var(--color-bg-subtle));
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-sizing: border-box;
+}
+
+.cleanup-view textarea {
+  font-family: var(--font-family-mono, monospace);
+  resize: vertical;
+}
+
+/* --- slop rules editor --- */
+.cleanup-slop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cleanup-slop-row {
+  display: grid;
+  grid-template-columns: 110px 52px 1fr 64px 140px 1fr 44px 28px;
+  gap: 0.4rem;
+  align-items: end;
+  padding: 0.45rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-subtle);
+}
+
+.cleanup-slop-row label {
+  margin-bottom: 0;
+}
+
+.cleanup-slop-enabled {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+  padding-bottom: 0.35rem;
+}
+
+.cleanup-slop-enabled input {
+  margin: 0;
+  width: auto;
+}
+
+.cleanup-slop-remove {
+  background: none;
+  border: none;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-md);
+  cursor: pointer;
+  padding: 0.25rem 0;
+}
+
+.cleanup-slop-remove:hover {
+  color: var(--color-danger);
+}
+
+.cleanup-row-actions,
+.cleanup-section-actions,
+.cleanup-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.cleanup-hint {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.cleanup-view button {
+  font-size: var(--font-size-sm);
+  padding: 0.35rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.cleanup-view button:hover:not(:disabled) {
+  border-color: var(--color-text-faint);
+}
+
+.cleanup-view button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.cleanup-save-status {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* --- activity table --- */
+.cleanup-activity-row select {
+  width: min(360px, 100%);
+  margin-top: 0;
+}
+
+.cleanup-jobs-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  font-size: var(--font-size-sm);
+}
+
+.cleanup-jobs-table th,
+.cleanup-jobs-table td {
+  text-align: left;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+  vertical-align: top;
+}
+
+.cleanup-jobs-table th {
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.cleanup-job-flagged td:first-child {
+  color: #fc6;
+  font-weight: var(--font-weight-semibold);
+}
+
+.cleanup-job-preview {
+  color: var(--color-text-secondary);
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Mobile: stack the slop row into two lines instead of the wide grid. */
+@media (max-width: 720px) {
+  .cleanup-slop-row {
+    grid-template-columns: 1fr 1fr;
+  }
+  .cleanup-slop-pattern {
+    grid-column: 1 / -1;
+  }
+}

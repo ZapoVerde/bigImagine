@@ -1,0 +1,79 @@
+/* The floating async-cleanup status pill in the chat header — TRG-badge states (unchanged |
+ * thinking | modified, plus our ⚠ flagged) in one small rounded pill. Colors match the TRG
+ * reference (SillyTavern-Triggeryze/style.css): gray muted = unchanged, red pulse = thinking,
+ * green = modified, amber = flagged. */
+.cleanup-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease;
+}
+
+.cleanup-status-pill:hover {
+  border-color: var(--color-text-faint);
+}
+
+.cleanup-status-icon {
+  font-size: 0.85em;
+  line-height: 1;
+}
+
+.cleanup-status-text {
+  text-transform: capitalize;
+}
+
+.cleanup-status-pending {
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  padding-left: 0.15rem;
+}
+
+/* thinking — the loop is actively working on the newest reply (TRG's red pulse). */
+.cleanup-status-thinking {
+  animation: cleanup-pulse 0.9s ease-in-out infinite;
+  border-color: rgba(200, 55, 55, 0.5);
+  color: #f99;
+}
+
+@keyframes cleanup-pulse {
+  0%,
+  100% {
+    background: rgba(200, 55, 55, 0.28);
+  }
+  50% {
+    background: rgba(200, 55, 55, 0.45);
+  }
+}
+
+/* unchanged — nothing needed fixing, or the reply hasn't landed yet. */
+.cleanup-status-unchanged {
+  opacity: 0.65;
+}
+
+/* modified — the loop rewrote the reply (original kept as a swipe), TRG's green. */
+.cleanup-status-modified {
+  background: rgba(50, 180, 80, 0.25);
+  border-color: rgba(50, 180, 80, 0.5);
+  color: #8f8;
+}
+
+/* flagged — a repair was needed but produced nothing / errored; the problem is still there. */
+.cleanup-status-flagged {
+  background: rgba(220, 160, 40, 0.22);
+  border-color: rgba(220, 160, 40, 0.55);
+  color: #fc6;
+}
+
+.cleanup-status-pill.running-now {
+  opacity: 0.6;
+  pointer-events: none;
+}

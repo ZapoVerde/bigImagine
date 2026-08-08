@@ -4,8 +4,8 @@
  * @architectural-role Orchestrator — Stage 2 of the post-turn pipeline (segway.md §4), with the
  *   pure parsing split out per bi_principles.md §8
  * @description
- * docs/vistalyze_integration/segway.md §4: the post-cleanup heuristic scraper. Stage 1 (the
- * optional cleanup LLM pass, runCleanupPass in server/httpServer.ts) may rewrite a turn's text
+ * docs/vistalyze_integration/segway.md §4: the post-cleanup heuristic scraper. Stage 1 (the async
+ * cleanup subloop, orchestrator/cleanupLoop.ts) may rewrite a turn's text
  * to open with the two-line header block defined in docs/vistalyze_integration/cleanup_prompt.md
  * §2.4:
  *

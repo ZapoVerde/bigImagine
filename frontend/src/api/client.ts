@@ -9,6 +9,9 @@ import type {
   ChatSessionRow,
   ChatSummary,
   ChatSyncStatus,
+  CleanupJob,
+  CleanupSettings,
+  CleanupStatus,
   ConnectionTestResult,
   CreateConnectionInput,
   CreateImageConnectionInput,
@@ -273,8 +276,13 @@ export function updateChat(
     tool_names?: string[] | null;
     canvas_note_id?: string | null;
     /** The context_stack_presets row the turn-loop cleanup pass runs for this chat; null turns
-     *  the pass off. Same preset selection shape as the Prompt stack picker. */
+     *  the pass off. Same preset selection shape as the Prompt stack picker.
+     *  @deprecated retirement in progress — superseded by cleanup_enabled_at (the async
+     *  heuristic subloop); kept only so the Chat Settings toggle can clear a legacy value. */
     cleanup_preset_id?: string | null;
+    /** Toggle the async heuristic cleanup subloop: an ISO timestamp = enabled (the loop only
+     *  processes messages created after it), null = off. RP chats only, by loop policy. */
+    cleanup_enabled_at?: string | null;
   },
   apiKey: string | null,
 ): Promise<ChatSessionRow> {
@@ -746,4 +754,74 @@ export async function adminSetChatMemorySettings(
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<ChatMemorySettings>;
+}
+
+// --- Async cleanup subloop (cleanupLoop.ts) — the floating chat status pill + Cleanup page ---
+
+/** GET /v1/cleanup/status?chat_id= — polled by the floating pill in the chat header. null on a
+ *  failed poll (best-effort, keep last-known state) like getChatTurnStatus; the pill renders
+ *  nothing when the response says enabled:false (chat not opted in / not RP / archived). */
+export async function getCleanupStatus(chatId: string, apiKey: string | null): Promise<CleanupStatus | null> {
+  const res = await fetch(`/v1/cleanup/status?chat_id=${encodeURIComponent(chatId)}`, { headers: authHeaders(apiKey) });
+  if (!res.ok) return null;
+  return res.json() as Promise<CleanupStatus>;
+}
+
+/** POST /v1/cleanup/run — the pill click / Cleanup page run-now: one immediate pass over one
+ *  chat (the poll tick keeps the rest). Fire-and-forget; the caller polls status for results. */
+export async function runCleanupNow(chatId: string, apiKey: string | null): Promise<void> {
+  const res = await fetch('/v1/cleanup/run', {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** GET /v1/cleanup/jobs?chat_id=&limit= — the Cleanup page's recent activity list for one chat. */
+export async function getCleanupJobs(chatId: string, apiKey: string | null, limit = 20): Promise<CleanupJob[]> {
+  const res = await fetch(
+    `/v1/cleanup/jobs?chat_id=${encodeURIComponent(chatId)}&limit=${limit}`,
+    { headers: authHeaders(apiKey) },
+  );
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { jobs: CleanupJob[] };
+  return body.jobs;
+}
+
+/** GET /v1/admin/cleanup-settings — the Cleanup page's setup block: header/footer format +
+ *  repair prompts and the full slop-rules table. Admin-gated like every other Settings-tab
+ *  field; the subloop re-reads it live every tick, so a save takes effect on the next poll. */
+export async function adminGetCleanupSettings(adminKey: string | null): Promise<CleanupSettings> {
+  const res = await fetch('/v1/admin/cleanup-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<CleanupSettings>;
+}
+
+export async function adminSetCleanupSettings(
+  patch: {
+    header_regex?: string;
+    header_prompt?: string;
+    footer_regex?: string;
+    footer_prompt?: string;
+    slop_rules?: {
+      setName: string;
+      position: number;
+      pattern: string;
+      flags: string;
+      action: 'remove' | 'replace-paragraph' | 'llm';
+      replacement: string | null;
+      llmPrompt: string | null;
+      enabled: boolean;
+    }[];
+  },
+  adminKey: string | null,
+): Promise<CleanupSettings> {
+  const res = await fetch('/v1/admin/cleanup-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<CleanupSettings>;
 }

@@ -1,5 +1,18 @@
 # Feature Specification: Turn Loop Cleanup Pass
 
+> **⚠️ SUPERSEDED — 2026-08-08.** The inline, preset-driven Cleanup Pass this document specifies
+> (a post-`runTurn` LLM call inside `httpServer.ts`, configured via `chat_sessions.cleanup_preset_id`)
+> is **retired and removed**. It is replaced by the **async heuristic cleanup subloop**:
+> `orchestrator/src/orchestrator/cleanupLoop.ts` (the poll loop) + `cleanupHeuristics.ts` (the pure
+> engine), migration `0072_cleanup_heuristic_settings.sql`. A reply now lands raw and instantly; the
+> background loop rewrites it after the fact — `cleanup_slop_rules` (RLS-exempt household config,
+> editable on the Cleanup page) for antislop, and the `cleanup_header_regex`/`cleanup_header_prompt`/
+> `cleanup_footer_regex`/`cleanup_footer_prompt` orchestrator_settings keys for the header/footer
+> formats ("the format expressed as a prompt"). The old `cleanup_preset_id` column is left in place,
+> unread. This document is kept only as the historical design record of what the inline pass was —
+> including §2.4's canonical header wire format, which the new header regex/prompt default still
+> encodes (`DEFAULT_CLEANUP_CONFIG` in `cleanupHeuristics.ts`).
+
 **Status**: Designed  
 **Scope**: Addition and handling of the secondary LLM Cleanup Pass prompt in the turn loop.  
 **Governing Principles**: `bi_principles.md` §2 (LLM Reasons), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts/Presets).

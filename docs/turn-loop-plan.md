@@ -1,5 +1,19 @@
 # Turn Loop — Phase 1 Implementation Plan
 
+> **⚠️ SUPERSEDED (cleanup section only) — 2026-08-08.** The optional inline cleanup pass this
+> plan's §4 described (a `cleanup_preset_id`-driven, post-`runTurn` LLM call inside
+> `handleChatCompletions`) is **retired and removed**. It is replaced by the **async heuristic
+> cleanup subloop** (`orchestrator/src/orchestrator/cleanupLoop.ts` + the pure engine in
+> `cleanupHeuristics.ts`, migration `0072_cleanup_heuristic_settings.sql`): a reply now lands raw
+> and instantly; a background poll loop rewrites it after the fact, driven by regex triggers —
+> `cleanup_slop_rules` for antislop and the `cleanup_header_regex/prompt` +
+> `cleanup_footer_regex/prompt` settings for the header/footer formats ("the format expressed as a
+> prompt"). The old `chat_sessions.cleanup_preset_id` column is deliberately left in place, unread.
+> Setup lives on the **Cleanup page** (`frontend/src/views/CleanupView.tsx`), the per-chat opt-in
+> is the ChatSettings "Async cleanup pass" toggle (`cleanup_enabled_at`), and the floating chat
+> header pill (`components/cleanup/CleanupStatusPill.tsx`) shows TRG-style status.
+> The rest of this plan (steps 1–3, 5's sync rework, 6–7) is historical and stands as written.
+
 *Status: designed, not yet built. Phase 1 = one main LLM call handling narrator + all present
 characters, plus an optional unconditional cleanup pass. Character-stamped per-character calls are
 explicitly shelved (see Non-Goals) — this plan builds the loop shape so that expansion doesn't
