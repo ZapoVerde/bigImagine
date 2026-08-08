@@ -7,9 +7,10 @@ import { ADMIN_API_KEY_STORAGE_KEY } from '../../api/authStorage';
 import './LegibilityMenu.css';
 
 /**
- * The ChatView "Text legibility" menu (migration 0074) — a collapsible section at the top of the
- * chat settings rail with the five opt-in text-rendering tricks for prose on translucent bubbles
- * over the location background. Each checkbox POSTs its partial patch to the admin-gated
+ * The ChatView "Text legibility" menu (migrations 0074 + 0075) — a collapsible section at the
+ * top of the chat settings rail with the five opt-in text-rendering tricks for prose on
+ * translucent bubbles over the location background, plus the halo-strength slider (0075) under
+ * the Letter halo toggle. Each control POSTs its partial patch to the admin-gated
  * POST /v1/admin/chat-legibility-settings immediately (no Save button); the change is applied
  * optimistically to the view and reverted if the write fails (e.g. no stored admin key).
  * Household-wide, so one set applies to every chat — ChatView re-reads it at every chat load.
@@ -26,7 +27,10 @@ interface LegibilityMenuProps {
   onChange: (next: ChatLegibilitySettings) => void;
 }
 
-const TOGGLES: Array<{ field: keyof ChatLegibilitySettings; label: string; desc: string }> = [
+/** The five toggle fields — haloStrength (a 0..1 number) is the slider, not a checkbox. */
+type ToggleField = 'halo' | 'outline' | 'solidCode' | 'weightBump' | 'hoverFocus';
+
+const TOGGLES: Array<{ field: ToggleField; label: string; desc: string }> = [
   {
     field: 'halo',
     label: 'Letter halo',
@@ -62,17 +66,14 @@ export default function LegibilityMenu({ settings, onChange }: LegibilityMenuPro
   // Monotonic click counter: only the newest request may apply its response (success or revert).
   const seqRef = useRef(0);
 
-  function toggle(field: keyof ChatLegibilitySettings) {
-    if (!settings) return;
-    const before = settings;
-    const next = { ...before, [field]: !before[field] };
+  /** Applies a partial patch optimistically, then POSTs it; the newest write's full-set response
+   *  is the only one that touches the view, and a failed newest write reverts to `before`. */
+  function commit(patch: ChatLegibilitySettingsPatch, before: ChatLegibilitySettings) {
     const seq = ++seqRef.current;
     setStatus('');
-    onChange(next); // optimistic — the view flips immediately
+    onChange({ ...before, ...patch }); // optimistic — the view flips immediately
     const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
-    const write = chainRef.current.then(() =>
-      adminSetChatLegibilitySettings({ [field]: next[field] } as ChatLegibilitySettingsPatch, adminKey),
-    );
+    const write = chainRef.current.then(() => adminSetChatLegibilitySettings(patch, adminKey));
     // Whatever the write's outcome, the chain must stay resolvable so later toggles still run.
     chainRef.current = write.catch(() => undefined);
     write
@@ -87,23 +88,46 @@ export default function LegibilityMenu({ settings, onChange }: LegibilityMenuPro
       });
   }
 
+  function toggle(field: ToggleField) {
+    if (!settings) return;
+    commit({ [field]: !settings[field] }, settings);
+  }
+
   return (
     <details className="legibility-menu">
       <summary className="legibility-menu-summary">Text legibility</summary>
       <div className="legibility-menu-body">
         {TOGGLES.map(({ field, label, desc }) => (
-          <label key={field} className={`legibility-toggle${settings ? '' : ' disabled'}`}>
-            <input
-              type="checkbox"
-              checked={settings?.[field] ?? false}
-              disabled={!settings}
-              onChange={() => void toggle(field)}
-            />
-            <span className="legibility-toggle-text">
-              <span className="legibility-toggle-label">{label}</span>
-              <span className="legibility-toggle-desc">{desc}</span>
-            </span>
-          </label>
+          <div key={field}>
+            <label className={`legibility-toggle${settings ? '' : ' disabled'}`}>
+              <input
+                type="checkbox"
+                checked={settings?.[field] ?? false}
+                disabled={!settings}
+                onChange={() => void toggle(field)}
+              />
+              <span className="legibility-toggle-text">
+                <span className="legibility-toggle-label">{label}</span>
+                <span className="legibility-toggle-desc">{desc}</span>
+              </span>
+            </label>
+            {field === 'halo' && (
+              <div className={`legibility-slider${settings?.halo ? '' : ' disabled'}`}>
+                <span className="legibility-slider-label">Strength</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={settings ? Math.round(settings.haloStrength * 100) : 0}
+                  disabled={!settings || !settings.halo}
+                  onChange={(e) => settings && commit({ haloStrength: Number(e.target.value) / 100 }, settings)}
+                />
+                <span className="legibility-slider-value">
+                  {settings ? `${Math.round(settings.haloStrength * 100)}%` : ''}
+                </span>
+              </div>
+            )}
+          </div>
         ))}
         {status && <div className="legibility-menu-status">{status}</div>}
       </div>

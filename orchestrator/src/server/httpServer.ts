@@ -1889,7 +1889,7 @@ async function handleChatLegibilitySettingsSet(req: IncomingMessage, res: Server
   if (!value) {
     sendJson(res, 400, {
       error:
-        'expected a partial { halo?, outline?, solidCode?, weightBump?, hoverFocus? } with at least one field',
+        'expected a partial { halo?, haloStrength?, outline?, solidCode?, weightBump?, hoverFocus? } with at least one field',
     });
     return;
   }

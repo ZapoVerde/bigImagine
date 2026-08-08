@@ -512,12 +512,15 @@
 
 /* The halo color per bubble role, chosen to contrast with that role's *text* color (the theme
    tokens above): dark ring under light text, light ring under dark text. Inherits into every
-   markdown descendant (quotes, em, code) so one var covers the whole bubble. */
+   markdown descendant (quotes, em, code) so one var covers the whole bubble. The ring's
+   intensity dial (migration 0075) mixes the theme color toward transparent at
+   var(--halo-strength) — set on the view root by ChatView from the settings, default 60% — so
+   the theme color's own alpha is preserved and the strength multiplies on top. */
 .chat-bubble.user {
-  --bubble-halo: var(--color-bubble-user-halo);
+  --bubble-halo: color-mix(in srgb, var(--color-bubble-user-halo) var(--halo-strength, 60%), transparent);
 }
 .chat-bubble.assistant {
-  --bubble-halo: var(--color-bubble-assistant-halo);
+  --bubble-halo: color-mix(in srgb, var(--color-bubble-assistant-halo) var(--halo-strength, 60%), transparent);
 }
 
 /* 1. halo — a tight ring of directional text-shadows (the subtitle-renderer trick). Because the

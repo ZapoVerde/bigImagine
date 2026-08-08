@@ -2446,11 +2446,12 @@ server.close();
   assert(
     legUserRes.status === 200 &&
       legUserBody.halo === false &&
+      legUserBody.haloStrength === 0.6 &&
       legUserBody.outline === false &&
       legUserBody.solidCode === false &&
       legUserBody.weightBump === false &&
       legUserBody.hoverFocus === false,
-    'GET /v1/chat-legibility-settings defaults to all five toggles off before anything has been saved',
+    'GET /v1/chat-legibility-settings defaults to all five toggles off with halo strength 0.6 before anything has been saved',
   );
 
   const legAdminNoAuthRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`);
@@ -2463,6 +2464,13 @@ server.close();
   });
   assert(legBadRes.status === 400, 'POST /v1/admin/chat-legibility-settings rejects a non-boolean halo');
 
+  const legBadStrengthRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+    body: JSON.stringify({ haloStrength: 1.5 }),
+  });
+  assert(legBadStrengthRes.status === 400, 'POST /v1/admin/chat-legibility-settings rejects an out-of-range haloStrength');
+
   const legEmptyRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
@@ -2473,12 +2481,13 @@ server.close();
   const legOkRes = await fetch(`${base4}/v1/admin/chat-legibility-settings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
-    body: JSON.stringify({ halo: true, solidCode: true, hoverFocus: true }),
+    body: JSON.stringify({ halo: true, haloStrength: 0.45, solidCode: true, hoverFocus: true }),
   });
   const legOkBody = await legOkRes.json();
   assert(
     legOkRes.status === 200 &&
       legOkBody.halo === true &&
+      legOkBody.haloStrength === 0.45 &&
       legOkBody.outline === false &&
       legOkBody.solidCode === true &&
       legOkBody.weightBump === false &&
@@ -2487,6 +2496,7 @@ server.close();
   );
   assert(
     settings4.setCalls.some((c) => c.key === 'chat_legibility_halo' && c.value === 'true') &&
+      settings4.setCalls.some((c) => c.key === 'chat_legibility_halo_strength' && c.value === '0.45') &&
       settings4.setCalls.some((c) => c.key === 'chat_legibility_solid_code' && c.value === 'true') &&
       settings4.setCalls.some((c) => c.key === 'chat_legibility_hover_focus' && c.value === 'true') &&
       !settings4.setCalls.some((c) => c.key === 'chat_legibility_outline') &&
@@ -2499,7 +2509,10 @@ server.close();
   });
   const legAfterSaveBody = await legAfterSaveRes.json();
   assert(
-    legAfterSaveBody.halo === true && legAfterSaveBody.hoverFocus === true && legAfterSaveBody.outline === false,
+    legAfterSaveBody.halo === true &&
+      legAfterSaveBody.haloStrength === 0.45 &&
+      legAfterSaveBody.hoverFocus === true &&
+      legAfterSaveBody.outline === false,
     'the user-scoped GET reflects the newly saved legibility toggles with no restart',
   );
 

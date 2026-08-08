@@ -224,6 +224,14 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         .join(' ')
     : '';
 
+  // The halo ring's intensity (migration 0075) as a CSS custom property: ChatView.css mixes the
+  // per-theme halo colors at this percentage, so 0% = invisible ring, 100% = full force. Read
+  // from the same settings object the toggles live in — the menu's slider writes it household-
+  // wide, applied live with no restart.
+  const legStyle = legSettings
+    ? ({ '--halo-strength': `${Math.round(legSettings.haloStrength * 100)}%` } as React.CSSProperties)
+    : undefined;
+
   // The settings, as CSS custom properties for ChatView.css: the overlay veil (opacity is a
   // plain 0..1 number — the CSS `opacity` property accepts it directly) and the bubble fill
   // (opacity as a percentage — color-mix needs one). Unitless/percentage strings so the rules
@@ -993,7 +1001,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   );
 
   return (
-    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={chatBgStyle} data-legibility={legibilityFlags}>
+    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={{ ...chatBgStyle, ...legStyle }} data-legibility={legibilityFlags}>
       {promptInspectorOpen && activeChat?.kind === 'rp' && (
         <PromptInspectorPanel
           apiKey={apiKey}

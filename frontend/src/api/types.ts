@@ -276,6 +276,10 @@ export interface ChatBackgroundSettings {
 export interface ChatLegibilitySettings {
   /** text-shadow halo ring around bubble prose (subtitle-renderer trick). */
   halo: boolean;
+  /** 0..1 — the halo ring's intensity (migration 0075), default 0.6 when unset; the menu's
+   *  slider under the Letter halo toggle. Applied as a color-mix percentage over the per-theme
+   *  halo colors, so 0 = invisible ring, 1 = the full-force ring. */
+  haloStrength: number;
   /** crisp 0.5px -webkit-text-stroke on quoted dialogue, headings, <summary>. */
   outline: boolean;
   /** solid near-black code chips + <pre> blocks with light text. */
@@ -289,6 +293,7 @@ export interface ChatLegibilitySettings {
 /** A partial update — every field optional, at least one present. */
 export interface ChatLegibilitySettingsPatch {
   halo?: boolean;
+  haloStrength?: number;
   outline?: boolean;
   solidCode?: boolean;
   weightBump?: boolean;

@@ -390,3 +390,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `{{history, x}}` + `{{message}}`, footer prompt `{{message}}` only; empty = built-in default).
   The old `cleanup_preset_id`/`users.default_cleanup_preset_id` columns stay in place, unread —
   migrations are append-only; the inline pass's call sites are removed with the feature itself.
+- `0075_chat_legibility_halo_strength.sql` — widens `orchestrator_settings.key`'s CHECK with
+  `chat_legibility_halo_strength` (text `'0'..'1'`, default `0.6`): the intensity dial under the
+  ChatView "Text legibility" menu's **Letter halo** toggle (0074). Applied in ChatView.css as
+  `color-mix(in srgb, var(--color-bubble-*-halo) var(--halo-strength, 60%), transparent)` — the
+  per-theme halo colors keep their own alpha and the strength multiplies on top, so 0 = invisible
+  ring, 1 = the full-force ring (the pre-0075 look, which read as too strong). Read live at chat
+  load by the same `GET /v1/chat-legibility-settings`; written by the admin-gated slider, no
+  restart. Idempotent (drop/re-add of the CHECK; the usual hand-apply one-shot).

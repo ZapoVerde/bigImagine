@@ -144,6 +144,13 @@
  * each toggle immediately POSTs its partial patch to the admin-gated
  * POST /v1/admin/chat-legibility-settings — household-wide, so one set applies to all chats.
  *
+ * chat_legibility_halo_strength (migration 0075) is the intensity dial under the Letter halo
+ * toggle: text '0'..'1', default 0.6 when unset. Applied in ChatView.css as a color-mix
+ * percentage over the per-theme halo colors (their own alpha preserved, strength multiplied on
+ * top), so 0 = invisible ring, 1 = the full-force ring (the pre-0075 look, which read as too
+ * strong). Same read-live-at-chat-load shape; written by the admin-gated slider in the same
+ * menu, no restart.
+ *
  * cleanup_header_regex/cleanup_header_prompt/cleanup_footer_regex/cleanup_footer_prompt
  * (migration 0072, the async heuristic cleanup subloop) are the Cleanup page's setup config:
  * the two editable regex triggers (header two-line shape `[ … | … | …]` + `Present: …`; footer
@@ -218,6 +225,7 @@ export const SETTING_NAMES = [
   'chat_legibility_solid_code',
   'chat_legibility_weight',
   'chat_legibility_hover_focus',
+  'chat_legibility_halo_strength',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 
