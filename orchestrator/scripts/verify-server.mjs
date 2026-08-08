@@ -411,6 +411,32 @@ function createFakeChatSessionStore() {
       );
       return true;
     },
+    async editMessageContent(userId, chatId, messageId, newContent) {
+      // Minimal mirror of io/chatSessions.ts's editMessageContent (recordSwipeIfContent): rewrite
+      // the message's content in place, same message_id, everything after untouched — the
+      // pre-edit text preserved as a swipe (stashed as swipe #0 on the first edit).
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
+      if (!target) return undefined;
+      let swipes = swipesByMessage.get(messageId) ?? [];
+      if (swipes.length === 0) {
+        swipes = [target.content];
+        swipesByMessage.set(messageId, swipes);
+        activeSwipeIdx.set(messageId, 0);
+      }
+      swipes.push(newContent);
+      const idx = swipes.length - 1;
+      activeSwipeIdx.set(messageId, idx);
+      target.content = newContent;
+      return {
+        messageId,
+        role: target.role,
+        content: newContent,
+        createdAt: target.createdAt,
+        swipes: { index: idx, count: swipes.length },
+      };
+    },
     async listFolders(userId) {
       return [...folders.values()].filter((f) => f.userId === userId);
     },
@@ -1772,6 +1798,93 @@ server.close();
   assert(
     afterEdit.messages.length === 2 && afterEdit.messages[0].content === 'first question, edited' && afterEdit.messages[1].role === 'assistant',
     'an edit resend (one more message than already persisted) appends both the edited user message and the new reply',
+  );
+
+  // "edit an LLM reply": POST .../edit rewrites the message's text in place — same message_id,
+  // the pre-edit text preserved as a swipe, everything else in the conversation untouched.
+  const editReplyNoAuthRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterEdit.messages[1].messageId}/edit`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 'rewritten' }),
+  });
+  assert(editReplyNoAuthRes.status === 401, 'POST .../edit with no auth returns 401');
+
+  const editReplyBadBodyRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterEdit.messages[1].messageId}/edit`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ content: '   ' }),
+  });
+  assert(editReplyBadBodyRes.status === 400, 'POST .../edit with empty content returns 400');
+
+  const editReplyUnknownRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/no-such-id/edit`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 'rewritten' }),
+  });
+  assert(editReplyUnknownRes.status === 404, 'POST .../edit for an unknown message id returns 404');
+
+  const editReplyRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterEdit.messages[1].messageId}/edit`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 'reply, rewritten in place' }),
+  });
+  assert(editReplyRes.status === 200, 'POST .../edit succeeds');
+  const editReplyBody = await editReplyRes.json();
+  assert(
+    editReplyBody.message &&
+      editReplyBody.message.messageId === afterEdit.messages[1].messageId &&
+      editReplyBody.message.content === 'reply, rewritten in place',
+    '.../edit returns the rewritten message under its original message_id',
+  );
+  assert(
+    editReplyBody.message.swipes && editReplyBody.message.swipes.count === 2 && editReplyBody.message.swipes.index === 1,
+    'the pre-edit reply text is preserved as swipe #0 and the rewritten text is the active swipe',
+  );
+  const afterEditReply = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterEditReply.messages.length === 2 &&
+      afterEditReply.messages[0].content === 'first question, edited' &&
+      afterEditReply.messages[1].content === 'reply, rewritten in place',
+    'an in-place edit rewrites the reply and leaves the conversation (including the user message before it) untouched',
+  );
+
+  // An identical-text edit is a no-op — it must not mint a junk swipe.
+  const noopEditRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterEdit.messages[1].messageId}/edit`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 'reply, rewritten in place' }),
+  });
+  assert(noopEditRes.status === 200, 'POST .../edit with identical content succeeds as a no-op');
+  const noopEditBody = await noopEditRes.json();
+  assert(
+    noopEditBody.message && noopEditBody.message.content === 'reply, rewritten in place',
+    'the no-op edit response carries the unchanged message',
+  );
+  assert(
+    (chats3.swipesByMessage.get(afterEdit.messages[1].messageId) ?? []).length === 2,
+    'an identical-text edit does not mint a junk swipe',
+  );
+
+  // Editing a mid-conversation reply must not truncate anything after it (unlike the user-edit
+  // flow) — the rewrite is purely in place, no "must be the last message" restriction.
+  await chats3.appendMessages(userId3, chat2.chatId, [
+    { role: 'user', content: 'third question' },
+    { role: 'assistant', content: 'third answer' },
+  ]);
+  const withThird = await chats3.getChat(userId3, chat2.chatId);
+  const midEditRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${withThird.messages[1].messageId}/edit`, {
+    method: 'POST',
+    headers: { ...auth3, 'content-type': 'application/json' },
+    body: JSON.stringify({ content: 'reply, edited mid-conversation' }),
+  });
+  assert(midEditRes.status === 200, 'POST .../edit on a mid-conversation reply succeeds');
+  const afterMidEdit = await chats3.getChat(userId3, chat2.chatId);
+  assert(
+    afterMidEdit.messages.length === 4 &&
+      afterMidEdit.messages[1].content === 'reply, edited mid-conversation' &&
+      afterMidEdit.messages[2].content === 'third question' &&
+      afterMidEdit.messages[3].content === 'third answer',
+    'editing a mid-conversation reply leaves everything after it untouched (no truncation)',
   );
 
   // --- A chat's own profile override swaps in a throwaway provider for that turn, no restart ---

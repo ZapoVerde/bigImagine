@@ -342,6 +342,23 @@ export function truncateMessagesFrom(
   );
 }
 
+/** In-place content rewrite of an already-persisted message — the Chat tab's "edit an LLM reply"
+ *  action. Unlike truncateMessagesFrom's user-edit flow, the message keeps its id, everything
+ *  chronologically after it is untouched, and the pre-edit text is preserved as a swipe (the
+ *  original reply stays one ‹ away when this is the last message). */
+export function editMessageContent(
+  chatId: string,
+  messageId: string,
+  content: string,
+  apiKey: string | null,
+): Promise<{ message: StoredChatMessage }> {
+  return jsonRequest<{ message: StoredChatMessage }>(
+    `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/edit`,
+    apiKey,
+    { method: 'POST', body: { content } },
+  );
+}
+
 export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier_swipe' | 'no_further_swipe' };
 
 /** Swipe capability on the last LLM response — messageId must be the chat's current last message.

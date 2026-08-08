@@ -14,6 +14,7 @@ import {
   chatCompletion,
   createChat,
   deleteMessage,
+  editMessageContent,
   forkChat,
   getChat,
   getChatLocationImage,
@@ -932,24 +933,35 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setEditDraft('');
   }
 
-  /** Edits a user message: truncates it (and everything after — the conversation branches from
-   *  here) server-side, then resends the kept history plus the edited content as a new turn.
-   *  One message longer than what's now persisted, so handleChatCompletions treats it as
-   *  genuinely new and appends both the edited message and its fresh reply. */
+  /** Edits a message. Two distinct semantics by role:
+   *  - user message: truncates it (and everything after — the conversation branches from here)
+   *    server-side, then resends the kept history plus the edited content as a new turn. One
+   *    message longer than what's now persisted, so handleChatCompletions treats it as genuinely
+   *    new and appends both the edited message and its fresh reply.
+   *  - assistant message (the "edit an LLM reply" action): the text is rewritten in place — same
+   *    message id, everything after untouched, the pre-edit text preserved as a swipe — and the
+   *    conversation simply continues from the edited reply. No truncation, no branch. */
   async function submitEdit() {
     const messageId = editingId;
     const content = editDraft.trim();
     if (!activeChat || !messageId || !content || sending) return;
+    const target = messages.find((m) => m.messageId === messageId);
+    if (!target) return;
     setError(null);
     setEditingId(null);
     setSending(true);
     try {
-      await truncateMessagesFrom(activeChat.chatId, messageId, apiKey);
-      const idx = messages.findIndex((m) => m.messageId === messageId);
-      const kept = idx === -1 ? messages : messages.slice(0, idx);
-      const withEdit: DisplayMessage[] = [...kept, { role: 'user', content }];
-      setMessages(withEdit);
-      await chatCompletion(toWireMessages(withEdit), apiKey, activeChat.chatId);
+      if (target.role === 'assistant') {
+        if (content === target.content) return; // nothing changed — no junk swipe server-side
+        await editMessageContent(activeChat.chatId, messageId, content, apiKey);
+      } else {
+        await truncateMessagesFrom(activeChat.chatId, messageId, apiKey);
+        const idx = messages.findIndex((m) => m.messageId === messageId);
+        const kept = idx === -1 ? messages : messages.slice(0, idx);
+        const withEdit: DisplayMessage[] = [...kept, { role: 'user', content }];
+        setMessages(withEdit);
+        await chatCompletion(toWireMessages(withEdit), apiKey, activeChat.chatId);
+      }
       await refreshActiveMessages(activeChat.chatId);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to save edit');
@@ -1328,7 +1340,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                     <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={3} autoFocus />
                     <div className="message-edit-actions">
                       <button onClick={submitEdit} disabled={!editDraft.trim() || sending}>
-                        Save &amp; resend
+                        {m.role === 'assistant' ? 'Save' : 'Save &amp; resend'}
                       </button>
                       <button onClick={cancelEdit}>Cancel</button>
                     </div>
@@ -1377,6 +1389,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                           >
                             {copiedId === m.messageId ? '✓' : '📋'}
                           </button>
+                          <button
+                            type="button"
+                            className="last-chat-icon"
+                            title="Edit this reply — rewrite the text in place, the original stays one ‹ away"
+                            disabled={busy}
+                            onClick={() => startEdit(m.messageId!, m.content)}
+                          >
+                            ✏️
+                          </button>
                           {showRerun && (
                             <button
                               type="button"
@@ -1421,7 +1442,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                           <button onClick={() => copyMessage(m.content, m.messageId)}>
                             {copiedId === m.messageId ? 'Copied' : 'Copy'}
                           </button>
-                          {m.role === 'user' && <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>}
+                          <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>
                           <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
                             Fork from here
                           </button>

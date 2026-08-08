@@ -263,7 +263,7 @@ function createFakePool() {
           // message_id`, which the deleteMessage branch below owns) and discriminated from the
           // getChat select-all by the `where message_id` predicate.
           if (sql.startsWith('select') && sql.includes('from chat_messages where message_id')) {
-            const row = messages.find((m) => m.message_id === params[0] && m.chat_id === params[1]);
+            const row = messages.find((m) => m.message_id === params[0] && m.chat_id === params[1] && m.user_id === scopedUserId);
             return { rows: row ? [row] : [] };
           }
           // ensureActiveSwipe / forkChat mirroring: give a message its own swipe row.
@@ -277,6 +277,18 @@ function createFakePool() {
             const [swipeId, messageId] = params;
             const row = messages.find((m) => m.message_id === messageId);
             if (row) row.active_swipe_id = swipeId;
+            return { rows: [] };
+          }
+          // recordSwipeIfContent's content writeback (regeneration / in-place edit): content and
+          // the fresh swipe together. Matches after the active_swipe_id-only branch above, which
+          // its `set content = $1, active_swipe_id = $2` clause doesn't collide with.
+          if (sql.includes('update chat_messages set content')) {
+            const [content, swipeId, messageId] = params;
+            const row = messages.find((m) => m.message_id === messageId);
+            if (row) {
+              row.content = content;
+              row.active_swipe_id = swipeId;
+            }
             return { rows: [] };
           }
           // forkChat resurrection (§2.7): transient/inactive rows anchored to the fork swipe.
@@ -581,6 +593,45 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(
     afterTruncate.messages.length === 1 && afterTruncate.messages[0].messageId === u1.messageId,
     'truncating from U2 removes U2 and everything chronologically after it (A2), leaving only U1',
+  );
+}
+
+// --- editMessageContent: in-place rewrite of a persisted message, original kept as a swipe ---
+{
+  const chat = await store.createChat(USER_A, { title: 'Edit scratch' });
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ]);
+  const before = await store.getChat(USER_A, chat.chatId);
+  const [u1, a1, u2, a2] = before.messages;
+
+  const otherUserEdited = await store.editMessageContent(USER_B, chat.chatId, a1.messageId, 'A1 hacked');
+  assert(otherUserEdited === undefined, "another user can't edit a message in someone else's chat (RLS scoping)");
+
+  const editedMissing = await store.editMessageContent(USER_A, chat.chatId, 'no-such-message-id', 'x');
+  assert(editedMissing === undefined, 'editing a missing message reports undefined, does not throw');
+
+  const edited = await store.editMessageContent(USER_A, chat.chatId, a1.messageId, 'A1 edited');
+  assert(
+    edited && edited.messageId === a1.messageId && edited.content === 'A1 edited' && edited.role === 'assistant',
+    'editMessageContent rewrites the message in place, same message_id and role',
+  );
+  assert(
+    edited.swipes && edited.swipes.count === 2 && edited.swipes.index === 1,
+    'the original text is preserved as swipe #0 and the edited text is the active swipe',
+  );
+
+  const afterEdit = await store.getChat(USER_A, chat.chatId);
+  assert(afterEdit.messages.length === 4, 'an in-place edit leaves the conversation length untouched (no truncation)');
+  assert(
+    afterEdit.messages[1].content === 'A1 edited' &&
+      afterEdit.messages[2].messageId === u2.messageId &&
+      afterEdit.messages[3].messageId === a2.messageId &&
+      afterEdit.messages[0].messageId === u1.messageId,
+    'everything chronologically after (and before) the edited message survives untouched',
   );
 }
 

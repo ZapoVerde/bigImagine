@@ -43,6 +43,12 @@
  * /v1/chat/completions again with new content, ending up one message longer than what's now
  * persisted).
  *
+ * POST /v1/chats/:id/messages/:messageId/edit (body: { content: non-empty string }) rewrites an
+ * already-persisted message's text in place — the Chat tab's "edit an LLM reply" action. Unlike
+ * the truncate+resend user-edit above, the message keeps its message_id and everything
+ * chronologically after it is untouched; the pre-edit text is preserved as a swipe via the same
+ * recordSwipe write path regeneration uses, so the original reply stays one ‹ away.
+ *
  * POST /v1/chats/:id/messages/:messageId/swipe (body: { direction: 'prev' | 'next' }) — swipe
  * capability on the last LLM response (docs/bi_principles.md), only ever valid for messageId ==
  * this chat's current last message. cycleSwipe (io/chatSessions.ts) is a pure content swap between
@@ -2495,6 +2501,43 @@ async function handleChatRoutes(
     if (segments.length === 4 && segments[3] === 'truncate' && req.method === 'POST') {
       const truncated = await deps.chats.truncateMessagesFrom(userId, chatId, messageId);
       sendJson(res, truncated ? 200 : 404, truncated ? { truncated: true } : { error: 'not found' });
+      return;
+    }
+    if (segments.length === 4 && segments[3] === 'edit' && req.method === 'POST') {
+      // In-place content rewrite (the Chat tab's "edit an LLM reply") — message keeps its id,
+      // everything chronologically after it is untouched, and the pre-edit text is preserved as
+      // a swipe (recordSwipeIfContent's stash-the-original path). Unlike the truncate+resend
+      // user-edit, there is no "must be the last message" restriction: rewriting an earlier
+      // reply's text is coherent mid-conversation, and swiping never touches earlier messages.
+      const body = await readJsonBody(req);
+      const content = (body as Record<string, unknown>)?.content;
+      if (typeof content !== 'string' || !content.trim()) {
+        sendJson(res, 400, { error: 'expected { content: non-empty string }' });
+        return;
+      }
+      const detail = await deps.chats.getChat(userId, chatId);
+      if (!detail) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      // No-op guard: identical text must not mint a junk swipe in the canonical record — the
+      // frontend already skips the call, but a raw-API client shouldn't corrupt the swipe list
+      // either (each edit otherwise appends a swipe, exactly like a regeneration would).
+      const existing = detail.messages.find((m) => m.messageId === messageId);
+      if (existing && existing.content === content) {
+        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, existing) });
+        return;
+      }
+      const updated = await deps.chats.editMessageContent(userId, chatId, messageId, content);
+      if (!updated) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, updated) });
+      // The edit made a new swipe active; if that swipe's location has no rendered image yet
+      // (or the location changed under it), restart bg discovery — cache-first, so this is a
+      // no-op whenever an image already exists or a render is in flight (see ensureActiveLocationImage).
+      void ensureActiveLocationImage(deps, userId, chatId);
       return;
     }
     if (segments.length === 4 && segments[3] === 'swipe' && req.method === 'POST') {

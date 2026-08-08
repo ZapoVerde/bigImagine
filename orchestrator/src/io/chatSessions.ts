@@ -329,6 +329,14 @@ export interface ChatSessionStore {
    *  (so 'prev' can always return to the original reply), and newContent becomes both the row's
    *  content and a fresh swipe of its own. Returns undefined if messageId isn't in this chat. */
   recordSwipe(userId: string, chatId: string, messageId: string, newContent: string): Promise<StoredChatMessage | undefined>;
+  /** In-place content rewrite of an already-persisted message — the Chat tab's "edit an LLM
+   *  reply" action. Same write path as recordSwipe (the message's prior content is preserved as
+   *  a swipe the first time this is ever called, and newContent becomes both the row's content
+   *  and a fresh swipe), but the content comes from the user typing, not an LLM regeneration —
+   *  and unlike truncateMessagesFrom's user-message edit flow, nothing chronologically after the
+   *  message is touched: the conversation simply continues from the rewritten reply. Returns
+   *  undefined if messageId isn't in this chat. */
+  editMessageContent(userId: string, chatId: string, messageId: string, newContent: string): Promise<StoredChatMessage | undefined>;
   /** The cleanup subloop's writeback (orchestrator/cleanupLoop.ts): recordSwipe with a
    *  mid-flight guard. Reads the message's current content in the SAME transaction as the
    *  writeback, and returns undefined (writing nothing) when it no longer equals expectedContent
@@ -722,6 +730,11 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
     },
 
     async recordSwipe(userId, chatId, messageId, newContent) {
+      const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent);
+      return result?.message;
+    },
+
+    async editMessageContent(userId, chatId, messageId, newContent) {
       const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent);
       return result?.message;
     },
