@@ -1,0 +1,86 @@
+/* The RAG management page — SettingsView.css's form styling (fieldsets, inputs, status lines)
+   plus ReviewPanelView.css's sync-status table. One page, two halves: the write path (Chat
+   Memory fieldset) and the read path (Retrieval fieldset + live sync status). */
+.rag-view {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.rag-view input,
+.rag-view select,
+.rag-view button {
+  font-size: var(--font-size-base);
+  padding: 0.4rem 0.6rem;
+  margin: 0.2rem 0;
+}
+
+.rag-view input[type='password'],
+.rag-view textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.rag-view fieldset {
+  margin-top: 1.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.rag-view-intro {
+  margin-top: 0.4rem;
+}
+
+.rag-refresh {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.rag-refresh:hover {
+  background: var(--color-hover-surface);
+}
+
+.rag-sync-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+}
+
+.rag-sync-table th,
+.rag-sync-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.rag-badge-ok {
+  color: var(--color-success);
+}
+
+.rag-badge-error {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.rag-badge-skipped {
+  color: var(--color-text-faint);
+}
+
+/* ChatView.css defines .model-connection-note for the chat settings pane, but RagView can mount
+   before any chat ever has (its landing pill opens straight here) — repeat the small rule so the
+   Retrieval fieldset's helper notes are styled regardless of mount order. */
+.rag-view .model-connection-note {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.rag-consecutive {
+  color: var(--color-danger);
+  font-size: 0.85em;
+}
