@@ -187,6 +187,10 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
           fires the <code>llm prompt</code> per paragraph containing the match and splices the result back.{' '}
           <code>llm</code> fires it once over the whole message. <code>set name</code> groups rules;{' '}
           <code>position</code> orders them within a set.
+          <br />
+          In an <code>llm prompt</code>, <code>{'{{keyword}}'}</code> is the exact phrase that triggered the rule,{' '}
+          <code>{'{{paragraph}}'}</code> the paragraph containing it (<code>replace-paragraph</code> only), and{' '}
+          <code>{'{{message}}'}</code> the whole reply — they resolve at run time.
         </p>
         <div className="cleanup-slop-list">
           {slopRules.map((rule) => (
@@ -245,7 +249,7 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
                   llm prompt
                   <input
                     value={rule.llmPrompt ?? ''}
-                    placeholder="repair prompt for this trigger"
+                    placeholder='e.g. The reply contains "{{keyword}}" — remove it. {{paragraph}}'
                     onChange={(e) => updateRule(rule.ruleId, { llmPrompt: e.target.value || null })}
                   />
                 </label>
