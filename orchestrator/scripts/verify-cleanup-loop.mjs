@@ -7,11 +7,14 @@
 // (message, swipe) via cleanup_jobs (a covered message is never re-processed, so the loop is
 // idempotent across ticks), 'remove' rules rewrite without any LLM call, header/footer repairs
 // fire one prompt each with {{history, N}} resolved, the 0066 "no inner thoughts → no footer"
-// rule holds, every failure lands in the ledger as 'flagged'/'error' rather than throwing, and
+// rule holds, every repair records its model reply on the chat's prompt trace (the Prompt
+// Inspector's source — the cleaned text replaces the raw reply, so the trace is where it
+// survives), every failure lands in the ledger as 'flagged'/'error' rather than throwing, and
 // getCleanupStatus derives the pill state (thinking → modified).
 
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
+import { getPromptTrace } from '../dist/io/promptTrace.js';
 import { runCleanupTick, getCleanupStatus, runCleanupNow, getCleanupJobs } from '../dist/orchestrator/cleanupLoop.js';
 import {
   getCleanupSettings,
@@ -446,6 +449,54 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(current.content.startsWith(VALID_HEADER), 'the header repair prompt output replaced the missing header');
   const job = pool.jobs.find((j) => j.message_id === message.message_id);
   assert(job && job.status === 'done' && job.changed === true, 'the header repair job is done+changed');
+}
+
+// ---------------------------------------------------------------------------
+// 6b. The Prompt Inspector's trace: a successful repair records its model reply (trimmed, exactly
+//     what applyRepairSteps consumed) on the 'cleanup' entry; a failed repair leaves no reply
+// ---------------------------------------------------------------------------
+{
+  const pool = createFakePool();
+  addUser(pool, 'u1');
+  const chatId = addChat(pool, { userId: 'u1' });
+  const message = addMessage(pool, { chatId, userId: 'u1', content: 'She refused to flinch.\n' });
+  // Padded on both sides — the loop must record the trimmed output, not the raw reply.
+  const llm = createFakeLlm(() => `  ${VALID_HEADER.trimEnd()}  `);
+  const db = createPostgresClient(pool);
+
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats: createFakeChats(pool) });
+
+  const cleanup = getPromptTrace(chatId).find((e) => e.kind === 'cleanup');
+  assert(!!cleanup, "a fired repair records a 'cleanup' entry in the chat's prompt trace");
+  assert(
+    cleanup.reply === VALID_HEADER.trimEnd(),
+    "the trace entry carries the model's trimmed reply — exactly the text applyRepairSteps consumed",
+  );
+  assert(
+    cleanup.items.length === 1 &&
+      cleanup.items[0].role === 'user' &&
+      cleanup.items[0].content.includes('header'),
+    'the trace entry still holds the prompt itself (user role) alongside the reply',
+  );
+}
+
+// --- Fail-open reply: a repair that throws still records the prompt (recorded before the call)
+//     but carries no reply --------------------------------------------------------
+{
+  const pool = createFakePool();
+  addUser(pool, 'u1');
+  const chatId = addChat(pool, { userId: 'u1' });
+  addMessage(pool, { chatId, userId: 'u1', content: 'She refused to flinch.\n' });
+  const llm = createFakeLlm(() => {
+    throw new Error('provider timeout');
+  });
+  const db = createPostgresClient(pool);
+
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats: createFakeChats(pool) });
+
+  const cleanup = getPromptTrace(chatId).find((e) => e.kind === 'cleanup');
+  assert(!!cleanup, 'a failed repair still records the prompt (recorded before the call went out)');
+  assert(cleanup.reply === undefined, 'a failed repair carries no reply on its trace entry');
 }
 
 // ---------------------------------------------------------------------------

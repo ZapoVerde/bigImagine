@@ -20,7 +20,9 @@ interface PromptInspectorPanelProps {
 // Prompt (the exact text the last turn sent — captured at send time server-side, io/promptTrace.ts
 // kind 'main' — shown as ONE collapsed block holding the complete text; see PromptGroupSection),
 // then each captured background prompt (cleanup pass, chat title generation, …) with its full
-// actual text. Every block carries a rough token estimate so a household member can see what's
+// actual text — and, when the trace captured one, the model's reply to that prompt (cleanup
+// repair outputs are discarded the moment the cleaned text replaces them; the inspector is where
+// they survive). Every block carries a rough token estimate so a household member can see what's
 // actually eating context. ChatView bumps refreshToken once per completed turn, so the panel
 // always shows the last turn that was sent.
 export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onClose }: PromptInspectorPanelProps) {
@@ -106,12 +108,13 @@ function itemLabel(item: PromptPreviewItem): string {
 
 // One collapsible section per prompt: the group title (Main Prompt / Cleanup Prompt / …), a
 // "fired" badge when this is a captured prompt's actual sent text, and the prompt's text as
-// collapsible blocks. The Main Prompt — the full system stack plus the entire trimmed conversation
-// history — is deliberately rendered as a SINGLE collapsed block holding the complete text (the
-// user's call: it "completely collapses"; the cleanup/background groups stay visible below without
-// scrolling past the whole history, and the full text is one click away). Every other group keeps
-// one item per header/slot/message, each defaulting open — those are short enough that reviewing
-// the complete literal text inline is the point.
+// collapsible blocks — plus, when the trace captured one, the model's reply as a block in the
+// same style (labeled "Reply", role assistant). The Main Prompt — the full system stack plus the
+// entire trimmed conversation history — is deliberately rendered as a SINGLE collapsed block
+// holding the complete text (the user's call: it "completely collapses"; the cleanup/background
+// groups stay visible below without scrolling past the whole history, and the full text is one
+// click away). Every other group keeps one item per header/slot/message, each defaulting open —
+// those are short enough that reviewing the complete literal text inline is the point.
 function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
   // Same ceil-of-total rule as the panel header's totalEstimatedTokens — sum the chars, then one
   // ceil — so section tokens always add up to exactly the header total (summing per-item ceils
@@ -156,6 +159,21 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
             <pre className="prompt-inspector-item-content">{item.content}</pre>
           </details>
         ))
+      )}
+      {group.reply && (
+        // The model's reply to this captured prompt — same collapsible block style as the prompt
+        // items above, defaulting open like they do. Labeled "Reply" so it can't be mistaken for
+        // a prompt item; its role badge is 'assistant'.
+        <details className="prompt-inspector-item" open>
+          <summary>
+            <span className="prompt-inspector-item-label">Reply</span>
+            <span className="prompt-inspector-item-role prompt-inspector-item-role-assistant">assistant</span>
+            <span className="prompt-inspector-item-tokens">
+              {group.reply.estimatedTokens.toLocaleString()} tk · {group.reply.chars.toLocaleString()} ch
+            </span>
+          </summary>
+          <pre className="prompt-inspector-item-content">{group.reply.content}</pre>
+        </details>
       )}
     </section>
   );

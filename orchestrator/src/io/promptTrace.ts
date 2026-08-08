@@ -27,7 +27,9 @@
  * immediately before the llm.complete() call — record before, regardless of whether the call later
  * throws (the prompt was sent either way). handleChatCompletions/regenerateSwipe record kind
  * 'main' this way (system prompt prepended, in send order); the cleanup subloop's repair prompts
- * (orchestrator/cleanupLoop.ts's dispatchStep) record kind 'cleanup'.
+ * (orchestrator/cleanupLoop.ts's dispatchStep) record kind 'cleanup'. A background prompt's entry
+ * may also pick up a `reply` after the call returns — the model's output, which for a cleanup
+ * repair is discarded the instant the cleaned text replaces it, so the trace is its only home.
  *
  * @api-declaration
  * recordPromptTrace(chatId, entry) — append one fired prompt to the chat's trace
@@ -57,6 +59,11 @@ export interface PromptTraceEntry {
   /** Human heading shown in the inspector, e.g. 'Cleanup Prompt'. */
   title: string;
   items: PromptTraceItem[];
+  /** The model's reply to this prompt, when the call produced one — attached after the call
+   *  returns (the entry object stays live in the trace). For a cleanup repair this is the only
+   *  place the reply ever exists: the cleaned text replaces it in the message, and the raw LLM
+   *  output is otherwise unrecoverable. Absent when the call failed or replied empty. */
+  reply?: string;
   capturedAt: number;
 }
 

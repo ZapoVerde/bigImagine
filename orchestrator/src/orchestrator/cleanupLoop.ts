@@ -74,7 +74,7 @@
 import { log } from '../io/logger.js';
 import { runWithCallContext } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
-import { recordPromptTrace } from '../io/promptTrace.js';
+import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ChatSessionStore } from '../io/chatSessions.js';
@@ -241,7 +241,11 @@ async function loadHistory(
 }
 
 /** One repair step → one prompt trace entry + one LLM call. Fail-open: null on throw or empty
- *  output (applyRepairSteps then leaves that region untouched). */
+ *  output (applyRepairSteps then leaves that region untouched). The trace entry is recorded before
+ *  the call (promptTrace.ts's contract — the prompt is sent either way) and then picks up the
+ *  model's reply afterwards, so the inspector shows the full exchange: the repair prompt and
+ *  exactly what the model replied with, which is otherwise unrecoverable (the cleaned text replaces
+ *  it in the message). */
 async function dispatchStep(
   deps: CleanupLoopDeps,
   userId: string,
@@ -249,17 +253,25 @@ async function dispatchStep(
   step: RepairStep,
 ): Promise<string | null> {
   try {
-    recordPromptTrace(chatId, {
+    // The entry object stays live in the trace after recordPromptTrace pushes it — attaching the
+    // reply to it post-call is what makes the inspector able to show the reply at all.
+    const entry: PromptTraceEntry = {
       kind: 'cleanup',
       title: `Cleanup Repair — ${step.kind === 'repair-header' ? 'header' : step.kind === 'repair-footer' ? 'footer' : step.setName}`,
       items: [{ role: 'user', content: step.prompt, chars: step.prompt.length, estimatedTokens: Math.ceil(step.prompt.length / 4) }],
       capturedAt: Date.now(),
-    });
+    };
+    recordPromptTrace(chatId, entry);
     const turn = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
       deps.llm.complete([{ role: 'user', content: step.prompt }], []),
     );
     const out = turn.message.content;
-    return out && out.trim() ? out.trim() : null;
+    if (out && out.trim()) {
+      const trimmed = out.trim();
+      entry.reply = trimmed; // exactly the text applyRepairSteps will consume — same trim
+      return trimmed;
+    }
+    return null;
   } catch (err) {
     log.error(`cleanup loop: repair step failed for chat ${chatId}, leaving the region as-is`, err);
     return null;

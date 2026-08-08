@@ -858,6 +858,11 @@ export interface PromptPreviewGroup {
   /** The prompt's items in send order — system-stack/header items first, then conversation
    *  messages, each with a rough token estimate. */
   items: PromptPreviewItem[];
+  /** The model's reply to this prompt, when the trace captured one (io/promptTrace.ts's `reply` —
+   *  cleanup repairs record it; the cleaned text replaces the raw output in the message, so this
+   *  is the only place it survives). Rendered as its own collapsible block; deliberately kept OUT
+   *  of `items` so the group's totals stay prompt-side (the reply was never sent to the model). */
+  reply?: PromptPreviewItem;
 }
 
 export interface PromptPreview {
@@ -959,7 +964,7 @@ async function buildPromptPreview(  deps: HttpServerDeps,
     mainGroup,
     ...latestPerKind(trace)
       .filter((e) => e.kind !== 'main')
-      .map((entry) => ({
+      .map((entry): PromptPreviewGroup => ({
         kind: entry.kind,
         title: entry.title,
         captured: true,
@@ -969,6 +974,11 @@ async function buildPromptPreview(  deps: HttpServerDeps,
           chars: i.chars,
           estimatedTokens: i.estimatedTokens,
         })),
+        // A captured background prompt's reply (cleanup repair outputs — otherwise unrecoverable),
+        // when the trace recorded one. Separate from items so prompt-side totals stay prompt-side.
+        reply: entry.reply
+          ? { role: 'assistant', content: entry.reply, chars: entry.reply.length, estimatedTokens: estimateTokens(entry.reply.length) }
+          : undefined,
       })),
   ];
 

@@ -583,6 +583,10 @@ export interface PromptPreviewGroup {
   captured: boolean;
   /** Items in send order — header/system items first, then conversation messages. */
   items: PromptPreviewItem[];
+  /** The model's reply to this prompt, when the trace captured one (cleanup repair outputs —
+   *  the cleaned text replaces the raw reply in the message, so this is its only home). Rendered
+   *  as its own collapsible block; kept out of `items` so the group's totals stay prompt-side. */
+  reply?: PromptPreviewItem;
 }
 
 export interface PromptPreview {
