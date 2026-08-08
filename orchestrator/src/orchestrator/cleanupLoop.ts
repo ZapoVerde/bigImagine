@@ -252,16 +252,21 @@ async function dispatchStep(
   chatId: string,
   step: RepairStep,
 ): Promise<string | null> {
+  const stepKind = step.kind === 'repair-header' ? 'header' : step.kind === 'repair-footer' ? 'footer' : step.setName;
   try {
     // The entry object stays live in the trace after recordPromptTrace pushes it — attaching the
     // reply to it post-call is what makes the inspector able to show the reply at all.
     const entry: PromptTraceEntry = {
       kind: 'cleanup',
-      title: `Cleanup Repair — ${step.kind === 'repair-header' ? 'header' : step.kind === 'repair-footer' ? 'footer' : step.setName}`,
+      title: `Cleanup Repair — ${stepKind}`,
       items: [{ role: 'user', content: step.prompt, chars: step.prompt.length, estimatedTokens: Math.ceil(step.prompt.length / 4) }],
       capturedAt: Date.now(),
     };
     recordPromptTrace(chatId, entry);
+    // The seam the log used to be silent on: an LLM repair prompt going out. Logged with its
+    // size, not its content (the full text lives in the prompt trace / inspector) — the reply
+    // below is the part that's otherwise unrecoverable.
+    log.info('cleanup loop: repair prompt fired', { chat: chatId, kind: stepKind, promptChars: step.prompt.length });
     const turn = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
       deps.llm.complete([{ role: 'user', content: step.prompt }], []),
     );
@@ -269,8 +274,10 @@ async function dispatchStep(
     if (out && out.trim()) {
       const trimmed = out.trim();
       entry.reply = trimmed; // exactly the text applyRepairSteps will consume — same trim
+      log.info('cleanup loop: repair reply', { chat: chatId, kind: stepKind, reply: trimmed });
       return trimmed;
     }
+    log.warn('cleanup loop: repair replied empty', { chat: chatId, kind: stepKind });
     return null;
   } catch (err) {
     log.error(`cleanup loop: repair step failed for chat ${chatId}, leaving the region as-is`, err);
@@ -330,18 +337,30 @@ async function processDueMessage(
         return;
       }
       await recordJob(deps.db, userId, chatId, message.message_id, result.newSwipeId, 'done', true, describePlan(plan));
-      log.info(`cleanup loop: rewrote message ${message.message_id} in chat ${chatId}`);
+      log.info(`cleanup loop: rewrote message ${message.message_id} in chat ${chatId}`, { notes: describePlan(plan) });
       return;
     }
 
     if (steps.length > 0 && !applied) {
       // Steps were needed but every output was empty/erred — the problem is still there.
+      log.warn(`cleanup loop: message ${message.message_id} in chat ${chatId} flagged — repairs needed but produced no output`, {
+        notes: describePlan(plan),
+      });
       await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'flagged', false, describePlan(plan));
       return;
     }
 
     // Either nothing needed fixing at all (no steps, text unchanged) or the repairs applied cleanly
     // but produced byte-identical text (the LLM reproduced it). Covered either way, no change.
+    if (steps.length > 0) {
+      // applied is true here (the !applied branch returned above) — the LLM ran and reproduced
+      // the text, which is worth knowing: the prompt fired but changed nothing.
+      log.info(`cleanup loop: repair reproduced the text byte-identical for message ${message.message_id} in chat ${chatId}`, {
+        notes: describePlan(plan),
+      });
+    } else {
+      log.debug(`cleanup loop: nothing to fix for message ${message.message_id} in chat ${chatId}`);
+    }
     await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'done', false, describePlan(plan));
   } catch (err) {
     log.error(`cleanup loop: unexpected failure processing message ${message.message_id} in chat ${chatId}`, err);
