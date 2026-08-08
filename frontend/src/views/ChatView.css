@@ -35,15 +35,19 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
-  opacity: 0.15;
+  /* Resting opacity: high enough that the location image reads clearly in the gaps between
+     bubbles (it sits behind the conversation — see the z-index rule below), while the bubbles
+     themselves, which let the image through at ~15% (see tokens.css's rgba bubble backgrounds),
+     keep their partially-opaque look. */
+  opacity: 0.5;
   pointer-events: none;
   z-index: 0;
 }
 
 /* Fade transition classes (parallax_fade_teststep.md §3): ST Vistalyze's single-layer rhythm —
    fade the old layer out (0.3s), swap src, fade the new one in (0.6s). The resting state is the
-   base .chat-location-background opacity (0.15); .vistalyze-fade-out animates to 0 and
-   .vistalyze-fade-in animates back from 0 to 0.15. The img is not keyed by URL — these classes
+   base .chat-location-background opacity (0.5); .vistalyze-fade-out animates to 0 and
+   .vistalyze-fade-in animates back from 0 to 0.5. The img is not keyed by URL — these classes
    drive the transition on one persistent element. */
 .chat-location-background.vistalyze-fade-out {
   opacity: 0;
@@ -51,7 +55,7 @@
 }
 
 .chat-location-background.vistalyze-fade-in {
-  opacity: 0.15;
+  opacity: 0.5;
   transition: opacity 0.6s ease-in-out;
 }
 
@@ -64,6 +68,16 @@
   left: -200px;
   top: -200px;
   will-change: transform;
+}
+
+/* The location background layer sits behind the conversation: every other child of .chat-main
+   (history, input row, staging/delete bars) paints above it, so the gaps between bubbles show
+   the location image and the bubbles stay legible. The rule is deliberately before
+   `.chat-main > .chat-top-bar` below (equal specificity — later wins), which re-raises the
+   header and its dropdown menu above the history. */
+.chat-main > :not(.chat-location-background) {
+  position: relative;
+  z-index: 1;
 }
 
 /* The header's dropdown menu must float above the history pane below it — both are z-index:1

@@ -104,8 +104,9 @@ should not play a fade-out of nothing (fade-in on first paint is fine).
 ### 3.2 CSS
 
 * `.chat-location-background.vistalyze-fade-out` → `opacity: 0; transition: opacity 0.3s ease-in-out`
-* `.chat-location-background.vistalyze-fade-in` → `opacity: 0.15; transition: opacity 0.6s ease-in-out`
-  (0.15 is the existing resting opacity, `ChatView.css:38`)
+* `.chat-location-background.vistalyze-fade-in` → `opacity: 0.5; transition: opacity 0.6s ease-in-out`
+  (0.5 is the resting opacity, `ChatView.css` — the background layer sits behind the
+  conversation, and the bubble backgrounds carry a 0.7 alpha so it shows through them too)
 * The fade and parallax compose: parallax transforms the element, fade animates its opacity —
   no conflict.
 

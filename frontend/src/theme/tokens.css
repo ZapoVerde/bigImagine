@@ -46,10 +46,13 @@
   --color-hover-surface: #eeeeee;
   --color-active-surface: #e4e4e4;
 
-  /* --- Chat bubbles (own contrast pair, not surface tokens above) --- */
-  --color-bubble-user-bg: #222222;
+  /* --- Chat bubbles (own contrast pair, not surface tokens above) ---
+     The bubble backgrounds are rgba at 0.7 so the chat-location-background layer (ChatView.css,
+     resting opacity 0.5) shows through them at ~15% — the same tint the bubbles had when the
+     background painted over them — keeping them partially opaque instead of solid panels. */
+  --color-bubble-user-bg: rgba(34, 34, 34, 0.7);
   --color-bubble-user-text: #ffffff;
-  --color-bubble-assistant-bg: #f0f0f0;
+  --color-bubble-assistant-bg: rgba(240, 240, 240, 0.7);
   --color-bubble-assistant-text: #111111;
 
   /* --- Narrative text (message-body dialogue vs. action/emphasis split, SillyTavern-style) ---
@@ -129,10 +132,10 @@ body.dark {
   --color-hover-surface: #2c2d33;
   --color-active-surface: #35363d;
 
-  /* --- Chat bubbles --- */
-  --color-bubble-user-bg: #4f46e5;
+  /* --- Chat bubbles --- (see the light block above for why the backgrounds carry a 0.7 alpha) */
+  --color-bubble-user-bg: rgba(79, 70, 229, 0.7);
   --color-bubble-user-text: #ffffff;
-  --color-bubble-assistant-bg: #26272c;
+  --color-bubble-assistant-bg: rgba(38, 39, 44, 0.7);
   --color-bubble-assistant-text: #f2f2f2;
 
   /* --- Narrative text --- */
