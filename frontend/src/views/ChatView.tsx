@@ -946,7 +946,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             {activeChat?.kind === 'rp' && activeChat.cleanupEnabledAt && (
               <CleanupStatusPill apiKey={apiKey} chatId={activeChat.chatId} />
             )}
-            {activeChat && !activeChat.archivedAt && (
+            {activeChat && activeChat.kind !== 'rp' && !activeChat.archivedAt && (
               <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
                 Archive
               </button>
