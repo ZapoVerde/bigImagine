@@ -48,6 +48,15 @@ select {
   border-radius: var(--radius-sm);
 }
 
+/* The open dropdown list of a <select> is drawn by the browser with its native popup colors,
+   not the page CSS — without this it renders white-on-white in dark mode (the <option> rows
+   never inherit the select's own text/background). Theme them explicitly so every dropdown in
+   the app matches the active palette. */
+select option {
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+
 input:focus,
 textarea:focus,
 select:focus {
