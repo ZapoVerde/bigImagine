@@ -967,10 +967,13 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
    *    server-side, then resends the kept history plus the edited content as a new turn. One
    *    message longer than what's now persisted, so handleChatCompletions treats it as genuinely
    *    new and appends both the edited message and its fresh reply.
+   *    Exception: the user's last message can be saved in place instead (inPlace=true) — same
+   *    message id, everything after untouched, the pre-edit text preserved as a swipe — when they
+   *    just want to fix their wording without burning a regeneration.
    *  - assistant message (the "edit an LLM reply" action): the text is rewritten in place — same
    *    message id, everything after untouched, the pre-edit text preserved as a swipe — and the
    *    conversation simply continues from the edited reply. No truncation, no branch. */
-  async function submitEdit() {
+  async function submitEdit(inPlace = false) {
     const messageId = editingId;
     const content = editDraft.trim();
     if (!activeChat || !messageId || !content || sending) return;
@@ -980,7 +983,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     setEditingId(null);
     setSending(true);
     try {
-      if (target.role === 'assistant') {
+      if (target.role === 'assistant' || inPlace) {
         if (content === target.content) return; // nothing changed — no junk swipe server-side
         await editMessageContent(activeChat.chatId, messageId, content, apiKey);
       } else {
@@ -1278,6 +1281,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           )}
           {messages.map((m, i) => {
             const isLastAssistant = m.role === 'assistant' && !messages.slice(i + 1).some((x) => x.role === 'assistant');
+            // The user's last message can be saved in place (no resend) — editing it with the
+            // resend path would burn a regeneration just to fix the wording. Earlier user messages
+            // keep the branch-and-resend semantic (an in-place save mid-conversation would silently
+            // orphan the exchange that followed).
+            const isLastUserMsg = m.role === 'user' && !messages.slice(i + 1).some((x) => x.role === 'user');
             // The chat's very first message being an assistant message only ever happens via
             // apply_character_to_chat's greeting seed (applyCharacterToChatTool.ts) — there's no
             // other path that produces an assistant reply with no user message before it. Its
@@ -1339,7 +1347,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   </label>
                 )}
                 <div
-                  className={`chat-bubble ${m.role}${actionsVisibleId === m.messageId ? ' actions-visible' : ''}`}
+                  className={`chat-bubble ${m.role}${editingId === m.messageId ? ' editing' : ''}${actionsVisibleId === m.messageId ? ' actions-visible' : ''}`}
                   onClick={() => toggleMessageActions(m.messageId)}
                   onTouchStart={handleSwipeTouchStart}
                   onTouchEnd={handleSwipeTouchEnd}
@@ -1348,9 +1356,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   <div className="message-edit">
                     <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={3} autoFocus />
                     <div className="message-edit-actions">
-                      <button onClick={submitEdit} disabled={!editDraft.trim() || sending}>
-                        {m.role === 'assistant' ? 'Save' : 'Save &amp; resend'}
-                      </button>
+                      {m.role === 'assistant' || isLastUserMsg ? (
+                        <button onClick={() => submitEdit(true)} disabled={!editDraft.trim() || sending}>
+                          Save
+                        </button>
+                      ) : null}
+                      {m.role === 'user' ? (
+                        <button onClick={() => submitEdit(false)} disabled={!editDraft.trim() || sending}>
+                          Save &amp; resend
+                        </button>
+                      ) : null}
                       <button onClick={cancelEdit}>Cancel</button>
                     </div>
                   </div>

@@ -1040,6 +1040,15 @@
     visibility: visible;
   }
 
+  /* Mobile: editing a message expands that bubble to the full history width — a small bubble
+     leaves too little room for rewriting a long entry comfortably. ChatView marks the bubble
+     with .editing while its edit form is open; this is scoped to the mobile query so desktop
+     keeps the bubble-width editor. */
+  .chat-bubble.editing {
+    max-width: none;
+    align-self: stretch;
+  }
+
   /* Same bump for the selection-mode tickboxes. */
   .chat-select-box {
     width: 2.5rem;
