@@ -214,3 +214,18 @@
   max-height: 24rem;
   overflow-y: auto;
 }
+
+/* Mounted inside the left sidebar (RP chats — the drawer permanently IS the inspector since the
+   change that moved chat history to the character page): fill the drawer and drop the
+   standalone-panel chrome — no right border, no self-positioning. The drawer (Sidebar.css) is
+   the mobile overlay now, so the fixed-position rules above must not apply here; this
+   specificity beats them. */
+.sidebar .prompt-inspector-panel {
+  width: 100%;
+  min-width: 0;
+  flex: 1;
+  min-height: 0;
+  border-right: none;
+  position: static;
+  box-shadow: none;
+}

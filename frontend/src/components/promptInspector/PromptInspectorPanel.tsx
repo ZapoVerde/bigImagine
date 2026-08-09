@@ -11,7 +11,9 @@ interface PromptInspectorPanelProps {
    *  latest exchange — the preview is a live read of current chat state, never cached beyond one
    *  fetch (bi_principles.md §13's live-read guarantee applied to this surface too). */
   refreshToken: number;
-  onClose: () => void;
+  /** Optional: when absent (the left-drawer mount), the × close button is hidden — the drawer
+   *  collapses via its own arrow/FAB instead. */
+  onClose?: () => void;
 }
 
 // docs/bi_principles.md §11/§18: an 'rp' chat's turn prompts are assembled fresh, server-side, and
@@ -73,9 +75,11 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
           >
             {copied ? 'Copied' : 'Copy all'}
           </button>
-          <button type="button" className="prompt-inspector-close" title="Close prompt inspector" onClick={onClose}>
-            &times;
-          </button>
+          {onClose && (
+            <button type="button" className="prompt-inspector-close" title="Close prompt inspector" onClick={onClose}>
+              &times;
+            </button>
+          )}
         </div>
       </div>
 

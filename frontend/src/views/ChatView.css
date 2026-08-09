@@ -140,10 +140,11 @@
   flex-shrink: 0;
 }
 
-/* RP-chat header ⋯ menu — one control folding the prompt-inspector and branch-map
-   toggles plus file/image attach (the input-row paper clip is hidden for RP chats). The
-   inspect/tree buttons this replaces had no persistent rail to toggle from (PromptInspectorPanel
-   / BranchMapPanel are both opt-in overlays), so the menu is the only way to reach them. */
+/* RP-chat header ⋯ menu — one control folding the branch-map toggle, sync status, file/image
+   attach and bulk delete (the input-row paper clip is hidden for RP chats). The prompt
+   inspector is NOT here anymore — it lives permanently in the left sidebar drawer (the arrow/
+   FAB toggles that). The branch map remains an opt-in overlay with no persistent rail, so the
+   menu is the only way to reach it. */
 .chat-menu-wrap {
   position: relative;
   flex-shrink: 0;

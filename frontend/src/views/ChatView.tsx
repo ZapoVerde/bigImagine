@@ -46,7 +46,6 @@ import type {
   PromptPreset,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
-import PromptInspectorPanel from '../components/promptInspector/PromptInspectorPanel';
 import BranchMapPanel from '../components/branchMap/BranchMapPanel';
 import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPanel';
 import CleanupStatusPill from '../components/cleanup/CleanupStatusPill';
@@ -95,6 +94,10 @@ interface ChatViewProps {
   topBarsHidden: boolean;
   /** Ask the app to collapse (true) or restore (false) the top bars. */
   onTopBarsHiddenChange: (hidden: boolean) => void;
+  /** RP chats only: fired once per completed turn (when this chat's message count changes) so the
+   *  app can bump its promptRefreshToken — the Prompt Inspector now lives in the left sidebar
+   *  drawer, and this is how it keeps the once-per-turn live-read it had as an in-chat panel. */
+  onPromptRefresh?: () => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -154,7 +157,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange, onPromptRefresh }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -367,17 +370,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // one of the two is shown at a time — this tracks which. Irrelevant on desktop, where both
   // panes are always visible and this toggle is hidden.
   const [mobileShowCanvas, setMobileShowCanvas] = useState(false);
-  // Prompt Inspector: opt-in per bi_principles.md §5 (specialist views are layered on top, never
-  // required) — a household member reviewing exactly what an 'rp' chat's next turn would send.
-  // Only offered for 'rp' chats (the header button below is gated on activeChat?.kind === 'rp');
-  // mounted only while open, same conditional-render shape as CanvasPanel.
-  const [promptInspectorOpen, setPromptInspectorOpen] = useState(false);
   // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
-  // RP-chat header ⋯ menu — folds the prompt-inspector and branch-map toggles plus
-  // file/image attach under one control (see the header below). Non-RP chats keep their single
-  // branch-map button and the input-row paper clip instead.
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
   // Sync Status panel (RP chat ⋯ menu → "Sync status"): this chat's slice of the rolling memory
   // sync loop's status record — when the last attempt/success landed, what it did, and when the
@@ -416,6 +411,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     topBarsHiddenRef.current = topBarsHidden;
   }, [topBarsHidden]);
 
+  // Report message-count changes up to the app (RP chats only) so Sidebar's Prompt Inspector
+  // can re-fetch after each completed turn. No dep array — every render compares against the
+  // last reported count, so only real changes bump; the App re-render this triggers can't loop
+  // because it doesn't change messages.length.
+  const lastReportedMessageCountRef = useRef(0);
+  useEffect(() => {
+    if (messages.length !== lastReportedMessageCountRef.current) {
+      lastReportedMessageCountRef.current = messages.length;
+      onPromptRefresh?.();
+    }
+  });
+
   useEffect(() => {
     listFolders(apiKey).then(setFolders).catch(() => {});
     listToolNames(apiKey).then(setAllToolNames).catch(() => {});
@@ -435,7 +442,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setMessages([]);
       setSettingsCollapsed(true);
       setMobileShowCanvas(false);
-      setPromptInspectorOpen(false);
       setBranchMapOpen(false);
       setChatMenuOpen(false);
       setSyncStatusOpen(false);
@@ -448,7 +454,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
     if (activeChat?.chatId === chatId) return;
     setMobileShowCanvas(false);
-    setPromptInspectorOpen(false);
     setBranchMapOpen(false);
     setChatMenuOpen(false);
     setSyncStatusOpen(false);
@@ -1062,22 +1067,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  // Shared between the desktop header ⋯ and the mobile input-row ⋯ — the same five items, two
+  // Shared between the desktop header ⋯ and the mobile input-row ⋯ — the same four items, two
   // mounts (ChatView.css hides the header copy on mobile and the row copy on desktop). One
   // chatMenuOpen state serves both.
   const chatMenuItems = (
     <>
-      <button
-        type="button"
-        role="menuitem"
-        title={promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect the exact prompt sent to the model'}
-        onClick={() => {
-          setPromptInspectorOpen((v) => !v);
-          setChatMenuOpen(false);
-        }}
-      >
-        🧾 {promptInspectorOpen ? 'Hide prompt inspector' : 'Inspect prompt'}
-      </button>
       <button
         type="button"
         role="menuitem"
@@ -1134,15 +1128,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
   return (
     <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={{ ...chatBgStyle, ...legStyle }} data-legibility={legibilityFlags}>
-      {promptInspectorOpen && activeChat?.kind === 'rp' && (
-        <PromptInspectorPanel
-          apiKey={apiKey}
-          chatId={activeChat.chatId}
-          refreshToken={messages.length}
-          onClose={() => setPromptInspectorOpen(false)}
-        />
-      )}
-
       <div className="chat-main" ref={chatMainRef}>
         {error && <div className="error-banner">{error}</div>}
 

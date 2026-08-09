@@ -50,8 +50,15 @@ export default function App() {
   // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
   // the always-on rail on narrow screens) can toggle the same state the rail's own header button
   // does — they're siblings under .app, not parent/child, same reason note selection is lifted
-  // above.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth < 768);
+  // above. Starts closed everywhere (the user's call: chat history lives on the character page
+  // drawer and the RP drawer is the prompt inspector now — both are summoned on demand, and the
+  // chat gets maximal room by default).
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+
+  // Bumped once per completed turn of the active RP chat (ChatView reports its message-count
+  // changes up via onPromptRefresh) and forwarded to Sidebar's Prompt Inspector, so the drawer
+  // version keeps the same live-read-once-per-turn behavior the in-chat panel had.
+  const [promptRefreshToken, setPromptRefreshToken] = useState(0);
 
   // Mobile chat only: the top bars (TabStrip + TimerStrip + the chat header) collapse up when the
   // user scrolls down the chat history and come back on scroll-up or a pull-down at the top —
@@ -150,6 +157,8 @@ export default function App() {
         onSelectNote={setSelectedNoteId}
         onDeselectNote={() => setSelectedNoteId(null)}
         notesRefreshKey={notesRefreshKey}
+        activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
+        promptRefreshToken={promptRefreshToken}
       />
       {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
           the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the top
@@ -217,6 +226,7 @@ export default function App() {
                 onOpenChat={openChat}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
+                onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
               />
             )}
             {tab.type === 'notes' && (
