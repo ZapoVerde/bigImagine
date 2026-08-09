@@ -45,9 +45,8 @@ function assert(cond, message) {
 {
   const out = renderBridge('The kitchen.', 'Dinner at 7.', DEFAULT_INJECT_BRIDGE_PROMPT);
   assert(
-    out.includes('The following is a summary of what has just occurred:\nThe kitchen.') &&
-      out.includes('The following are upcoming events:\nDinner at 7.'),
-    'default bridge template renders scene and events sections',
+    out.includes('The following are upcoming events and a summary of what has just occurred:\nDinner at 7.\n\nThe kitchen.'),
+    'default bridge template renders the exact canonize summary header with events first, then scene (CNZ defaults.js:209-210)',
   );
 }
 {
@@ -56,7 +55,11 @@ function assert(cond, message) {
 }
 {
   const out = renderBridge('The kitchen.', undefined, DEFAULT_INJECT_BRIDGE_PROMPT);
-  assert(!out.includes('upcoming events') && out.includes('The kitchen.'), '{{#if events}} drops the events section when absent');
+  assert(
+    out.includes('The following are upcoming events and a summary of what has just occurred:') &&
+      out.includes('The kitchen.') && !out.includes('Dinner'),
+    'scene-only bridge keeps the canonize header (CNZ guards on {{summary}}, not the table alone)',
+  );
 }
 {
   const custom = 'LOCATION: {{scene}}\nNEXT: {{events}}';
@@ -64,7 +67,7 @@ function assert(cond, message) {
   assert(out === 'LOCATION: The kitchen.\nNEXT: Dinner.', 'bespoke bridge template renders with {{scene}}/{{events}}');
 }
 
-// --- renderPlotThreads: per-arc lines through the plot template ---
+// --- renderPlotThreads: per-arc <arc_tag> blocks through the plot template ---
 {
   const out = renderPlotThreads(
     [
@@ -75,9 +78,9 @@ function assert(cond, message) {
   );
   assert(
     out.includes('The following is a summary of the active plot threads:') &&
-      out.includes('- #a1: Find the key — the vault') &&
-      out.includes('- #a2: Pay the debt'),
-    'default plot template renders one "- #arc: summary — detail" line per arc',
+      out.includes('<a1>\nFind the key — the vault\n</a1>') &&
+      out.includes('<a2>\nPay the debt\n</a2>'),
+    'default plot template renders canonize-style <arc_tag> blocks (CNZ DEFAULT_CNZ_PLOT_CHUNK_TEMPLATE)',
   );
 }
 {
@@ -96,8 +99,9 @@ function assert(cond, message) {
   );
   assert(
     out.startsWith('[The following are archived narrative memories retrieved for the current context:]') &&
-      out.includes('<memory turns="7">\nUser: x\nAssistant: y\n</memory>'),
-    'default auto-recall template wraps chunk blocks in <memory turns>',
+      out.includes('<memory turns="7">\n[turns 6-8]\nUser: x\nAssistant: y\n</memory>') &&
+      !out.includes('<!--'),
+    'default auto-recall chunk template is CNZ verbatim (<memory turns>) with the summary prefixed as [header] inside the block (rag-fetch.js:202), no HTML comment',
   );
   assert(out.includes('- [plot] The key is in the vault'), 'facts render as bullet lines in the injection template');
 }

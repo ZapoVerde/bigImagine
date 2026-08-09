@@ -32,8 +32,9 @@
  * interpolateMemoryTemplate(template, vars) -> string — CNZ's interpolate: {{#if key}}...{{/if}}
  *   blocks first, then {{var}} substitution (empty for unknown). Pure.
  * renderBridge(scene, events, template) -> string — {{scene}}/{{events}} via the bridge template.
- * renderPlotThreads(arcs, template) -> string — {{plot}} = one "- #arc: summary — detail" line per
- *   arc, via the plot template.
+ * renderPlotThreads(arcs, template) -> string — {{plot}} = canonize-style HTML blocks, one
+ *   `<{{arc_tag}}>\nsummary — detail\n</{{arc_tag}}>` per arc joined by blank lines, via the
+ *   plot template.
  * renderAutoRecall(chunks, facts, template, chunkTemplate, charName) -> string — chunk blocks
  *   rendered through the chunk template ({{text}}, {{turn_range}}, {{header}}, {{char_name}}),
  *   fact bullets appended as {{facts}}; the injection template receives {{text}} = chunk blocks,
@@ -65,34 +66,40 @@ export function interpolateMemoryTemplate(template: string, vars: Record<string,
   return result;
 }
 
-/** DEFAULT_INJECT_BRIDGE_PROMPT — the bridge component (scene + events combined), modeled on
- *  CNZ's DEFAULT_CNZ_SUMMARY_TEMPLATE ("The following are upcoming events and a summary of what
- *  has just occurred:\n{{summary}}"), split into the two source rows BI stores separately. */
-export const DEFAULT_INJECT_BRIDGE_PROMPT = `{{#if scene}}The following is a summary of what has just occurred:
-{{scene}}
+/** DEFAULT_INJECT_BRIDGE_PROMPT — the bridge component (scene + events combined), CNZ's
+ *  DEFAULT_CNZ_SUMMARY_TEMPLATE summary half verbatim (defaults.js:209-210 — "The following are
+ *  upcoming events and a summary of what has just occurred:\n{{summary}}"), split into the two
+ *  source rows BI stores separately. Canonize's summary var contains the EVENTS table first, then
+ *  the SCENE prose (hookseeker PART 1 before PART 2), so {{events}} renders before {{scene}}. */
+export const DEFAULT_INJECT_BRIDGE_PROMPT = `{{#if scene}}The following are upcoming events and a summary of what has just occurred:
+{{events}}
 
-{{/if}}{{#if events}}The following are upcoming events:
-{{events}}{{/if}}`;
+{{scene}}{{/if}}`;
 
-/** DEFAULT_INJECT_PLOT_PROMPT — the plot-threads component, same wording as CNZ's summary
- *  template's plot half. {{plot}} is pre-formatted (one "- #arc: summary — detail" per arc). */
+/** DEFAULT_INJECT_PLOT_PROMPT — the plot-threads component, CNZ's DEFAULT_CNZ_SUMMARY_TEMPLATE
+ *  plot half verbatim (defaults.js:206-207 — "The following is a summary of the active plot
+ *  threads:\n{{plot}}"). {{plot}} is pre-formatted per canonize's _formatPlotArcs +
+ *  DEFAULT_CNZ_PLOT_CHUNK_TEMPLATE (defaults-rag.js:183-186): one
+ *  `<{{arc_tag}}>\n{{text}}\n</{{arc_tag}}>` block per arc, joined by blank lines. */
 export const DEFAULT_INJECT_PLOT_PROMPT = `{{#if plot}}The following is a summary of the active plot threads:
 {{plot}}{{/if}}`;
 
 /** DEFAULT_INJECT_AUTO_RECALL_PROMPT — the auto-recall wrapper, CNZ's DEFAULT_RAG_INJECTION_
- *  TEMPLATE verbatim. {{text}} = the chunk blocks (each rendered through the chunk template);
- *  {{facts}} = the recalled fact bullets. */
+ *  TEMPLATE verbatim (defaults-rag.js:174-176: "[The following are archived narrative memories
+ *  retrieved for the current context:]\n{{text}}"), with BI's fact bullets appended after the
+ *  chunk blocks ({{text}} = the chunk blocks, each rendered through the chunk template). */
 export const DEFAULT_INJECT_AUTO_RECALL_PROMPT = `[The following are archived narrative memories retrieved for the current context:]
 {{text}}{{#if facts}}
 
 {{facts}}{{/if}}`;
 
-/** DEFAULT_AUTO_RECALL_CHUNK_PROMPT — per-chunk template, CNZ's DEFAULT_RAG_CHUNK_TEMPLATE with
- *  BI's ordinal as {{turn_range}} and the chunk summary as {{header}} (the legacy block rendered
- *  it as an HTML comment after </memory>; the template can reproduce that with {{header}}). */
+/** DEFAULT_AUTO_RECALL_CHUNK_PROMPT — per-chunk template, CNZ's DEFAULT_RAG_CHUNK_TEMPLATE
+ *  verbatim (defaults-rag.js:178-181). Like canonize's rag-fetch.js:202, the chunk summary is
+ *  prefixed into the text as "[{{header}}]" (not an HTML comment) — {{header}} remains available
+ *  for bespoke templates that want it elsewhere. */
 export const DEFAULT_AUTO_RECALL_CHUNK_PROMPT = `<memory turns="{{turn_range}}">
 {{text}}
-</memory>{{#if header}} <!-- {{header}} -->{{/if}}`;
+</memory>`;
 
 /** The structured RP memory context — what buildChatMemorySystemPrompt's rp branch returns so the
  *  narrator stack can render each component marker from its own template (and the deprecated
@@ -132,8 +139,8 @@ export function renderBridge(scene: string | undefined, events: string | undefin
 
 export function renderPlotThreads(arcs: PlotArcRow[], template = DEFAULT_INJECT_PLOT_PROMPT): string {
   const plot = arcs
-    .map((a) => `- #${a.arc_tag}: ${a.summary}${a.detail ? ` — ${a.detail}` : ''}`)
-    .join('\n');
+    .map((a) => `<${a.arc_tag}>\n${a.summary}${a.detail ? ` — ${a.detail}` : ''}\n</${a.arc_tag}>`)
+    .join('\n\n');
   return interpolateMemoryTemplate(template, { plot });
 }
 
@@ -148,14 +155,18 @@ export function renderAutoRecall(
   // marker shares). The template's static prefix would otherwise leak a bare header.
   if (chunks.length === 0 && facts.length === 0) return '';
   const text = chunks
-    .map((c) =>
-      interpolateMemoryTemplate(chunkTemplate, {
-        text: c.content,
+    .map((c) => {
+      // Canonize rag-fetch.js:202 prefixes the chunk summary into the text as "[header]\n"
+      // (its chunk template has no header slot of its own) — {{header}} still substitutes
+      // for bespoke templates that place it elsewhere.
+      const content = c.summary ? `[${c.summary}]\n${c.content}` : c.content;
+      return interpolateMemoryTemplate(chunkTemplate, {
+        text: content,
         turn_range: String(c.ordinal),
         header: c.summary ?? '',
         char_name: charName,
-      }),
-    )
+      });
+    })
     .join('\n\n');
   const factBlock = facts.map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`).join('\n');
   return interpolateMemoryTemplate(template, { text, facts: factBlock });
