@@ -445,13 +445,46 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     topBarsHiddenRef.current = topBarsHidden;
   }, [topBarsHidden]);
 
-  // Park the newest message just above the glass: mirror the bottom overlay's measured height
-  // (+ the history's base 1rem padding) as the history's bottom padding, so at full scroll the
-  // last bubble rests fully visible above the control stack while bubbles still slide under it
-  // while scrolling. ResizeObserver keeps this correct as staging/delete bars or the textarea
-  // change the stack's height. Mobile keeps its mid-screen rest point: the 50vh history spacer
-  // already sits below the last message there, so its height is subtracted (clamped at the base
-  // padding) to avoid stacking dead scroll slack on top of it.
+  // "Slice under the controls" blur: a bubble that has scrolled into the bottom overlay's
+  // footprint gets blurred — ramping with how deep it has gone underneath — while the overlay
+  // itself stays fully transparent, so the background shows crisp behind the controls and only
+  // the bubble blurs. rAF-throttled; only messages near the bottom can intersect the overlay,
+  // so the loop breaks at the first one fully above it.
+  const underControlsRafRef = useRef(0);
+  const syncUnderControlsBlur = () => {
+    cancelAnimationFrame(underControlsRafRef.current);
+    underControlsRafRef.current = requestAnimationFrame(() => {
+      const history = historyRef.current;
+      const overlay = bottomOverlayRef.current;
+      if (!history || !overlay) return;
+      const overlayRect = overlay.getBoundingClientRect();
+      const overlayH = overlayRect.height || 1;
+      const messages = history.querySelectorAll<HTMLElement>('.chat-message, .chat-bubble.pending');
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const el = messages[i];
+        const r = el.getBoundingClientRect();
+        if (r.bottom <= overlayRect.top) break; // this message and everything above is clear
+        const overlap = Math.min(r.bottom, overlayRect.bottom) - Math.max(r.top, overlayRect.top);
+        if (overlap > 0) {
+          // 6px max blur at full submersion; partial overlap gets a partial blur so the bubble
+          // softens as it enters the zone instead of snapping.
+          const blur = 6 * Math.min(1, overlap / overlayH);
+          el.style.filter = blur >= 0.4 ? `blur(${blur.toFixed(1)}px)` : '';
+        } else {
+          el.style.filter = '';
+        }
+      }
+    });
+  };
+
+  // Park the newest message just above the control stack: mirror the bottom overlay's measured
+  // height (+ the history's base 1rem padding) as the history's bottom padding, so at full
+  // scroll the last bubble rests fully visible above the stack while bubbles still slide under
+  // it while scrolling. ResizeObserver keeps this correct as staging/delete bars or the
+  // textarea change the stack's height — and re-syncs the under-controls blur, since the
+  // zone's top edge moves with it. Mobile keeps its mid-screen rest point: the 50vh history
+  // spacer already sits below the last message there, so its height is subtracted (clamped at
+  // the base padding) to avoid stacking dead scroll slack on top of it.
   useEffect(() => {
     const history = historyRef.current;
     const overlay = bottomOverlayRef.current;
@@ -461,12 +494,19 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       const spacer = history.querySelector<HTMLElement>('.chat-history-spacer');
       const spacerH = spacer?.offsetHeight ?? 0;
       history.style.paddingBottom = `${Math.max(base, overlay.offsetHeight + base - spacerH)}px`;
+      syncUnderControlsBlur();
     };
     sync();
     const ro = new ResizeObserver(sync);
     ro.observe(overlay);
     return () => ro.disconnect();
   }, []);
+
+  // Content shifts without a scroll event (deletes, refreshes, the pending bubble landing) can
+  // move messages relative to the overlay zone, so re-sync the under-controls blur then too.
+  useEffect(() => {
+    syncUnderControlsBlur();
+  }, [messages.length]);
 
   // Report message-count changes up to the app (RP chats only) so Sidebar's Prompt Inspector
   // can re-fetch after each completed turn. No dep array — every render compares against the
@@ -561,6 +601,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   };
 
   const handleHistoryScroll = () => {
+    syncUnderControlsBlur();
     const el = historyRef.current;
     if (!el || window.innerWidth >= 768) return;
     const delta = el.scrollTop - lastHistoryScrollTopRef.current;
@@ -1525,12 +1566,13 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length > 0 && <div className="chat-history-spacer" aria-hidden="true" />}
         </div>
 
-        {/* The whole bottom control stack floats over the conversation as a frosted-glass strip
-            (ChatView.css): bubbles scroll under it instead of stopping at a divider line, and
-            its footprint swallows pointer/touch events so a bubble that has scrolled underneath
-            can't be tapped or swiped. The history's bottom padding is kept in sync with this
-            stack's measured height (bottomOverlayRef's ResizeObserver) so the newest message
-            parks just above the glass at full scroll. */}
+        {/* The whole bottom control stack floats over the conversation (ChatView.css): bubbles
+            scroll under it instead of stopping at a divider line, and its footprint swallows
+            pointer/touch events so a bubble that has scrolled underneath can't be tapped or
+            swiped. The overlay is transparent — no tint, no edge — and bubbles blur only while
+            they're underneath it (syncUnderControlsBlur). The history's bottom padding is kept
+            in sync with this stack's measured height (bottomOverlayRef's ResizeObserver) so the
+            newest message parks just above the controls at full scroll. */}
         <div className="chat-bottom-overlay" ref={bottomOverlayRef}>
           <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
           <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
