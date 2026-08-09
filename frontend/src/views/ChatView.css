@@ -928,6 +928,22 @@
   border-color: var(--color-border);
 }
 
+/* Mobile-only jump-to-bottom (ChatView renders it always; desktop hides it so the input row
+   is unchanged there). Same panel styling as the attach pill so it matches on mobile. */
+.chat-input button.chat-jump-bottom {
+  display: none;
+  flex: 0 0 auto;
+  padding: 0.5rem 0.7rem;
+  background: var(--color-bg-panel);
+  color: var(--color-text-primary);
+  border-color: var(--color-border);
+}
+
+.chat-input button.chat-jump-bottom:hover {
+  background: var(--color-hover-surface);
+  border-color: var(--color-border);
+}
+
 .chat-send-icon {
   display: none;
 }
@@ -951,12 +967,17 @@
     order: 3;
   }
 
-  .chat-input button.chat-send-button {
+  .chat-input button.chat-jump-bottom {
     order: 4;
+  }
+
+  .chat-input button.chat-send-button {
+    order: 5;
     margin-left: auto;
   }
 
   .chat-input button.chat-attach-button,
+  .chat-input button.chat-jump-bottom,
   .chat-input button.chat-send-button {
     width: 2.5rem;
     height: 2.5rem;

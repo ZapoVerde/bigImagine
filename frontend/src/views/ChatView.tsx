@@ -1569,6 +1569,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             rows={2}
             autoFocus
           />
+          {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
+              the row is identical in both breakpoints. Scrolls the history to its end. */}
+          <button
+            type="button"
+            className="chat-jump-bottom"
+            title="Jump to bottom"
+            onClick={() => historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' })}
+          >
+            ↓
+          </button>
           <button
             type="submit"
             className={`chat-send-button${resendMode() ? ' chat-send-resend' : ''}`}
