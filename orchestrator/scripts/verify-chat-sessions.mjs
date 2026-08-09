@@ -311,6 +311,7 @@ function createFakePool() {
                 location_id: l.location_id,
                 name: l.name,
                 visual_description: l.visual_description,
+                definition: l.definition ?? null,
                 environment: JSON.stringify(l.environment ?? {}),
                 seed: l.seed ?? null,
                 image_url: l.image_url ?? null,
@@ -356,12 +357,17 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.includes('insert into locations') && params.length >= 10) {
-            const [userId, name, visualDescription, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, renderHash, chatId, anchorSwipeId] = params;
+            // forkChat's clone carries definition (describer.md §4) between visual_description
+            // and environment — 12 params: userId, name, visual_description, definition,
+            // environment, seed, image_url, image_generated_at, image_rendered_input,
+            // image_render_hash, chat_id, anchor_swipe_id.
+            const [userId, name, visualDescription, definition, environmentJson, seed, imageUrl, imageGeneratedAt, renderedInputJson, renderHash, chatId, anchorSwipeId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
               name,
               visual_description: visualDescription,
+              definition: definition ?? null,
               environment: JSON.parse(environmentJson ?? '{}'),
               seed: seed ?? null,
               image_url: imageUrl ?? null,

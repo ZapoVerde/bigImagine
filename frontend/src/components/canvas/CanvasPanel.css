@@ -83,6 +83,14 @@
   white-space: nowrap;
 }
 
+.canvas-panel-location-definition {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .canvas-panel-location-image {
   width: 100%;
   max-height: 12rem;

@@ -164,6 +164,7 @@ import { runWithCallContext } from '../io/llm/callContext.js';
 import type { LlmConnectionStore } from '../io/llmConnections.js';
 import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { generateLocationImage } from '../orchestrator/generateLocationImage.js';
+import { describeLocationIfNeeded } from '../orchestrator/describeLocation.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promptTrace.js';
@@ -709,17 +710,39 @@ async function trimToLiveWindow(messages: LlmMessage[], settings: OrchestratorSe
   return messages.length > liveMessages ? messages.slice(-liveMessages) : messages;
 }
 
-// endpoint.md §5's decoupled image-generation trigger: fires generateLocationImage without
-// awaiting it, invoked from the response 'finish' event so the reply the user is waiting on is
-// already sent before a provider round-trip starts. Fail-open inside generateLocationImage, so a
-// failed render can never surface as an unhandled rejection here.
-function fireLocationImageGeneration(deps: HttpServerDeps, userId: string, chatId: string | undefined, locationId: string): void {
-  void generateLocationImage(
-    { db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections },
-    userId,
-    locationId,
-    chatId,
-  );
+// endpoint.md §5's decoupled image-generation trigger: fires describe-then-render without
+// awaiting either, invoked from the response 'finish' event so the reply the user is waiting on is
+// already sent before a provider round-trip starts. The describer (describeLocation.ts — the
+// room-description LLM call, VLZ Step 3) must run BEFORE the render: the render hash (endpoint.md
+// §5.1.2) is over the synthesized prompt, which expands visual_description, so a description that
+// landed after the render would flip the hash and waste a gen — the chain awaits the describer
+// first (both fail-open inside themselves, so a failed describe falls through to a name-seed
+// render, exactly today's behavior). The injected llm is the turn's gated provider where the
+// caller has one (post-turn fire sites pass turnLlm — the same connection the story itself ran
+// on, mirroring VLZ's describer defaulting to the main chat LLM); restart triggers
+// (ensureActiveLocationImage, the swipe-route fire) pass none and fall back to deps.llm.
+function fireLocationImageGeneration(
+  deps: HttpServerDeps,
+  userId: string,
+  chatId: string | undefined,
+  locationId: string,
+  llm: LlmProvider = deps.llm,
+): void {
+  void (async () => {
+    await describeLocationIfNeeded(
+      { db: deps.db, settings: deps.settings },
+      llm,
+      userId,
+      chatId,
+      locationId,
+    );
+    await generateLocationImage(
+      { db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections },
+      userId,
+      locationId,
+      chatId,
+    );
+  })();
 }
 
 // endpoint.md §6.4's chat-background read: the eligible current location (via the scene_id cache
@@ -738,7 +761,7 @@ async function resolveChatLocationImage(
   db: PostgresClient,
   userId: string,
   chatId: string,
-): Promise<{ current: { locationId: string; name: string; imageUrl: string | null } | null; previous: { locationId: string; name: string; imageUrl: string } | null }> {
+): Promise<{ current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null; previous: { locationId: string; name: string; imageUrl: string } | null }> {
   return db.withUserScope(userId, async (session) => {
     // The chat's scene pointers — current and last-turn/previous — which everything below
     // resolves through.
@@ -747,14 +770,14 @@ async function resolveChatLocationImage(
       [chatId],
     );
 
-    let current: { locationId: string; name: string; imageUrl: string | null } | null = null;
+    let current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null = null;
     if (chatState?.scene_id) {
       // Primary path: the scene_id cache pointer (segway.md §2.2) -> scenes.active_location_id
       // -> locations.image_url, §2.6-filtered. The filter makes this read as absent on a stale
       // pointer — e.g. prev/next cycling flipped the active swipe but not the scene — which the
       // fallback below catches.
-      const [sceneRow] = await session.query<{ location_id: string; name: string; image_url: string | null }>(
-        `select l.location_id, l.name, l.image_url
+      const [sceneRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string | null }>(
+        `select l.location_id, l.name, l.definition, l.image_url
          from scenes s
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where s.scene_id = $2
@@ -767,15 +790,17 @@ async function resolveChatLocationImage(
          limit 1`,
         [userId, chatState.scene_id, chatId],
       );
-      current = sceneRow ? { locationId: sceneRow.location_id, name: sceneRow.name, imageUrl: sceneRow.image_url } : null;
+      current = sceneRow
+        ? { locationId: sceneRow.location_id, name: sceneRow.name, definition: sceneRow.definition, imageUrl: sceneRow.image_url }
+        : null;
     }
     if (!current) {
       // Fallback: the active swipe's own location — its anchored transient row, or its recorded
       // location_swipe_images association (the cycle-back case: the location row was since
       // re-anchored to a newer swipe, but this swipe's image is still valid for it — endpoint.md
       // §5.1.8's "save the association, stays inactive, reuse on return").
-      const [swipeRow] = await session.query<{ location_id: string; name: string; image_url: string | null }>(
-        `select l.location_id, l.name, l.image_url
+      const [swipeRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string | null }>(
+        `select l.location_id, l.name, l.definition, l.image_url
          from locations l
          where l.user_id = $1
            and (
@@ -793,7 +818,9 @@ async function resolveChatLocationImage(
          limit 1`,
         [userId, chatId],
       );
-      current = swipeRow ? { locationId: swipeRow.location_id, name: swipeRow.name, imageUrl: swipeRow.image_url } : null;
+      current = swipeRow
+        ? { locationId: swipeRow.location_id, name: swipeRow.name, definition: swipeRow.definition, imageUrl: swipeRow.image_url }
+        : null;
     }
 
     let previous: { locationId: string; name: string; imageUrl: string } | null = null;
@@ -1545,7 +1572,9 @@ async function handleChatCompletions(
     if (scrapedLocationId) {
       // endpoint.md §5: fire the location-image generation pass only once the reply is actually
       // sent — never awaited inline (a provider round-trip has no place blocking the reply).
-      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!));
+      // turnLlm is the connection this very turn ran on — the describer uses it too (the same
+      // "the room's description is written by the story's own voice" default VLZ uses).
+      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
     }
     return;
   }
@@ -1553,8 +1582,9 @@ async function handleChatCompletions(
   sendJson(res, 200, buildChatCompletion(echoedModel, reply));
   if (scrapedLocationId) {
     // endpoint.md §5: same decoupled trigger as the streaming branch — the reply is sent, the
-    // image pass starts in the background like chatMemorySync.ts's tick.
-    res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!));
+    // image pass starts in the background like chatMemorySync.ts's tick. Same turnLlm threading
+    // as the streaming branch above.
+    res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
   }
 }
 
@@ -1943,10 +1973,10 @@ async function handleImageSettingsSet(req: IncomingMessage, res: ServerResponse,
   }
   const parsed = parseSetImageSettingsBody(raw);
   if (!parsed) {
-    sendJson(res, 400, { error: 'expected { template: string }' });
+    sendJson(res, 400, { error: 'expected { template?: string, describer_prompt?: string, describer_history_pairs?: string }' });
     return;
   }
-  await setImageSettings(deps.settings, parsed.template!);
+  await setImageSettings(deps.settings, parsed);
   sendJson(res, 200, await getImageSettings(deps.settings));
 }
 
@@ -2504,7 +2534,7 @@ async function handleChatRoutes(
     // pending render lands, never blanking the layer (§5.1.8).
     const image = await resolveChatLocationImage(deps.db, userId, chatId);
     sendJson(res, 200, {
-      current: image.current ?? { locationId: null, name: null, imageUrl: null },
+      current: image.current ?? { locationId: null, name: null, definition: null, imageUrl: null },
       previous: image.previous ?? { locationId: null, name: null, imageUrl: null },
     });
     return;

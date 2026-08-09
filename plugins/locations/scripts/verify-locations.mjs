@@ -34,13 +34,16 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into locations')) {
-            const [userId, name, visualDescription, environmentJson, seed] = params;
+            // createLocationTool writes definition between visual_description and environment:
+            // [userId, name, visual_description, definition, environment, seed]
+            const [userId, name, visualDescription, definition, environmentJson, seed] = params;
             assert(scopedUserId === userId, 'create_location is scoped to the requesting user');
             const row = {
               location_id: `loc-${++counter}`,
               user_id: userId,
               name,
               visual_description: visualDescription,
+              definition: definition ?? null,
               environment: JSON.parse(environmentJson),
               seed,
               status: 'permanent', // createLocationTool.ts writes 'permanent' (user-created = canon)
@@ -49,7 +52,7 @@ function createFakePool() {
             return { rows: [{ location_id: row.location_id, name: row.name }] };
           }
 
-          if (sql.startsWith('select location_id, name from locations')) {
+          if (sql.startsWith('select location_id, name, definition from locations')) {
             const [userId, chatId] = params;
             assert(scopedUserId === userId, 'get_locations is scoped to the requesting user');
             // segway.md §2.6 eligibility, modeled in JS: transient rows count only when their
@@ -62,7 +65,7 @@ function createFakePool() {
             const rows = locations
               .filter((l) => l.user_id === userId && eligible(l))
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((l) => ({ location_id: l.location_id, name: l.name }));
+              .map((l) => ({ location_id: l.location_id, name: l.name, definition: l.definition ?? null }));
             return { rows };
           }
 
@@ -101,6 +104,11 @@ const tavern = await db.withUserScope(userId, (session) =>
 );
 assert(tavern.locationId.length > 0 && tavern.name === 'The Leaky Cauldron', 'create_location returns the new location id and name');
 
+const withDef = await db.withUserScope(userId, (session) =>
+  createTool.handler({ name: 'The Sorting Room', definition: 'A cramped room where arrivals are assigned.' }, { userId, db: session }),
+);
+assert(withDef.name === 'The Sorting Room', 'create_location accepts an optional definition');
+
 const bare = await db.withUserScope(userId, (session) =>
   createTool.handler({ name: 'Crossroads' }, { userId, db: session }),
 );
@@ -112,8 +120,10 @@ const otherUsersLoc = await db.withUserScope(otherUserId, (session) =>
 
 // --- get_locations ---
 const all = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
-assert(all.length === 2, "get_locations only returns the requesting user's locations");
+assert(all.length === 3, "get_locations only returns the requesting user's locations");
 assert(all.every((l) => !('visual_description' in l)), 'get_locations summaries omit the descriptive fields');
+assert(all.find((l) => l.locationId === withDef.locationId)?.definition === 'A cramped room where arrivals are assigned.', 'get_locations surfaces the definition when one exists');
+assert(!('definition' in all.find((l) => l.locationId === tavern.locationId)), 'get_locations omits definition when absent');
 assert(all[0].name === 'Crossroads', 'get_locations orders by name');
 
 // --- validation: empty name and malformed environment rejected before SQL ---

@@ -117,6 +117,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // Vistalyze image generation (docs/vistalyze_integration/endpoint.md §2.2, bi_principles.md §18).
   const [imageSettings, setImageSettingsState] = useState<ImageSettings | null>(null);
   const [selectedImageTemplate, setSelectedImageTemplate] = useState('');
+  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
+  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
   const [imageStatus, setImageStatus] = useState('');
 
   // Chat background (parallax_fade_teststep.md §2.2 + migration 0073) — the parallax pan
@@ -160,6 +162,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   function applyImageSettings(settings: ImageSettings) {
     setImageSettingsState(settings);
     setSelectedImageTemplate(settings.template);
+    setSelectedDescriberPrompt(settings.describerPrompt);
+    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
   }
 
   function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
@@ -239,10 +243,17 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   }
 
   async function saveImageSettings() {
-    if (!imageSettings || selectedImageTemplate === imageSettings.template) return;
+    if (!imageSettings) return;
+    const patch: { template?: string; describer_prompt?: string; describer_history_pairs?: string } = {};
+    if (selectedImageTemplate !== imageSettings.template) patch.template = selectedImageTemplate;
+    if (selectedDescriberPrompt !== imageSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
+    if (selectedDescriberHistoryPairs !== imageSettings.describerHistoryPairs) {
+      patch.describer_history_pairs = selectedDescriberHistoryPairs;
+    }
+    if (Object.keys(patch).length === 0) return;
     setImageStatus('');
     try {
-      const updated = await adminSetImageSettings(selectedImageTemplate, adminKey);
+      const updated = await adminSetImageSettings(patch, adminKey);
       applyImageSettings(updated);
       setImageStatus('Saved — applies to the next location render, no restart needed.');
     } catch (err) {
@@ -518,9 +529,48 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           the field is how you ask for the default back.
         </div>
         <br />
+        <label>
+          Room-describer prompt {imageSettings?.describerPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedDescriberPrompt}
+            onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
+            rows={10}
+            placeholder="[SYSTEM: TASK — LOCATION VISUAL ARCHIVIST]… (the built-in default)"
+          />
+        </label>
+        <div className="status">
+          The describer LLM call that turns a newly-minted location name into a real room
+          description (describer.md — VLZ's Step 3). Macros expanded per call are{' '}
+          <code>{'{{location_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
+          <code>Visuals:</code> half fills <code>visual_description</code> (which flows into the
+          template above); <code>Definition:</code> fills the location's definition. Empty means the
+          built-in default.
+        </div>
+        <label>
+          Room-describer context (turn-pairs)
+          <br />
+          <input
+            type="text"
+            inputMode="numeric"
+            value={selectedDescriberHistoryPairs}
+            onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
+            placeholder="1"
+          />
+        </label>
+        <div className="status">
+          How many trailing turn-pairs the describer reads as narrative context (default 1). Leave
+          empty for the default.
+        </div>
+        <br />
         <button
           onClick={saveImageSettings}
-          disabled={!imageSettings || selectedImageTemplate === imageSettings.template}
+          disabled={
+            !imageSettings ||
+            (selectedImageTemplate === imageSettings.template &&
+              selectedDescriberPrompt === imageSettings.describerPrompt &&
+              selectedDescriberHistoryPairs === imageSettings.describerHistoryPairs)
+          }
         >
           Save
         </button>

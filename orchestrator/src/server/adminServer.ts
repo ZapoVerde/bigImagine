@@ -56,10 +56,12 @@
  *   endpoint.md §2.1); undefined on any malformed shape
  * parseUpdateImageConnectionBody(raw) — validates an ImageConnectionPatch; undefined on any malformed
  *   shape
- * getImageSettings(store) — { template, templateIsDefault } for the master image prompt template
- *   (endpoint.md §2.2, bi_principles.md §18; '' = built-in default)
- * parseSetImageSettingsBody(raw) — validates { template?: string }; undefined on any malformed shape
- * setImageSettings(store, template) — upserts image_prompt_template
+ * getImageSettings(store) — { template, templateIsDefault, describerPrompt, describerPromptIsDefault,
+ *   describerHistoryPairs } for the image subsystem's settings (endpoint.md §2.2 + describer.md;
+ *   bi_principles.md §18 — '' = built-in default for the two prompts, '' = built-in 1 for the pairs)
+ * parseSetImageSettingsBody(raw) — validates { template?, describer_prompt?, describer_history_pairs? },
+ *   at least one present; undefined on any malformed shape
+ * setImageSettings(store, patch) — upserts whichever fields the patch names
  * testImageConnection(imageConnections, settings, id) — endpoint.md §3.3's diagnostic probe
  *   through one saved image connection, synthesized through the Master Image Prompt Template with
  *   the connection's style prefix (parallax_fade_teststep.md §4.2); undefined only if the id
@@ -467,13 +469,19 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
 }
 
 // --- Image settings (endpoint.md §2.2, bi_principles.md §18) ---
-// The one orchestrator-settings key this subsystem adds: image_prompt_template, the Master Image
-// Prompt Template synthesizeImagePrompt.ts expands against a location's visual_description/
-// environment. Live-read on every generation call (no restart), empty value = built-in default.
+// The three orchestrator-settings keys this subsystem adds: image_prompt_template, the Master
+// Image Prompt Template synthesizeImagePrompt.ts expands against a location's visual_description/
+// environment; location_describer_prompt, the room-description LLM prompt describeLocation.ts
+// expands (migration 0078, describer.md — empty = built-in default); and
+// location_describer_history_pairs, how many trailing turn-pairs the describer reads as context
+// (integer-as-text, default 1). All three are live-read on every call (no restart).
 
 export interface ImageSettings {
   template: string;
   templateIsDefault: boolean;
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
 }
 
 // parallax_fade_teststep.md §2.2 + migration 0073: the ChatView location-background controls —
@@ -691,20 +699,39 @@ export async function setChatLegibilitySettings(store: OrchestratorSettingsStore
 }
 
 export async function getImageSettings(store: OrchestratorSettingsStore): Promise<ImageSettings> {
-  const template = (await store.get('image_prompt_template')) ?? '';
-  return { template, templateIsDefault: !template };
+  const [template, describerPrompt, describerHistoryPairs] = await Promise.all([
+    store.get('image_prompt_template'),
+    store.get('location_describer_prompt'),
+    store.get('location_describer_history_pairs'),
+  ]);
+  return {
+    template: template ?? '',
+    templateIsDefault: !template,
+    describerPrompt: describerPrompt ?? '',
+    describerPromptIsDefault: !describerPrompt,
+    describerHistoryPairs: describerHistoryPairs ?? '',
+  };
 }
 
-export function parseSetImageSettingsBody(raw: unknown): { template?: string } | undefined {
+export function parseSetImageSettingsBody(raw: unknown): { template?: string; describer_prompt?: string; describer_history_pairs?: string } | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { template } = raw as Record<string, unknown>;
-  if (template === undefined) return undefined;
-  if (typeof template !== 'string') return undefined;
-  return { template };
+  const { template, describer_prompt, describer_history_pairs } = raw as Record<string, unknown>;
+  if (template === undefined && describer_prompt === undefined && describer_history_pairs === undefined) return undefined;
+  if (template !== undefined && typeof template !== 'string') return undefined;
+  if (describer_prompt !== undefined && typeof describer_prompt !== 'string') return undefined;
+  if (describer_history_pairs !== undefined && typeof describer_history_pairs !== 'string') return undefined;
+  return { template, describer_prompt, describer_history_pairs };
 }
 
-export async function setImageSettings(store: OrchestratorSettingsStore, template: string): Promise<void> {
-  await store.set('image_prompt_template', template);
+export async function setImageSettings(
+  store: OrchestratorSettingsStore,
+  patch: { template?: string; describer_prompt?: string; describer_history_pairs?: string },
+): Promise<void> {
+  const writes: Array<[SettingName, string]> = [];
+  if (patch.template !== undefined) writes.push(['image_prompt_template', patch.template]);
+  if (patch.describer_prompt !== undefined) writes.push(['location_describer_prompt', patch.describer_prompt]);
+  if (patch.describer_history_pairs !== undefined) writes.push(['location_describer_history_pairs', patch.describer_history_pairs]);
+  for (const [key, value] of writes) await store.set(key, value);
 }
 
 export interface ImageConnectionTestResult {

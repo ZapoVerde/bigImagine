@@ -216,10 +216,13 @@ export function getChat(chatId: string, apiKey: string | null): Promise<ChatDeta
 
 /** One side of the chat-background layer (endpoint.md §6.4): a location + its rendered image
  *  URL. imageUrl null is only legal on `current` — the location exists but its image hasn't
- *  rendered yet (the post-turn bg pass is still in flight, endpoint.md §5). */
+ *  rendered yet (the post-turn bg pass is still in flight, endpoint.md §5). definition is the
+ *  location's logical definition (the describer pass's "Definition:" half, describer.md) —
+ *  null when never written. */
 export interface ChatLocationImage {
   locationId: string;
   name: string;
+  definition: string | null;
   imageUrl: string | null;
 }
 
@@ -570,8 +573,11 @@ export async function adminGetImageSettings(adminKey: string | null): Promise<Im
   return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey);
 }
 
-export function adminSetImageSettings(template: string, adminKey: string | null): Promise<ImageSettings> {
-  return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey, { method: 'POST', body: { template } });
+export function adminSetImageSettings(
+  patch: { template?: string; describer_prompt?: string; describer_history_pairs?: string },
+  adminKey: string | null,
+): Promise<ImageSettings> {
+  return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey, { method: 'POST', body: patch });
 }
 
 /** GET /v1/admin/chat-background-settings — the SettingsView "Chat Background" fieldset's saved

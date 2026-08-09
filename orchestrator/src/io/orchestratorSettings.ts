@@ -173,6 +173,17 @@
  * fallback shape as every other prompt key (bi_principles.md §18). Written by the admin-gated
  * cleanup-settings endpoint, read live by the subloop, no restart.
  *
+ * location_describer_prompt/location_describer_history_pairs (migration 0078,
+ * docs/vistalyze_integration/describer.md) are the room-description LLM pass's two keys — the
+ * pass that turns a freshly-minted location's name-seeded visual_description into a real room
+ * description (BigImagine's analogue of SillyTavern-Vistalyze's Step 3 Describer), fired in the
+ * same decoupled chain as the image render and awaited before it. describer_prompt is the full
+ * prompt template ({{location_name}}, {{context}}; empty = the built-in default in
+ * describeLocation.ts — same §18 fallback as every prompt key), describer_history_pairs is how
+ * many trailing turn-pairs form the narrative context (integer-as-text, default '1', VLZ's
+ * describerHistory). Read live on every pass, no restart, editable from the Settings tab's Image
+ * Generation fieldset.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -242,6 +253,8 @@ export const SETTING_NAMES = [
   'chat_legibility_weight',
   'chat_legibility_hover_focus',
   'chat_legibility_halo_strength',
+  'location_describer_prompt',
+  'location_describer_history_pairs',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

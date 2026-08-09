@@ -11,8 +11,10 @@ interface CanvasPanelProps {
    *  guard handles that). */
   refreshToken: number;
   /** The active location's rendered image (endpoint.md §6.4) — the panel's location preview +
-   *  re-render section. Null when the chat has no eligible rendered location image. */
-  locationImage: { locationId: string; name: string; imageUrl: string } | null;
+   *  re-render section. Null when the chat has no eligible rendered location image. definition
+   *  is the location's logical definition (describer.md's "Definition:" half), shown under the
+   *  name when present. */
+  locationImage: { locationId: string; name: string; definition: string | null; imageUrl: string } | null;
   /** Called after a manual re-render completes (or fails) so ChatView can refresh its background
    *  layer and this panel's preview from the server. */
   onLocationImageChanged: () => void;
@@ -84,6 +86,11 @@ export default function CanvasPanel({ apiKey, noteId, refreshToken, locationImag
           <div className="canvas-panel-location-name" title={locationImage.name}>
             {locationImage.name}
           </div>
+          {locationImage.definition && (
+            <div className="canvas-panel-location-definition" title={locationImage.definition}>
+              {locationImage.definition}
+            </div>
+          )}
           <img
             className="canvas-panel-location-image"
             src={locationImage.imageUrl}

@@ -1072,6 +1072,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             location_id: string;
             name: string;
             visual_description: string;
+            definition: string | null;
             environment: string;
             seed: number | null;
             image_url: string | null;
@@ -1080,7 +1081,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             image_render_hash: string | null;
             anchor_swipe_id: string | null;
           }>(
-            `select location_id, name, visual_description, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash, anchor_swipe_id from locations
+            `select location_id, name, visual_description, definition, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash, anchor_swipe_id from locations
              where user_id = $1 and anchor_swipe_id = any($2::uuid[]) and status in ('transient', 'inactive')`,
             [userId, copiedSwipeIds],
           );
@@ -1100,10 +1101,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             // parent's. Character resurrection is unaffected — characters carry no visual fields.
             const branchAnchorSwipeId = loc.anchor_swipe_id ? (swipeIdMap.get(loc.anchor_swipe_id) ?? branchForkSwipeId) : undefined;
             const [cloned] = await session.query<{ location_id: string }>(
-              `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
-               values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8::jsonb, $9, 'transient', $10, $11)
+              `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
+               values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10, 'transient', $11, $12)
                returning location_id`,
-              [userId, loc.name, loc.visual_description, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
+              [userId, loc.name, loc.visual_description, loc.definition, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
             );
             if (cloned) branchLocationIdMap.set(loc.location_id, cloned.location_id);
           }

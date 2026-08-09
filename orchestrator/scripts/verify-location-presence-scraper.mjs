@@ -77,6 +77,8 @@ function createFakePool() {
                       image_rendered_input: matches[0].image_rendered_input ?? null,
                       image_render_hash: matches[0].image_render_hash ?? null,
                       seed: matches[0].seed ?? null,
+                      visual_description: matches[0].visual_description ?? null,
+                      definition: matches[0].definition ?? null,
                     },
                   ]
                 : [],
@@ -112,12 +114,13 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into locations')) {
-            const [userId, name, visualDescription, environmentJson, seed, imageUrl, renderedInput, renderHash, chatId, swipeId] = params;
+            const [userId, name, visualDescription, definition, environmentJson, seed, imageUrl, renderedInput, renderHash, chatId, swipeId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
               name,
               visual_description: visualDescription,
+              definition,
               environment: JSON.parse(environmentJson),
               seed,
               image_url: imageUrl,
@@ -402,6 +405,40 @@ Present: Mair, Seraphina, Mair`;
   assert(fresh.image_render_hash === 'hash-kraken', 'the fresh row inherits the render hash — the follow-up generation pass is a §5.1.2 cache hit');
   assert(fresh.seed === 12345, 'the fresh row inherits the seed');
   assert(fresh.visual_description === 'The Drunken Kraken - Main Hall', 'visual_description is still seeded from the extracted name');
+  assert(fresh.definition === null, 'a name-seeded prior carries no definition');
+}
+
+// --- §4.2.5 carry with a described prior: the description/definition ride along -------------
+// Once the describer (describeLocation.ts) has enriched a row, the carried hash covers the
+// *described* prompt — the fresh mint must carry the description too or the §5.1.2 cache check
+// misses and the render fires a name-only prompt (worse image + wasted gen). The describer's own
+// skip rule sees the carried description as "already described" — no second LLM call for the room.
+{
+  const pool = poolWithActiveSwipe(createFakePool());
+  pool.locations.push({
+    location_id: 'ffffffff-0000-0000-0000-000000000006',
+    user_id: USER,
+    name: 'The Drunken Kraken - Main Hall',
+    visual_description: 'A wide taproom with low oak beams, a great hearth, and lanterns casting warm light across scarred tables.',
+    definition: 'A rowdy dockside tavern and the crew\'s usual meeting spot.',
+    environment: {},
+    status: 'transient',
+    anchor_chat_id: CHAT,
+    anchor_swipe_id: '99999999-9999-9999-9999-999999999999', // superseded by a rerun — ineligible
+    seed: 12345,
+    image_url: 'https://cdn.example.com/kraken.png',
+    image_rendered_input: { visual_description: 'A wide taproom with low oak beams…', environment: {}, seed: 12345 },
+    image_render_hash: 'hash-kraken-described',
+    image_generated_at: '2026-08-08T10:00:00.000Z',
+  });
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+
+  const fresh = pool.locations.find((l) => l.location_id !== 'ffffffff-0000-0000-0000-000000000006');
+  assert(fresh.visual_description === 'A wide taproom with low oak beams, a great hearth, and lanterns casting warm light across scarred tables.', 'a described prior\'s visual_description is carried onto the fresh row (hash-match keeps the §5.1.2 cache hit)');
+  assert(fresh.definition === 'A rowdy dockside tavern and the crew\'s usual meeting spot.', 'a described prior\'s definition is carried onto the fresh row');
+  assert(fresh.image_render_hash === 'hash-kraken-described', 'the carried description matches the carried hash — the render stays a cache hit');
 }
 
 // --- Re-anchor: a transient row reused by a later turn follows the live timeline's swipe -------

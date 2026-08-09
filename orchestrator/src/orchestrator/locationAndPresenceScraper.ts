@@ -230,29 +230,44 @@ async function resolveLocation(
     return matched[0].location_id;
   }
 
-  // §4.2.5 same-place carry — the row-churn reuse described in the docstring above.
+  // §4.2.5 same-place carry — the row-churn reuse described in the docstring above. Also clones
+  // the prior row's visual_description/definition when it was actually described (non-name): the
+  // carried image hash was computed over the described prompt, so the new row must hold the same
+  // description or the §5.1.2 cache check misses and the render fires with a name-only prompt
+  // (worse image + wasted gen). The describer's own skip rule (describeLocation.ts) sees the
+  // carried description as "already described" — no second LLM call for the same room.
   const [prior] = await session.query<{
     image_url: string | null;
     image_rendered_input: unknown;
     image_render_hash: string | null;
     seed: number | null;
+    visual_description: string | null;
+    definition: string | null;
   }>(
-    `select image_url, image_rendered_input, image_render_hash, seed
+    `select image_url, image_rendered_input, image_render_hash, seed, visual_description, definition
      from locations
      where user_id = $1 and name = $2 and anchor_chat_id = $3 and image_url is not null
      order by image_generated_at desc nulls last
      limit 1`,
     [userId, header.location, chatId],
   );
+  // The minted description: the prior row's real description when it has one (non-empty and not
+  // just the name), else the name-seed this mint would otherwise write — a genuinely new place
+  // still seeds from its name and the describer enriches it after.
+  const carriedDescription =
+    prior?.visual_description && prior.visual_description.trim() !== '' && prior.visual_description !== header.location
+      ? prior.visual_description
+      : header.location;
 
   const [created] = await session.query<{ location_id: string }>(
-    `insert into locations (user_id, name, visual_description, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
-     values ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, 'transient', $9, $10)
+    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
+     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10, $11)
      returning location_id`,
     [
       userId,
       header.location,
-      header.location,
+      carriedDescription,
+      prior?.definition ?? null,
       environment,
       prior?.seed ?? IMAGE_GEN_SEED,
       prior?.image_url ?? null,

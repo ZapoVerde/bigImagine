@@ -30,13 +30,15 @@ import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 interface LocationRow {
   location_id: string;
   name: string;
+  definition: string | null;
 }
 
 export function createGetLocationsTool(): RegisteredTool {
   return {
     definition: {
       name: 'get_locations',
-      description: "List the user's locations (id and name only). Use the returned location ids to reference locations in scenes or canon facts.",
+      description:
+        "List the user's locations (id, name, and a brief definition when one exists). Use the returned location ids to reference locations in scenes or canon facts.",
       parameters: {
         type: 'object',
         properties: {},
@@ -47,7 +49,7 @@ export function createGetLocationsTool(): RegisteredTool {
       // segway.md §2.6 eligibility, copied from getScenesTool.ts: transient rows count only when
       // their anchor is on the calling chat's active swipe path ($2; null chat -> none).
       const rows = await ctx.db.query<LocationRow>(
-        `select location_id, name from locations
+        `select location_id, name, definition from locations
          where user_id = $1 and (
            status = 'permanent' or status is null or
            (status = 'transient' and anchor_swipe_id in (
@@ -57,7 +59,11 @@ export function createGetLocationsTool(): RegisteredTool {
          order by name`,
         [ctx.userId, ctx.chatId ?? null],
       );
-      return rows.map((r) => ({ locationId: r.location_id, name: r.name }));
+      return rows.map((r) => ({
+        locationId: r.location_id,
+        name: r.name,
+        ...(r.definition ? { definition: r.definition } : {}),
+      }));
     },
   };
 }

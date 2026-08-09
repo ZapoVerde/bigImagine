@@ -301,10 +301,14 @@ export interface ChatLegibilitySettingsPatch {
 }
 
 // orchestrator/src/server/adminServer.ts ImageSettings — the master image prompt template
-// (endpoint.md §2.2); '' means "use the built-in default" (bi_principles.md §18).
+// (endpoint.md §2.2), the location-describer prompt + history-pairs knob (describer.md, migration
+// 0078); '' means "use the built-in default" (bi_principles.md §18).
 export interface ImageSettings {
   template: string;
   templateIsDefault: boolean;
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
 }
 
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions

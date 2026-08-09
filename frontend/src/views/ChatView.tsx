@@ -180,7 +180,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // the scene_id cache pointer, §2.6-filtered). nulls = no eligible location at all — a location
   // whose image hasn't rendered yet does NOT null this out: the previous background stays up until
   // the pending render is ready to replace it (refreshLocationImage below, endpoint.md §5.1.8).
-  const [locationImage, setLocationImage] = useState<{ locationId: string; name: string; imageUrl: string } | null>(null);
+  const [locationImage, setLocationImage] = useState<{ locationId: string; name: string; definition: string | null; imageUrl: string } | null>(null);
 
   // Background fade state machine (parallax_fade_teststep.md §3): when locationImage's URL
   // changes, the old layer fades out (0.3s), then the src swaps and the new layer fades in (0.6s)
@@ -650,7 +650,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       // location). Any pending poll for the old render is moot now.
       bgFreshRef.current = bgLastLocationIdRef.current !== null && current.locationId !== bgLastLocationIdRef.current;
       bgLastLocationIdRef.current = current.locationId;
-      setLocationImage({ locationId: current.locationId, name: current.name, imageUrl: current.imageUrl });
+      setLocationImage({ locationId: current.locationId, name: current.name, definition: current.definition, imageUrl: current.imageUrl });
       stopBgPoll();
       return;
     }

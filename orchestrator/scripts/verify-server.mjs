@@ -586,7 +586,7 @@ function createFakePool() {
           //   the scene-path reads — params: [userId, sceneId, chatId?] -> the scene's location.
           //   The previous-location read (endpoint.md §5.1.8) is the same join with
           //   `l.image_url is not null`: a historical pointer is only shown when it has an image.
-          if (sql.startsWith('select l.location_id, l.name, l.image_url') && sql.includes('from scenes s')) {
+          if (sql.includes('from scenes s') && sql.includes('select l.location_id, l.name')) {
             const row = sceneLocations.get(params[1]);
             if (sql.includes('l.image_url is not null')) {
               return { rows: row && row.image_url ? [row] : [] };
@@ -595,7 +595,7 @@ function createFakePool() {
           }
           //   the active-swipe fallback (stale scene pointer on prev/next cycling) — params:
           //   [userId, chatId] -> the cycled-to swipe's own location.
-          if (sql.startsWith('select l.location_id, l.name, l.image_url') && sql.includes('from locations l')) {
+          if (sql.includes('from locations l') && sql.includes('select l.location_id, l.name')) {
             const row = fallbackLocations.get(`${params[0]}:${params[1]}`);
             return { rows: row ? [row] : [] };
           }

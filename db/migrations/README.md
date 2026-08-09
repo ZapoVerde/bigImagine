@@ -411,3 +411,15 @@ Already applied by hand, not run automatically (see the file for the exact comma
   constants (same fail-open shape as every numeric setting). The key list is the *complete*
   current vocabulary (all of 0010–0076), not the diff — the CHECK is rebuilt wholesale, so a
   fresh volume must land on the same constraint the live DB has. Idempotent hand-apply one-shot.
+- `0078_location_describer.sql` — the room-description pass (docs/vistalyze_integration/describer.md,
+  VLZ's Step 3 Describer ported into BigImagine's bg pipeline): adds `locations.definition`
+  (nullable — the describer's "Definition:" output, the logical half; the "Visuals:" half lands in
+  the existing `visual_description`), plus two orchestrator_settings keys:
+  `location_describer_prompt` (the full describer prompt template; empty = the built-in default in
+  `orchestrator/src/orchestrator/describeLocation.ts`, bi_principles.md §18) and
+  `location_describer_history_pairs` (integer-as-text, default `'1'` — how many trailing turn-pairs
+  the describer reads as narrative context). Read live on every describe pass, no restart; unset or
+  corrupt values fall back to the built-in defaults (same fail-open shape as every numeric setting).
+  The key list is the *complete* current vocabulary (all of 0010–0077), not the diff — the CHECK is
+  rebuilt wholesale, so a fresh volume must land on the same constraint the live DB has. Idempotent
+  hand-apply one-shot.
