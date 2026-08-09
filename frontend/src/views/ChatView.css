@@ -154,7 +154,7 @@
   background: var(--color-hover-surface);
 }
 
-/* RP-chat header hamburger menu — one control folding the prompt-inspector and branch-map
+/* RP-chat header ⋯ menu — one control folding the prompt-inspector and branch-map
    toggles plus file/image attach (the input-row paper clip is hidden for RP chats). The
    inspect/tree buttons this replaces had no persistent rail to toggle from (PromptInspectorPanel
    / BranchMapPanel are both opt-in overlays), so the menu is the only way to reach them. */
@@ -166,7 +166,10 @@
 .chat-menu-button {
   background: none;
   border: none;
-  font-size: var(--font-size-base);
+  /* ⋯ renders noticeably smaller than the ☰ it replaced at --font-size-base, so the glyph
+     gets its own slightly larger size to keep the hit target visually balanced. */
+  font-size: 1.25rem;
+  line-height: 1;
   padding: 0.3rem 0.5rem;
   color: var(--color-text-muted);
   flex-shrink: 0;
@@ -213,7 +216,7 @@
   cursor: default;
 }
 
-/* Mobile-only mount of the same ☰ menu, in the input row opposite Send — hidden on desktop,
+/* Mobile-only mount of the same ⋯ menu, in the input row opposite Send — hidden on desktop,
    where the header's copy is the live one (see the mobile block below for the swap). */
 .chat-menu-mobile {
   display: none;
@@ -788,7 +791,7 @@
   margin: 0 0.1rem;
 }
 
-/* --- Selection-mode bulk delete (hamburger → "Delete messages") ---
+/* --- Selection-mode bulk delete (⋯ menu → "Delete messages") ---
    Every message becomes a checkbox + bubble row; only the wrapper is a flex child of the
    history column, so bubbles keep their old left/right alignment. Ticking any entry selects
    everything below it too — the selection is always a trailing suffix, which is exactly what
@@ -978,7 +981,7 @@
     font-size: var(--font-size-lg);
   }
 
-  /* The ☰ chat menu relocates from the header into the input row on mobile (ChatView.tsx
+  /* The ⋯ chat menu relocates from the header into the input row on mobile (ChatView.tsx
      renders a second copy there; one chatMenuOpen state serves both). The header's copy hides
      and the row's takes the left slot opposite Send — same pill shape as attach/send — with the
      popup opening upward since it now sits at the bottom of the screen. */

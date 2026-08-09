@@ -375,15 +375,15 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
-  // RP-chat header hamburger menu — folds the prompt-inspector and branch-map toggles plus
+  // RP-chat header ⋯ menu — folds the prompt-inspector and branch-map toggles plus
   // file/image attach under one control (see the header below). Non-RP chats keep their single
   // branch-map button and the input-row paper clip instead.
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
-  // Sync Status panel (RP chat ☰ menu → "Sync status"): this chat's slice of the rolling memory
+  // Sync Status panel (RP chat ⋯ menu → "Sync status"): this chat's slice of the rolling memory
   // sync loop's status record — when the last attempt/success landed, what it did, and when the
   // next one is due. Mounted only while open, same conditional-render shape as the other panels.
   const [syncStatusOpen, setSyncStatusOpen] = useState(false);
-  // Selection-mode bulk delete (hamburger → "Delete messages"): a tickbox on every message, and
+  // Selection-mode bulk delete (⋯ menu → "Delete messages"): a tickbox on every message, and
   // ticking any entry selects everything below it, so the selected set is always a trailing
   // suffix — exactly what the server's truncateMessagesFrom removes in one call. RP-chat only,
   // like the menu itself.
@@ -395,7 +395,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
   const historyRef = useRef<HTMLDivElement | null>(null);
   const chatMenuRef = useRef<HTMLDivElement | null>(null);
-  // Second mount of the ☰ chat menu, in the mobile input row opposite Send (the desktop copy
+  // Second mount of the ⋯ chat menu, in the mobile input row opposite Send (the desktop copy
   // lives in the chat header). Only one is visible at a time — CSS hides the header one on
   // mobile and the row one on desktop — but both need to participate in outside-click closing.
   const chatMenuMobileRef = useRef<HTMLDivElement | null>(null);
@@ -465,7 +465,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
 
-  // Close the ☰ chat menu (either mount — header or mobile input row) on outside click or
+  // Close the ⋯ chat menu (either mount — header or mobile input row) on outside click or
   // Escape. Only mounted while the menu is open, so the listeners cost nothing when it isn't.
   useEffect(() => {
     if (!chatMenuOpen) return;
@@ -583,7 +583,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Escape exits selection mode too, same as it closes the hamburger menu.
+  // Escape exits selection mode too, same as it closes the ⋯ menu.
   useEffect(() => {
     if (!selectionMode) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -965,7 +965,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  // --- Selection-mode bulk delete (hamburger → "Delete messages") ---
+  // --- Selection-mode bulk delete (⋯ menu → "Delete messages") ---
   // Ticking a message selects everything below it too, so the selection is always a trailing
   // suffix of the conversation; un-ticking works symmetrically (clears that message and all
   // below it). Deleting = one truncateMessagesFrom call at the first selected message.
@@ -1062,7 +1062,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  // Shared between the desktop header ☰ and the mobile input-row ☰ — the same five items, two
+  // Shared between the desktop header ⋯ and the mobile input-row ⋯ — the same five items, two
   // mounts (ChatView.css hides the header copy on mobile and the row copy on desktop). One
   // chatMenuOpen state serves both.
   const chatMenuItems = (
@@ -1193,7 +1193,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                   aria-expanded={chatMenuOpen}
                   onClick={() => setChatMenuOpen((v) => !v)}
                 >
-                  ☰
+                  ⋯
                 </button>
                 {chatMenuOpen && (
                   <div className="chat-menu" role="menu">
@@ -1470,7 +1470,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               e.target.value = '';
             }}
           />
-          {/* RP chats attach from the ☰ menu; on mobile that menu lives in this row (opposite
+          {/* RP chats attach from the ⋯ menu; on mobile that menu lives in this row (opposite
               Send) instead of the header, so the row carries its own copy here. Non-RP chats
               keep the paper clip. */}
           {activeChat?.kind === 'rp' && (
@@ -1483,7 +1483,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                 aria-expanded={chatMenuOpen}
                 onClick={() => setChatMenuOpen((v) => !v)}
               >
-                ☰
+                ⋯
               </button>
               {chatMenuOpen && (
                 <div className="chat-menu" role="menu">
@@ -1492,7 +1492,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
               )}
             </div>
           )}
-          {/* RP chats attach from the header hamburger menu instead — the input row keeps just
+          {/* RP chats attach from the header ⋯ menu instead — the input row keeps just
               the textarea + Send, with the paper clip reserved for non-RP chats. */}
           {activeChat?.kind !== 'rp' && (
             <button
