@@ -492,6 +492,11 @@ function createFakePool() {
   const chatLocationState = new Map();
   const sceneLocations = new Map();
   const fallbackLocations = new Map();
+  // GET /v1/admin/location-render-status (adminServer.ts getLocationRenderStatus): the users
+  // roster read (withSystemScope, rows shaped {user_id}) + each user's recent-locations read
+  // (withUserScope, rows shaped like the query's snake_case result columns).
+  const renderStatusUsers = [];
+  const renderStatusLocations = [];
   return {
     inserts,
     characters,
@@ -504,6 +509,12 @@ function createFakePool() {
     },
     setFallbackLocation(userId, chatId, row) {
       fallbackLocations.set(`${userId}:${chatId}`, row);
+    },
+    setRenderStatusUsers(rows) {
+      renderStatusUsers.push(...rows);
+    },
+    setRenderStatusLocations(rows) {
+      renderStatusLocations.push(...rows);
     },
     async connect() {
       let scopedUserId;
@@ -598,6 +609,15 @@ function createFakePool() {
           if (sql.includes('from locations l') && sql.includes('select l.location_id, l.name')) {
             const row = fallbackLocations.get(`${params[0]}:${params[1]}`);
             return { rows: row ? [row] : [] };
+          }
+          // GET /v1/admin/location-render-status: the users roster read (withSystemScope).
+          if (sql.includes('select user_id from users')) {
+            return { rows: renderStatusUsers };
+          }
+          //   each user's recent-locations read (withUserScope) — seeded rows are already
+          //   shaped like the query's snake_case result columns.
+          if (sql.startsWith('select location_id, name, status')) {
+            return { rows: renderStatusLocations };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -1370,6 +1390,38 @@ const imgSettingsSetBody = await imgSettingsSetRes.json();
 assert(
   imgSettingsSetRes.status === 200 && imgSettingsSetBody.template === '{{style_prefix}} {{visual_description}} at {{time_of_day}}' && imgSettingsSetBody.templateIsDefault === false,
   'POST /v1/admin/image-settings persists the template and reports it as non-default',
+);
+
+// --- Admin location-render-status route (adminServer.ts getLocationRenderStatus) ---
+const rsNoAuthRes = await fetch(`${base}/v1/admin/location-render-status`);
+assert(rsNoAuthRes.status === 401, 'GET /v1/admin/location-render-status with no auth header returns 401');
+
+pool.setRenderStatusUsers([{ user_id: 'user-1' }]);
+pool.setRenderStatusLocations([
+  {
+    location_id: 'loc-1',
+    name: 'The Tavern',
+    status: 'permanent',
+    described: true,
+    defined: true,
+    rendered: true,
+    has_render_hash: true,
+    image_generated_at: '2026-01-02T00:00:00.000Z',
+    updated_at: '2026-01-02T00:00:00.000Z',
+  },
+]);
+const rsRes = await fetch(`${base}/v1/admin/location-render-status`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const rsBody = await rsRes.json();
+assert(
+  rsRes.status === 200 &&
+    rsBody.locations.length === 1 &&
+    rsBody.locations[0].name === 'The Tavern' &&
+    rsBody.locations[0].rendered === true &&
+    rsBody.locations[0].hasRenderHash === true &&
+    rsBody.locations[0].described === true,
+  'GET /v1/admin/location-render-status returns the seeded per-stage render booleans',
 );
 
 // --- Chat/folder CRUD routes ---

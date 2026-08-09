@@ -4,6 +4,7 @@ import type {
   ChatLineageNode,
   ChatMemorySettings,
   ChatMemorySyncStatusRow,
+  LocationRenderStatusRow,
   CanonSettings,
   ChatMessage,
   ChatParams,
@@ -818,6 +819,16 @@ export async function adminGetChatMemorySyncStatus(adminKey: string | null): Pro
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   const body = (await res.json()) as { chats: ChatMemorySyncStatusRow[] };
   return body.chats;
+}
+
+/** The Backgrounds tab's data source — read-only confirmation that the bg-gen pipeline
+ *  (describer → render) actually ran per location, not a settings/editing endpoint. No POST
+ *  counterpart. */
+export async function adminGetLocationRenderStatus(adminKey: string | null): Promise<LocationRenderStatusRow[]> {
+  const res = await fetch('/v1/admin/location-render-status', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { locations: LocationRenderStatusRow[] };
+  return body.locations;
 }
 
 export async function adminGetCanonSettings(adminKey: string | null): Promise<CanonSettings> {

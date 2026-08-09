@@ -1,0 +1,102 @@
+/* App-wide navigation drawer behind the tab-bar's top-left hamburger — the specialist views
+   that used to be the empty-chat landing pills. Modal overlay: backdrop dims the whole app,
+   drawer slides in from the left above every in-view panel (sidebar is z-index 30) but below
+   the modals (1000/1100) and the screen lock (2000). */
+
+.app-nav-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.app-nav-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.app-nav-drawer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: min(20rem, 85vw);
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-surface);
+  border-right: 1px solid var(--color-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  animation: app-nav-slide-in 0.18s ease-out;
+}
+
+@keyframes app-nav-slide-in {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.app-nav-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.app-nav-title {
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.app-nav-close {
+  font-size: var(--font-size-lg);
+  line-height: 1;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.25rem 0.5rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.app-nav-close:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+.app-nav-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem;
+  gap: 0.15rem;
+  overflow-y: auto;
+}
+
+/* Rows are deliberately tall (>=44px) — mobile-first (bi_principles.md §19): a drawer you
+   summon on a phone needs thumb-sized targets, not link-sized ones. */
+.app-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.8rem 0.9rem;
+  font-size: var(--font-size-md);
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.app-nav-item:hover {
+  background: var(--color-hover-surface);
+}
+
+.app-nav-icon {
+  font-size: var(--font-size-base);
+  flex-shrink: 0;
+}

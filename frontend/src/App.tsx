@@ -4,6 +4,7 @@ import './App.css';
 import { API_KEY_STORAGE_KEY } from './api/authStorage';
 import { whoami } from './api/client';
 import BackupWarningModal from './components/BackupWarningModal';
+import AppNavDrawer from './components/appNav/AppNavDrawer';
 import ScreenLockOverlay from './components/ScreenLockOverlay';
 import Sidebar from './components/sidebar/Sidebar';
 import TabStrip from './components/TabStrip';
@@ -13,6 +14,7 @@ import UnlockGate from './components/UnlockGate';
 import { useTabs } from './hooks/useTabs';
 import { useTheme } from './hooks/useTheme';
 import BrowseChubView from './views/BrowseChubView';
+import BackgroundsView from './views/BackgroundsView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
@@ -58,6 +60,10 @@ export default function App() {
   // boundary (TabStrip is App's, the chat header is ChatView's), and reset on any tab switch so
   // non-chat views never inherit a collapsed bar they have no bottom control to bring back.
   const [topBarsHidden, setTopBarsHidden] = useState(false);
+
+  // App-wide navigation drawer behind the tab-bar hamburger (AppNavDrawer) — owns the specialist
+  // views that used to be the empty-chat landing pills.
+  const [navOpen, setNavOpen] = useState(false);
 
   useEffect(() => {
     setTopBarsHidden(false);
@@ -168,6 +174,8 @@ export default function App() {
                     }
                   : undefined
               }
+              navOpen={navOpen}
+              onToggleNav={() => setNavOpen((v) => !v)}
             />
             <TimerStrip apiKey={apiKey} />
           </div>
@@ -185,7 +193,6 @@ export default function App() {
                 chatId={tab.chatId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
-                onSwitchView={summon}
                 onOpenChat={openChat}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
@@ -197,7 +204,6 @@ export default function App() {
                 chatId={tab.chatId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
-                onSwitchView={summon}
                 onOpenChat={openChat}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
@@ -220,9 +226,11 @@ export default function App() {
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
+            {tab.type === 'backgrounds' && <BackgroundsView />}
           </div>
         ))}
       </div>
+      <AppNavDrawer open={navOpen} onClose={() => setNavOpen(false)} onNavigate={summon} />
     </div>
   );
 }

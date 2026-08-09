@@ -107,6 +107,10 @@
  * parseSetPersonaSettingsBody(raw) — validates {name?, description?: string}, at least one
  *   present; undefined on any malformed shape
  * setPersonaSettings(store, body) — upserts whichever of persona_name/persona_description was given
+ * getLocationRenderStatus(db) — the bg-gen pipeline's proof-it-ran read (bi_principles.md §11):
+ *   the most-recently-touched locations per user with which render stages actually completed
+ *   (described/defined/rendered/hasRenderHash + status + timestamps) — same roster-every-user
+ *   RLS-scope shape as getChatMemorySyncStatus
  *
  * @contract
  *   assertions:
@@ -1417,6 +1421,82 @@ export async function getChatMemorySyncStatus(db: PostgresClient): Promise<ChatM
         canonProposedCount: Number(r.canon_proposed_count),
         canonApprovedCount: Number(r.canon_approved_count),
         canonLastProposedAt: r.canon_last_proposed_at,
+      });
+    }
+  }
+  return rows;
+}
+
+// --- Location render status (bi_principles.md §11) ---
+// The read side of the bg-gen pipeline: one row per recently-touched location proving which
+// stages actually ran — described (visual_description filled by describeLocation.ts / the
+// describer's Definition half), rendered (image_url + render hash written by
+// generateLocationImage.ts), plus the location's segway status (migration 0067). Same "roster
+// every user, then query each one under its own RLS scope" shape as getChatMemorySyncStatus
+// above — locations is user_id-scoped + RLS-forced, so an admin key alone can't read it.
+
+export interface LocationRenderStatusRow {
+  locationId: string;
+  name: string;
+  status: string;
+  /** visual_description non-empty (the describer or the scraper's name seed). */
+  described: boolean;
+  /** definition non-empty (the describer's Definition half, migration 0078). */
+  defined: boolean;
+  /** image_url present — generateLocationImage.ts wrote a render for this row. */
+  rendered: boolean;
+  /** image_render_hash present — the cache-validation key (migration 0076). */
+  hasRenderHash: boolean;
+  imageGeneratedAt: string | null;
+  updatedAt: string;
+}
+
+interface LocationRenderStatusQueryRow {
+  location_id: string;
+  name: string;
+  status: string;
+  described: boolean;
+  defined: boolean;
+  rendered: boolean;
+  has_render_hash: boolean;
+  image_generated_at: string | null;
+  updated_at: string;
+}
+
+/** How many most-recently-touched locations each user's status table shows — a proof-it-ran
+ *  surface, not a browser, so a cap keeps it cheap without hiding failures (errors surface as
+ *  stale/missing stages on the newest rows). */
+const LOCATION_RENDER_STATUS_LIMIT = 50;
+
+export async function getLocationRenderStatus(db: PostgresClient): Promise<LocationRenderStatusRow[]> {
+  const users = await db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
+  const rows: LocationRenderStatusRow[] = [];
+  for (const { user_id: userId } of users) {
+    const userRows = await db.withUserScope(userId, (session) =>
+      session.query<LocationRenderStatusQueryRow>(
+        `select location_id, name, status,
+                (visual_description is not null and visual_description <> '') as described,
+                (definition is not null and definition <> '') as defined,
+                (image_url is not null) as rendered,
+                (image_render_hash is not null) as has_render_hash,
+                image_generated_at, updated_at
+         from locations
+         order by updated_at desc
+         limit $1`,
+        [LOCATION_RENDER_STATUS_LIMIT],
+      ),
+    );
+    for (const r of userRows) {
+      rows.push({
+        locationId: r.location_id,
+        name: r.name,
+        status: r.status,
+        described: r.described,
+        defined: r.defined,
+        rendered: r.rendered,
+        hasRenderHash: r.has_render_hash,
+        imageGeneratedAt: r.image_generated_at,
+        updatedAt: r.updated_at,
       });
     }
   }

@@ -54,22 +54,7 @@ import StagingBar, { type StagedFile } from '../components/attachments/StagingBa
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
-import type { SummonableType } from '../hooks/useTabs';
 import './ChatView.css';
-
-// The "come here to do a task" specialist views. Settings is reachable via TabStrip's gear icon
-// instead (always available, not just from this empty-chat landing state), so it isn't one of
-// these.
-const VIEW_SWITCH_OPTIONS: { type: SummonableType; label: string; icon: string }[] = [
-  { type: 'notes', label: 'Notes', icon: '📝' },
-  { type: 'documents', label: 'Documents', icon: '📄' },
-  { type: 'characters', label: 'Characters', icon: '🎭' },
-  { type: 'browse-chub', label: 'Browse Chub', icon: '🔍' },
-  { type: 'rag', label: 'RAG', icon: '🧠' },
-  { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
-  { type: 'connections', label: 'Connections', icon: '🔌' },
-  { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
-];
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
 // currentColor and scales with the surrounding text (1em) instead of relying on an emoji glyph.
@@ -100,10 +85,6 @@ interface ChatViewProps {
   /** Fires whenever this chat's title changes (e.g. the server's first-message auto-title) so the
    *  owning tab's label stays in sync. */
   onTitleChange?: (title: string) => void;
-  /** Opt-in escape hatch out of the chat-first default (principle 5): converts this still-empty
-   *  draft tab into a specialist view. Only offered before anything's been sent — see the
-   *  chat-empty-landing branch below. */
-  onSwitchView?: (type: SummonableType) => void;
   /** Focuses (or opens) a chat tab by id — used by the "Fork from here" action to jump straight
    *  to the new branch once it's created (useTabs.ts's openChat). */
   onOpenChat?: (chatId: string, title?: string) => void;
@@ -173,7 +154,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onSwitchView, onOpenChat, topBarsHidden, onTopBarsHiddenChange }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -1256,16 +1237,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length === 0 && chatId && <div className="empty-state">Ask BigImagine something.</div>}
           {messages.length === 0 && !chatId && (
             <div className="chat-empty-landing">
-              {onSwitchView && (
-                <div className="view-switch-pills">
-                  {VIEW_SWITCH_OPTIONS.map((opt) => (
-                    <button key={opt.type} type="button" onClick={() => onSwitchView(opt.type)}>
-                      <span className="pill-icon">{opt.icon}</span>
-                      {opt.label}
-                    </button>
-                  ))}
-                </div>
-              )}
               <PinnedNotesDrawer apiKey={apiKey} />
             </div>
           )}

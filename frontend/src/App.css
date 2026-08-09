@@ -107,6 +107,23 @@ body {
   background: var(--color-hover-surface);
 }
 
+/* The app-wide navigation drawer toggle (AppNavDrawer.tsx) — the top-left hamburger. Same
+   icon-button look as the sidebar summon but always visible, on every screen size. */
+.app-nav-button {
+  background: none;
+  border: none;
+  font-size: var(--font-size-lg);
+  padding: 0.3rem 0.6rem;
+  margin-right: 0.6rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.app-nav-button:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
 @media (max-width: 768px) {
   .mobile-only {
     display: inline-flex;

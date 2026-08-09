@@ -203,6 +203,7 @@ import {
   getCleanupSettings,
   getHouseholdTimezone,
   getImageSettings,
+  getLocationRenderStatus,
   getNotificationSettings,
   getPersonaSettings,
   getPiaProxyUrl,
@@ -1983,9 +1984,7 @@ async function handleImageSettingsSet(req: IncomingMessage, res: ServerResponse,
 async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const timezone = await getHouseholdTimezone(deps.settings);
   sendJson(res, 200, { timezone });
-}
-
-async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+}async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   let raw: unknown;
   try {
     raw = await readJsonBody(req);
@@ -2097,6 +2096,13 @@ async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResp
 // than configuring anything.
 async function handleChatMemorySyncStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, { chats: await getChatMemorySyncStatus(deps.db) });
+}
+
+// The Backgrounds tab's proof-it-ran read: which render stages each recent location actually
+// completed (describeLocation.ts's described/defined halves, generateLocationImage.ts's
+// rendered/hash), cross-user like getChatMemorySyncStatus above — admin-gated, read-only.
+async function handleLocationRenderStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { locations: await getLocationRenderStatus(deps.db) });
 }
 
 // docs/canonize-plan.md §6 — canon settings are live-read (recall_canon_facts reads
@@ -3229,6 +3235,14 @@ async function handleRequest(
       return;
     }
     await handleChatMemorySyncStatusGet(res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/location-render-status') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLocationRenderStatusGet(res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/canon-settings') {

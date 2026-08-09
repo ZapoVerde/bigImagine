@@ -1,8 +1,6 @@
 import { useRef, useState } from 'react';
 import {
   ApiError,
-  adminGetChatBackgroundSettings,
-  adminGetImageSettings,
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
@@ -10,8 +8,6 @@ import {
   adminGetTimezone,
   adminListCredentials,
   adminSetCredential,
-  adminSetChatBackgroundSettings,
-  adminSetImageSettings,
   adminSetNotificationSettings,
   adminSetPersonaSettings,
   adminSetPiaProxyUrl,
@@ -19,7 +15,7 @@ import {
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { ChatBackgroundSettings, CredentialSummary, ImageSettings, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
+import type { CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
@@ -66,7 +62,9 @@ function formatUtcOffset(tz: string): string {
 // The Connection fieldset that used to live here (create/switch/rotate a named LLM connection) has
 // moved to its own Connections tab (views/ConnectionsView.tsx, io/llmConnections.ts). The Chat
 // Memory fieldset that used to live here (sync timing, prompts, the auto-recall retrieval knobs)
-// moved to the RAG tab (views/RagView.tsx) — this view is household settings only now.
+// moved to the RAG tab (views/RagView.tsx), and the Image Generation + Chat Background fieldsets
+// moved to the Backgrounds tab (views/BackgroundsView.tsx) — this view is household settings only
+// now.
 interface SettingsViewProps {
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -114,30 +112,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedScreenLockTimeoutMinutes, setSelectedScreenLockTimeoutMinutes] = useState('5');
   const [screenLockStatus, setScreenLockStatus] = useState('');
 
-  // Vistalyze image generation (docs/vistalyze_integration/endpoint.md §2.2, bi_principles.md §18).
-  const [imageSettings, setImageSettingsState] = useState<ImageSettings | null>(null);
-  const [selectedImageTemplate, setSelectedImageTemplate] = useState('');
-  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
-  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
-  const [imageStatus, setImageStatus] = useState('');
-
-  // Chat background (parallax_fade_teststep.md §2.2 + migration 0073) — the parallax pan
-  // toggle, the dimming veil ("overlay") over the location background, and the bubble fill.
-  // Saved values + in-progress selections, mirroring the other fieldsets.
-  const [chatBackgroundParallax, setChatBackgroundParallax] = useState(false);
-  const [selectedParallax, setSelectedParallax] = useState(false);
-  const [chatBackgroundOverlayOpacity, setChatBackgroundOverlayOpacity] = useState(0.5);
-  const [selectedOverlayOpacity, setSelectedOverlayOpacity] = useState(0.5);
-  const [chatBackgroundOverlayShade, setChatBackgroundOverlayShade] = useState('#000000');
-  const [selectedOverlayShade, setSelectedOverlayShade] = useState('#000000');
-  const [chatBackgroundBubbleOpacity, setChatBackgroundBubbleOpacity] = useState(0.7);
-  const [selectedBubbleOpacity, setSelectedBubbleOpacity] = useState(0.7);
-  const [chatBackgroundBubbleUserShade, setChatBackgroundBubbleUserShade] = useState('#4f46e5');
-  const [selectedBubbleUserShade, setSelectedBubbleUserShade] = useState('#4f46e5');
-  const [chatBackgroundBubbleAssistantShade, setChatBackgroundBubbleAssistantShade] = useState('#26272c');
-  const [selectedBubbleAssistantShade, setSelectedBubbleAssistantShade] = useState('#26272c');
-  const [chatBackgroundStatus, setChatBackgroundStatus] = useState('');
-
   function applyNotificationSettings(settings: NotificationSettings) {
     setNtfyServerUrl(settings.serverUrl ?? '');
     setSelectedNtfyServerUrl(settings.serverUrl ?? '');
@@ -159,44 +133,19 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setSelectedScreenLockTimeoutMinutes(String(settings.timeoutMinutes));
   }
 
-  function applyImageSettings(settings: ImageSettings) {
-    setImageSettingsState(settings);
-    setSelectedImageTemplate(settings.template);
-    setSelectedDescriberPrompt(settings.describerPrompt);
-    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
-  }
-
-  function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
-    setChatBackgroundParallax(settings.parallaxEnabled);
-    setSelectedParallax(settings.parallaxEnabled);
-    setChatBackgroundOverlayOpacity(settings.overlayOpacity);
-    setSelectedOverlayOpacity(settings.overlayOpacity);
-    setChatBackgroundOverlayShade(settings.overlayShade);
-    setSelectedOverlayShade(settings.overlayShade);
-    setChatBackgroundBubbleOpacity(settings.bubbleOpacity);
-    setSelectedBubbleOpacity(settings.bubbleOpacity);
-    setChatBackgroundBubbleUserShade(settings.bubbleUserShade);
-    setSelectedBubbleUserShade(settings.bubbleUserShade);
-    setChatBackgroundBubbleAssistantShade(settings.bubbleAssistantShade);
-    setSelectedBubbleAssistantShade(settings.bubbleAssistantShade);
-  }
-
   // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
   // state (adminKey/checking/unlocked/loadError, the mount-time no-key-then-stored-key probe, the
   // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, imageSettingsResult, chatBackgroundSettingsResult] =
-        await Promise.all([
-          adminListCredentials(key),
-          adminGetTimezone(key),
-          adminGetNotificationSettings(key),
-          adminGetPiaProxyUrl(key),
-          adminGetPersonaSettings(key),
-          adminGetScreenLockSettings(key),
-          adminGetImageSettings(key),
-          adminGetChatBackgroundSettings(key),
-        ]);
+      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings] = await Promise.all([
+        adminListCredentials(key),
+        adminGetTimezone(key),
+        adminGetNotificationSettings(key),
+        adminGetPiaProxyUrl(key),
+        adminGetPersonaSettings(key),
+        adminGetScreenLockSettings(key),
+      ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
       setTimezone(tz);
@@ -206,8 +155,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setSelectedPiaProxyUrl(piaProxyUrlResult ?? '');
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
-      applyImageSettings(imageSettingsResult);
-      applyChatBackgroundSettings(chatBackgroundSettingsResult);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };
@@ -240,54 +187,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     }
     setPiaProxyUrl(selectedPiaProxyUrl);
     setPiaProxyUrlStatus('Saved — takes effect on the next chub import/search call, no restart needed.');
-  }
-
-  async function saveImageSettings() {
-    if (!imageSettings) return;
-    const patch: { template?: string; describer_prompt?: string; describer_history_pairs?: string } = {};
-    if (selectedImageTemplate !== imageSettings.template) patch.template = selectedImageTemplate;
-    if (selectedDescriberPrompt !== imageSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
-    if (selectedDescriberHistoryPairs !== imageSettings.describerHistoryPairs) {
-      patch.describer_history_pairs = selectedDescriberHistoryPairs;
-    }
-    if (Object.keys(patch).length === 0) return;
-    setImageStatus('');
-    try {
-      const updated = await adminSetImageSettings(patch, adminKey);
-      applyImageSettings(updated);
-      setImageStatus('Saved — applies to the next location render, no restart needed.');
-    } catch (err) {
-      setImageStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-    }
-  }
-
-  async function saveChatBackgroundSettings() {
-    const value: ChatBackgroundSettings = {
-      parallaxEnabled: selectedParallax,
-      overlayOpacity: selectedOverlayOpacity,
-      overlayShade: selectedOverlayShade,
-      bubbleOpacity: selectedBubbleOpacity,
-      bubbleUserShade: selectedBubbleUserShade,
-      bubbleAssistantShade: selectedBubbleAssistantShade,
-    };
-    if (
-      value.parallaxEnabled === chatBackgroundParallax &&
-      value.overlayOpacity === chatBackgroundOverlayOpacity &&
-      value.overlayShade === chatBackgroundOverlayShade &&
-      value.bubbleOpacity === chatBackgroundBubbleOpacity &&
-      value.bubbleUserShade === chatBackgroundBubbleUserShade &&
-      value.bubbleAssistantShade === chatBackgroundBubbleAssistantShade
-    ) {
-      return;
-    }
-    setChatBackgroundStatus('');
-    try {
-      const updated = await adminSetChatBackgroundSettings(value, adminKey);
-      applyChatBackgroundSettings(updated);
-      setChatBackgroundStatus('Saved — takes effect on the next chat view load, no restart needed.');
-    } catch (err) {
-      setChatBackgroundStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
-    }
   }
 
   async function savePersonaSettings() {
@@ -507,164 +406,6 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{personaSettingsStatus}</div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Image Generation</legend>
-        <label>
-          Master image prompt template {imageSettings?.templateIsDefault && <em>(default)</em>}
-          <br />
-          <textarea
-            value={selectedImageTemplate}
-            onChange={(e) => setSelectedImageTemplate(e.target.value)}
-            rows={8}
-            placeholder="e.g. {{style_prefix}} Concept Art for Video Games, {{visual_description}}, {{time_of_day}}, {{weather}}, {{mood}} lighting…"
-          />
-        </label>
-        <div className="status">
-          Vistalyze's prompt synthesis template (endpoint.md §4.2): macros expanded per render are{' '}
-          <code>{'{{visual_description}}'}</code>, <code>{'{{time_of_day}}'}</code>, <code>{'{{weather}}'}</code>,{' '}
-          <code>{'{{mood}}'}</code>, <code>{'{{lighting}}'}</code> and <code>{'{{style_prefix}}'}</code>. Empty means
-          the built-in default (bi_principles.md §18) — there is no separate reset action; clearing
-          the field is how you ask for the default back.
-        </div>
-        <br />
-        <label>
-          Room-describer prompt {imageSettings?.describerPromptIsDefault && <em>(default)</em>}
-          <br />
-          <textarea
-            value={selectedDescriberPrompt}
-            onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
-            rows={10}
-            placeholder="[SYSTEM: TASK — LOCATION VISUAL ARCHIVIST]… (the built-in default)"
-          />
-        </label>
-        <div className="status">
-          The describer LLM call that turns a newly-minted location name into a real room
-          description (describer.md — VLZ's Step 3). Macros expanded per call are{' '}
-          <code>{'{{location_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
-          <code>Visuals:</code> half fills <code>visual_description</code> (which flows into the
-          template above); <code>Definition:</code> fills the location's definition. Empty means the
-          built-in default.
-        </div>
-        <label>
-          Room-describer context (turn-pairs)
-          <br />
-          <input
-            type="text"
-            inputMode="numeric"
-            value={selectedDescriberHistoryPairs}
-            onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
-            placeholder="1"
-          />
-        </label>
-        <div className="status">
-          How many trailing turn-pairs the describer reads as narrative context (default 1). Leave
-          empty for the default.
-        </div>
-        <br />
-        <button
-          onClick={saveImageSettings}
-          disabled={
-            !imageSettings ||
-            (selectedImageTemplate === imageSettings.template &&
-              selectedDescriberPrompt === imageSettings.describerPrompt &&
-              selectedDescriberHistoryPairs === imageSettings.describerHistoryPairs)
-          }
-        >
-          Save
-        </button>
-        <div className="status">{imageStatus}</div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Chat Background</legend>
-        <label>
-          <input
-            type="checkbox"
-            checked={selectedParallax}
-            onChange={(e) => setSelectedParallax(e.target.checked)}
-          />{' '}
-          Parallax pan on the chat location background
-        </label>
-        <div className="status">
-          The location background pans gently opposite the pointer / device tilt
-          (parallax_fade_teststep.md §2), matching SillyTavern-Vistalyze's parallax. Off by
-          default; takes effect on the next chat view load.
-        </div>
-        <label>
-          Background overlay opacity ({Math.round(selectedOverlayOpacity * 100)}%)
-          <br />
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(selectedOverlayOpacity * 100)}
-            onChange={(e) => setSelectedOverlayOpacity(Number(e.target.value) / 100)}
-          />
-        </label>
-        <div className="status">
-          The dimming veil over the location image — lower it to let the background show more
-          clearly between the bubbles (which keep their own opacity below).
-        </div>
-        <label>
-          Background overlay shade
-          <br />
-          <input
-            type="color"
-            value={selectedOverlayShade}
-            onChange={(e) => setSelectedOverlayShade(e.target.value)}
-          />
-        </label>
-        <div className="status">The veil's color — black by default; pick a tint to warm or cool the background.</div>
-        <label>
-          Bubble opacity ({Math.round(selectedBubbleOpacity * 100)}%)
-          <br />
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={Math.round(selectedBubbleOpacity * 100)}
-            onChange={(e) => setSelectedBubbleOpacity(Number(e.target.value) / 100)}
-          />
-        </label>
-        <div className="status">
-          How much of the background shows through the bubbles' fill (the bubble text stays fully
-          opaque).
-        </div>
-        <label>
-          User bubble shade
-          <br />
-          <input
-            type="color"
-            value={selectedBubbleUserShade}
-            onChange={(e) => setSelectedBubbleUserShade(e.target.value)}
-          />
-        </label>
-        <label>
-          Assistant bubble shade
-          <br />
-          <input
-            type="color"
-            value={selectedBubbleAssistantShade}
-            onChange={(e) => setSelectedBubbleAssistantShade(e.target.value)}
-          />
-        </label>
-        <br />
-        <button
-          onClick={saveChatBackgroundSettings}
-          disabled={
-            selectedParallax === chatBackgroundParallax &&
-            selectedOverlayOpacity === chatBackgroundOverlayOpacity &&
-            selectedOverlayShade === chatBackgroundOverlayShade &&
-            selectedBubbleOpacity === chatBackgroundBubbleOpacity &&
-            selectedBubbleUserShade === chatBackgroundBubbleUserShade &&
-            selectedBubbleAssistantShade === chatBackgroundBubbleAssistantShade
-          }
-        >
-          Save
-        </button>
-        <div className="status">{chatBackgroundStatus}</div>
       </fieldset>
 
       <fieldset>

@@ -420,6 +420,26 @@ export interface ChatMemorySyncStatusRow {
   canonLastProposedAt: string | null;
 }
 
+/** GET /v1/admin/location-render-status — the Backgrounds tab's proof-it-ran table
+ *  (orchestrator/src/server/adminServer.ts getLocationRenderStatus): one row per
+ *  recently-touched location with which bg-gen pipeline stages actually completed. The row's
+ *  booleans map directly to the pipeline (endpoint.md §5): described = visual_description
+ *  non-empty (the describer / name seed), defined = definition non-empty (describer's Definition
+ *  half, migration 0078), rendered = image_url present (generateLocationImage.ts wrote one),
+ *  hasRenderHash = the cache-validation key (migration 0076) is present. status is the segway
+ *  status (migration 0067: transient / permanent / inactive). */
+export interface LocationRenderStatusRow {
+  locationId: string;
+  name: string;
+  status: string;
+  described: boolean;
+  defined: boolean;
+  rendered: boolean;
+  hasRenderHash: boolean;
+  imageGeneratedAt: string | null;
+  updatedAt: string;
+}
+
 // GET /v1/chats/:id/sync-status — one chat's slice of the rolling sync loop's status record
 // (orchestrator/src/io/chatSessions.ts getChatSyncStatus), the RP chat header menu's "Sync
 // status" panel. Same field set as the admin Review Panel's row minus the chat-identifying

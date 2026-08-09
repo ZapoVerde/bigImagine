@@ -1,0 +1,99 @@
+/* The Backgrounds management page — RagView.css's form + status-table styling (fieldsets,
+   inputs, status lines, table) with SettingsView.css's slider/color-swatch rules for the Chat
+   Background fieldset. Three sections: Image Generation, Chat Background, Render status. */
+.backgrounds-view {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.backgrounds-view input,
+.backgrounds-view select,
+.backgrounds-view button {
+  font-size: var(--font-size-base);
+  padding: 0.4rem 0.6rem;
+  margin: 0.2rem 0;
+}
+
+.backgrounds-view input[type='password'],
+.backgrounds-view textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* The Chat Background fieldset's sliders/color pickers: range gets a full-width track with the
+   accent color, color stays a compact swatch (the generic input rule above would stretch it). */
+.backgrounds-view input[type='range'] {
+  padding: 0;
+  margin: 0.3rem 0;
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+
+.backgrounds-view input[type='color'] {
+  padding: 0.1rem;
+  margin: 0.2rem 0;
+  width: 3.5rem;
+  height: 2rem;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.backgrounds-view fieldset {
+  margin-top: 1.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.backgrounds-view-intro {
+  margin-top: 0.4rem;
+}
+
+.status {
+  margin-top: 0.6rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.badge-yes {
+  color: var(--color-success);
+}
+
+.badge-no {
+  color: var(--color-text-faint);
+}
+
+.bg-refresh {
+  padding: 0.3rem 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.bg-refresh:hover {
+  background: var(--color-hover-surface);
+}
+
+.bg-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+}
+
+.bg-status-table th,
+.bg-status-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.bg-badge-status {
+  font-size: 0.85em;
+  color: var(--color-text-secondary);
+}
+
+.bg-error {
+  color: var(--color-danger);
+}

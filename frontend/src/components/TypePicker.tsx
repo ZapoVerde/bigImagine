@@ -20,6 +20,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'rag', label: 'RAG' },
   { type: 'reviewpanel', label: 'Review Panel' },
   { type: 'cleanup', label: 'Cleanup' },
+  { type: 'backgrounds', label: 'Backgrounds' },
 ];
 
 // What a legacy 'blank' tab shows until the user picks what it's for. The tab strip's (+) button
