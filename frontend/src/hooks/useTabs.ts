@@ -141,14 +141,26 @@ export function useTabs() {
   }
 
   /** Opens an RP tab for a chatId that already exists server-side (a character must be picked
-   *  first — CharactersView's "Start RP" creates the chat, then calls this). Focuses the existing
-   *  tab if that chat is already open, else opens a new one — no "claim an empty landing tab"
-   *  branch like openChat has, since there's no such thing as an empty/draft RP tab. */
+   *  first — CharactersView's "Start RP" creates the chat, then calls this). RP chat is a single
+   *  slot by design: the strip never carries more than one RP tab, so opening another RP chat
+   *  (new or from history) replaces the existing one in place rather than stacking stale tabs.
+   *  The replacement keeps the existing tab's position in the strip and becomes active. */
   function openRp(chatId: string, title?: string) {
     setState((s) => {
       const existing = s.tabs.find((t) => t.type === 'rp' && t.chatId === chatId);
       if (existing) return { ...s, activeTabId: existing.id };
-      const tab: TabInstance = { id: crypto.randomUUID(), type: 'rp', chatId, title: title ?? 'RP' };
+      const label = title ?? 'RP';
+      const keep =
+        s.tabs.find((t) => t.id === s.activeTabId && t.type === 'rp') ?? s.tabs.find((t) => t.type === 'rp');
+      if (keep) {
+        return {
+          tabs: s.tabs
+            .filter((t) => t.type !== 'rp' || t.id === keep.id)
+            .map((t) => (t.id === keep.id ? { ...t, chatId, title: label } : t)),
+          activeTabId: keep.id,
+        };
+      }
+      const tab: TabInstance = { id: crypto.randomUUID(), type: 'rp', chatId, title: label };
       return { tabs: [...s.tabs, tab], activeTabId: tab.id };
     });
   }
@@ -169,5 +181,25 @@ export function useTabs() {
     });
   }
 
-  return { tabs: state.tabs, activeTabId: state.activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus };
+  /** Closes every chat/RP tab whose chatId is in the given set — used when a character is
+   *  deleted and its chats are purged server-side, so they vanish from the strip too. If the
+   *  active tab is among the closed ones, the neighbor that would follow it becomes active
+   *  (same selection rule as close()). No-op for an empty set. */
+  function closeChats(chatIds: string[]) {
+    if (chatIds.length === 0) return;
+    const doomed = new Set(chatIds);
+    setState((s) => {
+      const closedIdx = s.tabs.findIndex((t) => (t.type === 'chat' || t.type === 'rp') && t.chatId && doomed.has(t.chatId));
+      if (closedIdx === -1) return s;
+      const tabs = s.tabs.filter((t) => !((t.type === 'chat' || t.type === 'rp') && t.chatId && doomed.has(t.chatId)));
+      if (tabs.length === s.tabs.length) return s;
+      if (s.activeTabId && s.tabs.some((t) => t.id === s.activeTabId && ((t.type === 'chat' || t.type === 'rp') && t.chatId && doomed.has(t.chatId)))) {
+        const neighbor = tabs[closedIdx] ?? tabs[closedIdx - 1] ?? null;
+        return { tabs, activeTabId: neighbor?.id ?? null };
+      }
+      return { tabs, activeTabId: s.activeTabId };
+    });
+  }
+
+  return { tabs: state.tabs, activeTabId: state.activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus, closeChats };
 }
