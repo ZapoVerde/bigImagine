@@ -46,9 +46,12 @@
  * the user's last entry is always the newest pair, exactly CNZ's `allPairs.slice(-horizonPairs)`.
  *
  * @api-declaration
+ * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
+ * buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages) ->
+ *   Promise<{ chunks, facts }> — raw retrieval, fail-open to empty parts.
  * buildAutoRecallPrompt(session, settings, embeddings, userId, chatId, messages) ->
- *   Promise<string> — the labeled recall block, or '' when nothing matched / retrieval failed
- *   (fail-open). `session` is the caller's already-user-scoped DbSession.
+ *   Promise<string> — the legacy labeled block (formatAutoRecallBlock over the parts), kept for
+ *   the deprecated memory_recall alias. `session` is the caller's already-user-scoped DbSession.
  *
  * @contract
  *   assertions:
@@ -103,6 +106,14 @@ interface CanonFactRow {
   detail: string;
 }
 
+/** Raw retrieval result — the unformatted parts the narrator stack's component markers render
+ *  through their own templates (io/chatMemory/memoryInjection.ts). buildAutoRecallPrompt still
+ *  formats them into the legacy labeled block for the deprecated memory_recall alias. */
+export interface AutoRecallParts {
+  chunks: ChunkRow[];
+  facts: CanonFactRow[];
+}
+
 /** Query-text cleanup in CNZ's spirit: collapse whitespace runs so the embedded query is about
  *  words, not layout. (Deliberately not full CNZ parity — CNZ strips speaker labels via its
  *  transcript cleaner; keeping `User:`/`Assistant:` prefixes here preserves the speaker turn
@@ -132,6 +143,31 @@ export function buildAutoRecallQuery(messages: LlmMessage[], pairCount = AUTO_RE
   );
 }
 
+/** The legacy labeled block — byte-identical to the pre-split output, so the deprecated
+ *  memory_recall alias keeps its exact shape. Exported for memoryInjection's fused renderer. */
+export function formatAutoRecallBlock(chunks: ChunkRow[], facts: CanonFactRow[]): string {
+  const parts: string[] = [];
+  if (chunks.length) {
+    parts.push(
+      chunks
+        .map(
+          (c) =>
+            `<memory turns="${c.ordinal}">\n${c.content}\n</memory>` +
+            (c.summary ? ` <!-- ${c.summary} -->` : ''),
+        )
+        .join('\n'),
+    );
+  }
+  if (facts.length) {
+    parts.push(
+      facts
+        .map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`)
+        .join('\n'),
+    );
+  }
+  return parts.length ? `Recalled from earlier in this conversation (archived):\n${parts.join('\n\n')}` : '';
+}
+
 export function buildAutoRecallPrompt(
   session: DbSession,
   settings: OrchestratorSettingsStore,
@@ -140,6 +176,23 @@ export function buildAutoRecallPrompt(
   chatId: string,
   messages: LlmMessage[],
 ): Promise<string> {
+  return buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages).then((p) =>
+    formatAutoRecallBlock(p.chunks, p.facts),
+  );
+}
+
+/** Raw CNZ-style auto-recall retrieval: query text from the trailing turn-pairs, embedded once,
+ *  then the chat's archived full-turn chunks and its approved canon facts in parallel. Fail-open
+ *  by contract: any error (embedding provider down, DB hiccup, malformed row) logs a warning and
+ *  returns empty parts — retrieval must never break or stall a turn. */
+export function buildAutoRecallParts(
+  session: DbSession,
+  settings: OrchestratorSettingsStore,
+  embeddings: EmbeddingProvider,
+  userId: string,
+  chatId: string,
+  messages: LlmMessage[],
+): Promise<AutoRecallParts> {
   return (async () => {
     try {
       const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw] = await Promise.all([
@@ -152,7 +205,7 @@ export function buildAutoRecallPrompt(
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
       // the RP allow-list either way — this knob only silences the silent path (CNZ's own
       // enable/disable shape). Unset/any-other-value = on (the shipped default).
-      if (enabledRaw === 'false') return '';
+      if (enabledRaw === 'false') return { chunks: [], facts: [] };
 
       const parsedPairs = pairsRaw ? parseInt(pairsRaw, 10) : NaN;
       const pairs = Number.isFinite(parsedPairs) && parsedPairs > 0 ? parsedPairs : AUTO_RECALL_PAIRS;
@@ -168,10 +221,10 @@ export function buildAutoRecallPrompt(
         Number.isFinite(parsedFactTopK) && parsedFactTopK > 0 ? Math.min(parsedFactTopK, MAX_FACT_TOP_K) : DEFAULT_FACT_TOP_K;
 
       const query = buildAutoRecallQuery(messages, pairs);
-      if (!query) return '';
+      if (!query) return { chunks: [], facts: [] };
 
       const [vector] = await embeddings.embed([query]);
-      if (!vector) return '';
+      if (!vector) return { chunks: [], facts: [] };
 
       const [chunks, facts] = await Promise.all([
         session.query<ChunkRow>(
@@ -201,30 +254,11 @@ export function buildAutoRecallPrompt(
         ),
       ]);
 
-      const parts: string[] = [];
-      if (chunks.length) {
-        parts.push(
-          chunks
-            .map(
-              (c) =>
-                `<memory turns="${c.ordinal}">\n${c.content}\n</memory>` +
-                (c.summary ? ` <!-- ${c.summary} -->` : ''),
-            )
-            .join('\n'),
-        );
-      }
-      if (facts.length) {
-        parts.push(
-          facts
-            .map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`)
-            .join('\n'),
-        );
-      }
-      return parts.length ? `Recalled from earlier in this conversation (archived):\n${parts.join('\n\n')}` : '';
+      return { chunks, facts };
     } catch (err) {
       // Fail-open: a retrieval error must never break the turn. Log and continue empty.
-      log.warn('buildAutoRecallPrompt: retrieval failed, continuing without recalled context', { userId, chatId, err });
-      return '';
+      log.warn('buildAutoRecallParts: retrieval failed, continuing without recalled context', { userId, chatId, err });
+      return { chunks: [], facts: [] };
     }
   })();
 }

@@ -58,6 +58,9 @@ export type MarkerKey =
   | 'location'
   | 'canon_facts'
   | 'memory_recall'
+  | 'bridge'
+  | 'plot_threads'
+  | 'auto_recall'
   | 'recent_history';
 
 export type PromptStackFields = Partial<Record<MarkerKey, string>>;

@@ -140,7 +140,10 @@ Already applied by hand, not run automatically (see the file for the exact comma
   presets for which prompt-stack slots an assembled turn includes, and in what order. Each slot is
   either a `marker` (references one of the fixed marker keys — `system`, `description`,
   `personality`, `scenario`, `mes_example`, `post_history_instructions`, `global_rules`,
-  `location`, `canon_facts`, `memory_recall`, `recent_history`) or a `custom` static block with its
+  `location`, `canon_facts`, `memory_recall`, `bridge`, `plot_threads`, `auto_recall`,
+  `recent_history`; the last three are the 2026-08-13 RP memory component split —
+  `io/chatMemory/memoryInjection.ts`, and `memory_recall` is the deprecated fused alias) or a
+  `custom` static block with its
   own role; `context_stack_slots_marker_shape` CHECKs that a `marker` slot carries a `marker_key`
   and no `custom_role`/`custom_content`, and vice versa for `custom`. Seeds two builtin presets
   (`Standard`, `Minimal`) owned by a fixed `system_user_id` of all-zeroes, `is_builtin = true`.
@@ -442,5 +445,13 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `getChatSyncInspection`/`GET /v1/chats/:id/syncs/:syncId` fetch one sync's full record on
   demand — `chat_memory_entries.sync_id` (re-pointed by the upsert on every update, so it's
   exactly "created or changed in that sync") plus `canon_facts.sync_id` and the bridge prompt.
+- `0080_memory_injection_templates.sql` — the RP memory component split's four settings keys
+  (`io/chatMemory/memoryInjection.ts`, 2026-08-13 user direction): `chat_memory_inject_bridge_prompt`,
+  `chat_memory_inject_plot_prompt`, `chat_memory_inject_auto_recall_prompt`,
+  `chat_memory_auto_recall_chunk_prompt` — the user-editable CNZ-style `{{var}}`/`{{#if}}` templates
+  the narrator stack renders the `bridge` / `plot_threads` / `auto_recall` markers from (read live
+  on every RP prompt assembly, no restart). `memory_recall` remains the deprecated fused alias of
+  all three. Same wholesale CHECK rebuild pattern as 0077/0078 (complete vocabulary, confirmed
+  against `pg_get_constraintdef` after applying).
   Applied by hand against the live DB — the `add column`s are individually re-runnable; the index
   and FK constraint are one-shot, so apply once and verify.

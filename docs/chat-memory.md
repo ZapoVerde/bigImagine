@@ -204,7 +204,7 @@ to search, not to add a fourth always-on injected block.
 
 For an 'rp'-kind chat, `buildChatMemorySystemPrompt` (`server/httpServer.ts`) runs a fourth,
 Canonize-shaped read every turn on top of the scene/events/plot threads — `io/chatMemory/
-recallForPrompt.ts`'s `buildAutoRecallPrompt`, the CNZ-style silent retrieval the user asked for
+recallForPrompt.ts`'s `buildAutoRecallParts`, the CNZ-style silent retrieval the user asked for
 ("the way CNZ works"):
 
 1. **Query = the last `AUTO_RECALL_PAIRS` (3) turn-pairs** of the full message list handed to the
@@ -219,9 +219,17 @@ recallForPrompt.ts`'s `buildAutoRecallPrompt`, the CNZ-style silent retrieval th
    - `canon_facts` — approved rows only, deduped to most-recent-approved per
      `arc_tag`/`entity_key` (the same `distinct on (coalesce(...))` query
      `recallCanonFactsTool.ts` runs), top-k from the live `canon_recall_top_k` setting (default 8).
-4. **Injected unconditionally** as one labeled block (`Recalled from earlier in this conversation
-   (archived):` — `<memory turns="…">` chunks then `- [category] summary — detail` fact bullets),
-   appended to the memory context after the open plot threads.
+4. **Rendered as three independent prompt-stack markers** (2026-08-13 user direction, the
+   component split): `buildChatMemorySystemPrompt` returns the raw parts (scene, events,
+   plotThreads, chunks, facts) and the narrator stack renders each marker from its own
+   user-editable template — `bridge` (scene + events combined, CNZ's summary-prompt shape),
+   `plot_threads` (the approved plot arcs), `auto_recall` (the CNZ RAG injection template around
+   `<memory turns="…">` chunk blocks plus fact bullets) — so a preset can order the three
+   independently. Templates live in `io/chatMemory/memoryInjection.ts` and are exposed on the Rag
+   page ("Retrieval" fieldset) with `{{scene}}`, `{{events}}`, `{{plot}}`, `{{text}}`, `{{facts}}`,
+   `{{turn_range}}`, `{{header}}`, `{{char_name}}` variables and CNZ's `{{#if var}}…{{/if}}` blocks
+   (empty component ⇒ the slot emits nothing). The deprecated `memory_recall` marker remains as a
+   fused alias of all three (the legacy single block) for presets that haven't migrated.
 
 Fail-open by contract: any error (embeddings provider down, DB hiccup) logs a warning and injects
 nothing — retrieval must never break or stall a turn. The tools stay enabled alongside it (an RP
@@ -309,24 +317,32 @@ section exposes:
   40, because the key-ideas digest already persists its own state forward as `chat_memory_entries`
   rows across syncs; the horizon here is a revision window layered on top of that persistence, not
   the sole source of continuity the way Canonize's wholesale bridge re-read is.
-- **Six prompts** (chunk summary, key-ideas digest, long-term memory, RP bridge, lorebook curator,
-  people curator), each **default + bespoke**: every prompt ships a sensible built-in
-  (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`, `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`,
+- **Ten prompts**, each **default + bespoke**: the six writer prompts (chunk summary, key-ideas
+  digest, long-term memory, RP bridge, lorebook curator, people curator) plus the four RP read-path
+  injection templates (bridge, plot threads, auto-recall wrapper, auto-recall chunk — the
+  2026-08-13 component split, `io/chatMemory/memoryInjection.ts`). Every prompt ships a sensible
+  built-in (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`, `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`,
   `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_LOREBOOK_CURATOR_PROMPT`,
-  `DEFAULT_PEOPLE_CURATOR_PROMPT`, each exported from its own `io/chatMemory/*.ts` module) and can be
-  overridden freely; an empty override clears back to the default rather than needing a separate
-  reset action. `docs/bi_principles.md` §18 makes this default-plus-bespoke shape a platform-wide
-  requirement, not a one-off pattern local to this feature: any prompt driving an internal LLM call
-  must be surfaced here or somewhere else in Settings. The key-ideas digest prompt is mutually
+  `DEFAULT_PEOPLE_CURATOR_PROMPT`, `DEFAULT_INJECT_BRIDGE_PROMPT`, `DEFAULT_INJECT_PLOT_PROMPT`,
+  `DEFAULT_INJECT_AUTO_RECALL_PROMPT`, `DEFAULT_AUTO_RECALL_CHUNK_PROMPT`, each exported from its
+  own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
+  the default rather than needing a separate reset action. `docs/bi_principles.md` §18 makes this
+  default-plus-bespoke shape a platform-wide requirement, not a one-off pattern local to this
+  feature: any prompt driving an internal LLM call must be surfaced here or somewhere else in
+  Settings. The key-ideas digest prompt is mutually
   exclusive with the other three RP-lane prompts per chat (`chat_sessions.kind` picks exactly one
   branch); the bridge/lorebook-curator/people-curator prompts all run together for every 'rp' chat,
   not exclusively.
 
-All ten settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
+All fourteen settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
 `chat_memory_sync_every_pairs`, `chat_memory_digest_horizon_pairs`, `chat_memory_chunk_summary_prompt`,
 `chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`, `chat_memory_bridge_prompt`,
-`chat_memory_lorebook_curator_prompt`, `chat_memory_people_curator_prompt`) are read live on every
-sync tick — a save takes effect on the next tick, no restart, same shape as `household_timezone`.
+`chat_memory_lorebook_curator_prompt`, `chat_memory_people_curator_prompt`,
+`chat_memory_inject_bridge_prompt`, `chat_memory_inject_plot_prompt`,
+`chat_memory_inject_auto_recall_prompt`, `chat_memory_auto_recall_chunk_prompt`) are read live — the
+ten sync-side keys on every sync tick and the four injection templates on every RP prompt assembly
+(the narrator stack reads them per turn, so a template save takes effect on the very next message,
+no restart, same shape as `household_timezone`).
 
 Each of these keys needed `orchestrator_settings.key`'s CHECK constraint widened before it could
 actually be saved: the first six were added to application code in `0036`-`0041` but the constraint

@@ -42,6 +42,12 @@ export default function RagView() {
   const [selectedBridgePrompt, setSelectedBridgePrompt] = useState('');
   const [selectedLorebookCuratorPrompt, setSelectedLorebookCuratorPrompt] = useState('');
   const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
+  // RP read-path injection templates (io/chatMemory/memoryInjection.ts, 2026-08-13 component
+  // split) — the bridge / plot_threads / auto_recall marker wrappers rendered per turn.
+  const [selectedInjectBridgePrompt, setSelectedInjectBridgePrompt] = useState('');
+  const [selectedInjectPlotPrompt, setSelectedInjectPlotPrompt] = useState('');
+  const [selectedInjectAutoRecallPrompt, setSelectedInjectAutoRecallPrompt] = useState('');
+  const [selectedAutoRecallChunkPrompt, setSelectedAutoRecallChunkPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
 
   // --- Retrieval knobs: the RP read path's auto-recall (recallForPrompt.ts, migration 0077)
@@ -70,6 +76,10 @@ export default function RagView() {
     setSelectedBridgePrompt(settings.bridgePrompt);
     setSelectedLorebookCuratorPrompt(settings.lorebookCuratorPrompt);
     setSelectedPeopleCuratorPrompt(settings.peopleCuratorPrompt);
+    setSelectedInjectBridgePrompt(settings.injectBridgePrompt);
+    setSelectedInjectPlotPrompt(settings.injectPlotPrompt);
+    setSelectedInjectAutoRecallPrompt(settings.injectAutoRecallPrompt);
+    setSelectedAutoRecallChunkPrompt(settings.autoRecallChunkPrompt);
     setSelectedAutoRecallEnabled(settings.autoRecallEnabled);
     setSelectedAutoRecallPairs(settings.autoRecallPairs === null ? '' : String(settings.autoRecallPairs));
     setSelectedAutoRecallChunkTopK(settings.autoRecallChunkTopK === null ? '' : String(settings.autoRecallChunkTopK));
@@ -144,7 +154,17 @@ export default function RagView() {
   }
 
   function resetChatMemoryPrompt(
-    field: 'chunkSummaryPrompt' | 'distillPrompt' | 'householdMemoryPrompt' | 'bridgePrompt' | 'lorebookCuratorPrompt' | 'peopleCuratorPrompt',
+    field:
+      | 'chunkSummaryPrompt'
+      | 'distillPrompt'
+      | 'householdMemoryPrompt'
+      | 'bridgePrompt'
+      | 'lorebookCuratorPrompt'
+      | 'peopleCuratorPrompt'
+      | 'injectBridgePrompt'
+      | 'injectPlotPrompt'
+      | 'injectAutoRecallPrompt'
+      | 'autoRecallChunkPrompt',
   ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
@@ -152,6 +172,10 @@ export default function RagView() {
     if (field === 'bridgePrompt') setSelectedBridgePrompt('');
     if (field === 'lorebookCuratorPrompt') setSelectedLorebookCuratorPrompt('');
     if (field === 'peopleCuratorPrompt') setSelectedPeopleCuratorPrompt('');
+    if (field === 'injectBridgePrompt') setSelectedInjectBridgePrompt('');
+    if (field === 'injectPlotPrompt') setSelectedInjectPlotPrompt('');
+    if (field === 'injectAutoRecallPrompt') setSelectedInjectAutoRecallPrompt('');
+    if (field === 'autoRecallChunkPrompt') setSelectedAutoRecallChunkPrompt('');
   }
 
   // The retrieval knobs split across two endpoints: the auto-recall trio lives in
@@ -171,6 +195,14 @@ export default function RagView() {
     const autoRecallChunkTopK = Number(selectedAutoRecallChunkTopK);
     if (selectedAutoRecallChunkTopK && autoRecallChunkTopK !== chatMemorySettings.autoRecallChunkTopK) {
       memoryPatch.auto_recall_chunk_top_k = autoRecallChunkTopK;
+    }
+    if (selectedInjectBridgePrompt !== chatMemorySettings.injectBridgePrompt) memoryPatch.inject_bridge_prompt = selectedInjectBridgePrompt;
+    if (selectedInjectPlotPrompt !== chatMemorySettings.injectPlotPrompt) memoryPatch.inject_plot_prompt = selectedInjectPlotPrompt;
+    if (selectedInjectAutoRecallPrompt !== chatMemorySettings.injectAutoRecallPrompt) {
+      memoryPatch.inject_auto_recall_prompt = selectedInjectAutoRecallPrompt;
+    }
+    if (selectedAutoRecallChunkPrompt !== chatMemorySettings.autoRecallChunkPrompt) {
+      memoryPatch.auto_recall_chunk_prompt = selectedAutoRecallChunkPrompt;
     }
     const canonPatch: Parameters<typeof adminSetCanonSettings>[0] = {};
     const canonRecallTopK = Number(selectedCanonRecallTopK);
@@ -438,6 +470,58 @@ export default function RagView() {
           read live on every recall call). The extraction pass that proposes new facts is Director Pass work — see
           docs/canonize-plan.md §2.
         </div>
+        <br />
+        <hr />
+        <div className="status">
+          Component injection templates — how the three RP memory markers (bridge / plot threads / auto recall) are
+          rendered into the prompt stack, CNZ-style. Each slot is its own prompt you can order in the preset; empty
+          component = the slot emits nothing. Available variables: bridge: {'{{scene}} {{events}}'}; plot: {'{{plot}}'};
+          auto recall: {'{{text}} {{facts}}'} (chunk template: {'{{text}} {{turn_range}} {{header}} {{char_name}}'}), with
+          optional {'{{#if var}}…{{/if}}'} blocks. Edit the preset's markers in the Prompt Stacks tab.
+        </div>
+        <label>
+          Bridge injection prompt (scene + events) {chatMemorySettings?.injectBridgePromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea value={selectedInjectBridgePrompt} onChange={(e) => setSelectedInjectBridgePrompt(e.target.value)} rows={5} />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('injectBridgePrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Plot threads injection prompt {chatMemorySettings?.injectPlotPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea value={selectedInjectPlotPrompt} onChange={(e) => setSelectedInjectPlotPrompt(e.target.value)} rows={5} />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('injectPlotPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Auto-recall injection prompt {chatMemorySettings?.injectAutoRecallPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedInjectAutoRecallPrompt}
+            onChange={(e) => setSelectedInjectAutoRecallPrompt(e.target.value)}
+            rows={5}
+          />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('injectAutoRecallPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Auto-recall chunk template {chatMemorySettings?.autoRecallChunkPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea value={selectedAutoRecallChunkPrompt} onChange={(e) => setSelectedAutoRecallChunkPrompt(e.target.value)} rows={5} />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('autoRecallChunkPrompt')}>
+          Reset to default
+        </button>
         <br />
         <button onClick={saveRetrievalSettings}>Save</button>
         <div className="status">{retrievalStatus}</div>

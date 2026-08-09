@@ -386,6 +386,14 @@ export interface ChatMemorySettings {
   lorebookCuratorPromptIsDefault: boolean;
   peopleCuratorPrompt: string;
   peopleCuratorPromptIsDefault: boolean;
+  injectBridgePrompt: string;
+  injectBridgePromptIsDefault: boolean;
+  injectPlotPrompt: string;
+  injectPlotPromptIsDefault: boolean;
+  injectAutoRecallPrompt: string;
+  injectAutoRecallPromptIsDefault: boolean;
+  autoRecallChunkPrompt: string;
+  autoRecallChunkPromptIsDefault: boolean;
   autoRecallEnabled: boolean;
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;

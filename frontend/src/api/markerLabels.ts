@@ -14,6 +14,9 @@ export const MARKER_LABELS: Record<string, string> = {
   canon_facts: 'Canon Facts',
   mes_example: 'Example Messages',
   memory_recall: 'Memory Recall',
+  bridge: 'Bridge',
+  plot_threads: 'Plot Threads',
+  auto_recall: 'Auto Recall',
   recent_history: 'Recent History',
   post_history_instructions: 'Post-History Instructions',
 };

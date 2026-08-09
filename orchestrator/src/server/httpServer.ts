@@ -174,7 +174,14 @@ import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
 import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
-import { buildAutoRecallPrompt } from '../io/chatMemory/recallForPrompt.js';
+import { buildAutoRecallParts, formatAutoRecallBlock } from '../io/chatMemory/recallForPrompt.js';
+import {
+  renderBridge,
+  renderPlotThreads,
+  renderAutoRecall,
+  renderFusedMemoryBlock,
+  type RpMemoryContext,
+} from '../io/chatMemory/memoryInjection.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
@@ -434,7 +441,8 @@ function toPreviewItem(
 // tools). The two chat kinds diverge completely here, mirroring chatMemorySync.ts's own kind branch:
 //
 // A 'chat' (household) chat gets household_memory (every user's own row — RLS already scopes it)
-// plus chat_memory_entries' flat key-ideas digest, byte-for-byte the original behavior.
+// plus chat_memory_entries' flat key-ideas digest, byte-for-byte the original behavior, returned
+// as a plain string.
 //
 // An 'rp' chat gets no household_memory at all (docs/bi_principles.md §4/§16,
 // db/migrations/0049_chat_kind.sql — in-fiction details have no business leaking into unrelated
@@ -443,9 +451,16 @@ function toPreviewItem(
 // bridgeChatMemory.ts) plus the latest-approved-per-arc_tag 'plot' canon_facts — the same
 // dedup-to-most-recent-per-arc query recallCanonFactsTool.ts uses, just unranked (this is the
 // unconditional "what's the state of every open thread" injection, not a semantic top-k search) —
-// plus buildAutoRecallPrompt's CNZ-style auto-recall: the last AUTO_RECALL_PAIRS turn-pairs
+// plus buildAutoRecallParts's CNZ-style auto-recall: the last AUTO_RECALL_PAIRS turn-pairs
 // embedded as the query, returning this chat's archived full turns and approved canon facts,
-// injected unconditionally (fail-open — '' on error or no match).
+// injected unconditionally (fail-open — empty parts on error or no match).
+//
+// The rp branch returns the *structured* RpMemoryContext (scene/events/plotThreads/chunks/facts
+// plus the fused legacy string), not a formatted block — the narrator stack renders each
+// component through its own user-editable template (io/chatMemory/memoryInjection.ts, the
+// 2026-08-13 user direction), so bridge/plot_threads/auto_recall can be ordered independently in
+// a preset, while `fused` keeps the deprecated memory_recall alias and the no-preset fallback
+// byte-identical to the pre-split output.
 async function buildChatMemorySystemPrompt(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
@@ -454,14 +469,15 @@ async function buildChatMemorySystemPrompt(
   chatId: string,
   kind: 'chat' | 'rp',
   messages: LlmMessage[],
-): Promise<string> {
+): Promise<string | RpMemoryContext> {
   return db.withUserScope(userId, async (session) => {
     if (kind === 'rp') {
       // docs/chat-memory.md: the always-injected half (scene/events/plot threads) plus the
       // CNZ-shaped auto-recall (io/chatMemory/recallForPrompt.ts) — the last AUTO_RECALL_PAIRS
       // turn-pairs become the query, and both the chat's archived full turns and its approved
-      // canon facts are injected unconditionally. Fail-open: '' when nothing matched or
-      // retrieval errored, so memory can never break a turn.
+      // canon facts are retrieved unconditionally. Fail-open: empty parts when nothing matched or
+      // retrieval errored, so memory can never break a turn. Returned as raw parts — the narrator
+      // stack renders them through the per-component templates (io/chatMemory/memoryInjection.ts).
       const [bridgeRows, plotRows, autoRecall] = await Promise.all([
         session.query<{ topic_key: string; content: string }>(
           `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
@@ -474,20 +490,13 @@ async function buildChatMemorySystemPrompt(
            order by arc_tag, proposed_at desc`,
           [chatId],
         ),
-        buildAutoRecallPrompt(session, settings, embeddings, userId, chatId, messages),
+        buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages),
       ]);
       const scene = bridgeRows.find((r) => r.topic_key === 'scene')?.content;
       const events = bridgeRows.find((r) => r.topic_key === 'events')?.content;
-      const parts: string[] = [];
-      if (scene) parts.push(`Scene so far (evolves each sync — call recall_chat_history for exact recent wording):\n${scene}`);
-      if (events) parts.push(`Upcoming scheduled events:\n${events}`);
-      if (plotRows.length) {
-        parts.push(
-          `Open plot threads:\n${plotRows.map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`).join('\n')}`,
-        );
-      }
-      if (autoRecall) parts.push(autoRecall);
-      return parts.join('\n\n');
+      const plotThreads = plotRows.map((r) => ({ arc_tag: r.arc_tag, summary: r.summary, detail: r.detail }));
+      const fused = renderFusedMemoryBlock(scene, events, plotThreads, formatAutoRecallBlock(autoRecall.chunks, autoRecall.facts));
+      return { scene, events, plotThreads, chunks: autoRecall.chunks, facts: autoRecall.facts, fused };
     }
 
     const [household, entries] = await Promise.all([
@@ -604,9 +613,14 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 
 // docs/turn-loop-plan.md §3.2: the per-turn replacement for apply_prompt_stack_to_chat's
 // bake-once-at-Apply behavior. Same two-phase pattern that tool already uses (assemblePromptStack
-// then interpolateMacros) — re-run fresh every turn instead of frozen into params.system, and with
-// memory_recall folded in as a field the preset's own slot ordering places, instead of
-// buildChatMemorySystemPrompt's result being concatenated on unconditionally after the fact.
+// then interpolateMacros) — re-run fresh every turn instead of frozen into params.system. The RP
+// memory split (2026-08-13 user direction): buildChatMemorySystemPrompt now returns structured
+// parts (scene/events/plotThreads/chunks/facts) and each of the three component markers is
+// rendered from its own user-editable template (io/chatMemory/memoryInjection.ts, CNZ-style
+// {{var}}/{{#if}} interpolation) into a field the preset's own slot ordering places — so a preset
+// can order `bridge`, `plot_threads` and `auto_recall` independently. The deprecated `memory_recall`
+// alias still emits the fused legacy block (context.fused) for presets that haven't migrated,
+// byte-identical to the pre-split behavior.
 //
 // canon_facts is deliberately left unset here even when a preset enables that slot:
 // recall_canon_facts (plugins/canonize/src/recallCanonFactsTool.ts) scopes by scene_id via
@@ -627,9 +641,9 @@ async function buildNarratorStackItems(
   userId: string,
   characterId: string | null,
   presetId: string,
-  memoryContext: string,
+  memoryContext: RpMemoryContext,
 ): Promise<PromptPreviewItem[]> {
-  const [slots, characterRows, persona] = await Promise.all([
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -640,6 +654,10 @@ async function buildNarratorStackItems(
         )
       : Promise.resolve([]),
     getPersonaSettings(settings),
+    settings.get('chat_memory_inject_bridge_prompt'),
+    settings.get('chat_memory_inject_plot_prompt'),
+    settings.get('chat_memory_inject_auto_recall_prompt'),
+    settings.get('chat_memory_auto_recall_chunk_prompt'),
   ]);
   // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
   // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
@@ -658,7 +676,18 @@ async function buildNarratorStackItems(
     scenario: character?.scenario || undefined,
     mes_example: character?.example_dialogue || undefined,
     persona: personaText,
-    memory_recall: memoryContext || undefined,
+    // The three component markers — each rendered from its own template (CNZ-style {{var}}/{{#if}}),
+    // empty when its component has no content so an enabled slot with nothing to say emits nothing.
+    // Template settings follow the platform's "empty string = built-in default" contract (same as
+    // the digest prompts: an empty override clears back to DEFAULT_*), so `|| undefined` — not
+    // `?? undefined`, which would render an empty template and silently drop the marker.
+    bridge: renderBridge(memoryContext.scene, memoryContext.events, bridgeTemplate || undefined) || undefined,
+    plot_threads: renderPlotThreads(memoryContext.plotThreads, plotTemplate || undefined) || undefined,
+    auto_recall:
+      renderAutoRecall(memoryContext.chunks, memoryContext.facts, autoRecallTemplate || undefined, chunkTemplate || undefined, character?.name) ||
+      undefined,
+    // Deprecated fused alias — presets that still carry a memory_recall slot get the legacy block.
+    memory_recall: memoryContext.fused || undefined,
   };
 
   const snapshot: MacroSnapshot = {
@@ -695,7 +724,7 @@ async function assembleNarratorSystemText(
   userId: string,
   characterId: string | null,
   presetId: string,
-  memoryContext: string,
+  memoryContext: RpMemoryContext,
 ): Promise<string> {
   const items = await buildNarratorStackItems(db, settings, userId, characterId, presetId, memoryContext);
   return items.map((i) => i.content).join('\n\n');
@@ -936,7 +965,7 @@ async function assembleSessionTurnContext(
     // buildNarratorStackItems reads the character/persona once more for its own slot snapshot —
     // near-simultaneous with the turn-level buildMacroSnapshot above, so Stage 1's deterministic
     // lookups make the two byte-identical; a Stage 2 clock/RNG would want them merged into one.
-    const narratorText = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext);
+    const narratorText = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext);
     return { systemPrompt: narratorText, messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot) };
   }
 
@@ -948,8 +977,11 @@ async function assembleSessionTurnContext(
     system = await resolveMacrosInSystemPrompt(system, macroSnapshot);
   }
   const dateContext = sessionKind === 'rp' ? undefined : formatCurrentDateContext(timezone);
+  // The no-preset fallback gets the fused string either way: a 'chat' lane returns it directly,
+  // an 'rp' lane returns the structured context whose .fused is the legacy block.
+  const memoryText = typeof memoryContext === 'string' ? memoryContext : memoryContext.fused;
   return {
-    systemPrompt: [dateContext, system, memoryContext].filter(Boolean).join('\n\n'),
+    systemPrompt: [dateContext, system, memoryText].filter(Boolean).join('\n\n'),
     messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
   };
 }
@@ -1074,9 +1106,9 @@ async function buildPromptPreview(  deps: HttpServerDeps,
       ? await buildMacroSnapshot(deps.db, deps.settings, userId, session.characterId)
       : undefined;
 
-    if (session.promptStackPresetId) {
+    if (session.kind === 'rp' && session.promptStackPresetId) {
       systemStack.push(
-        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext)),
+        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext)),
       );
     } else {
       let system = session.params.system;
@@ -1084,7 +1116,10 @@ async function buildPromptPreview(  deps: HttpServerDeps,
         system = await resolveMacrosInSystemPrompt(system, macroSnapshot);
       }
       if (system) systemStack.push(toPreviewItem('system', system, { markerKey: 'system' }));
-      if (memoryContext) systemStack.push(toPreviewItem('system', memoryContext, { markerKey: 'memory_recall' }));
+      // No-preset fallback: 'chat' lane returns the string directly, 'rp' lane the structured
+      // context whose .fused is the legacy block — either way it previews as the memory item.
+      const memoryText = typeof memoryContext === 'string' ? memoryContext : memoryContext.fused;
+      if (memoryText) systemStack.push(toPreviewItem('system', memoryText, { markerKey: 'memory_recall' }));
     }
     trimmed = resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot);
 
