@@ -60,6 +60,12 @@ function createFakePool() {
             return { rows: [] };
           }
 
+          // runOneChatSync's per-chat advisory lock (chatMemorySync.ts) — pure DB-side
+          // serialization, no rows, nothing for the in-memory fake to track.
+          if (sql.includes('pg_advisory_xact_lock')) {
+            return { rows: [] };
+          }
+
           if (sql === 'select user_id from users') {
             return { rows: users.map((u) => ({ user_id: u })) };
           }
@@ -617,6 +623,76 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   assert(demotedCharacter.status === 'inactive', "the archived turn's alternate-swipe character demotes to inactive — not deleted");
   assert(permanentLocation.status === 'permanent', 'a permanent row is untouched by the settle step');
   assert(pool.locations.length === 3 && pool.characters.length === 2, 'nothing is ever deleted by the settle step');
+}
+
+// --- The 2026-08-09 sync_point duplicate-key regression (chatMemorySync.ts): the poll tick fires
+// every POLL_INTERVAL_MS while a single pass takes minutes of LLM round-trips, so ticks overlap
+// by construction. Two overlapping passes for the same chat both read the same last-synced
+// ordinal, both compute the same nextOrdinal, and the loser's chat_sync_points insert dies on the
+// (chat_id, ordinal) unique constraint. The in-flight guard must let pass A win and make pass B
+// skip ('skipped' status, zero extra LLM work, zero extra chunks) instead of racing it. ---
+{
+  const CONCUR_CHAT_ID = randomUUID();
+  pool.chatSessions.set(CONCUR_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(CONCUR_CHAT_ID, 'CONCUR', 12); // clears the due threshold
+
+  // Gate the fake LLM's summarize calls so pass A is provably parked mid-pipeline (before it can
+  // commit its sync point) when pass B runs. aInside flips before the gate await — the record of
+  // the call being entered is what the poller below waits on.
+  const realComplete = llm.complete;
+  let releaseGate;
+  let aInside = false;
+  const gate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+  llm.complete = async (messages, tools, options) => {
+    if (options.forceTool === 'summarize_chat_chunk') {
+      aInside = true;
+      await gate;
+    }
+    return realComplete.call(llm, messages, tools, options);
+  };
+
+  try {
+    const passA = runChatMemorySyncTick(deps); // don't await — hold it mid-flight
+    let waited = 0;
+    while (!aInside && waited < 1000) {
+      await new Promise((r) => setTimeout(r, 5));
+      waited++;
+    }
+    assert(aInside, 'test setup: pass A reaches the gated summarize step (so it is provably in flight)');
+
+    // Pass B: findDueChats still sees the chat as due (A hasn't committed), but the in-flight
+    // guard must skip it — no second summarize/embed/bridge pipeline, no second sync point, and
+    // the status row says 'skipped', not a second attempt.
+    const summarizeCallsBeforeB = llm.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length;
+    const chunksBeforeB = pool.chatChunks.filter((c) => c.chat_id === CONCUR_CHAT_ID).length;
+    await runChatMemorySyncTick(deps);
+    const statusWhileAFlying = pool.chatMemorySyncStatus.get(CONCUR_CHAT_ID);
+    assert(statusWhileAFlying?.last_status === 'skipped', "the overlapping tick records 'skipped' — the guard short-circuits before any work");
+    assert(
+      llm.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length === summarizeCallsBeforeB,
+      'the overlapping tick launches zero additional summarize calls for the in-flight chat',
+    );
+    assert(
+      pool.chatChunks.filter((c) => c.chat_id === CONCUR_CHAT_ID).length === chunksBeforeB,
+      'the overlapping tick adds no chunks — it never reaches the sync_point insert, let alone collides on the ordinal',
+    );
+
+    releaseGate();
+    await passA;
+
+    assert(
+      pool.chatChunks.filter((c) => c.chat_id === CONCUR_CHAT_ID).length === 2,
+      'pass A alone archives its 2 chunks (8 of 12 messages) once it finishes',
+    );
+    assert(
+      pool.chatMemorySyncStatus.get(CONCUR_CHAT_ID)?.last_status === 'ok',
+      "the winning pass's commit overwrites the transient 'skipped' with ok",
+    );
+  } finally {
+    llm.complete = realComplete;
+  }
 }
 
 if (process.exitCode) {

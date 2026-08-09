@@ -48,6 +48,16 @@
  * (bi_principles.md §11: the failure logging already existed here, this is just the read surface
  * for it). server/adminServer.ts's getChatMemorySyncStatus is the read side.
  *
+ * The poll tick fires every POLL_INTERVAL_MS while a single pass can take minutes of LLM
+ * round-trips, so ticks overlap by construction; the in-flight guard (inFlightSyncs, module-level
+ * like cleanupLoop.ts's) keeps at most one pass running per chat. Without it, two overlapping
+ * ticks both read the same last-synced ordinal, both compute the same nextOrdinal, and the
+ * loser's chat_sync_points insert dies on the (chat_id, ordinal) unique constraint — observed
+ * 2026-08-09 ("sync_point: duplicate key value violates unique constraint
+ * chat_sync_points_chat_id_ordinal_key"). The per-chat pg_advisory_xact_lock is the DB-side
+ * serialization for the same race, in case the in-memory guard is ever bypassed (a second
+ * process, a future caller); the unique constraint remains the last-resort backstop.
+ *
  * The connection this pipeline's calls run through, and each of the six prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
@@ -76,7 +86,9 @@
  * @contract
  *   assertions:
  *     purity:          impure (Postgres IO, LLM IO; owns the setInterval timer it starts)
- *     state_ownership: [the setInterval timer this starts]
+ *     state_ownership: [the setInterval timer this starts; the in-flight per-chat guard set that
+ *                       keeps overlapping poll ticks from launching a parallel sync pass for a
+ *                       chat whose pass is still running]
  *     external_io:     [Postgres, the LLM via the gated provider it builds, the embeddings provider]
  */
 
@@ -102,6 +114,19 @@ const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation ur
 export const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
 export const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
 const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_memory_entries already persists state across syncs
+
+/** chatIds whose sync pass is currently running. The poll tick fires every POLL_INTERVAL_MS while
+ *  a single pass can take minutes of LLM round-trips, and a chat stays 'due' to every tick until
+ *  its pass commits — so without this guard each overlapping tick launches a parallel sync pass
+ *  for the same chat. Two such passes read the same last-synced ordinal, both compute the same
+ *  nextOrdinal, and the loser's chat_sync_points insert dies on the (chat_id, ordinal) unique
+ *  constraint (observed 2026-08-09 on chat 3ffceed3: "sync_point: duplicate key value violates
+ *  unique constraint chat_sync_points_chat_id_ordinal_key"). Skip, don't queue: the next tick
+ *  re-reads and only picks the chat up again if the committed pass left work behind. Module-level
+ *  in-memory only, same lifetime as the timer — a process bounce drops the set and the next tick
+ *  re-plans, which is the restart tolerance the tick already has. Mirrors cleanupLoop.ts's own
+ *  inFlightRepairs guard, which fixed the same runaway on the cleanup lane. */
+const inFlightSyncs = new Set<string>();
 
 // Tags which named stage of runOneChatSync threw, so chat_memory_sync_status (bi_principles.md
 // §11 — the read surface for this pipeline's existing log-only failure seams) can record *which*
@@ -330,8 +355,24 @@ function entityKeyFor(category: string, name: string): string {
 }
 
 async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<SyncResult> {
+  // In-flight guard: at most one sync pass per chat at a time. Skip, don't queue — see
+  // inFlightSyncs' own doc (and cleanupLoop.ts's inFlightRepairs, the same fix on the cleanup
+  // lane). The chat stays 'due' to the next tick if this pass left work behind, so skipping here
+  // only delays the re-run by one poll interval, never loses it.
+  if (inFlightSyncs.has(chatId)) {
+    log.debug(`chat-memory sync: chat ${chatId} already being synced, skipping this tick`);
+    return { status: 'skipped' };
+  }
+  inFlightSyncs.add(chatId);
   return runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
     deps.db.withUserScope(userId, async (session): Promise<SyncResult> => {
+      // Per-chat advisory lock: serializes same-chat passes at the DB even if the in-memory
+      // guard above is ever bypassed (a second orchestrator process, a future caller). First
+      // statement of the transaction, so a concurrent pass blocks HERE before any read — under
+      // READ COMMITTED its subsequent reads then see the winner's committed sync point and
+      // compute a fresh nextOrdinal instead of colliding on the same one. The unique
+      // (chat_id, ordinal) constraint stays as the final backstop, last-resort only.
+      await session.query('select pg_advisory_xact_lock(hashtext($1))', [chatId]);
       // Canon facts auto-approve at the chat's next sync tick (the user's explicit call — no
       // manual approval gate) rather than at write time, giving a brief settling window before a
       // proposal goes live. Runs first, unconditionally for any chat this function is called for
@@ -676,7 +717,13 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       log.info('chat-memory sync: synced chat', { chatId, chunksAdded: chunks.length, entriesUpdated: updates.length });
       return { status: 'ok', chunksAdded: chunks.length, entriesUpdated: updates.length };
     }),
-  );
+  ).finally(() => {
+    // The guard is per chat: drop it once the pass is done, whatever happened (committed, skipped
+    // after the eligibility check, or the transaction rolled back mid-pipeline). A chat whose
+    // pass left work uncovered is legitimately picked up by the next tick — but as a new pass,
+    // not as a parallel twin of this one.
+    inFlightSyncs.delete(chatId);
+  });
 }
 
 export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<void> {
