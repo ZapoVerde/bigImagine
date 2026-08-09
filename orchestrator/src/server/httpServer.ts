@@ -762,7 +762,7 @@ async function resolveChatLocationImage(
   db: PostgresClient,
   userId: string,
   chatId: string,
-): Promise<{ current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null; previous: { locationId: string; name: string; imageUrl: string } | null }> {
+): Promise<{ current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null; previous: { locationId: string; name: string; definition: string | null; imageUrl: string } | null }> {
   return db.withUserScope(userId, async (session) => {
     // The chat's scene pointers — current and last-turn/previous — which everything below
     // resolves through.
@@ -824,18 +824,20 @@ async function resolveChatLocationImage(
         : null;
     }
 
-    let previous: { locationId: string; name: string; imageUrl: string } | null = null;
+    let previous: { locationId: string; name: string; definition: string | null; imageUrl: string } | null = null;
     if (chatState?.previous_scene_id) {
       // The last settled location — shown while the current render is pending or after a swipe.
-      const [prevRow] = await session.query<{ location_id: string; name: string; image_url: string }>(
-        `select l.location_id, l.name, l.image_url
+      // definition rides along (describer.md's "Definition:" half) so the canvas caption stays
+      // complete when the UI is showing the previous background, mirroring the current path.
+      const [prevRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string }>(
+        `select l.location_id, l.name, l.definition, l.image_url
          from scenes s
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where s.scene_id = $2 and l.image_url is not null
          limit 1`,
         [userId, chatState.previous_scene_id],
       );
-      previous = prevRow ? { locationId: prevRow.location_id, name: prevRow.name, imageUrl: prevRow.image_url } : null;
+      previous = prevRow ? { locationId: prevRow.location_id, name: prevRow.name, definition: prevRow.definition, imageUrl: prevRow.image_url } : null;
     }
 
     return { current, previous };
@@ -2541,7 +2543,7 @@ async function handleChatRoutes(
     const image = await resolveChatLocationImage(deps.db, userId, chatId);
     sendJson(res, 200, {
       current: image.current ?? { locationId: null, name: null, definition: null, imageUrl: null },
-      previous: image.previous ?? { locationId: null, name: null, imageUrl: null },
+      previous: image.previous ?? { locationId: null, name: null, definition: null, imageUrl: null },
     });
     return;
   }

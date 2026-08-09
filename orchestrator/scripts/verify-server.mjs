@@ -2801,15 +2801,18 @@ server.close();
 
   // A settled previous location comes back alongside the current — the last-turn location state
   // (endpoint.md §5.1.8) the client reverts to on a swipe and falls back to while a render is
-  // pending.
+  // pending. definition rides along (describer.md's "Definition:" half) so the canvas caption
+  // stays complete on the previous background, mirroring the current path.
   pool7.setChatLocationState(chat7.chatId, { scene_id: 'scene-1', previous_scene_id: 'scene-0' });
-  pool7.setSceneLocation('scene-0', { location_id: 'loc-0', name: 'The Old Mill', image_url: 'https://cdn.example.invalid/prev.png' });
+  pool7.setSceneLocation('scene-0', { location_id: 'loc-0', name: 'The Old Mill', definition: 'A weathered mill by the river.', image_url: 'https://cdn.example.invalid/prev.png' });
   const prevRes = await fetch(`${base7}/v1/chats/${chat7.chatId}/location-image`, { headers: auth7 });
   const prevBody = await prevRes.json();
   assert(
     prevRes.status === 200 &&
       prevBody.current?.locationId === 'loc-1' &&
       prevBody.previous?.locationId === 'loc-0' &&
+      prevBody.previous?.name === 'The Old Mill' &&
+      prevBody.previous?.definition === 'A weathered mill by the river.' &&
       prevBody.previous?.imageUrl === 'https://cdn.example.invalid/prev.png',
     'a settled previous location comes back alongside the current as the last-turn location state',
   );

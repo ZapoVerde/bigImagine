@@ -189,7 +189,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // current background"), and whether that location was freshly established by the last settle.
   // All three reset on chat switch; freshness starts false on load (a chat's historical
   // background is established, never "fresh").
-  const bgPreviousRef = useRef<{ locationId: string; name: string; imageUrl: string } | null>(null);
+  const bgPreviousRef = useRef<{ locationId: string; name: string; definition: string | null; imageUrl: string } | null>(null);
   const bgLastLocationIdRef = useRef<string | null>(null);
   const bgFreshRef = useRef(false);
 
@@ -624,7 +624,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     // stale null re-arm a poll against an old chatId.
     if (bgDisposedRef.current || bgChatIdRef.current !== chatId) return;
     const { current, previous } = payload;
-    bgPreviousRef.current = previous?.imageUrl ? { locationId: previous.locationId, name: previous.name, imageUrl: previous.imageUrl } : null;
+    bgPreviousRef.current = previous?.imageUrl ? { locationId: previous.locationId, name: previous.name, definition: previous.definition, imageUrl: previous.imageUrl } : null;
     if (current?.imageUrl) {
       // A rendered current — show it; the fade state machine swaps it in. Freshness: the
       // location changed on this settle (a swipe of that turn should revert to the previous
@@ -881,7 +881,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     if (reverted) {
       // The swiped turn's freshly generated image belongs to content being replaced — show the
       // last settled location until the regenerated turn settles.
-      setLocationImage({ locationId: prevImage.locationId, name: prevImage.name, imageUrl: prevImage.imageUrl });
+      setLocationImage({ locationId: prevImage.locationId, name: prevImage.name, definition: prevImage.definition, imageUrl: prevImage.imageUrl });
     }
     try {
       const result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
