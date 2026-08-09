@@ -12,10 +12,11 @@
 }
 
 /* Mobile: the rail is an overlay drawer, not a permanent column. Collapsed means gone entirely —
-   no 2.6rem sliver — since the "summoning arrow" is now a floating FAB (App.css, .side-fab-left)
-   instead of taking up its own strip of screen. Expanded, it floats above the view rather than
-   pushing it over (position: fixed takes it out of the .app flex flow, so .app-main always gets
-   full width on mobile regardless of this state). */
+   no 2.6rem sliver — since the summon control is now an edge grip plus a left-edge swipe
+   (App.css, .edge-grip-left; hooks/useEdgeSwipe.ts) instead of taking up its own strip of
+   screen. Expanded, it floats above the view rather than pushing it over (position: fixed
+   takes it out of the .app flex flow, so .app-main always gets full width on mobile regardless
+   of this state). */
 @media (max-width: 768px) {
   .sidebar {
     position: fixed;

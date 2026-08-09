@@ -97,46 +97,62 @@ body {
   position: relative;
 }
 
-/* Shown only under the mobile breakpoint — the rail-toggle "summoning arrows" and other controls
+/* Shown only under the mobile breakpoint — the rail-toggle "summoning grips" and other controls
    that replace an always-on rail once it collapses to nothing on a narrow screen. */
 .mobile-only {
   display: none;
 }
 
-/* Mobile-only floating toggle buttons for the left rail (App.tsx) and the chat settings rail
-   (ChatView.tsx) — the "arrows" the rails' own headers carry on desktop. Little FABs pinned to
-   the top edges, just under the main bar, so they survive the top bars collapsing on scroll
-   (a collapsed mobile chat shows exactly these two at the top) and never take a strip of their
-   own — the collapsed rails are gone entirely on mobile, so the chat keeps the whole screen
-   (Sidebar.css / ChatView.css mobile blocks). */
-.side-fab {
+/* Mobile-only edge "grip" openers (App.tsx left rail, ChatView.tsx settings rail) — the
+   replacement for the old circular .side-fab buttons: a 6px strip pinned to the extreme screen
+   edge, just under the main bar, so it survives the top bars collapsing on scroll (when the
+   bars collapse the conversation reclaims the screen while the summon stays put) without ever
+   covering the conversation the way a floating circle did. The strip is the tap target; a
+   horizontal swipe from the same edge is the forgiving summon gesture (hooks/useEdgeSwipe.ts).
+   The open drawers (z-index 30) sit above the grips, so a grip is only reachable while its
+   rail is closed — it stops being in the way exactly when the panel it summons is up. */
+.edge-grip {
   position: fixed;
-  top: calc(var(--topbar-height) + 0.5rem);
-  z-index: 31; /* above the mobile drawers (30), below nav drawer / modals (1000+) */
-  width: 2.2rem;
-  height: 2.2rem;
-  align-items: center;
-  justify-content: center;
+  top: var(--topbar-height);
+  height: 28vh; /* an anchor near the top, not a full-height wall — the edge swipe covers the rest */
+  z-index: 20; /* above content, below the mobile drawers (30), nav drawer / modals (1000+) */
+  width: 6px;
   padding: 0;
-  border-radius: 50%;
-  background: var(--color-bg-surface);
-  border: 1px solid var(--color-border);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-  color: var(--color-text-muted);
-  font-size: var(--font-size-base);
+  border: none;
+  border-radius: 0 3px 3px 0;
+  background: var(--color-border);
+  opacity: 0.75;
 }
 
-.side-fab:hover {
-  color: var(--color-text-primary);
-  background: var(--color-hover-surface);
+/* The 6px strip is the visual; the pseudo-element widens the hit area to 14px inward from the
+   edge so a thumb can land on it, still inside the chat's 1rem history padding (ChatView.css)
+   — content taps past that are untouched, and the swipe gesture covers the rest of the edge. */
+.edge-grip::after {
+  content: '';
+  position: absolute;
+  top: -0.5rem;
+  bottom: -0.5rem;
+  left: 0;
+  width: 14px;
 }
 
-.side-fab-left {
-  left: 0.5rem;
+.edge-grip-right::after {
+  left: auto;
+  right: 0;
 }
 
-.side-fab-right {
-  right: 0.5rem;
+.edge-grip:hover {
+  opacity: 1;
+  background: var(--color-text-muted);
+}
+
+.edge-grip-left {
+  left: 0;
+}
+
+.edge-grip-right {
+  right: 0;
+  border-radius: 3px 0 0 3px;
 }
 
 /* The app-wide navigation drawer toggle (AppNavDrawer.tsx) — the top-left hamburger. Icon-button

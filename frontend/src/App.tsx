@@ -11,7 +11,8 @@ import TabStrip from './components/TabStrip';
 import TimerStrip from './components/temporal/TimerStrip';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
-import { useTabs } from './hooks/useTabs';
+import { useTabs, type TabType } from './hooks/useTabs';
+import { useEdgeSwipe } from './hooks/useEdgeSwipe';
 import { useTheme } from './hooks/useTheme';
 import BrowseChubView from './views/BrowseChubView';
 import BackgroundsView from './views/BackgroundsView';
@@ -28,6 +29,12 @@ import RagView from './views/RagView';
 import SettingsView from './views/SettingsView';
 
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
+
+// Tabs whose sidebar actually renders content (Sidebar.tsx's switch): the chat/RP history
+// browsers, the RP prompt inspector, and the notes name picker. Every other tab type gets an
+// empty drawer, so the mobile rail opener (grip + edge swipe) is hidden there rather than
+// summoning nothing.
+const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'characters', 'notes']);
 
 type AuthState =
   | { mode: 'checking' }
@@ -47,13 +54,31 @@ export default function App() {
   const { tabs, activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus, closeChats } = useTabs();
   const { theme, toggle: toggleTheme } = useTheme();
 
-  // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
-  // the always-on rail on narrow screens) can toggle the same state the rail's own header button
-  // does — they're siblings under .app-body, not parent/child, same reason note selection is
-  // lifted above. Starts closed everywhere (the user's call: chat history lives on the character
-  // page drawer and the RP drawer is the prompt inspector now — both are summoned on demand, and
-  // the chat gets maximal room by default).
+  // Lifted out of Sidebar so the mobile edge grip (App.css, .edge-grip-left) can toggle the
+  // same state the rail's own header button does — they're siblings under .app-body, not
+  // parent/child, same reason note selection is lifted above. Starts closed everywhere (the
+  // user's call: chat history lives on the character page drawer and the RP drawer is the
+  // prompt inspector now — both are summoned on demand, and the chat gets maximal room by
+  // default).
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+
+  // Mobile edge-swipe summon for the left rail (paired with the .edge-grip-left strip in the
+  // JSX below): open-only, so it's a no-op while the drawer is already open. Gated on the
+  // active tab having sidebar content — the empty-drawer tabs don't get an opener at all —
+  // and on the drawer being closed, so an open rail never swallows the browser's native
+  // back-edge gesture (useEdgeSwipe's canOpen guard).
+  useEdgeSwipe('left', () => {
+    const t = tabs.find((x) => x.id === activeTabId);
+    if (t && SIDEBAR_CONTENT_TABS.has(t.type)) setSidebarCollapsed(false);
+  }, {
+    // Claim the gesture only where it can actually do something: drawer closed AND this tab
+    // has sidebar content. On the empty-drawer tabs (settings, connections, …) a left-edge
+    // swipe must fall through to the browser's native back-swipe instead of being swallowed.
+    canOpen: () => {
+      const t = tabs.find((x) => x.id === activeTabId);
+      return sidebarCollapsed && !!t && SIDEBAR_CONTENT_TABS.has(t.type);
+    },
+  });
 
   // Bumped once per completed turn of the active RP chat (ChatView reports its message-count
   // changes up via onPromptRefresh) and forwarded to Sidebar's Prompt Inspector, so the drawer
@@ -202,18 +227,21 @@ export default function App() {
           promptRefreshToken={promptRefreshToken}
           chatsRefreshKey={chatsRefreshKey}
         />
-        {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
-            the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the
-            top bars collapse on scroll, and the arrow has to survive that (App.css, .side-fab). */}
-        <button
-          type="button"
-          className="side-fab side-fab-left mobile-only"
-          title={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
-          aria-label={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
-          onClick={() => setSidebarCollapsed((c) => !c)}
-        >
-          {sidebarCollapsed ? '»' : '«'}
-        </button>
+        {/* Mobile-only edge-grip opener for the left rail (App.css, .edge-grip) — the desktop
+            rail's own header arrow is the control wide-screen. A 6px strip pinned to the left
+            screen edge rather than a slot in TabStrip: the top bars collapse on scroll, and the
+            opener has to survive that. Rendered only where the sidebar has content — on the
+            empty-drawer tabs (settings, connections, …) there'd be nothing to summon. A wider
+            left-edge swipe summons the same drawer (hooks/useEdgeSwipe.ts). */}
+        {activeTab?.type != null && SIDEBAR_CONTENT_TABS.has(activeTab.type) && (
+          <button
+            type="button"
+            className="edge-grip edge-grip-left mobile-only"
+            title="Open sidebar"
+            aria-label="Open sidebar"
+            onClick={() => setSidebarCollapsed((c) => !c)}
+          />
+        )}
         <div className="app-main">
           {tabs.map((tab) => (
           <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
@@ -226,6 +254,7 @@ export default function App() {
               <ChatView
                 apiKey={apiKey}
                 chatId={tab.chatId}
+                active={tab.id === activeTabId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onOpenChat={openChat}
@@ -237,6 +266,7 @@ export default function App() {
               <ChatView
                 apiKey={apiKey}
                 chatId={tab.chatId}
+                active={tab.id === activeTabId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onOpenChat={openChat}

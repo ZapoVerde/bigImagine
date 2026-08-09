@@ -53,6 +53,7 @@ import StagingBar, { type StagedFile } from '../components/attachments/StagingBa
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
+import { useEdgeSwipe } from '../hooks/useEdgeSwipe';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
@@ -94,6 +95,10 @@ interface ChatViewProps {
   topBarsHidden: boolean;
   /** Ask the app to collapse (true) or restore (false) the top bars. */
   onTopBarsHiddenChange: (hidden: boolean) => void;
+  /** Whether this tab is the one currently displayed — hidden tabs stay mounted (App.tsx toggles
+   *  them with a CSS class), so the mobile edge-swipe listener below is attached only for the
+   *  visible chat, and no hidden tab's settings rail opens on a stray swipe. */
+  active: boolean;
   /** RP chats only: fired once per completed turn (when this chat's message count changes) so the
    *  app can bump its promptRefreshToken — the Prompt Inspector now lives in the left sidebar
    *  drawer, and this is how it keeps the once-per-turn live-read it had as an in-chat panel. */
@@ -157,7 +162,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange, onPromptRefresh }: ChatViewProps) {
+export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange, onPromptRefresh, active }: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -369,6 +374,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // message. pendingSettings holds a save made before activeChat exists; send() applies it right
   // after the lazy createChat() so the very first message already sees it.
   const [settingsCollapsed, setSettingsCollapsed] = useState(true);
+
+  // Mobile right-edge swipe summon for the settings rail (paired with the .edge-grip-right
+  // strip at the bottom of the JSX): open-only — closing stays with the rail's own header
+  // toggle, so the gesture is unambiguous about direction. Not gated on chat kind: the rail
+  // exists for both RP and non-RP chats. enabled=false while this tab isn't the active one
+  // (hidden tabs stay mounted, and their rails must not open on a swipe meant for the chat
+  // on screen); canOpen keeps the browser's native back-edge gesture alive while the rail is
+  // already open.
+  useEdgeSwipe('right', () => setSettingsCollapsed(false), {
+    enabled: active,
+    canOpen: () => settingsCollapsed,
+  });
   const [pendingSettings, setPendingSettings] = useState<{
     params?: ChatParams;
     tool_names?: string[] | null;
@@ -1600,17 +1617,17 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         )}
       </div>
 
-      {/* Mobile-only floating toggle for the settings rail — the chat-header ⚙ it replaces
-          collapsed away with the top bars on scroll, this FAB doesn't (App.css, .side-fab). */}
+      {/* Mobile-only edge-grip opener for the settings rail (App.css, .edge-grip) — the
+          chat-header ⚙ it replaces collapsed away with the top bars on scroll, this strip
+          doesn't. Same summon as the old .side-fab-right, just 6px and pinned to the screen
+          edge; a right-edge swipe opens it too (hooks/useEdgeSwipe.ts). */}
       <button
         type="button"
-        className="side-fab side-fab-right mobile-only"
-        title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
-        aria-label={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+        className="edge-grip edge-grip-right mobile-only"
+        title="Show chat settings"
+        aria-label="Show chat settings"
         onClick={() => setSettingsCollapsed((c) => !c)}
-      >
-        {settingsCollapsed ? '«' : '»'}
-      </button>
+      />
     </div>
   );
 }
