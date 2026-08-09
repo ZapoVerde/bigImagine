@@ -1480,6 +1480,12 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             );
           })}
           {sending && <div className="chat-bubble assistant pending">{turnStatus ?? '…'}</div>}
+          {/* Mobile bottom slack (ChatView.css): the scrollable content otherwise ends at the
+              last entry, which pins its bottom to the top of the input row — the expandable
+              rerun/edit bar could never be pulled up to mid-screen. This spacer extends the
+              scroll range past the last message instead. Omitted on an empty chat (the landing/
+              empty-state already fills the pane with flex:1 — a spacer would just add scroll). */}
+          {messages.length > 0 && <div className="chat-history-spacer" aria-hidden="true" />}
         </div>
 
         <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />

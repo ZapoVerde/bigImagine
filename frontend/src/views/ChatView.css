@@ -455,6 +455,14 @@
   color: var(--color-success);
 }
 
+/* The mobile bottom-slack spacer (see the ChatView.tsx comment at the render site). A real flex
+   item so the scroll range past the last entry is unambiguous regardless of padding/overflow
+   quirks; zero-height on desktop where the always-visible last-reply action bar needs no slack. */
+.chat-history-spacer {
+  flex-shrink: 0;
+  height: 0;
+}
+
 /* --- Conversation --- */
 
 .chat-history {
@@ -953,6 +961,14 @@
    100%) and drops attach/send to a second, compact row below it as small round icon buttons —
    same shape as Open WebUI's own bottom action row. */
 @media (max-width: 768px) {
+  /* Mobile: extend the scrollable content below the last entry by ~half a viewport so the last
+     message — and the expandable rerun/edit bar at its foot — can be pulled up to rest at about
+     mid-screen instead of being pinned against the input row (it kept rubber-banding back down
+     because the scroll range simply ended at the last entry). */
+  .chat-history-spacer {
+    height: 50vh;
+  }
+
   .chat-input {
     flex-wrap: wrap;
     row-gap: 0.5rem;
