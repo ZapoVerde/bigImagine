@@ -72,7 +72,10 @@ function createFakePool() {
               .filter((c) => (whereIsActive ? c.is_active : true))
               .filter((c) => (whereId ? c.id === params[0] : true))
               .sort((a, b) => a.name.localeCompare(b.name));
-            return { rows: [...rows] };
+            // node-postgres returns `numeric` (cfg_scale) and `bigint` (locations.seed) columns as
+            // STRINGS — mimic that at this boundary so the store's Number() coercion is what's
+            // under test (the real-pg behavior that stringified seed/CFGScale onto the runware wire).
+            return { rows: rows.map((c) => ({ ...c, cfg_scale: c.cfg_scale == null ? null : String(c.cfg_scale) })) };
           }
           if (sql.includes('select id from image_connections')) {
             const row = imageConnections.find((c) => c.id === params[0]);
@@ -171,7 +174,8 @@ function createFakePool() {
                       location_id: row.location_id,
                       visual_description: row.visual_description,
                       environment: row.environment,
-                      seed: row.seed,
+                      // bigint-as-string, exactly like node-postgres hands locations.seed back
+                      seed: row.seed == null ? null : String(row.seed),
                       image_url: row.image_url,
                       image_generated_at: row.image_generated_at,
                       image_rendered_input: row.image_rendered_input,
@@ -248,6 +252,7 @@ assert(
 await imageConnections.activate(withKey.id);
 const active = await imageConnections.resolveActive();
 assert(active?.kind === 'runware' && active.apiKey === 'sk-runware-secret', 'resolveActive returns the decrypted profile of the active connection');
+assert(typeof active?.cfgScale === 'number' && active.cfgScale === 7, 'resolveActive coerces the numeric cfg_scale column back to a number (pg returns strings)');
 
 const profileById = await imageConnections.resolveById(keyless.id);
 assert(profileById?.apiKey === null, 'resolveById of a keyless connection yields apiKey null');
@@ -542,6 +547,45 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
       testResult.prompt.includes('golden hour'),
     'the probe prompt is synthesized through the Master Image Prompt Template with the connection\'s style prefix (parallax_fade_teststep.md §4.2)',
   );
+}
+
+// --- generateLocationImage → runware wire: pg-style string numerics never reach the payload ---
+// Regression guard for the invalidSeed failure: locations.seed (bigint) and cfg_scale (numeric)
+// come back from node-postgres as strings, and the fake pool above mimics that. A cache-miss
+// render through a real runware connection must still put NUMBER seed/CFGScale on the wire.
+{
+  const rw = await imageConnections.create({ name: 'runware-wire', kind: 'runware', model: 'runware:z-image@turbo', apiKey: 'sk-rw-wire', cfgScale: 1, samplingSteps: 7 });
+  await imageConnections.activate(rw.id);
+  pool.locations.push({
+    location_id: 'loc-wire',
+    user_id: USER,
+    visual_description: 'A sunlit study',
+    environment: {},
+    seed: 7,
+    image_url: null,
+    image_generated_at: null,
+    image_rendered_input: null,
+  });
+  const realFetch = global.fetch;
+  let captured;
+  global.fetch = async (url, init) => {
+    captured = { url, init };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://cdn.runware.ai/img/wire.jpg' }] }),
+    };
+  };
+  try {
+    const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-wire');
+    assert(result.ok === true && typeof result.imageUrl === 'string', 'a fresh location renders through the runware adapter (mocked fetch)');
+    const task = JSON.parse(captured.init.body)[0];
+    assert(typeof task.seed === 'number' && task.seed === 7, 'the runware wire carries seed as a NUMBER (bigint-as-string coerced at the DB boundary — the invalidSeed fix)');
+    assert(typeof task.CFGScale === 'number' && task.CFGScale === 1, 'the runware wire carries CFGScale as a NUMBER (numeric-as-string coerced at the DB boundary)');
+  } finally {
+    global.fetch = realFetch;
+  }
 }
 
 if (process.exitCode) {

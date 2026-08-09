@@ -98,6 +98,7 @@
  */
 
 import type { DbSession, PostgresClient } from './postgres.js';
+import { toImageGenSeed } from '../util/synthesizeImagePrompt.js';
 
 export interface ChatParams {
   system?: string;
@@ -1104,7 +1105,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
               `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
                values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10, 'transient', $11, $12)
                returning location_id`,
-              [userId, loc.name, loc.visual_description, loc.definition, loc.environment, loc.seed, loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
+              [userId, loc.name, loc.visual_description, loc.definition, loc.environment, loc.seed == null ? null : toImageGenSeed(loc.seed), loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
             );
             if (cloned) branchLocationIdMap.set(loc.location_id, cloned.location_id);
           }

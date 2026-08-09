@@ -55,7 +55,7 @@
 import type { PostgresClient } from '../io/postgres.js';
 import type { DbSession } from '../io/postgres.js';
 import { log } from '../io/logger.js';
-import { IMAGE_GEN_SEED } from '../util/synthesizeImagePrompt.js';
+import { toImageGenSeed } from '../util/synthesizeImagePrompt.js';
 
 /** The two-line header block (docs/vistalyze_integration/cleanup_prompt.md §2.4), parsed. */
 export interface StoryHeader {
@@ -269,7 +269,7 @@ async function resolveLocation(
       carriedDescription,
       prior?.definition ?? null,
       environment,
-      prior?.seed ?? IMAGE_GEN_SEED,
+      toImageGenSeed(prior?.seed),
       prior?.image_url ?? null,
       prior?.image_rendered_input ?? null,
       prior?.image_render_hash ?? null,

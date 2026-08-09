@@ -43,6 +43,15 @@ Style: Concept Art for Video Games, in the style of Frank Cho, comic book style.
  *  to the cached one. Text LLM calls stay seed-less (provider-random) so reruns/swipes vary. */
 export const IMAGE_GEN_SEED = 12345;
 
+/** The effective numeric seed for a location row. locations.seed is a `bigint` column and
+ *  node-postgres hands bigints back as strings (same for `numeric`, e.g. cfg_scale) — every
+ *  provider adapter's contract is `seed: number`, so the DB boundary must coerce before a value
+ *  ever reaches a wire payload (Runware rejects a stringified seed with `invalidSeed`). Pure:
+ *  null/undefined falls back to the shared fixed seed, anything else is Number()-coerced. */
+export function toImageGenSeed(seed: unknown): number {
+  return seed == null ? IMAGE_GEN_SEED : Number(seed);
+}
+
 /** A location's environment jsonb (db/migrations/0045_locations.sql) — time of day, weather, mood
  *  and lighting are the four environmental parameters endpoint.md §2.3/§4.2 names. Each may be
  *  absent; the template then expands the macro to empty rather than crashing. */

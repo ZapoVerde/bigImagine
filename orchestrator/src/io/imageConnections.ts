@@ -171,7 +171,11 @@ function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
     width: row.width,
     height: row.height,
     samplingSteps: row.sampling_steps,
-    cfgScale: row.cfg_scale,
+    // cfg_scale is a `numeric` column — node-postgres hands numerics back as strings, but the
+    // profile/row contract is number and providers (Runware's CFGScale, fal.ai's guidance_scale)
+    // reject or mangle stringified values on the wire. Coerce at the DB boundary, same Number()
+    // pattern as every other pg numeric read in this codebase.
+    cfgScale: Number(row.cfg_scale),
     samplerName: row.sampler_name,
     masterPositiveStylePrefix: row.master_positive_style_prefix,
     masterNegativePrompt: row.master_negative_prompt,
@@ -190,7 +194,7 @@ function toProfile(row: ImageConnectionDbRow, cipher: FieldCipher): ImageConnect
     width: row.width,
     height: row.height,
     samplingSteps: row.sampling_steps,
-    cfgScale: row.cfg_scale,
+    cfgScale: Number(row.cfg_scale),
     samplerName: row.sampler_name,
     masterPositiveStylePrefix: row.master_positive_style_prefix,
     masterNegativePrompt: row.master_negative_prompt,
