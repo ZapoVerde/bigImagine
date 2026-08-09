@@ -339,12 +339,12 @@ itself was never widened to match until `0043` closed that gap alongside adding
 
 | Table | Scope | Lifecycle |
 |---|---|---|
-| `chat_sync_points` | per chat | bookkeeping only — records how far rolling sync has reached |
+| `chat_sync_points` | per chat | bookkeeping only — records how far rolling sync has reached. Since 0079 also carries `bridge_prompt`: the fully-rendered prompt the 'rp' lane's bridge actually sent the model that pass, so the Sync Status panel's per-sync inspection can play it back |
 | `chat_chunks` | per chat | archived turn-pairs + AI summary + embedding; reached via `recall_chat_history` (explicit tool call) and, for 'rp' chats, auto-injected every turn by the RP read path (`recallForPrompt.ts`) |
-| `chat_memory_entries` | per chat | 'chat' lane: the always-injected "key ideas" digest, one row per `topic_key`. 'rp' lane: exactly two reserved rows, `topic_key` `'scene'`/`'events'`, written by the bridge. Same upsert-on-`(chat_id, topic_key)` mechanism either way. |
+| `chat_memory_entries` | per chat | 'chat' lane: the always-injected "key ideas" digest, one row per `topic_key`. 'rp' lane: exactly two reserved rows, `topic_key` `'scene'`/`'events'`, written by the bridge. Same upsert-on-`(chat_id, topic_key)` mechanism either way. `sync_id` points at the sync that created or last updated the row (the upsert re-points it), which is exactly what per-sync inspection reads |
 | `household_memory` | per household member, cross-chat | populated once at explicit archive; outlives its source chat; 'chat' lane only |
-| `canon_facts` (`category = 'plot'`) | per chat | 'rp' lane's plot entries — `'proposed'` rows written by the bridge, promoted to `'approved'` at the chat's next sync tick, latest-per-`arc_tag` is the live state |
-| `canon_facts` (`category in ('place','thing','concept','person')`) | per chat | 'rp' lane's lorebook/people entries — `'proposed'` rows written by the two curators, same promotion, latest-per-`entity_key` is the live state |
+| `canon_facts` (`category = 'plot'`) | per chat | 'rp' lane's plot entries — `'proposed'` rows written by the bridge, promoted to `'approved'` at the chat's next sync tick, latest-per-`arc_tag` is the live state. `sync_id` (0079) attributes each proposal to the sync that wrote it |
+| `canon_facts` (`category in ('place','thing','concept','person')`) | per chat | 'rp' lane's lorebook/people entries — `'proposed'` rows written by the two curators, same promotion, latest-per-`entity_key` is the live state. `sync_id` (0079) attributes each proposal to the sync that wrote it |
 
 `entity_key` (`0064_canon_facts_entity_key.sql`) is deliberately a separate column from `arc_tag`,
 not a reuse of it, even though both exist purely to give `recallCanonFactsTool.ts`'s dedup query a

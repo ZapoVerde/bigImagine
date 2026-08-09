@@ -598,11 +598,18 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           for (const entry of bridgeResult.plotEntries) {
             const [vector] = await deps.embeddings.embed([`${entry.name}\n${entry.content}`]);
             await session.query(
-              `insert into canon_facts (user_id, category, arc_tag, summary, detail, vector_embed, chat_id)
-               values ($1, 'plot', $2, $3, $4, $5, $6)`,
-              [userId, entry.arcTag, entry.content, entry.name, toPgVectorLiteral(vector!), chatId],
+              `insert into canon_facts (user_id, category, arc_tag, summary, detail, vector_embed, chat_id, sync_id)
+               values ($1, 'plot', $2, $3, $4, $5, $6, $7)`,
+              [userId, entry.arcTag, entry.content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
             );
           }
+          // The fully-rendered bridge prompt this pass actually sent the model (0079): the sync
+          // point is inserted before the bridge runs (entries need its id), so the prompt lands
+          // as an UPDATE on the same transaction — a rollback takes both together.
+          await session.query('update chat_sync_points set bridge_prompt = $2 where sync_id = $1', [
+            syncId,
+            bridgeResult.prompt,
+          ]);
         });
 
         // The two periodic curators (place/thing/concept, and person) run every tick alongside the
@@ -636,9 +643,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             }
             const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
             await session.query(
-              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id)
-               values ($1, $2, $3, $4, $5, $6, $7)`,
-              [userId, category, entityKeyFor(category, entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId],
+              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id, sync_id)
+               values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+              [userId, category, entityKeyFor(category, entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
             );
           }
         });
@@ -664,9 +671,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             }
             const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
             await session.query(
-              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id)
-               values ($1, 'person', $2, $3, $4, $5, $6)`,
-              [userId, entityKeyFor('person', entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId],
+              `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id, sync_id)
+               values ($1, 'person', $2, $3, $4, $5, $6, $7)`,
+              [userId, entityKeyFor('person', entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
             );
           }
         });

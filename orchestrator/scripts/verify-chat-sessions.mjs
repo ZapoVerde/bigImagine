@@ -28,6 +28,9 @@ function createFakePool() {
   const swipeImages = []; // {chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at}
   const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
   const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
+  const syncPoints = []; // {sync_id, chat_id, user_id, ordinal, last_message_id, created_at, bridge_prompt} (0079)
+  const syncEntries = []; // {sync_id, topic_key, content, updated_at} (chat_memory_entries, inspection slice)
+  const syncFacts = []; // {sync_id, fact_id, category, arc_tag, entity_key, summary, detail, status, proposed_at} (0079)
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
@@ -41,6 +44,9 @@ function createFakePool() {
     swipeImages,
     syncStatus,
     canonCounts,
+    syncPoints,
+    syncEntries,
+    syncFacts,
     async connect() {
       let scopedUserId;
       return {
@@ -182,11 +188,78 @@ function createFakePool() {
             rows.sort((a, b) => a.created_at.localeCompare(b.created_at));
             return { rows };
           }
+          if (sql.includes('left join chat_memory_entries e on e.sync_id')) {
+            // The syncs-summary list (0079): the grouped counts query in getChatSyncStatus —
+            // one left-join shape no other query in this pool shares. The real SQL counts with
+            // count(distinct ...) precisely because the two left joins fan out (E×F product rows
+            // per sync); the filter counts below are the same answer, so this fake mirrors the
+            // SQL's *result* semantics rather than its row-multiplication mechanics.
+            const chatId = params[0];
+            const rows = syncPoints
+              .filter((sp) => sp.chat_id === chatId)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .slice(0, 50)
+              .map((sp) => ({
+                sync_id: sp.sync_id,
+                ordinal: sp.ordinal,
+                created_at: sp.created_at,
+                entry_count: String(syncEntries.filter((e) => e.sync_id === sp.sync_id).length),
+                fact_count: String(syncFacts.filter((f) => f.sync_id === sp.sync_id).length),
+              }));
+            return { rows };
+          }
           if (sql.includes('from chat_sync_points where chat_id')) {
+            // The unsynced-count query's own embedded max(ordinal) subquery — empty-rows stub,
+            // as before (no sync points exist in this pool's status tests).
             return { rows: [] };
           }
           if (sql.includes('from canon_facts where chat_id')) {
             return { rows: [] };
+          }
+          // getChatSyncInspection's sync-point read (0079) — the `and chat_id = $2` distinguishes
+          // it from every other chat_sync_points query in this pool.
+          if (sql.includes('from chat_sync_points where sync_id = $1 and chat_id = $2')) {
+            const [syncId, chatId] = params;
+            const sp = syncPoints.find((p) => p.sync_id === syncId && p.chat_id === chatId);
+            if (!sp) return { rows: [] };
+            return {
+              rows: [
+                {
+                  sync_id: sp.sync_id,
+                  ordinal: sp.ordinal,
+                  last_message_id: sp.last_message_id,
+                  created_at: sp.created_at,
+                  bridge_prompt: sp.bridge_prompt ?? null,
+                },
+              ],
+            };
+          }
+          // The per-sync inspection reads (0079) — matched after the chat-scoped branches above
+          // (they share no text, but keeping them adjacent mirrors the query order in
+          // getChatSyncInspection itself).
+          if (sql.includes('from chat_memory_entries where sync_id')) {
+            const [syncId] = params;
+            const rows = syncEntries
+              .filter((e) => e.sync_id === syncId)
+              .sort((a, b) => a.updated_at.localeCompare(b.updated_at))
+              .map((e) => ({ topic_key: e.topic_key, content: e.content, updated_at: e.updated_at }));
+            return { rows };
+          }
+          if (sql.includes('from canon_facts where sync_id')) {
+            const [syncId] = params;
+            const rows = syncFacts
+              .filter((f) => f.sync_id === syncId)
+              .sort((a, b) => a.proposed_at.localeCompare(b.proposed_at))
+              .map((f) => ({
+                fact_id: f.fact_id,
+                category: f.category,
+                arc_tag: f.arc_tag ?? null,
+                entity_key: f.entity_key ?? null,
+                summary: f.summary,
+                detail: f.detail,
+                status: f.status,
+              }));
+            return { rows };
           }
           // getChat's swipe-metadata lookup (chatSessions.ts) — previously a stub that always
           // returned empty (no test exercised swipes); now backed by the in-memory swipes table
@@ -1000,6 +1073,71 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
 {
   const sync = await store.getChatSyncStatus(USER_A, 'nonexistent-chat', 32);
   assert(sync === undefined, 'getChatSyncStatus on a nonexistent chat returns undefined');
+}
+
+// --- Per-sync inspection (db/migrations/0079_sync_inspection.sql): the status payload carries a
+// cheap summary list, and getChatSyncInspection fetches one sync's full record on demand. ---
+{
+  const syncId = randomUUID();
+  const messageId = randomUUID();
+  pool.syncPoints.push({
+    sync_id: syncId,
+    chat_id: syncChat.chatId,
+    user_id: USER_A,
+    ordinal: 2,
+    last_message_id: messageId,
+    created_at: '2026-08-07T13:00:00.000Z',
+    bridge_prompt: 'SYSTEM: [TASK — NARRATIVE CHRONICLER]\n\nTRANSCRIPT:\nUser: hi',
+  });
+  pool.syncEntries.push(
+    { sync_id: syncId, topic_key: 'scene', content: 'SCENE: A rainy square.', updated_at: '2026-08-07T13:01:00.000Z' },
+    { sync_id: syncId, topic_key: 'events', content: '| When | What | Who |', updated_at: '2026-08-07T13:01:00.000Z' },
+  );
+  pool.syncFacts.push({
+    sync_id: syncId,
+    fact_id: randomUUID(),
+    category: 'plot',
+    arc_tag: 'siege_break',
+    entity_key: null,
+    summary: 'The siege wall breached.',
+    detail: 'The Ashford Siege Breaks Open',
+    status: 'proposed',
+    proposed_at: '2026-08-07T13:01:30.000Z',
+  });
+
+  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 32);
+  assert(Array.isArray(sync.syncs) && sync.syncs.length === 1, 'getChatSyncStatus returns the chat\'s sync-point summaries, newest first');
+  const summary = sync.syncs[0];
+  assert(
+    summary.ordinal === 2 && summary.entryCount === 2 && summary.factCount === 1,
+    'a sync summary carries its ordinal and aggregate entry/fact counts — the panel list without the heavy detail',
+  );
+  assert(
+    summary.createdAt === '2026-08-07T13:00:00.000Z' && !('bridgePrompt' in summary),
+    'the summary stays light — no bridge prompt shipped on the status poll',
+  );
+
+  const inspection = await store.getChatSyncInspection(USER_A, syncChat.chatId, syncId);
+  assert(inspection !== undefined, 'getChatSyncInspection finds an existing sync');
+  assert(inspection.ordinal === 2 && inspection.lastMessageId === messageId, 'an inspection carries its ordinal and anchor message');
+  assert(
+    inspection.bridgePrompt?.includes('NARRATIVE CHRONICLER') && inspection.bridgePrompt.includes('TRANSCRIPT:'),
+    'the bridge prompt this sync sent the model round-trips through the inspection record',
+  );
+  assert(
+    inspection.entries.length === 2 && inspection.entries[0].topicKey === 'scene',
+    'the entries this sync created/changed are listed with their content',
+  );
+  assert(
+    inspection.canonFacts.length === 1 &&
+      inspection.canonFacts[0].category === 'plot' &&
+      inspection.canonFacts[0].status === 'proposed',
+    'the canon-fact proposals this sync wrote are attributed to it',
+  );
+  assert(
+    (await store.getChatSyncInspection(USER_A, syncChat.chatId, randomUUID())) === undefined,
+    'getChatSyncInspection on a sync that is not this chat\'s returns undefined',
+  );
 }
 
 if (process.exitCode) {

@@ -145,3 +145,177 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* --- Sync history: the per-sync inspection list ("click a sync and play it back") --- */
+.chat-sync-history {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: 0.6rem;
+}
+
+.chat-sync-history-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chat-sync-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.chat-sync-history-item {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.chat-sync-history-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  padding: 0.4rem 0.5rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.chat-sync-history-row:hover {
+  background: var(--color-bg-panel);
+}
+
+.chat-sync-history-chevron {
+  color: var(--color-text-faint);
+  width: 0.9rem;
+  flex-shrink: 0;
+}
+
+.chat-sync-history-ordinal {
+  color: var(--color-text-primary);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-sync-history-meta {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+}
+
+.chat-sync-history-time {
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+.chat-sync-history-detail {
+  border-top: 1px solid var(--color-border-subtle);
+  padding: 0.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-sync-history-section-title {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
+}
+
+.chat-sync-history-entries,
+.chat-sync-history-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-sync-history-entry,
+.chat-sync-history-fact {
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.5rem;
+  font-size: var(--font-size-sm);
+}
+
+.chat-sync-history-entry-topic {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  font-size: 0.85em;
+  margin-bottom: 0.15rem;
+}
+
+.chat-sync-history-entry-content {
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.45;
+}
+
+.chat-sync-history-fact-head {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.15rem;
+}
+
+.chat-sync-fact-cat {
+  font-size: 0.78em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  padding: 0.05rem 0.3rem;
+  border-radius: var(--radius-sm);
+  background: rgba(128, 128, 128, 0.12);
+  color: var(--color-text-muted);
+}
+
+.chat-sync-fact-status {
+  font-size: 0.78em;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chat-sync-history-fact-summary {
+  color: var(--color-text-primary);
+  line-height: 1.4;
+}
+
+.chat-sync-history-fact-detail {
+  color: var(--color-text-faint);
+  font-size: 0.9em;
+  margin-top: 0.15rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-sync-history-prompt {
+  margin: 0;
+  padding: 0.5rem;
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-secondary);
+  max-height: 16rem;
+  overflow-y: auto;
+}

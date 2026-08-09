@@ -10,6 +10,7 @@ import type {
   ChatParams,
   ChatSessionRow,
   ChatSummary,
+  ChatSyncInspection,
   ChatSyncStatus,
   ChubCardDetail,
   CleanupJob,
@@ -293,6 +294,22 @@ export async function getChatLineage(chatId: string, apiKey: string | null): Pro
  *  key needed to look at your own chat's sync history. */
 export async function getChatSyncStatus(chatId: string, apiKey: string | null): Promise<ChatSyncStatus> {
   const body = await jsonRequest<{ sync: ChatSyncStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/sync-status`, apiKey);
+  return body.sync;
+}
+
+/** GET /v1/chats/:id/syncs/:syncId — one sync point's full inspection record (io/chatSessions.ts
+ *  getChatSyncInspection, 0079): the memory entries that sync created/changed, the canon-fact
+ *  proposals it wrote, and the bridge prompt it sent. Fetched on demand when the Sync Status
+ *  panel expands a sync row, so the 30s status poll stays summary-only. */
+export async function getChatSyncInspection(
+  chatId: string,
+  syncId: string,
+  apiKey: string | null,
+): Promise<ChatSyncInspection> {
+  const body = await jsonRequest<{ sync: ChatSyncInspection }>(
+    `/v1/chats/${encodeURIComponent(chatId)}/syncs/${encodeURIComponent(syncId)}`,
+    apiKey,
+  );
   return body.sync;
 }
 

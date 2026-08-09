@@ -159,6 +159,12 @@ export interface BridgeResult {
   events: string;
   scene: string;
   plotEntries: BridgePlotEntryDraft[];
+  /** The fully-rendered prompt this sync actually sent the model — the interpolated system
+   *  instructions plus the built user message (transcript + PREVIOUS OUTPUT + running threads).
+   *  Persisted onto the sync point (db/migrations/0079_sync_inspection.sql) so the sync-status
+   *  panel can play the prompt back; exact reconstruction after the fact is impossible because
+   *  previous output / running threads have since moved on. */
+  prompt: string;
 }
 
 interface BridgeToolResponse {
@@ -199,6 +205,8 @@ export async function bridgeChatMemory(
     threadsBlock +
     'Answer by calling bridge_chat_memory with the EVENTS table, SCENE prose, and any PLOT entries.';
 
+  const prompt = `${instructions}\n\n${userMessage}`;
+
   const turn = await llm.complete(
     [
       { role: 'system', content: instructions },
@@ -219,5 +227,6 @@ export async function bridgeChatMemory(
     events: call.arguments.events,
     scene: call.arguments.scene,
     plotEntries: call.arguments.plot_entries.map((e) => ({ name: e.name, content: e.content, arcTag: e.arc_tag })),
+    prompt,
   };
 }

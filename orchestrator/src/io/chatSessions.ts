@@ -224,6 +224,41 @@ export interface ChatDetail {
  *  findDueChats' own arithmetic — messages past the last sync point's anchor message, vs. the
  *  liveWindow+syncEvery message threshold — so the UI can say whether the next tick will actually
  *  do something. */
+/** One sync point's summary row in the sync-status payload — enough to render the "click a sync"
+ *  list without shipping the heavy detail (full bridge transcript, per-sync entries/facts) on the
+ *  30s poll. The detail is fetched on demand via getChatSyncInspection when a row is expanded. */
+export interface ChatSyncSummary {
+  syncId: string;
+  ordinal: number;
+  createdAt: string;
+  entryCount: number;
+  factCount: number;
+}
+
+/** One sync point's inspection record (db/migrations/0079_sync_inspection.sql) — what that pass
+ *  actually produced. `entries` are the chat_memory_entries rows whose sync_id points at this
+ *  sync (the upsert re-points sync_id on every update, so this is exactly "created or changed in
+ *  that sync"); `canonFacts` are the plot/lorebook/people proposals this sync wrote; `bridgePrompt`
+ *  is the fully-rendered prompt the bridge sent the model (null for non-rp chats and pre-0079
+ *  syncs). */
+export interface ChatSyncInspection {
+  syncId: string;
+  ordinal: number;
+  createdAt: string;
+  lastMessageId: string;
+  bridgePrompt: string | null;
+  entries: { topicKey: string; content: string; updatedAt: string }[];
+  canonFacts: {
+    factId: string;
+    category: string;
+    arcTag: string | null;
+    entityKey: string | null;
+    summary: string;
+    detail: string;
+    status: string;
+  }[];
+}
+
 export interface ChatSyncStatus {
   lastAttemptAt: string | null;
   lastStatus: 'ok' | 'skipped' | 'error' | null;
@@ -238,6 +273,10 @@ export interface ChatSyncStatus {
   canonLastProposedAt: string | null;
   unsyncedMessages: number;
   dueAfterMessages: number;
+  /** Every sync point this chat has produced, newest first — the panel's "click a sync and play
+   *  it back" list. Summary-only; the per-sync detail (entries, canon facts, bridge prompt) is
+   *  fetched on demand. */
+  syncs: ChatSyncSummary[];
 }
 
 export interface FolderRow {
@@ -288,6 +327,11 @@ export interface ChatSessionStore {
    *  from DB-backed settings, since this store reads no settings. Undefined only if chatId doesn't
    *  exist. */
   getChatSyncStatus(userId: string, chatId: string, dueAfterMessages: number): Promise<ChatSyncStatus | undefined>;
+  /** One sync point's full inspection record (0079) — the entries it created/changed, the
+   *  canon-fact proposals it wrote, and the bridge prompt it sent. Fetched on demand when the
+   *  Sync Status panel expands a sync row, so the 30s status poll never ships the heavy detail.
+   *  Undefined if the sync doesn't exist or isn't this chat's. */
+  getChatSyncInspection(userId: string, chatId: string, syncId: string): Promise<ChatSyncInspection | undefined>;
   updateChat(
     userId: string,
     chatId: string,
@@ -613,6 +657,38 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           [chatId],
         );
 
+        // The per-sync summary list (0079): every sync point this chat has produced, newest
+        // first, with aggregate entry/fact counts — one grouped query, so the 30s panel poll
+        // stays cheap and never ships the heavy detail (full bridge transcripts live in the
+        // on-demand getChatSyncInspection fetch). Capped at the 50 most recent — the panel is an
+        // inspection surface, not an export.
+        const syncRows = await session.query<{
+          sync_id: string;
+          ordinal: number;
+          created_at: string;
+          entry_count: string;
+          fact_count: string;
+        }>(
+          `select sp.sync_id, sp.ordinal, sp.created_at,
+                  count(distinct e.entry_id)::text as entry_count,
+                  count(distinct f.fact_id)::text as fact_count
+           from chat_sync_points sp
+           left join chat_memory_entries e on e.sync_id = sp.sync_id
+           left join canon_facts f on f.sync_id = sp.sync_id
+           where sp.chat_id = $1
+           group by sp.sync_id, sp.ordinal, sp.created_at
+           order by sp.ordinal desc
+           limit 50`,
+          [chatId],
+        );
+        const syncs: ChatSyncSummary[] = syncRows.map((sp) => ({
+          syncId: sp.sync_id,
+          ordinal: sp.ordinal,
+          createdAt: sp.created_at,
+          entryCount: Number(sp.entry_count),
+          factCount: Number(sp.fact_count),
+        }));
+
         return {
           lastAttemptAt: status?.last_attempt_at ?? null,
           lastStatus: status?.last_status ?? null,
@@ -627,6 +703,64 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           canonLastProposedAt: status?.canon_last_proposed_at ?? null,
           unsyncedMessages: Number(counts?.unsynced ?? 0),
           dueAfterMessages,
+          syncs,
+        };
+      });
+    },
+
+    async getChatSyncInspection(userId, chatId, syncId) {
+      return db.withUserScope(userId, async (session) => {
+        // The chat check first, so a sync id from another chat (or another user — RLS) reads as
+        // a plain not-found rather than leaking its detail.
+        const [syncRow] = await session.query<{
+          sync_id: string;
+          ordinal: number;
+          last_message_id: string;
+          created_at: string;
+          bridge_prompt: string | null;
+        }>(
+          `select sync_id, ordinal, last_message_id, created_at, bridge_prompt from chat_sync_points where sync_id = $1 and chat_id = $2`,
+          [syncId, chatId],
+        );
+        if (!syncRow) return undefined;
+
+        const [entryRows, factRows] = await Promise.all([
+          // chat_memory_entries re-points sync_id on every update (the upsert), so this is
+          // exactly "created or changed in that sync".
+          session.query<{ topic_key: string; content: string; updated_at: string }>(
+            'select topic_key, content, updated_at from chat_memory_entries where sync_id = $1 order by updated_at',
+            [syncId],
+          ),
+          session.query<{
+            fact_id: string;
+            category: string;
+            arc_tag: string | null;
+            entity_key: string | null;
+            summary: string;
+            detail: string;
+            status: string;
+          }>(
+            `select fact_id, category, arc_tag, entity_key, summary, detail, status from canon_facts where sync_id = $1 order by proposed_at`,
+            [syncId],
+          ),
+        ]);
+
+        return {
+          syncId: syncRow.sync_id,
+          ordinal: syncRow.ordinal,
+          createdAt: syncRow.created_at,
+          lastMessageId: syncRow.last_message_id,
+          bridgePrompt: syncRow.bridge_prompt ?? null,
+          entries: entryRows.map((e) => ({ topicKey: e.topic_key, content: e.content, updatedAt: e.updated_at })),
+          canonFacts: factRows.map((f) => ({
+            factId: f.fact_id,
+            category: f.category,
+            arcTag: f.arc_tag,
+            entityKey: f.entity_key,
+            summary: f.summary,
+            detail: f.detail,
+            status: f.status,
+          })),
         };
       });
     },

@@ -2533,6 +2533,20 @@ async function handleChatRoutes(
     return;
   }
 
+  // One sync point's full inspection record (io/chatSessions.ts's getChatSyncInspection, 0079) —
+  // what that pass actually produced: the memory entries it created/changed, the canon-fact
+  // proposals it wrote, and the bridge prompt it sent the model. Fetched on demand when the Sync
+  // Status panel expands a sync row, so the 30s status poll above never ships the heavy detail.
+  if (segments[1] === 'syncs' && segments.length === 3 && req.method === 'GET') {
+    const inspection = await deps.chats.getChatSyncInspection(userId, chatId, segments[2]);
+    if (!inspection) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    sendJson(res, 200, { sync: inspection });
+    return;
+  }
+
   if (segments[1] === 'location-image' && segments.length === 2 && req.method === 'GET') {
     // endpoint.md §6.4's chat background layer: resolve the chat's active location image — the
     // current eligible location (scene_id pointer, active-swipe fallback) plus the last settled

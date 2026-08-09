@@ -445,6 +445,32 @@ export interface LocationRenderStatusRow {
 // status" panel. Same field set as the admin Review Panel's row minus the chat-identifying
 // columns, plus the unsynced-vs-due message counts so the panel can say when the next tick will
 // actually do something. lastStatus is null until the chat has had its first sync attempt.
+export interface ChatSyncSummary {
+  syncId: string;
+  ordinal: number;
+  createdAt: string;
+  entryCount: number;
+  factCount: number;
+}
+
+export interface ChatSyncInspection {
+  syncId: string;
+  ordinal: number;
+  createdAt: string;
+  lastMessageId: string;
+  bridgePrompt: string | null;
+  entries: { topicKey: string; content: string; updatedAt: string }[];
+  canonFacts: {
+    factId: string;
+    category: string;
+    arcTag: string | null;
+    entityKey: string | null;
+    summary: string;
+    detail: string;
+    status: string;
+  }[];
+}
+
 export interface ChatSyncStatus {
   lastAttemptAt: string | null;
   lastStatus: 'ok' | 'skipped' | 'error' | null;
@@ -459,6 +485,9 @@ export interface ChatSyncStatus {
   canonLastProposedAt: string | null;
   unsyncedMessages: number;
   dueAfterMessages: number;
+  /** Every sync point this chat has produced, newest first — the "click a sync and play it
+   *  back" list. Summary-only; the per-sync detail is fetched on demand (getChatSyncInspection). */
+  syncs: ChatSyncSummary[];
 }
 
 // GET /v1/cleanup/status — the async cleanup subloop's per-chat read surface (cleanupLoop.ts's

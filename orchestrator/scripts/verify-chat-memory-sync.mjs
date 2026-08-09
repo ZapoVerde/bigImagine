@@ -302,6 +302,60 @@ function createFakePool() {
             return { rows: promoted };
           }
 
+          // 0079 sync inspection: the rp lane's bridge-prompt persistence (chatMemorySync.ts
+          // updates the just-inserted sync point after the bridge runs) and the canon_facts
+          // inserts it stamps with that sync's id.
+          if (sql.includes('update chat_sync_points set bridge_prompt')) {
+            const [syncId, bridgePrompt] = params;
+            const sp = chatSyncPoints.find((p) => p.sync_id === syncId);
+            if (sp) sp.bridge_prompt = bridgePrompt;
+            return { rows: [] };
+          }
+
+          // The bridge's open-thread read (latest-approved-per-arc_tag) and the two curators'
+          // existing-entry reads — all empty on a first sync, which is all this script exercises.
+          if (sql.includes('select distinct on (arc_tag)')) {
+            return { rows: [] };
+          }
+          if (sql.includes('select distinct on (entity_key)')) {
+            return { rows: [] };
+          }
+
+          if (sql.includes('insert into canon_facts')) {
+            // Column order (0079): (user_id, category, arc_tag|entity_key, summary, detail,
+            // vector_embed, chat_id, sync_id) — arc_tag for the bridge's plot lane, entity_key
+            // for the two curators, exactly one of them present per insert. Param layout differs
+            // by lane: plot/people put the category in the SQL as a literal (7 params), the
+            // lorebook lane passes it as $2 (8 params).
+            const isPlot = sql.includes("'plot'");
+            const isPerson = sql.includes("'person'");
+            let userId, category, tag, summary, detail, chatId, syncId;
+            if (isPlot) {
+              [userId, tag, summary, detail, , chatId, syncId] = params;
+              category = 'plot';
+            } else if (isPerson) {
+              [userId, tag, summary, detail, , chatId, syncId] = params;
+              category = 'person';
+            } else {
+              [userId, category, tag, summary, detail, , chatId, syncId] = params;
+            }
+            canonFacts.push({
+              fact_id: randomUUID(),
+              chat_id: chatId,
+              user_id: userId,
+              category,
+              status: 'proposed',
+              approved_at: null,
+              arc_tag: category === 'plot' ? tag : null,
+              entity_key: category === 'plot' ? null : tag,
+              summary,
+              detail,
+              sync_id: syncId ?? null,
+              proposed_at: now(),
+            });
+            return { rows: [] };
+          }
+
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
         release() {},
@@ -339,6 +393,46 @@ function createFakeLlm() {
         return {
           message: { role: 'assistant', content: '' },
           toolCalls: [{ id: randomUUID(), name: 'classify_household_memory', arguments: { memories: ['A durable fact worth remembering.'] } }],
+        };
+      }
+      if (options.forceTool === 'bridge_chat_memory') {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [
+            {
+              id: randomUUID(),
+              name: 'bridge_chat_memory',
+              arguments: {
+                events: '| When | What | Who |\n|------|------|-----|',
+                scene: 'SCENE: A quiet square at dusk.',
+                plot_entries: [{ name: 'The Ashford Siege Breaks Open', content: 'The siege wall breached.', arc_tag: 'siege_break' }],
+              },
+            },
+          ],
+        };
+      }
+      if (options.forceTool === 'curate_lorebook') {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [
+            {
+              id: randomUUID(),
+              name: 'curate_lorebook',
+              arguments: { entries: [{ action: 'new', name: 'The Pavilion', category: 'place', content: 'A weathered pavilion.' }] },
+            },
+          ],
+        };
+      }
+      if (options.forceTool === 'curate_people') {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [
+            {
+              id: randomUUID(),
+              name: 'curate_people',
+              arguments: { entries: [{ action: 'new', name: 'Elena Ashford', content: '**Appearance:** tall.\n**Goals:** hold the gate.' }] },
+            },
+          ],
         };
       }
       throw new Error(`fake llm got an unexpected forceTool: ${options.forceTool}`);
@@ -693,6 +787,58 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   } finally {
     llm.complete = realComplete;
   }
+}
+
+// --- The rp lane (db/migrations/0079_sync_inspection.sql): a sync of an rp chat persists the
+// fully-rendered bridge prompt onto its sync point and stamps every canon-fact proposal it writes
+// (plot/lorebook/people) with that sync's id — the write side of the sync-status panel's "click a
+// sync and play it back" inspection. ---
+{
+  const RP_CHAT_ID = randomUUID();
+  pool.chatSessions.set(RP_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  seedMessages(RP_CHAT_ID, 'RP', 12); // same 12-message due profile as the household tick above
+
+  const chunksBefore = pool.chatChunks.length;
+  await runChatMemorySyncTick(deps);
+
+  assert(pool.chatChunks.length === chunksBefore + 2, "an rp chat's tick archives its chunks like any other chat");
+  const rpSyncs = pool.chatSyncPoints.filter((sp) => sp.chat_id === RP_CHAT_ID);
+  assert(rpSyncs.length === 1, "an rp chat's successful tick writes exactly one sync point");
+  const rpSyncId = rpSyncs[0].sync_id;
+  assert(
+    rpSyncs[0].bridge_prompt?.includes('NARRATIVE CHRONICLER') && rpSyncs[0].bridge_prompt.includes('TRANSCRIPT:'),
+    'the bridge prompt the sync sent the model is persisted onto the sync point (system + transcript + previous output)',
+  );
+  assert(
+    rpSyncs[0].bridge_prompt.includes('RP-user-1'),
+    "the persisted bridge prompt carries this sync's raw transcript, not a placeholder",
+  );
+
+  const rpEntries = [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === RP_CHAT_ID);
+  assert(rpEntries.length === 2, 'the bridge writes its SCENE and EVENTS entries');
+  assert(
+    rpEntries.every((e) => e.sync_id === rpSyncId),
+    'both bridge entries point at the sync that created them, so the inspection can list them per sync',
+  );
+
+  const rpFacts = pool.canonFacts.filter((f) => f.chat_id === RP_CHAT_ID);
+  assert(rpFacts.length === 3, 'the tick proposes one plot, one lorebook, and one people fact');
+  assert(
+    rpFacts.every((f) => f.sync_id === rpSyncId),
+    'every canon-fact proposal the sync wrote carries its sync_id — plot, lorebook, and people lanes alike',
+  );
+  assert(
+    rpFacts.some((f) => f.category === 'plot' && f.arc_tag === 'siege_break'),
+    "the bridge's plot proposal lands with its arc_tag intact",
+  );
+  assert(
+    rpFacts.some((f) => f.category === 'person' && f.entity_key === 'person:elena-ashford'),
+    "the people curator's proposal lands with its entity_key intact",
+  );
+  assert(
+    pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 5,
+    'an rp sync reports 5 entries updated (scene + events + plot + lorebook + people)',
+  );
 }
 
 if (process.exitCode) {

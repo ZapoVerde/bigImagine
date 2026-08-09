@@ -423,3 +423,24 @@ Already applied by hand, not run automatically (see the file for the exact comma
   The key list is the *complete* current vocabulary (all of 0010–0077), not the diff — the CHECK is
   rebuilt wholesale, so a fresh volume must land on the same constraint the live DB has. Idempotent
   hand-apply one-shot.
+- `0079_sync_inspection.sql` — the RP sync-status panel's "click a sync and play it back"
+  data: adds `chat_sync_points.bridge_prompt` (nullable — the fully-rendered system+user message
+  the 'rp' lane's bridge actually sent the model that pass, persisted by chatMemorySync.ts's
+  `upsert_bridge` step; null for non-rp chats and pre-0079 syncs, and deliberately not
+  reconstructible afterwards since previous output / running threads have moved on) and
+  `canon_facts.sync_id` — `on delete set null`, not cascade: unlike chat_chunks/chat_memory_entries
+  (pure derived state, reconstructible from the source transcript, so 0036's self-healing cascade
+  is right for them), an approved canon fact is a durable record (bi_principles.md §15), so a
+  truncated-away sync point de-attributes its facts rather than deleting them — the same `set null`
+  reasoning 0054 originally used for `canon_facts.chat_id`, and the reason a fork's copied facts
+  (which keep the parent's sync_id) survive the parent's sync point dying. Nullable — facts
+  written outside the sync loop (tools, future writers) stay unattributed, which is exactly the
+  distinction the inspection view wants to draw. The three rp-lane inserts (bridge plot entries,
+  lorebook curator, people curator) stamp sync_id. Read side: `getChatSyncStatus` returns a cheap
+  summary list (ordinal, created_at, aggregate entry/fact counts — one grouped query, newest 50
+  syncs first, so the 30s panel poll never ships the heavy detail), and
+  `getChatSyncInspection`/`GET /v1/chats/:id/syncs/:syncId` fetch one sync's full record on
+  demand — `chat_memory_entries.sync_id` (re-pointed by the upsert on every update, so it's
+  exactly "created or changed in that sync") plus `canon_facts.sync_id` and the bridge prompt.
+  Applied by hand against the live DB — the `add column`s are individually re-runnable; the index
+  and FK constraint are one-shot, so apply once and verify.

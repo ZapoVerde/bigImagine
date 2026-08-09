@@ -256,6 +256,7 @@ function createFakeChatSessionStore() {
   // io/chatSessions.ts's getChatSyncStatus returns, so the route's dispatch + settings plumbing
   // can be exercised end to end without the real store's DB.
   const syncStatusByChat = new Map();
+  const syncInspections = new Map(); // sync_id -> ChatSyncInspection (0079, getChatSyncInspection)
   let counter = 0;
   const newId = (prefix) => `${prefix}-${++counter}`;
 
@@ -263,6 +264,7 @@ function createFakeChatSessionStore() {
     sessions,
     swipesByMessage,
     syncStatusByChat,
+    syncInspections,
     async listChats(userId, opts = {}) {
       let rows = [...sessions.values()].filter((s) => s.userId === userId);
       if (opts.search) {
@@ -336,7 +338,14 @@ function createFakeChatSessionStore() {
         canonLastProposedAt: entry?.canonLastProposedAt ?? null,
         unsyncedMessages: (messagesByChat.get(chatId) ?? []).length,
         dueAfterMessages,
+        syncs: [],
       };
+    },
+    async getChatSyncInspection(userId, chatId, syncId) {
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const inspection = syncInspections.get(syncId);
+      return inspection ?? undefined;
     },
     async deleteChat(userId, chatId) {
       const row = sessions.get(chatId);
@@ -1506,6 +1515,33 @@ chats.syncStatusByChat.set(createdChat.chatId, {
 {
   const res = await fetch(`${base}/v1/chats/does-not-exist/sync-status`, { headers: auth });
   assert(res.status === 404, 'GET /v1/chats/:id/sync-status 404s for a nonexistent chat');
+}
+{
+  // The per-sync inspection route (0079): full record on demand, 404 for a sync that isn't this
+  // chat's.
+  const syncId = 'sync-1';
+  chats.syncInspections.set(syncId, {
+    syncId,
+    ordinal: 1,
+    createdAt: '2026-08-07T12:00:00.000Z',
+    lastMessageId: 'msg-1',
+    bridgePrompt: 'SYSTEM: [TASK — NARRATIVE CHRONICLER]\n\nTRANSCRIPT:\nUser: hi',
+    entries: [{ topicKey: 'scene', content: 'SCENE: A rainy square.', updatedAt: '2026-08-07T12:01:00.000Z' }],
+    canonFacts: [],
+  });
+  const ok = await fetch(`${base}/v1/chats/${createdChat.chatId}/syncs/${syncId}`, { headers: auth });
+  assert(ok.status === 200, 'GET /v1/chats/:id/syncs/:syncId returns 200 for the chat\'s own sync');
+  const okBody = await ok.json();
+  assert(
+    okBody.sync.ordinal === 1 && okBody.sync.bridgePrompt.includes('NARRATIVE CHRONICLER'),
+    'the inspection payload carries the sync\'s bridge prompt and ordinal',
+  );
+  assert(
+    okBody.sync.entries.length === 1 && okBody.sync.entries[0].topicKey === 'scene',
+    'the inspection payload carries the memories that sync created/changed',
+  );
+  const missing = await fetch(`${base}/v1/chats/${createdChat.chatId}/syncs/not-a-sync`, { headers: auth });
+  assert(missing.status === 404, 'GET /v1/chats/:id/syncs/:syncId 404s for a sync that is not this chat\'s');
 }
 {
   // The two pair-settings are read live by the route, same keys the sync loop itself resolves
