@@ -105,14 +105,14 @@
 
 /* The bottom control stack (staging bars, delete bar, input row) floats over the conversation
    instead of sitting below it: bubbles scroll under it — the old border-top divider is gone.
-   The overlay itself is fully transparent (no tint, no blur, no edge): the background shows
-   crisp behind the controls. The blur is applied per-bubble by ChatView's syncUnderControlsBlur
-   (ChatView.tsx), which blurs a bubble only while it's actually underneath the stack, ramping
-   with how deep it has gone. Its whole footprint swallows pointer/touch events, so a bubble
-   that has scrolled underneath can't be tapped (message actions) or swiped (variant browsing);
-   only the controls themselves are interactive. The history's live bottom padding (ChatView's
-   ResizeObserver on this element) parks the newest message just above the stack at full
-   scroll. */
+   Its top edge is the "invisible line": above it bubbles are fully crisp; a bubble crossing
+   it is split — crisp above the line, its sliver below the line blurred by syncUnderControls
+   (ChatView.tsx, .chat-under-clone-layer below). The overlay itself is fully transparent (no
+   tint, no blur, no edge), so the background behind the controls stays untouched. Its whole
+   footprint swallows pointer/touch events, so a bubble that has scrolled underneath can't be
+   tapped (message actions) or swiped (variant browsing); only the controls themselves are
+   interactive. The history's live bottom padding (ChatView's ResizeObserver on this element)
+   parks the newest message just above the line at full scroll. */
 .chat-main > .chat-bottom-overlay {
   position: absolute;
   left: 0;
@@ -121,6 +121,19 @@
   z-index: 1;
   display: flex;
   flex-direction: column;
+}
+
+/* Per-bubble blur layer: transparent and non-interactive; syncUnderControls (ChatView.tsx)
+   drops a blurred clone of each message that crosses the bottom overlay's top edge — the
+   "invisible line" — clipped to the part below it, while the original stays crisp above. Sits
+   above the history (later sibling at the same z-index) but below the bottom overlay, which
+   swallows pointer events in the strip. */
+.chat-main > .chat-under-clone-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: hidden;
 }
 
 /* The header's dropdown menu must float above the history pane below it — both are z-index:1

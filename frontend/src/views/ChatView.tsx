@@ -445,33 +445,82 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     topBarsHiddenRef.current = topBarsHidden;
   }, [topBarsHidden]);
 
-  // "Slice under the controls" blur: a bubble that has scrolled into the bottom overlay's
-  // footprint gets blurred — ramping with how deep it has gone underneath — while the overlay
-  // itself stays fully transparent, so the background shows crisp behind the controls and only
-  // the bubble blurs. rAF-throttled; only messages near the bottom can intersect the overlay,
-  // so the loop breaks at the first one fully above it.
+  // "Slice under the controls" effect (ChatView.css): the bottom overlay is fully transparent
+  // and its top edge is the "invisible line". A message crossing that line is split in two —
+  // the original stays crisp, clipped to the part above the line, while a blurred clone of it
+  // is clipped to the part below the line and laid over it via the clone layer. So only the
+  // sliver of bubble that has actually gone under the line is blurred (fully submerged
+  // bubbles blur whole); the background behind the controls never blurs. rAF-throttled and
+  // viewport-aligned to the clone layer (transform-proof). Only messages near the bottom can
+  // intersect the line, so the scan breaks at the first fully-above one; any message styled on
+  // a previous pass that is now clear of the line gets reset, so blur never sticks.
+  const UNDER_CONTROLS_BLUR = 5; // px
   const underControlsRafRef = useRef(0);
-  const syncUnderControlsBlur = () => {
+  const underCloneLayerRef = useRef<HTMLDivElement>(null);
+  const underCloneRefs = useRef(new Map<HTMLElement, HTMLElement>());
+  const underTouchedRef = useRef(new Set<HTMLElement>());
+  const syncUnderControls = () => {
     cancelAnimationFrame(underControlsRafRef.current);
     underControlsRafRef.current = requestAnimationFrame(() => {
       const history = historyRef.current;
       const overlay = bottomOverlayRef.current;
-      if (!history || !overlay) return;
-      const overlayRect = overlay.getBoundingClientRect();
-      const overlayH = overlayRect.height || 1;
-      const messages = history.querySelectorAll<HTMLElement>('.chat-message, .chat-bubble.pending');
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const el = messages[i];
+      const layer = underCloneLayerRef.current;
+      if (!history || !overlay || !layer) return;
+      const layerRect = layer.getBoundingClientRect();
+      const line = overlay.getBoundingClientRect().top;
+      const clones = underCloneRefs.current;
+      const touched = underTouchedRef.current;
+      const styledNow = new Set<HTMLElement>();
+      const els = history.querySelectorAll<HTMLElement>('.chat-message, .chat-bubble.pending');
+      for (let i = els.length - 1; i >= 0; i--) {
+        const el = els[i];
         const r = el.getBoundingClientRect();
-        if (r.bottom <= overlayRect.top) break; // this message and everything above is clear
-        const overlap = Math.min(r.bottom, overlayRect.bottom) - Math.max(r.top, overlayRect.top);
-        if (overlap > 0) {
-          // 6px max blur at full submersion; partial overlap gets a partial blur so the bubble
-          // softens as it enters the zone instead of snapping.
-          const blur = 6 * Math.min(1, overlap / overlayH);
-          el.style.filter = blur >= 0.4 ? `blur(${blur.toFixed(1)}px)` : '';
-        } else {
+        if (r.bottom <= line) break; // this message and everything above is clear of the line
+        styledNow.add(el);
+        if (r.top >= line) {
+          // Fully submerged: the whole bubble is under the controls — blur it entirely.
+          el.style.clipPath = '';
+          el.style.filter = `blur(${UNDER_CONTROLS_BLUR}px)`;
+          touched.add(el);
+          const old = clones.get(el);
+          if (old) {
+            old.remove();
+            clones.delete(el);
+          }
+          continue;
+        }
+        // Crossing the line: crisp above, blurred clone below.
+        el.style.filter = '';
+        el.style.clipPath = `inset(0 0 ${(r.bottom - line).toFixed(1)}px 0)`;
+        touched.add(el);
+        let clone = clones.get(el);
+        if (!clone) {
+          clone = el.cloneNode(true) as HTMLElement;
+          clone.style.cssText = 'position:absolute;pointer-events:none;margin:0;';
+          clone.style.filter = `blur(${UNDER_CONTROLS_BLUR}px)`;
+          clone.removeAttribute('id');
+          clone.setAttribute('aria-hidden', 'true');
+          layer.appendChild(clone);
+          clones.set(el, clone);
+        }
+        clone.style.left = `${r.left - layerRect.left}px`;
+        clone.style.top = `${r.top - layerRect.top}px`;
+        clone.style.width = `${r.width}px`;
+        clone.style.height = `${r.height}px`;
+        clone.style.clipPath = `inset(${Math.max(0, line - r.top).toFixed(1)}px 0 0 0)`;
+      }
+      // Reset anything styled on a previous pass that is now fully above the line (deletes
+      // clear stale clones too — the removed message isn't in styledNow).
+      for (const el of touched) {
+        if (!styledNow.has(el)) {
+          touched.delete(el);
+          el.style.clipPath = '';
           el.style.filter = '';
+          const old = clones.get(el);
+          if (old) {
+            old.remove();
+            clones.delete(el);
+          }
         }
       }
     });
@@ -481,10 +530,10 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // height (+ the history's base 1rem padding) as the history's bottom padding, so at full
   // scroll the last bubble rests fully visible above the stack while bubbles still slide under
   // it while scrolling. ResizeObserver keeps this correct as staging/delete bars or the
-  // textarea change the stack's height — and re-syncs the under-controls blur, since the
-  // zone's top edge moves with it. Mobile keeps its mid-screen rest point: the 50vh history
-  // spacer already sits below the last message there, so its height is subtracted (clamped at
-  // the base padding) to avoid stacking dead scroll slack on top of it.
+  // textarea change the stack's height — and re-syncs the under-controls split, since the
+  // line moves with it. Mobile keeps its mid-screen rest point: the 50vh history spacer
+  // already sits below the last message there, so its height is subtracted (clamped at the
+  // base padding) to avoid stacking dead scroll slack on top of it.
   useEffect(() => {
     const history = historyRef.current;
     const overlay = bottomOverlayRef.current;
@@ -494,7 +543,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       const spacer = history.querySelector<HTMLElement>('.chat-history-spacer');
       const spacerH = spacer?.offsetHeight ?? 0;
       history.style.paddingBottom = `${Math.max(base, overlay.offsetHeight + base - spacerH)}px`;
-      syncUnderControlsBlur();
+      syncUnderControls();
     };
     sync();
     const ro = new ResizeObserver(sync);
@@ -503,10 +552,21 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   }, []);
 
   // Content shifts without a scroll event (deletes, refreshes, the pending bubble landing) can
-  // move messages relative to the overlay zone, so re-sync the under-controls blur then too.
+  // move messages relative to the line, so re-sync the under-controls split then too.
   useEffect(() => {
-    syncUnderControlsBlur();
+    syncUnderControls();
   }, [messages.length]);
+
+  // Message sizes change without scrolling (the last reply's action bar expands, images load,
+  // text reflows) — re-sync the split then too, so the crisp/blurred seam tracks the message.
+  useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    const ro = new ResizeObserver(() => syncUnderControls());
+    const els = history.querySelectorAll<HTMLElement>('.chat-message, .chat-bubble.pending');
+    els.forEach((el) => ro.observe(el));
+    return () => ro.disconnect();
+  }, [messages]);
 
   // Report message-count changes up to the app (RP chats only) so Sidebar's Prompt Inspector
   // can re-fetch after each completed turn. No dep array — every render compares against the
@@ -601,7 +661,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   };
 
   const handleHistoryScroll = () => {
-    syncUnderControlsBlur();
+    syncUnderControls();
     const el = historyRef.current;
     if (!el || window.innerWidth >= 768) return;
     const delta = el.scrollTop - lastHistoryScrollTopRef.current;
@@ -1566,13 +1626,20 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length > 0 && <div className="chat-history-spacer" aria-hidden="true" />}
         </div>
 
+        {/* Per-bubble blur layer (ChatView.css): transparent and non-interactive; syncUnderControls
+            drops a blurred clone of each message that crosses the bottom overlay's top edge — the
+            "invisible line" — clipped to the part below it, while the original stays crisp above. */}
+        <div className="chat-under-clone-layer" ref={underCloneLayerRef} aria-hidden="true" />
+
         {/* The whole bottom control stack floats over the conversation (ChatView.css): bubbles
             scroll under it instead of stopping at a divider line, and its footprint swallows
             pointer/touch events so a bubble that has scrolled underneath can't be tapped or
-            swiped. The overlay is transparent — no tint, no edge — and bubbles blur only while
-            they're underneath it (syncUnderControlsBlur). The history's bottom padding is kept
-            in sync with this stack's measured height (bottomOverlayRef's ResizeObserver) so the
-            newest message parks just above the controls at full scroll. */}
+            swiped. Its top edge is the invisible line: the bubble stays crisp above it, and
+            only the sliver below it is blurred (syncUnderControls + .chat-under-clone-layer).
+            The overlay itself is transparent — no tint, no edge — so the background behind the
+            controls stays untouched. The history's bottom padding is kept in sync with this
+            stack's measured height (bottomOverlayRef's ResizeObserver) so the newest message
+            parks just above the line at full scroll. */}
         <div className="chat-bottom-overlay" ref={bottomOverlayRef}>
           <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
           <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
