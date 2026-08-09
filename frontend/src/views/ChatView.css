@@ -93,13 +93,34 @@
 }
 
 /* The location background + its overlay veil sit behind the conversation: every other child of
-   .chat-main (history, input row, staging/delete bars) paints above them, so the gaps between
-   bubbles show the location image and the bubbles stay legible. The rule is deliberately before
-   `.chat-main > .chat-top-bar` below (equal specificity — later wins), which re-raises the
-   header and its dropdown menu above the history. */
-.chat-main > :not(.chat-location-background, .chat-location-overlay) {
+   .chat-main (history, header) paints above them, so the gaps between bubbles show the
+   location image and the bubbles stay legible. The bottom overlay is excluded here — it is
+   positioned absolutely over the history (see .chat-bottom-overlay below). The rule is
+   deliberately before `.chat-main > .chat-top-bar` below (equal specificity — later wins),
+   which re-raises the header and its dropdown menu above the history. */
+.chat-main > :not(.chat-location-background, .chat-location-overlay, .chat-bottom-overlay) {
   position: relative;
   z-index: 1;
+}
+
+/* The bottom control stack (staging bars, delete bar, input row) floats over the conversation
+   instead of sitting below it: bubbles scroll under it — the old border-top divider is gone —
+   and the frosted strip hides them while they pass beneath. Its whole footprint swallows
+   pointer/touch events, so a bubble that has scrolled underneath can't be tapped (message
+   actions) or swiped (variant browsing); only the controls themselves are interactive. The
+   history's live bottom padding (ChatView's ResizeObserver on this element) parks the newest
+   message just above the glass at full scroll. */
+.chat-main > .chat-bottom-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  background: color-mix(in srgb, var(--color-bg-canvas) 80%, transparent);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15);
+  backdrop-filter: blur(12px) saturate(1.15);
 }
 
 /* The header's dropdown menu must float above the history pane below it — both are z-index:1
@@ -832,8 +853,6 @@
   align-items: center;
   gap: 0.6rem;
   padding: 0.5rem 1rem;
-  background: var(--color-bg-panel);
-  border-top: 1px solid var(--color-border-subtle);
 }
 
 .chat-delete-count {
@@ -889,7 +908,6 @@
   display: flex;
   gap: 0.5rem;
   padding: 0.8rem 1rem;
-  border-top: 1px solid var(--color-border);
 }
 
 .chat-input textarea {

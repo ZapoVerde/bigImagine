@@ -418,6 +418,11 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [folders, setFolders] = useState<Folder[]>([]);
 
   const historyRef = useRef<HTMLDivElement | null>(null);
+  // The bottom control stack (staging bars, delete bar, input row) floats over the conversation
+  // as .chat-bottom-overlay — bubbles scroll under it. Its height is dynamic (staging/delete
+  // bars appear and vanish, the textarea grows), so the history's matching bottom padding is
+  // measured live (ResizeObserver below) instead of hardcoded.
+  const bottomOverlayRef = useRef<HTMLDivElement | null>(null);
   const chatMenuRef = useRef<HTMLDivElement | null>(null);
   // Second mount of the ⋯ chat menu, in the mobile input row opposite Send (the desktop copy
   // lives in the chat header). Only one is visible at a time — CSS hides the header one on
@@ -439,6 +444,29 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   useEffect(() => {
     topBarsHiddenRef.current = topBarsHidden;
   }, [topBarsHidden]);
+
+  // Park the newest message just above the glass: mirror the bottom overlay's measured height
+  // (+ the history's base 1rem padding) as the history's bottom padding, so at full scroll the
+  // last bubble rests fully visible above the control stack while bubbles still slide under it
+  // while scrolling. ResizeObserver keeps this correct as staging/delete bars or the textarea
+  // change the stack's height. Mobile keeps its mid-screen rest point: the 50vh history spacer
+  // already sits below the last message there, so its height is subtracted (clamped at the base
+  // padding) to avoid stacking dead scroll slack on top of it.
+  useEffect(() => {
+    const history = historyRef.current;
+    const overlay = bottomOverlayRef.current;
+    if (!history || !overlay) return;
+    const sync = () => {
+      const base = parseFloat(getComputedStyle(history).paddingTop) || 16;
+      const spacer = history.querySelector<HTMLElement>('.chat-history-spacer');
+      const spacerH = spacer?.offsetHeight ?? 0;
+      history.style.paddingBottom = `${Math.max(base, overlay.offsetHeight + base - spacerH)}px`;
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(overlay);
+    return () => ro.disconnect();
+  }, []);
 
   // Report message-count changes up to the app (RP chats only) so Sidebar's Prompt Inspector
   // can re-fetch after each completed turn. No dep array — every render compares against the
@@ -1497,127 +1525,135 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           {messages.length > 0 && <div className="chat-history-spacer" aria-hidden="true" />}
         </div>
 
-        <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
-        <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
+        {/* The whole bottom control stack floats over the conversation as a frosted-glass strip
+            (ChatView.css): bubbles scroll under it instead of stopping at a divider line, and
+            its footprint swallows pointer/touch events so a bubble that has scrolled underneath
+            can't be tapped or swiped. The history's bottom padding is kept in sync with this
+            stack's measured height (bottomOverlayRef's ResizeObserver) so the newest message
+            parks just above the glass at full scroll. */}
+        <div className="chat-bottom-overlay" ref={bottomOverlayRef}>
+          <StagingBar attachments={stagedFiles} apiKey={apiKey} onRemove={removeStagedFile} />
+          <ImageStagingBar images={stagedImages} onRemove={removeStagedImage} />
 
-        {selectionMode && (
-          <div className="chat-delete-bar">
-            <span className="chat-delete-count">
-              {selectionStart === null ? 0 : messages.length - selectionStart} selected
-            </span>
-            <button
-              type="button"
-              className="chat-delete-confirm"
-              disabled={selectionStart === null}
-              onClick={confirmSelectionDelete}
-            >
-              Delete
-            </button>
-            <button type="button" onClick={cancelSelectionMode}>
-              Cancel
-            </button>
-          </div>
-        )}
-
-        <form
-          className="chat-input"
-          onSubmit={(e) => {
-            e.preventDefault();
-            send();
-          }}
-        >
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={(e) => {
-              attachFiles(e.target.files);
-              e.target.value = '';
-            }}
-          />
-          {/* RP chats attach from the ⋯ menu; on mobile that menu lives in this row (opposite
-              Send) instead of the header, so the row carries its own copy here. Non-RP chats
-              keep the paper clip. */}
-          {activeChat?.kind === 'rp' && (
-            <div className="chat-menu-wrap chat-menu-mobile" ref={chatMenuMobileRef}>
+          {selectionMode && (
+            <div className="chat-delete-bar">
+              <span className="chat-delete-count">
+                {selectionStart === null ? 0 : messages.length - selectionStart} selected
+              </span>
               <button
                 type="button"
-                className="chat-menu-button"
-                title="Chat menu"
-                aria-haspopup="menu"
-                aria-expanded={chatMenuOpen}
-                onClick={() => setChatMenuOpen((v) => !v)}
+                className="chat-delete-confirm"
+                disabled={selectionStart === null}
+                onClick={confirmSelectionDelete}
               >
-                ⋯
+                Delete
               </button>
-              {chatMenuOpen && (
-                <div className="chat-menu" role="menu">
-                  {chatMenuItems}
-                </div>
-              )}
+              <button type="button" onClick={cancelSelectionMode}>
+                Cancel
+              </button>
             </div>
           )}
-          {/* RP chats attach from the header ⋯ menu instead — the input row keeps just
-              the textarea + Send, with the paper clip reserved for non-RP chats. */}
-          {activeChat?.kind !== 'rp' && (
+
+          <form
+            className="chat-input"
+            onSubmit={(e) => {
+              e.preventDefault();
+              send();
+            }}
+          >
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(e) => {
+                attachFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            {/* RP chats attach from the ⋯ menu; on mobile that menu lives in this row (opposite
+                Send) instead of the header, so the row carries its own copy here. Non-RP chats
+                keep the paper clip. */}
+            {activeChat?.kind === 'rp' && (
+              <div className="chat-menu-wrap chat-menu-mobile" ref={chatMenuMobileRef}>
+                <button
+                  type="button"
+                  className="chat-menu-button"
+                  title="Chat menu"
+                  aria-haspopup="menu"
+                  aria-expanded={chatMenuOpen}
+                  onClick={() => setChatMenuOpen((v) => !v)}
+                >
+                  ⋯
+                </button>
+                {chatMenuOpen && (
+                  <div className="chat-menu" role="menu">
+                    {chatMenuItems}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* RP chats attach from the header ⋯ menu instead — the input row keeps just
+                the textarea + Send, with the paper clip reserved for non-RP chats. */}
+            {activeChat?.kind !== 'rp' && (
+              <button
+                type="button"
+                className="chat-attach-button"
+                title="Attach a file or image"
+                disabled={attaching}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                📎
+              </button>
+            )}
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 768) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              placeholder="Message BigImagine…"
+              rows={2}
+              autoFocus
+            />
+            {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
+                the row is identical in both breakpoints. Scrolls the history to its end. */}
             <button
               type="button"
-              className="chat-attach-button"
-              title="Attach a file or image"
-              disabled={attaching}
-              onClick={() => fileInputRef.current?.click()}
+              className="chat-jump-bottom"
+              title="Jump to bottom"
+              onClick={() => historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' })}
             >
-              📎
+              ↓
             </button>
-          )}
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 768) {
-                e.preventDefault();
-                send();
+            <button
+              type="button"
+              className={`chat-send-button${sending ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
+              disabled={
+                !sending &&
+                (selectionMode ||
+                  (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
               }
-            }}
-            placeholder="Message BigImagine…"
-            rows={2}
-            autoFocus
-          />
-          {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
-              the row is identical in both breakpoints. Scrolls the history to its end. */}
-          <button
-            type="button"
-            className="chat-jump-bottom"
-            title="Jump to bottom"
-            onClick={() => historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' })}
-          >
-            ↓
-          </button>
-          <button
-            type="button"
-            className={`chat-send-button${sending ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
-            disabled={
-              !sending &&
-              (selectionMode ||
-                (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
-            }
-            title={sending ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
-            onClick={() => (sending ? void stopTurn() : void send())}
-          >
-            {sending ? (
-              <>
-                <span className="chat-send-label">Stop</span>
-                <span className="chat-send-icon" aria-hidden="true">■</span>
-              </>
-            ) : (
-              <>
-                <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
-                <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
-              </>
-            )}
-          </button>
-        </form>
+              title={sending ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
+              onClick={() => (sending ? void stopTurn() : void send())}
+            >
+              {sending ? (
+                <>
+                  <span className="chat-send-label">Stop</span>
+                  <span className="chat-send-icon" aria-hidden="true">■</span>
+                </>
+              ) : (
+                <>
+                  <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
+                  <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
+                </>
+              )}
+            </button>
+          </form>
+        </div>
       </div>
 
       {activeChat?.canvasNoteId && (
