@@ -186,6 +186,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   // clobber the on-screen chat's background nor re-arm an orphaned interval.
   const bgChatIdRef = useRef(chatId);
   const bgDisposedRef = useRef(false);
+  // The chat currently on screen, kept current during render — so an async callback that
+  // resolves after a chat switch (the cleanup pill's onSettled, which re-fetches messages) can
+  // tell that its chat is gone and stand down instead of clobbering the new chat's message list.
+  const chatIdRef = useRef(chatId);
+  chatIdRef.current = chatId;
+  // Latest sending flag, read from async callbacks: send() sets it synchronously (not just via
+  // setSending), so a cleanup settle that lands mid-send sees it immediately, and a cleanup
+  // settle deferred past the send can be re-run in send()'s finally without a stale check.
+  const sendingRef = useRef(false);
+  // A cleanup settle observed while a send was in flight — the send's own refresh may have
+  // already read the DB before the cleanup write landed, so re-fetch once in send()'s finally.
+  const deferredCleanupSettleRef = useRef<string | null>(null);
   // endpoint.md §5.1.8's last-turn location state on the client side: the endpoint's `previous`
   // from the last refresh (the revert target a regen swipe shows while the new turn settles), the
   // last settled current locationId (to compute freshness — "did the swiped turn establish the
@@ -813,6 +825,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
 
     setError(null);
     setSending(true);
+    sendingRef.current = true;
     // Resend re-runs the existing history as-is; a normal send appends this turn's user message.
     const nextMessages: DisplayMessage[] = resendLast
       ? messages
@@ -853,6 +866,17 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
     } finally {
       setSending(false);
+      sendingRef.current = false;
+      // A cleanup settle observed while the send was in flight: the send's own refresh above may
+      // have read the DB before the cleanup write landed. Re-fetch once so the rewrite still
+      // shows up straightaway — guarded against a chat switch mid-send (chatIdRef).
+      const deferredId = deferredCleanupSettleRef.current;
+      deferredCleanupSettleRef.current = null;
+      if (deferredId && chatIdRef.current === deferredId) {
+        void refreshActiveMessages(deferredId).catch(() => {
+          // Best-effort — a failed settle refresh leaves the poll tick to handle the next one.
+        });
+      }
     }
   }
 
@@ -1160,7 +1184,25 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           <div className="chat-header">
             <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
             {activeChat?.kind === 'rp' && activeChat.cleanupEnabledAt && (
-              <CleanupStatusPill apiKey={apiKey} chatId={activeChat.chatId} />
+              // The subloop just reported the newest message settled — the cleaned rewrite is
+              // already in the DB, so re-fetch the chat to surface it straightaway instead of
+              // making the reader refresh. Guarded against a chat switch (chatIdRef) and
+              // deferred past an in-flight send (the send's own refresh would race it).
+              <CleanupStatusPill
+                apiKey={apiKey}
+                chatId={activeChat.chatId}
+                onSettled={() => {
+                  const id = activeChat.chatId;
+                  if (chatIdRef.current !== id) return;
+                  if (sendingRef.current) {
+                    deferredCleanupSettleRef.current = id;
+                    return;
+                  }
+                  void refreshActiveMessages(id).catch(() => {
+                    // Best-effort — a failed settle refresh leaves the poll tick to handle it.
+                  });
+                }}
+              />
             )}
             {activeChat && activeChat.kind !== 'rp' && !activeChat.archivedAt && (
               <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
