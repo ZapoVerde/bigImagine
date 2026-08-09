@@ -7,12 +7,18 @@
   overflow: hidden;
 }
 
+/* Desktop: the header (title + toggle arrow) sits UNDER the main bar, mirroring the chat
+   settings rail — the strip above it is just empty rail surface beside the bar. */
+.sidebar-header {
+  margin-top: var(--topbar-height);
+}
+
 .sidebar.collapsed {
   width: 2.6rem;
 }
 
 /* Mobile: the rail is an overlay drawer, not a permanent column. Collapsed means gone entirely —
-   no 2.6rem sliver — since the "summoning arrow" now lives in TabStrip (App.css/.sidebar-summon)
+   no 2.6rem sliver — since the "summoning arrow" is now a floating FAB (App.css, .side-fab-left)
    instead of taking up its own strip of screen. Expanded, it floats above the view rather than
    pushing it over (position: fixed takes it out of the .app flex flow, so .app-main always gets
    full width on mobile regardless of this state). */
@@ -35,6 +41,11 @@
 
   .sidebar.collapsed .sidebar-header {
     display: none;
+  }
+
+  /* The drawer already anchors below the main bar via top — don't double-shift the header. */
+  .sidebar-header {
+    margin-top: 0;
   }
 }
 

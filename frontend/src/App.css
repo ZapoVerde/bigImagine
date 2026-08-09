@@ -92,23 +92,44 @@ body {
   display: none;
 }
 
-.sidebar-summon {
-  background: none;
-  border: none;
-  font-size: var(--font-size-lg);
-  padding: 0.3rem 0.6rem;
-  margin-right: 0.4rem;
+/* Mobile-only floating toggle buttons for the left rail (App.tsx) and the chat settings rail
+   (ChatView.tsx) — the "arrows" the rails' own headers carry on desktop. Little FABs pinned to
+   the top edges, just under the main bar, so they survive the top bars collapsing on scroll
+   (a collapsed mobile chat shows exactly these two at the top) and never take a strip of their
+   own — the collapsed rails are gone entirely on mobile, so the chat keeps the whole screen
+   (Sidebar.css / ChatView.css mobile blocks). */
+.side-fab {
+  position: fixed;
+  top: calc(var(--topbar-height) + 0.5rem);
+  z-index: 31; /* above the mobile drawers (30), below nav drawer / modals (1000+) */
+  width: 2.2rem;
+  height: 2.2rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   color: var(--color-text-muted);
-  flex-shrink: 0;
+  font-size: var(--font-size-base);
 }
 
-.sidebar-summon:hover {
+.side-fab:hover {
   color: var(--color-text-primary);
   background: var(--color-hover-surface);
 }
 
-/* The app-wide navigation drawer toggle (AppNavDrawer.tsx) — the top-left hamburger. Same
-   icon-button look as the sidebar summon but always visible, on every screen size. */
+.side-fab-left {
+  left: 0.5rem;
+}
+
+.side-fab-right {
+  right: 0.5rem;
+}
+
+/* The app-wide navigation drawer toggle (AppNavDrawer.tsx) — the top-left hamburger. Icon-button
+   look matching the other top-bar controls, always visible, on every screen size. */
 .app-nav-button {
   background: none;
   border: none;

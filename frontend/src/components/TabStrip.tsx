@@ -9,8 +9,6 @@ interface TabStripProps {
   onOpenSettings: () => void;
   /** Omitted entirely under Cloudflare Access SSO — there's no key to change. */
   onChangeKey?: () => void;
-  sidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
   /** App-wide navigation drawer (AppNavDrawer) — open state + toggle, driven by App so the
    *  drawer overlays app-main rather than living inside this header. */
   navOpen: boolean;
@@ -25,8 +23,6 @@ export default function TabStrip({
   onNew,
   onOpenSettings,
   onChangeKey,
-  sidebarCollapsed,
-  onToggleSidebar,
   navOpen,
   onToggleNav,
 }: TabStripProps) {
@@ -44,16 +40,6 @@ export default function TabStrip({
         onClick={onToggleNav}
       >
         ☰
-      </button>
-      {/* Mobile-only "summoning arrow": the left rail collapses to nothing on narrow screens
-          (Sidebar.css), so this is the only way left to open it there. Hidden on desktop, where
-          the rail's own header toggle already does the job. */}
-      <button
-        className="sidebar-summon mobile-only"
-        title={sidebarCollapsed ? 'Open menu' : 'Close menu'}
-        onClick={onToggleSidebar}
-      >
-        {sidebarCollapsed ? '☰' : '«'}
       </button>
       <h1>BigImagine</h1>
       <nav>

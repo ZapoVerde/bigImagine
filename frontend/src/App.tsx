@@ -151,6 +151,18 @@ export default function App() {
         onDeselectNote={() => setSelectedNoteId(null)}
         notesRefreshKey={notesRefreshKey}
       />
+      {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
+          the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the top
+          bars collapse on scroll, and the arrow has to survive that (App.css, .side-fab). */}
+      <button
+        type="button"
+        className="side-fab side-fab-left mobile-only"
+        title={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
+        aria-label={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
+        onClick={() => setSidebarCollapsed((c) => !c)}
+      >
+        {sidebarCollapsed ? '»' : '«'}
+      </button>
       <div className="app-main">
         {/* .app-top-bars is a collapsing single-row grid (App.css); the inner column shim keeps
             TabStrip and TimerStrip stacked vertically so the grid always has exactly one child
@@ -164,8 +176,6 @@ export default function App() {
               onClose={close}
               onNew={openBlank}
               onOpenSettings={() => summon('settings')}
-              sidebarCollapsed={sidebarCollapsed}
-              onToggleSidebar={() => setSidebarCollapsed((c) => !c)}
               onChangeKey={
                 auth.mode === 'key'
                   ? () => {

@@ -1222,14 +1222,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                 {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
               </button>
             )}
-            <button
-              type="button"
-              className="chat-settings-summon mobile-only"
-              title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
-              onClick={() => setSettingsCollapsed((c) => !c)}
-            >
-              ⚙
-            </button>
           </div>
         </div>
 
@@ -1580,6 +1572,18 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           </div>
         )}
       </div>
+
+      {/* Mobile-only floating toggle for the settings rail — the chat-header ⚙ it replaces
+          collapsed away with the top bars on scroll, this FAB doesn't (App.css, .side-fab). */}
+      <button
+        type="button"
+        className="side-fab side-fab-right mobile-only"
+        title={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+        aria-label={settingsCollapsed ? 'Show chat settings' : 'Hide chat settings'}
+        onClick={() => setSettingsCollapsed((c) => !c)}
+      >
+        {settingsCollapsed ? '«' : '»'}
+      </button>
     </div>
   );
 }
