@@ -6,7 +6,9 @@
  * Deletes the row first (still scoped to user_id, so a stale/foreign id never touches the
  * filesystem at all) and only then removes the on-disk avatar (avatarStorage.ts) — the row is the
  * source of truth, so an avatar file orphaned by a crash between the two steps is a leaked file,
- * never a leaked-but-still-referenced one.
+ * never a leaked-but-still-referenced one. Also deletes every chat_sessions row pointing at the
+ * character (its chats are unusable without the persona) and returns the deleted chat ids so the
+ * client can close any open tabs for them. chat_messages cascade with their chat row (0009).
  *
  * @api-declaration
  * createDeleteCharacterTool() — returns the delete_character RegisteredTool
@@ -44,13 +46,24 @@ export function createDeleteCharacterTool(): RegisteredTool {
       if (!isDeleteCharacterArgs(args)) {
         throw new Error('delete_character requires a characterId: string');
       }
+      // Purge the character's chats FIRST: chat_sessions.character_id is ON DELETE SET NULL
+      // (0049), so deleting the character row first would null the link and this purge would
+      // match nothing. FK integrity means a missing character can't have referencing chats, so
+      // doing the purge before the character delete is safe for the not-found case too (and the
+      // character delete below still decides deleted: true/false).
+      const chats = await ctx.db.query<{ chat_id: string }>(
+        'delete from chat_sessions where character_id = $1 and user_id = $2 returning chat_id',
+        [args.characterId, ctx.userId],
+      );
       const rows = await ctx.db.query<{ character_id: string }>(
         'delete from characters where character_id = $1 and user_id = $2 returning character_id',
         [args.characterId, ctx.userId],
       );
-      if (rows.length === 0) return { deleted: false };
+      if (rows.length === 0) return { deleted: false, deletedChatIds: [] };
+      // chat_messages cascade with their chat row (0009); the avatar is last so a crash between
+      // the two deletes leaks at worst an orphaned file, never a live reference.
       await deleteAvatar(args.characterId);
-      return { deleted: true };
+      return { deleted: true, deletedChatIds: chats.map((c) => c.chat_id) };
     },
   };
 }

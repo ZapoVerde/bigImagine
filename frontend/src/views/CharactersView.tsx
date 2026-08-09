@@ -8,7 +8,12 @@ interface CharactersViewProps {
   apiKey: string | null;
   /** RP always opens with a real chatId already created below — the roster starts roleplay
    *  sessions only, never plain chats. */
+  /** Opens (or focuses, if already open) an RP chat tab — wired to useTabs' openRp, which keeps
+   *  RP chat a single slot: opening another RP chat replaces the existing one in place. */
   onOpenRp: (chatId: string, title?: string) => void;
+  /** A character was deleted and its chats purged server-side — these are the deleted chat ids,
+   *  so the app can close any open tabs for them and drop them from the history browsers. */
+  onChatsDeleted?: (chatIds: string[]) => void;
 }
 
 interface Draft {
@@ -42,7 +47,7 @@ function draftFromDetail(detail: CharacterDetail): Draft {
 // explicitly wherever the selection changes, rather than driven off a useEffect keyed on
 // selectedId, since saving an *already-selected* character needs a fresh fetch too and a same-value
 // setSelectedId wouldn't retrigger an effect.
-export default function CharactersView({ apiKey, onOpenRp }: CharactersViewProps) {
+export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: CharactersViewProps) {
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterDetail | null>(null);
@@ -201,7 +206,14 @@ export default function CharactersView({ apiKey, onOpenRp }: CharactersViewProps
     if (!detail?.found) return;
     if (!window.confirm(`Delete "${detail.name}"? This can't be undone.`)) return;
     try {
-      await callTool('delete_character', { characterId: detail.characterId }, apiKey);
+      const result = await callTool<{ deleted: boolean; deletedChatIds?: string[] }>(
+        'delete_character',
+        { characterId: detail.characterId },
+        apiKey,
+      );
+      // The server purged the character's chats with it (they're unusable without the persona);
+      // tell the app so it closes any open tabs for them and refreshes the history browsers.
+      onChatsDeleted?.(result.deletedChatIds ?? []);
       setSelectedId(null);
       setDetail(null);
       setMobileShowEditor(false);

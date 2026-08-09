@@ -10,10 +10,14 @@ interface ChatBrowserProps {
   /** Opens (or focuses, if already open in another tab) a chat/RP tab — wired to useTabs'
    *  openChat/openRp. */
   onOpenChat: (chatId: string, title?: string) => void;
+  /** Bumped (App.tsx) whenever the underlying chat set changes out from under this browser —
+   *  e.g. a deleted character's chats were purged server-side — so the list re-fetches. Same
+   *  pattern as NotesBrowser's refreshKey. */
+  refreshKey: number;
 }
 
 // The sidebar's chat/RP browser: folders + past sessions of one kind, click to open/focus a tab.
-export default function ChatBrowser({ apiKey, kind, onOpenChat }: ChatBrowserProps) {
+export default function ChatBrowser({ apiKey, kind, onOpenChat, refreshKey }: ChatBrowserProps) {
   const [chats, setChats] = useState<ChatSummary[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
   const [search, setSearch] = useState('');
@@ -36,7 +40,7 @@ export default function ChatBrowser({ apiKey, kind, onOpenChat }: ChatBrowserPro
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refreshKey]);
 
   function onSearchChange(text: string) {
     setSearch(text);

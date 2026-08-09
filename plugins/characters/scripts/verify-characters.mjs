@@ -160,7 +160,26 @@ function createFakePool() {
             const idx = characters.findIndex((c) => c.character_id === characterId && c.user_id === userId);
             if (idx === -1) return { rows: [] };
             const [removed] = characters.splice(idx, 1);
+            // Emulate the real FK: chat_sessions.character_id is ON DELETE SET NULL (0049), so
+            // deleting a character nulls the link on its chats. The tool must purge the chats
+            // BEFORE this delete or its purge query matches nothing.
+            for (const c of chatSessions) {
+              if (c.character_id === removed.character_id) c.character_id = null;
+            }
             return { rows: [{ character_id: removed.character_id }] };
+          }
+
+          // --- delete_character: purge the character's chats (their ids come back so the
+          // client can close open tabs for them) ---
+          if (sql.startsWith('delete from chat_sessions') && sql.includes('character_id')) {
+            const [characterId, userId] = params;
+            assert(scopedUserId === userId, "delete_character's chat purge is scoped to the requesting user");
+            const removed = chatSessions.filter((c) => c.character_id === characterId && c.user_id === userId);
+            for (const row of removed) {
+              const i = chatSessions.indexOf(row);
+              if (i !== -1) chatSessions.splice(i, 1);
+            }
+            return { rows: removed.map((c) => ({ chat_id: c.chat_id })) };
           }
 
           // --- export_character_card ---
@@ -542,17 +561,26 @@ const appliedMissingChat = await db.withUserScope(userId, (session) =>
 assert(appliedMissingChat.applied === false && appliedMissingChat.reason === 'chat not found', 'apply_character_to_chat reports a missing chat instead of throwing');
 
 // --- delete_character ---
+pool.chatSessions.push({ chat_id: 'chat-3', user_id: userId, character_id: bare.characterId, params: {} });
 const deleted = await db.withUserScope(userId, (session) =>
   deleteTool.handler({ characterId: bare.characterId }, { userId, db: session }),
 );
 assert(deleted.deleted === true, 'delete_character removes an owned character');
+assert(
+  deleted.deletedChatIds.length === 1 && deleted.deletedChatIds[0] === 'chat-3',
+  "delete_character purges the character's chats and returns their ids",
+);
+assert(!pool.chatSessions.some((c) => c.chat_id === 'chat-3'), 'the purged chat is gone from chat_sessions');
 const afterDelete = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
 assert(!afterDelete.some((c) => c.characterId === bare.characterId), "a deleted character no longer appears in get_characters");
 
 const deleteOtherUsers = await db.withUserScope(userId, (session) =>
   deleteTool.handler({ characterId: otherUsersChar.characterId }, { userId, db: session }),
 );
-assert(deleteOtherUsers.deleted === false, "delete_character can't delete another user's character");
+assert(
+  deleteOtherUsers.deleted === false && Array.isArray(deleteOtherUsers.deletedChatIds) && deleteOtherUsers.deletedChatIds.length === 0,
+  "delete_character can't delete another user's character",
+);
 
 if (process.exitCode) {
   console.error('\ncharacters verification FAILED');

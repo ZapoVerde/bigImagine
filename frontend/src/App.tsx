@@ -44,7 +44,7 @@ export default function App() {
   // sessionStorage (not localStorage) so this reappears next session rather than being
   // permanently silenced by one click — see BackupWarningModal's own note on why.
   const [showBackupWarning, setShowBackupWarning] = useState(false);
-  const { tabs, activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus } = useTabs();
+  const { tabs, activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus, closeChats } = useTabs();
   const { theme, toggle: toggleTheme } = useTheme();
 
   // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
@@ -60,6 +60,10 @@ export default function App() {
   // version keeps the same live-read-once-per-turn behavior the in-chat panel had.
   const [promptRefreshToken, setPromptRefreshToken] = useState(0);
 
+  // Bumped when a character is deleted and its chats were purged server-side, so the sidebar's
+  // history browsers (which list those chats) re-fetch and drop them.
+  const [chatsRefreshKey, setChatsRefreshKey] = useState(0);
+
   // Mobile chat only: the top bars (TabStrip + TimerStrip + the chat header) collapse up when the
   // user scrolls down the chat history and come back on scroll-up or a pull-down at the top —
   // ChatView drives this via onTopBarsHiddenChange; the class below is what actually collapses
@@ -71,6 +75,15 @@ export default function App() {
   // App-wide navigation drawer behind the tab-bar hamburger (AppNavDrawer) — owns the specialist
   // views that used to be the empty-chat landing pills.
   const [navOpen, setNavOpen] = useState(false);
+
+  // A character was deleted — its RP chats are gone server-side (delete_character returns the
+  // ids). Close any open tabs for them and bump chatsRefreshKey so the history browsers drop
+  // them too.
+  function handleChatsDeleted(chatIds: string[]) {
+    if (chatIds.length === 0) return;
+    closeChats(chatIds);
+    setChatsRefreshKey((k) => k + 1);
+  }
 
   useEffect(() => {
     setTopBarsHidden(false);
@@ -159,6 +172,7 @@ export default function App() {
         notesRefreshKey={notesRefreshKey}
         activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
         promptRefreshToken={promptRefreshToken}
+        chatsRefreshKey={chatsRefreshKey}
       />
       {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
           the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the top
@@ -241,7 +255,7 @@ export default function App() {
             {tab.type === 'reviewpanel' && <ReviewPanelView />}
             {tab.type === 'rag' && <RagView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
-            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenRp={openRp} />}
+            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} />}
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}

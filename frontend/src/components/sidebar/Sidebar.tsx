@@ -18,6 +18,9 @@ interface SidebarProps {
   /** Bumped once per completed turn of the active RP chat (App.tsx, via ChatView) so the
    *  inspector re-fetches — same live-read-per-turn behavior it had as an in-chat panel. */
   promptRefreshToken: number;
+  /** Bumped (App.tsx) when the chat set changes out from under the browsers (a deleted
+   *  character's chats were purged) so the history lists re-fetch. */
+  chatsRefreshKey: number;
 
   selectedNoteId: string | null;
   onSelectNote: (id: string) => void;
@@ -44,7 +47,7 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
   let content: ReactNode = null;
   switch (props.activeType) {
     case 'chat':
-      content = <ChatBrowser apiKey={props.apiKey} kind="chat" onOpenChat={props.onOpenChat} />;
+      content = <ChatBrowser apiKey={props.apiKey} kind="chat" onOpenChat={props.onOpenChat} refreshKey={props.chatsRefreshKey} />;
       break;
     case 'rp':
       content = props.activeChatId ? (
@@ -54,7 +57,7 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
       );
       break;
     case 'characters':
-      content = <ChatBrowser apiKey={props.apiKey} kind="rp" onOpenChat={props.onOpenRp} />;
+      content = <ChatBrowser apiKey={props.apiKey} kind="rp" onOpenChat={props.onOpenRp} refreshKey={props.chatsRefreshKey} />;
       break;
     case 'notes':
       content = (
