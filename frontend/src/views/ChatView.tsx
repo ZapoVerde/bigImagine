@@ -350,10 +350,9 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Per-message edit/copy UI state
+  // Per-message edit UI state
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState('');
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   // Mobile: which message's action row is revealed by tapping its bubble — hidden by default
   // below the mobile breakpoint (ChatView.css). One at a time: tapping another message moves the
   // reveal, tapping the same message again closes it. Desktop is unaffected — the CSS rules that
@@ -1070,18 +1069,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
-  async function copyMessage(content: string, messageId?: string) {
-    try {
-      await navigator.clipboard.writeText(content);
-    } catch {
-      return; // clipboard permission denied/unavailable — not worth an error banner
-    }
-    if (messageId) {
-      setCopiedId(messageId);
-      window.setTimeout(() => setCopiedId((id) => (id === messageId ? null : id)), 1500);
-    }
-  }
-
   /** Mobile tap-to-reveal for a message's action row: tapping the bubble toggles which message's
    *  row is visible (one at a time). Action-button clicks stopPropagation inside the row, so
    *  using the buttons doesn't collapse the row mid-use. */
@@ -1408,14 +1395,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                           <button
                             type="button"
                             className="last-chat-icon"
-                            title={copiedId === m.messageId ? 'Copied' : 'Copy'}
-                            onClick={() => copyMessage(m.content, m.messageId)}
-                          >
-                            {copiedId === m.messageId ? '✓' : '📋'}
-                          </button>
-                          <button
-                            type="button"
-                            className="last-chat-icon"
                             title="Edit this reply — rewrite the text in place, the original stays one ‹ away"
                             disabled={busy}
                             onClick={() => startEdit(m.messageId!, m.content)}
@@ -1439,7 +1418,7 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                             title="Branch a new chat from this point, leaving this one untouched"
                             onClick={() => forkFrom(m.messageId!)}
                           >
-                            🌿
+                            <GitBranchIcon />
                           </button>
                           <button type="button" className="last-chat-icon" title="Delete" onClick={() => removeMessage(m.messageId!)}>
                             🗑
@@ -1463,9 +1442,6 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
                         </div>
                       ) : (
                         <div className="message-actions" onClick={(e) => e.stopPropagation()}>
-                          <button onClick={() => copyMessage(m.content, m.messageId)}>
-                            {copiedId === m.messageId ? 'Copied' : 'Copy'}
-                          </button>
                           <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>
                           <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
                             Fork from here

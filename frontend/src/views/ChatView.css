@@ -706,7 +706,7 @@
   opacity: 0.9;
 }
 
-/* --- Per-message actions (copy/edit/rerun/delete) --- */
+/* --- Per-message actions (edit/fork/rerun/delete) --- */
 
 .message-actions {
   display: flex;
