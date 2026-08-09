@@ -20,7 +20,10 @@
  * Two response-shaped failures are explicitly excluded even though they carry no HTTP status:
  * openaiCompatible.ts's "malformed arguments" (a real response came back, just not a usable one —
  * retrying the identical prompt is unlikely to fix a model's own bad tool-call JSON) and "returned
- * no choices" (same reasoning — a real, empty response, not a transport failure).
+ * no choices" (same reasoning — a real, empty response, not a transport failure). The embeddings
+ * adapter's "returned a N-dim embedding" (io/embeddings/voyage.ts — a real response whose vector
+ * length mismatches the requested output_dimension, a permanent config error) is the same shape
+ * and excluded the same way, so its digit isn't accidentally parsed as a retryable status.
  *
  * @api-declaration
  * isRetryableLlmError(err) -> boolean
@@ -32,7 +35,7 @@
  *     external_io:     []
  */
 
-const NON_RETRYABLE_RESPONSE_SHAPES = [/malformed arguments/i, /returned no choices/i];
+const NON_RETRYABLE_RESPONSE_SHAPES = [/malformed arguments/i, /returned no choices/i, /returned a \d+-dim embedding/i];
 
 export function isRetryableLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);

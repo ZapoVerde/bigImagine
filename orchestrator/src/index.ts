@@ -57,6 +57,7 @@ import { parseLlmProfiles } from './io/llm/profiles.js';
 import { createLlmConnectionStore } from './io/llmConnections.js';
 import { createImageConnectionStore } from './io/imageConnections.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
+import { createRetryingEmbeddingProvider } from './io/embeddings/retry.js';
 import { createFieldCipher } from './io/fieldCipher.js';
 import { createAccessIdentityResolver } from './io/accessIdentity.js';
 import { createChatSessionStore } from './io/chatSessions.js';
@@ -165,7 +166,10 @@ async function main(): Promise<void> {
   // constructed at runtime (server/httpServer.ts) — that call site gates its own throwaway
   // instance the same way, since this wrap can't reach something built after boot.
   const llm = createGatedLlmProvider(createLlmProviderForProfile(activeProfile), db, settings);
-  const embeddings = createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' });
+  const embeddings = createRetryingEmbeddingProvider(
+    createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' }),
+    settings,
+  );
 
   // Default matches the Docker image layout: /app/orchestrator/dist/index.js -> /app/plugins.
   const pluginsDir = process.env.BIGBRAIN_PLUGINS_DIR ?? new URL('../../plugins', import.meta.url).pathname;
