@@ -186,6 +186,23 @@ export async function getChatTurnStatus(chatId: string, apiKey: string | null): 
   return body.status;
 }
 
+/** POST /v1/chat/abort — the Stop button's client side: asks the orchestrator to abort the LLM
+ *  turn (and any cleanup repair) currently in flight for this chat, server-side — the only way
+ *  to actually stop generation, since /v1/chat/completions is one blocking non-streaming POST
+ *  and killing the client's own fetch would just orphan the server-side turn (see
+ *  orchestrator/turnAbort.ts). 404 = nothing was in flight (turn already finished or never
+ *  started — a normal race, not an error) and the function returns false. */
+export async function abortTurn(chatId: string, apiKey: string | null): Promise<boolean> {
+  const res = await fetch('/v1/chat/abort', {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId }),
+  });
+  if (res.status === 404) return false;
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return true;
+}
+
 async function jsonRequest<T>(path: string, apiKey: string | null, init?: { method?: string; body?: unknown }): Promise<T> {
   const res = await fetch(path, {
     method: init?.method ?? 'GET',

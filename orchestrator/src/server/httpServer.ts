@@ -171,6 +171,7 @@ import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promp
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
+import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
 import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { buildAutoRecallPrompt } from '../io/chatMemory/recallForPrompt.js';
@@ -1176,7 +1177,7 @@ async function regenerateSwipe(
   chatId: string,
   detail: ChatDetail,
   messageId: string,
-): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; error: string }> {
+): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
   const { db, chats } = deps;
   const { session } = detail;
   const priorMessages = detail.messages.slice(0, -1);
@@ -1229,6 +1230,13 @@ async function regenerateSwipe(
       anchorMessageId,
     }));
   } catch (err) {
+    if (isAbortError(err)) {
+      // The user hit Stop — not a failure. Nothing is written (the persisted user message simply
+      // has no reply yet, which the frontend already presents as the Resend recovery path), so
+      // the client gets a 499 to swallow quietly instead of an alarming 500.
+      log.info(`swipe regenerate aborted for chat ${chatId}`);
+      return { ok: false, aborted: true, error: 'turn aborted' };
+    }
     log.error(`swipe regenerate failed for chat ${chatId}`, err);
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -1478,6 +1486,13 @@ async function handleChatCompletions(
     // Surfaced to the client rather than falling through to startHttpServer's generic top-level
     // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
     // upstream response) should be diagnosable from the chat itself, not just the server log.
+    if (isAbortError(err)) {
+      // The user hit Stop (POST /v1/chat/abort). Not an error: the upstream call was cancelled,
+      // nothing was appended, and the frontend treats 499 as the expected "turn stopped" outcome.
+      log.info(`runTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
+      sendJson(res, 499, { error: 'turn aborted' });
+      return;
+    }
     log.error(`runTurn failed for user ${userId}`, err);
     sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
     return;
@@ -2663,7 +2678,9 @@ async function handleChatRoutes(
       }
       const result = await regenerateSwipe(deps, userId, chatId, detail, messageId);
       if (!result.ok) {
-        sendJson(res, 500, { error: result.error });
+        // 499 = the user stopped this regeneration (POST /v1/chat/abort) — same contract as the
+        // main turn's aborted response, so the frontend treats both the same way.
+        sendJson(res, result.aborted ? 499 : 500, { error: result.error });
         return;
       }
       sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
@@ -2808,6 +2825,42 @@ async function handleChatTurnStatus(req: IncomingMessage, res: ServerResponse, d
   }
   const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
   sendJson(res, 200, { status: chatId ? (getTurnStatus(chatId) ?? null) : null });
+}
+
+// The Stop button's server side (orchestrator/turnAbort.ts): abort every LLM task currently in
+// flight for this chat — the interactive turn runTurn is running AND any cleanup-loop repair
+// churning on the same chat (the stop is meant to kill the chat's whole active LLM spend at
+// once). 200 means at least one task was aborted; 404 means nothing was in flight (turn already
+// finished, or never started — a no-op, not an error). Ownership-checked via chats.getChat so a
+// user can only stop their own chat's work, unlike the read-only /v1/chat/status side channel.
+async function handleChatAbort(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  let body: { chat_id?: string };
+  try {
+    body = (await readJsonBody(req)) as { chat_id?: string };
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  if (typeof body.chat_id !== 'string' || !body.chat_id) {
+    sendJson(res, 400, { error: 'expected { chat_id: string }' });
+    return;
+  }
+  const chat = await deps.chats.getChat(userId, body.chat_id);
+  if (!chat) {
+    sendJson(res, 404, { error: 'unknown chat_id' });
+    return;
+  }
+  const aborted = abortTurn(body.chat_id);
+  if (!aborted) {
+    sendJson(res, 404, { error: 'no turn in flight for this chat' });
+    return;
+  }
+  sendJson(res, 200, { aborted: true });
 }
 
 // The async cleanup subloop's (cleanupLoop.ts) read surface for the chat's floating status pill —
@@ -2976,6 +3029,10 @@ async function handleRequest(
   }
   if (req.method === 'POST' && req.url === '/v1/chat/completions') {
     await handleChatCompletions(req, res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/chat/abort') {
+    await handleChatAbort(req, res, deps);
     return;
   }
   if (req.method === 'POST' && req.url === '/v1/attachments/extract') {

@@ -152,6 +152,7 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
           'x-api-key': config.apiKey,
           'anthropic-version': apiVersion,
         },
+        signal: options?.signal,
         body: JSON.stringify({
           model: options?.model ?? config.model,
           max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,

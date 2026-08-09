@@ -91,6 +91,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** sleep() that wakes early (and rejects with AbortError) the moment `signal` fires — a Stop
+ *  during retry backoff must not feel dead for the full backoff (up to llm_gate_retry_max_ms).
+ *  Undefined signal = plain sleep. */
+function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('The operation was aborted.', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 interface JobCapRow {
   status: string;
   max_runs_per_day: number;
@@ -294,7 +316,13 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
       for (let attempt = 0; ; attempt++) {
         const callStart = Date.now();
         try {
-          turn = await withLaneSlot(lane, maxConcurrent, () => base.complete(messages, tools, options));
+          turn = await withLaneSlot(lane, maxConcurrent, () => {
+            // A Stop fired while this call was queued behind a full lane (or before it started):
+            // throw AbortError without touching the provider — the retry decision below (and
+            // io/httpRetry.ts) both treat it as un-retryable, so it propagates as the abort.
+            if (options?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+            return base.complete(messages, tools, options);
+          });
           await logCall(db, {
             userId: ctx.userId,
             kind: ctx.kind,
@@ -329,7 +357,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
 
           const willRetry = isRetryableLlmError(err) && attempt < maxRetries;
           if (!willRetry) throw err;
-          await sleep(computeBackoffMs(attempt, retryBaseMs, retryMaxMs));
+          await sleepAbortable(computeBackoffMs(attempt, retryBaseMs, retryMaxMs), options?.signal);
         }
       }
 

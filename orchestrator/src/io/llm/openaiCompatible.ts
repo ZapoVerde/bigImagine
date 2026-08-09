@@ -236,6 +236,7 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
           'content-type': 'application/json',
           authorization: `Bearer ${config.apiKey}`,
         },
+        signal: options?.signal,
         body: JSON.stringify({
           model: options?.model ?? config.model,
           max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,

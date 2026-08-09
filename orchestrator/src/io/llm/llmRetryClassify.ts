@@ -37,6 +37,13 @@ const NON_RETRYABLE_RESPONSE_SHAPES = [/malformed arguments/i, /returned no choi
 export function isRetryableLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
 
+  // A Stop (orchestrator/turnAbort.ts) aborts the provider fetch, which throws a DOMException
+  // named 'AbortError' — that is the user explicitly cancelling this call, never something
+  // retrying it could fix. Must be checked before the no-status fallthrough below, which would
+  // otherwise classify it retryable (bare transport throw) and re-fire the very call the user
+  // just stopped.
+  if (err instanceof Error && err.name === 'AbortError') return false;
+
   if (NON_RETRYABLE_RESPONSE_SHAPES.some((re) => re.test(message))) return false;
 
   const statusMatch = message.match(/\b(\d{3})\b/);

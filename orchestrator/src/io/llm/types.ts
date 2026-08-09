@@ -78,6 +78,10 @@ export interface LlmTurn {
 }
 
 export interface LlmCompleteOptions {
+  /** Abort signal for this one call — threaded down to the provider fetch so a Stop (server-side
+   *  abort, orchestrator/turnAbort.ts) actually kills the upstream request mid-generation instead
+   *  of just the client giving up waiting. Undefined for calls nothing can cancel. */
+  signal?: AbortSignal;
   /** Force the named tool to be called instead of leaving it to the model's discretion — the
    *  "forced-schema call" pattern docs/spec.md §6.1/§6.3 use for extraction, not open-ended
    *  agentic tool use. `tools` must contain exactly this one definition when set. */

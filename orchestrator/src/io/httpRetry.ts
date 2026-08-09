@@ -24,8 +24,10 @@
  * on a plain retry with no code change, same class of problem as the stale-socket case above.
  *
  * @api-declaration
- * retryOnFailure(label, fn, maxRetries = 1) — retries only a thrown failure, logging each attempt
- *   under `label`; the last error is rethrown once retries are exhausted
+ * retryOnFailure(label, fn, maxRetries = 1, shouldSkipRetry?) — retries only a thrown failure,
+ *   logging each attempt under `label`; the last error is rethrown once retries are exhausted.
+ *   shouldSkipRetry, when given, marks an error as un-retryable (e.g. a request whose AbortSignal
+ *   fired — retrying it would just re-throw immediately against the already-aborted signal)
  * fetchWithRetry(url, init, maxRetries = 1) — retries only a thrown (network-level) failure,
  *   never an HTTP error status (4xx/5xx); those are real responses the caller must handle itself
  *
@@ -38,23 +40,34 @@
 
 import { log } from './logger.js';
 
-export async function retryOnFailure<T>(label: string, fn: () => Promise<T>, maxRetries = 1): Promise<T> {
+export async function retryOnFailure<T>(
+  label: string,
+  fn: () => Promise<T>,
+  maxRetries = 1,
+  shouldSkipRetry?: (err: unknown) => boolean,
+): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (err) {
       lastError = err;
-      const willRetry = attempt < maxRetries;
+      const willRetry = attempt < maxRetries && !(shouldSkipRetry?.(err) ?? false);
       log.warn(
         `${label} failed (attempt ${attempt + 1}/${maxRetries + 1})${willRetry ? ', retrying' : ', giving up'}`,
         err,
       );
+      if (!willRetry) break;
     }
   }
   throw lastError;
 }
 
 export function fetchWithRetry(url: string, init: RequestInit, maxRetries = 1): Promise<Response> {
-  return retryOnFailure(`fetch to ${url} — likely a stale keep-alive socket, see io/httpRetry.ts`, () => fetch(url, init), maxRetries);
+  return retryOnFailure(
+    `fetch to ${url} — likely a stale keep-alive socket, see io/httpRetry.ts`,
+    () => fetch(url, init),
+    maxRetries,
+    (err) => err instanceof Error && err.name === 'AbortError',
+  );
 }

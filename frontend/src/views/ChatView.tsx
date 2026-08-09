@@ -9,6 +9,7 @@ import {
   ApiError,
   adminListConnectionModels,
   adminListConnections,
+  abortTurn,
   archiveChat,
   callTool,
   chatCompletion,
@@ -821,6 +822,22 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     );
   }
 
+  /** The Stop button: tell the orchestrator to abort this chat's in-flight turn server-side
+   *  (POST /v1/chat/abort) — the only way to actually stop generation, since the completion
+   *  POST is a single blocking request (see client.ts's abortTurn doc comment for why killing
+   *  the client fetch alone wouldn't stop the server). The still-pending chatCompletion then
+   *  resolves with the server's 499 'turn aborted' response, which send()'s catch treats as
+   *  the expected outcome. Best-effort: if the abort request itself fails, the turn simply
+   *  continues and its reply lands — nothing worse happens, so no error banner either. */
+  async function stopTurn() {
+    if (!activeChat) return; // chat still being created — nothing in flight to abort yet
+    try {
+      await abortTurn(activeChat.chatId, apiKey);
+    } catch {
+      // Best-effort, see above.
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     const resendLast = resendMode();
@@ -879,7 +896,16 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       }
       await refreshActiveMessages(session.chatId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
+      if (err instanceof ApiError && err.status === 499) {
+        // The user hit Stop — the server aborted the turn (POST /v1/chat/abort), so this is
+        // the expected outcome, not an error. Refresh to show the stopped state: the user
+        // message stands with no reply, which resendMode() already presents as the Resend
+        // button recovery path. (activeChat, not the try-scoped session/chatId: a 499 can
+        // only come from a turn on the already-open active chat.)
+        if (activeChat) await refreshActiveMessages(activeChat.chatId).catch(() => {});
+      } else {
+        setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
+      }
     } finally {
       setSending(false);
       sendingRef.current = false;
@@ -995,7 +1021,14 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
       }
       await refreshActiveMessages(activeChat.chatId);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to save edit');
+      if (err instanceof ApiError && err.status === 499) {
+        // The user hit Stop on an edit-resend (the Stop button shows while `sending` is true,
+        // which submitEdit sets) — expected outcome, same quiet handling as send(): refresh so
+        // the truncated/edited user message stands alone with the Resend recovery path.
+        await refreshActiveMessages(activeChat.chatId).catch(() => {});
+      } else {
+        setError(err instanceof ApiError ? err.message : 'failed to save edit');
+      }
     } finally {
       setSending(false);
     }
@@ -1562,17 +1595,27 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
             ↓
           </button>
           <button
-            type="submit"
-            className={`chat-send-button${resendMode() ? ' chat-send-resend' : ''}`}
+            type="button"
+            className={`chat-send-button${sending ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
             disabled={
-              sending ||
-              selectionMode ||
-              (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0)
+              !sending &&
+              (selectionMode ||
+                (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
             }
-            title={resendMode() ? 'Resend your last message' : undefined}
+            title={sending ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
+            onClick={() => (sending ? void stopTurn() : void send())}
           >
-            <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
-            <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
+            {sending ? (
+              <>
+                <span className="chat-send-label">Stop</span>
+                <span className="chat-send-icon" aria-hidden="true">■</span>
+              </>
+            ) : (
+              <>
+                <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
+                <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
+              </>
+            )}
           </button>
         </form>
       </div>

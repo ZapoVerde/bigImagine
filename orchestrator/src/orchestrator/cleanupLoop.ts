@@ -80,6 +80,7 @@ import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ChatSessionStore } from '../io/chatSessions.js';
+import { registerTurnAbort, unregisterTurnAbort, isAbortError } from './turnAbort.js';
 import {
   DEFAULT_CLEANUP_CONFIG,
   applyRepairSteps,
@@ -265,9 +266,14 @@ async function dispatchStep(
   userId: string,
   chatId: string,
   step: RepairStep,
+  signal: AbortSignal,
 ): Promise<string | null> {
   const stepKind = step.kind === 'repair-header' ? 'header' : step.kind === 'repair-footer' ? 'footer' : step.setName;
   try {
+    // A Stop (orchestrator/turnAbort.ts, fired by POST /v1/chat/abort) landed while this chat's
+    // repair pass was between steps: skip without firing another billed call — the caller's loop
+    // sees the aborted signal too and records nothing, so the next tick re-plans the message.
+    if (signal.aborted) return null;
     // The entry object stays live in the trace after recordPromptTrace pushes it — attaching the
     // reply to it post-call is what makes the inspector able to show the reply at all.
     const entry: PromptTraceEntry = {
@@ -282,7 +288,7 @@ async function dispatchStep(
     // below is the part that's otherwise unrecoverable.
     log.info('cleanup loop: repair prompt fired', { chat: chatId, kind: stepKind, promptChars: step.prompt.length });
     const turn = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-      deps.llm.complete([{ role: 'user', content: step.prompt }], []),
+      deps.llm.complete([{ role: 'user', content: step.prompt }], [], { signal }),
     );
     const out = turn.message.content;
     if (out && out.trim()) {
@@ -294,6 +300,9 @@ async function dispatchStep(
     log.warn('cleanup loop: repair replied empty', { chat: chatId, kind: stepKind });
     return null;
   } catch (err) {
+    // Stopped by the user (the same abort signal above) is not a repair failure — leave the
+    // region as-is and let the caller's abort handling decide what gets recorded.
+    if (isAbortError(err)) return null;
     log.error(`cleanup loop: repair step failed for chat ${chatId}, leaving the region as-is`, err);
     return null;
   }
@@ -321,6 +330,10 @@ async function processDueMessage(
   // assigned after ensureActiveSwipe succeeds, so an early return before that leaves it undefined
   // and the finally's delete is a harmless no-op.
   let inFlightKey: string | undefined;
+  // Registered for the whole pass so POST /v1/chat/abort can stop the repair LLM call mid-flight
+  // (orchestrator/turnAbort.ts) — keyed by chatId like the interactive turn's own registration,
+  // so one Stop kills the chat's whole active LLM spend at once. Unregistered in the finally.
+  const abortController = registerTurnAbort(chatId);
   try {
     const swipeId = await deps.chats.ensureActiveSwipe(userId, chatId, message.message_id);
     if (!swipeId) {
@@ -351,8 +364,17 @@ async function processDueMessage(
     // steps, a deterministic 'remove' rule's output is what gets compared and written back.
     const outputs: Array<string | null> = [];
     for (const step of steps) {
-      // Serialized, TRG runQueued style — per-step fail-open inside dispatchStep.
-      outputs.push(await dispatchStep(deps, userId, chatId, step));
+      // Serialized, TRG runQueued style — per-step fail-open inside dispatchStep. A Stop that
+      // landed between steps breaks out here without firing another billed call.
+      if (abortController.signal.aborted) break;
+      outputs.push(await dispatchStep(deps, userId, chatId, step, abortController.signal));
+    }
+    if (abortController.signal.aborted) {
+      // The user hit Stop: nothing gets recorded (no job, no writeback), so the message stays
+      // due and the next tick re-plans it from scratch — a stopped pass must not mark the
+      // problem 'flagged', since it was never attempted to completion.
+      log.info(`cleanup loop: repair pass for message ${message.message_id} in chat ${chatId} aborted, nothing recorded`);
+      return;
     }
     const cleaned = applyRepairSteps(plan.text, steps, outputs);
     const applied = steps.length > 0 && outputs.some((o) => o !== null);
@@ -406,6 +428,7 @@ async function processDueMessage(
     // message uncovered, the next tick legitimately picks it up again — but as a new pass, not
     // as a parallel twin of this one.
     if (inFlightKey) inFlightRepairs.delete(inFlightKey);
+    unregisterTurnAbort(chatId, abortController);
   }
 }
 

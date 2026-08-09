@@ -50,6 +50,7 @@ import { createMetricsAccumulator, recordTurnMetrics, type TurnMetricsAccumulato
 import type { ToolRegistry } from './toolRegistry.js';
 import { describeToolCall } from './describeToolCall.js';
 import { setTurnStatus, clearTurnStatus } from './turnStatus.js';
+import { registerTurnAbort, unregisterTurnAbort } from './turnAbort.js';
 
 export interface RunTurnOptions {
   userId: string;
@@ -111,12 +112,13 @@ async function completeWithBlankRetry(
   messages: LlmMessage[],
   round: number,
   metrics: TurnMetricsAccumulator,
+  signal: AbortSignal,
 ): Promise<LlmTurn> {
   const { llm, tools, model, sampling, userId } = opts;
   let attempts = 0;
   for (;;) {
     const llmStart = Date.now();
-    const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling });
+    const turn = await llm.complete(messages, tools.definitions(), { model, ...sampling, signal });
     attempts++;
     metrics.rounds.push({
       round,
@@ -155,9 +157,13 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
   const callContext = { taskId: opts.taskId, kind: opts.taskKind ?? ('chat' as LlmCallKind), userId: opts.userId };
   const metrics = createMetricsAccumulator();
   const turnStart = Date.now();
+  // Registered under taskId (a chat_id for live turns) so POST /v1/chat/abort can stop this turn
+  // server-side (orchestrator/turnAbort.ts) — the same key the status side channel uses, and the
+  // same lifetime: dropped in the finally below, whatever the outcome.
+  const abortController = registerTurnAbort(opts.taskId);
   try {
     const result = await runWithRequestId(requestId, () =>
-      runWithCallContext(callContext, () => runTurnInner(opts, metrics)),
+      runWithCallContext(callContext, () => runTurnInner(opts, metrics, abortController.signal)),
     );
     await recordTurnMetrics(opts.db, {
       userId: opts.userId,
@@ -181,10 +187,11 @@ export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
     throw err;
   } finally {
     clearTurnStatus(opts.taskId);
+    unregisterTurnAbort(opts.taskId, abortController);
   }
 }
 
-async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulator): Promise<RunTurnResult> {
+async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulator, signal: AbortSignal): Promise<RunTurnResult> {
   const { userId, systemPrompt, db, tools, maxToolRounds = 10 } = opts;
   // taskId is the chat_id for a live conversation (RunTurnOptions.taskId's own doc comment) — only
   // meaningful to thread through to tools as chatId when this turn actually is one.
@@ -199,7 +206,10 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
   let focusedNoteId: string | undefined;
 
   for (let round = 0; round < maxToolRounds; round++) {
-    const turn = await completeWithBlankRetry(opts, messages, round, metrics);
+    // A Stop while a tool was executing (the tool's own nested calls aren't cancellable — they
+    // never see the signal) stops the turn here, before the next LLM round is billed.
+    if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+    const turn = await completeWithBlankRetry(opts, messages, round, metrics, signal);
 
     messages.push({
       ...turn.message,
@@ -212,6 +222,7 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
     }
 
     for (const call of turn.toolCalls) {
+      if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
       log.info(`tool call: ${call.name}`, { userId, toolCallId: call.id });
       setTurnStatus(opts.taskId, describeToolCall(call.name, call.arguments));
       const tool = tools.get(call.name);

@@ -923,6 +923,18 @@
     0 0 14px var(--color-accent);
 }
 
+/* Stop state: while a turn is in flight the button becomes Stop (ChatView.tsx) — danger-red so
+   it reads as "halt this", never as another Send. Same shape/size as Send, so the input row
+   doesn't shift when the button swaps. */
+.chat-input button.chat-send-stop,
+.chat-input button.chat-send-stop:hover {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  box-shadow:
+    0 0 0 2px var(--color-danger-bg),
+    0 0 14px var(--color-danger);
+}
+
 .chat-input button.chat-attach-button {
   flex: 0 0 auto;
   padding: 0.5rem 0.7rem;
