@@ -81,8 +81,19 @@ body {
 
 .app {
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
   height: 100%;
+  position: relative;
+}
+
+/* Below the full-width main bar: the row holding the left drawer and the content column. The
+   drawer pushes only this row (the chat content), never the main bar above it — the main bar
+   spans the whole app width and stays put when the drawer opens. */
+.app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
   position: relative;
 }
 

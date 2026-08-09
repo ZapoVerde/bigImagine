@@ -7,12 +7,6 @@
   overflow: hidden;
 }
 
-/* Desktop: the header (title + toggle arrow) sits UNDER the main bar, mirroring the chat
-   settings rail — the strip above it is just empty rail surface beside the bar. */
-.sidebar-header {
-  margin-top: var(--topbar-height);
-}
-
 .sidebar.collapsed {
   width: 2.6rem;
 }
@@ -41,11 +35,6 @@
 
   .sidebar.collapsed .sidebar-header {
     display: none;
-  }
-
-  /* The drawer already anchors below the main bar via top — don't double-shift the header. */
-  .sidebar-header {
-    margin-top: 0;
   }
 }
 

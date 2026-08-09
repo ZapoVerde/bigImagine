@@ -49,10 +49,10 @@ export default function App() {
 
   // Lifted out of Sidebar so TabStrip's mobile menu button (the "summoning arrow" that replaces
   // the always-on rail on narrow screens) can toggle the same state the rail's own header button
-  // does — they're siblings under .app, not parent/child, same reason note selection is lifted
-  // above. Starts closed everywhere (the user's call: chat history lives on the character page
-  // drawer and the RP drawer is the prompt inspector now — both are summoned on demand, and the
-  // chat gets maximal room by default).
+  // does — they're siblings under .app-body, not parent/child, same reason note selection is
+  // lifted above. Starts closed everywhere (the user's call: chat history lives on the character
+  // page drawer and the RP drawer is the prompt inspector now — both are summoned on demand, and
+  // the chat gets maximal room by default).
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
   // Bumped once per completed turn of the active RP chat (ChatView reports its message-count
@@ -159,61 +159,63 @@ export default function App() {
           }}
         />
       )}
-      <Sidebar
-        apiKey={apiKey}
-        activeType={activeTab?.type}
-        collapsed={sidebarCollapsed}
-        onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
-        onOpenChat={openChat}
-        onOpenRp={openRp}
-        selectedNoteId={selectedNoteId}
-        onSelectNote={setSelectedNoteId}
-        onDeselectNote={() => setSelectedNoteId(null)}
-        notesRefreshKey={notesRefreshKey}
-        activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
-        promptRefreshToken={promptRefreshToken}
-        chatsRefreshKey={chatsRefreshKey}
-      />
-      {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
-          the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the top
-          bars collapse on scroll, and the arrow has to survive that (App.css, .side-fab). */}
-      <button
-        type="button"
-        className="side-fab side-fab-left mobile-only"
-        title={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
-        aria-label={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
-        onClick={() => setSidebarCollapsed((c) => !c)}
-      >
-        {sidebarCollapsed ? '»' : '«'}
-      </button>
-      <div className="app-main">
-        {/* .app-top-bars is a collapsing single-row grid (App.css); the inner column shim keeps
-            TabStrip and TimerStrip stacked vertically so the grid always has exactly one child
-            to collapse. */}
-        <div className="app-top-bars">
-          <div className="app-top-bars-inner">
-            <TabStrip
-              tabs={tabs}
-              activeId={activeTabId}
-              onSelect={focus}
-              onClose={close}
-              onNew={openBlank}
-              onOpenSettings={() => summon('settings')}
-              onChangeKey={
-                auth.mode === 'key'
-                  ? () => {
-                      localStorage.removeItem(API_KEY_STORAGE_KEY);
-                      setAuth({ mode: 'locked' });
-                    }
-                  : undefined
-              }
-              navOpen={navOpen}
-              onToggleNav={() => setNavOpen((v) => !v)}
-            />
-            <TimerStrip apiKey={apiKey} />
-          </div>
+      {/* .app-top-bars is a collapsing single-row grid (App.css) spanning the FULL app width above
+          the drawer+content row (.app-body): the left drawer lives under the main bar and pushes
+          only the content area, never the bar itself. The inner column shim keeps TabStrip and
+          TimerStrip stacked vertically so the grid always has exactly one child to collapse. */}
+      <div className="app-top-bars">
+        <div className="app-top-bars-inner">
+          <TabStrip
+            tabs={tabs}
+            activeId={activeTabId}
+            onSelect={focus}
+            onClose={close}
+            onNew={openBlank}
+            onOpenSettings={() => summon('settings')}
+            onChangeKey={
+              auth.mode === 'key'
+                ? () => {
+                    localStorage.removeItem(API_KEY_STORAGE_KEY);
+                    setAuth({ mode: 'locked' });
+                  }
+                : undefined
+            }
+            navOpen={navOpen}
+            onToggleNav={() => setNavOpen((v) => !v)}
+          />
+          <TimerStrip apiKey={apiKey} />
         </div>
-        {tabs.map((tab) => (
+      </div>
+      <div className="app-body">
+        <Sidebar
+          apiKey={apiKey}
+          activeType={activeTab?.type}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={() => setSidebarCollapsed((c) => !c)}
+          onOpenChat={openChat}
+          onOpenRp={openRp}
+          selectedNoteId={selectedNoteId}
+          onSelectNote={setSelectedNoteId}
+          onDeselectNote={() => setSelectedNoteId(null)}
+          notesRefreshKey={notesRefreshKey}
+          activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
+          promptRefreshToken={promptRefreshToken}
+          chatsRefreshKey={chatsRefreshKey}
+        />
+        {/* Mobile-only floating toggle for the left rail (the desktop rail's own header arrow is
+            the control wide-screen). A fixed-position FAB rather than a slot in TabStrip — the
+            top bars collapse on scroll, and the arrow has to survive that (App.css, .side-fab). */}
+        <button
+          type="button"
+          className="side-fab side-fab-left mobile-only"
+          title={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
+          aria-label={sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
+          onClick={() => setSidebarCollapsed((c) => !c)}
+        >
+          {sidebarCollapsed ? '»' : '«'}
+        </button>
+        <div className="app-main">
+          {tabs.map((tab) => (
           <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
             {tab.type === 'blank' && (
               <div className="blank-tab">
@@ -263,6 +265,7 @@ export default function App() {
             {tab.type === 'backgrounds' && <BackgroundsView />}
           </div>
         ))}
+      </div>
       </div>
       <AppNavDrawer open={navOpen} onClose={() => setNavOpen(false)} onNavigate={summon} />
     </div>
