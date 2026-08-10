@@ -69,13 +69,27 @@ function groupHue(name: string): number {
   return 20 + (h % 320); // 20..339 — red (≈0-20, 340-360) excluded
 }
 
-/** True when the trimmed content is enclosed in ONE matching HTML-style tag pair — the same shape
- *  the 0085 toggle and 0086 groups produce. Tag names may contain spaces (kept verbatim), the
- *  comparison is case-insensitive and trailing whitespace-tolerant. Used by the red-coverage rule
- *  so a HAND-tagged custom block counts as covered even with the toggle off: the check is about
- *  the content that ships, not about which button was pushed. */
+/** True when the trimmed content is FULLY enclosed in matching HTML-style tag pairs — the same
+ *  shape the 0085 toggle and 0086 groups produce. Multiple sibling groups are fine (each pair
+ *  consumes its content, nesting included); the block is bare iff any non-whitespace text remains
+ *  OUTSIDE every matching pair — an untagged segment at the start, in the middle, or at the end.
+ *  Tag names may contain spaces (kept verbatim), comparison is case-insensitive. Used by the
+ *  red-coverage rule so a HAND-tagged custom block counts as covered even with the toggle off:
+ *  the check is about the content that ships, not about which button was pushed. */
 function contentIsWrapped(content: string): boolean {
-  return /^<([^<>]+)>[\s\S]*?<\/\1>\s*$/i.test(content.trim());
+  // Repeatedly remove the leftmost matching <Name>…</Name> pair (empty replacement: inner
+  // content is inside the pair, so it is tagged too). Nested pairs resolve over passes.
+  let remaining = content.trim();
+  const pairRe = /<([^<>]+)>[\s\S]*?<\/\1>/gi;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    remaining = remaining.replace(pairRe, () => {
+      changed = true;
+      return '';
+    });
+  }
+  return remaining.trim() === '';
 }
 
 /** Red-coverage rule: an enabled slot whose content ships bare is highlighted red. A slot is
