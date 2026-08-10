@@ -2217,7 +2217,9 @@ async function handleLocationsGet(res: ServerResponse, deps: HttpServerDeps): Pr
 async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const timezone = await getHouseholdTimezone(deps.settings);
   sendJson(res, 200, { timezone });
-}async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+}
+
+async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   let raw: unknown;
   try {
     raw = await readJsonBody(req);
