@@ -480,3 +480,10 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `orchestrator/src/util/renderLocationBlock.ts`). Index on `parent_location_id`.
   Applied by hand against the live DB — the `add column`/settings inserts are individually
   re-runnable; the FK constraint and backfill are guarded to run once, so apply once and verify.
+- `0084_location_marker_all_presets.sql` — the `'location'` marker slot in EVERY prompt stack
+  preset, not just builtins (2026-08-10: 0083's seed guarded `is_builtin`, so the user's custom
+  Comfy 2 preset never got the always-on "Active Location" slot). Inserts an enabled `'location'`
+  marker after the core markers in every preset that lacks one, shifting later slots up — using a
+  descending-position loop instead of 0083's single UPDATE, which collides on the unique
+  `(preset_id, position)` index for contiguous runs. No code change; hand-applied to the live DB
+  only (frontend already labels the slot via `markerLabels.ts`).
