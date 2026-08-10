@@ -20,6 +20,7 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
   { type: 'connections', label: 'Connections', icon: '🔌' },
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
+  { type: 'locations', label: 'Locations', icon: '📍' },
 ];
 
 interface AppNavDrawerProps {

@@ -260,6 +260,9 @@ export const SETTING_NAMES = [
   'chat_legibility_halo_strength',
   'location_describer_prompt',
   'location_describer_history_pairs',
+  'location_split_enabled',
+  'location_injection_enabled',
+  'location_injection_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

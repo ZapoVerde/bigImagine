@@ -16,6 +16,7 @@ import { useEdgeSwipe } from './hooks/useEdgeSwipe';
 import { useTheme } from './hooks/useTheme';
 import BrowseChubView from './views/BrowseChubView';
 import BackgroundsView from './views/BackgroundsView';
+import LocationsView from './views/LocationsView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
@@ -297,6 +298,7 @@ export default function App() {
             {tab.type === 'connections' && <ConnectionsView />}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}
+            {tab.type === 'locations' && <LocationsView />}
           </div>
         ))}
       </div>

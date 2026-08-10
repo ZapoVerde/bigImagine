@@ -186,7 +186,7 @@ import {
   renderRecentHistory,
   type RpMemoryContext,
 } from '../io/chatMemory/memoryInjection.js';
-import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
+import { loadLocationBlock, parseStoryHeader, scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -216,6 +216,8 @@ import {
   getHouseholdTimezone,
   getImageSettings,
   getLocationRenderStatus,
+  getLocationsAdmin,
+  getLocationSettings,
   getNotificationSettings,
   getPersonaSettings,
   getPiaProxyUrl,
@@ -232,6 +234,7 @@ import {
   parseSetCleanupSettingsBody,
   parseSetCredentialBody,
   parseSetImageSettingsBody,
+  parseSetLocationSettingsBody,
   parseSetNotificationSettingsBody,
   parseSetPersonaSettingsBody,
   parseSetPiaProxyUrlBody,
@@ -247,6 +250,7 @@ import {
   setCredential,
   setHouseholdTimezone,
   setImageSettings,
+  setLocationSettings,
   setNotificationSettings,
   setPersonaSettings,
   setPiaProxyUrl,
@@ -630,10 +634,12 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // recall_canon_facts (plugins/canonize/src/recallCanonFactsTool.ts) scopes by scene_id via
 // scene_presence/scenes.active_location_id. chat_sessions.scene_id now exists (migration 0067)
 // and is kept stamped by the post-cleanup scraper (orchestrator/locationAndPresenceScraper.ts),
-// so the cheap "this chat's current scene" read segway.md §2.2 promised is available here — but
-// wiring scene context into the narrator stack is deferred to the location-tracker plan
-// (docs/vistalyze_integration/location.md); until then the tool itself stays live for the model
-// to call mid-turn when it does have a scene_id.
+// so the cheap "this chat's current scene" read segway.md §2.2 promised is available here — and
+// the location-tracker (docs/vistalyze_integration/location.md §5.4) now uses it: the
+// 'location' marker slot is populated every turn via loadLocationBlock (the known-locations
+// <locations> block, eligibility-filtered + current-parent scoped), so a preset carrying that
+// marker emits it verbatim in its own slot order. The tool stays live for the model to call
+// mid-turn when it does have a scene_id.
 // docs/bi_principles.md §18 ("every prompt is surfaced for manual tuning"): one labeled item per
 // enabled, non-empty slot, in preset order — the same population assemblePromptStack itself would
 // emit, just not yet collapsed into one joined string. Both assembleNarratorSystemText (the real
@@ -651,12 +657,13 @@ async function buildNarratorStackItems(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
+  chatId: string,
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
 ): Promise<PromptPreviewItem[]> {
-  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate] = await Promise.all([
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate, locationBlock] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -672,6 +679,10 @@ async function buildNarratorStackItems(
     settings.get('chat_memory_inject_auto_recall_prompt'),
     settings.get('chat_memory_auto_recall_chunk_prompt'),
     settings.get('chat_memory_inject_recent_history_prompt'),
+    // location.md §5.4 — the known-locations block for the 'location' marker slot. Fail-open:
+    // '' when disabled/empty, so an enabled slot with nothing to say emits nothing (the
+    // assembler's non-empty filter drops it) — never an empty <locations> block in the prompt.
+    loadLocationBlock({ db, settings }, userId, chatId),
   ]);
   // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
   // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
@@ -714,6 +725,10 @@ async function buildNarratorStackItems(
             recentHistoryTemplate || undefined,
           ) || undefined
         : undefined,
+    // location.md §5.4 — the known-locations block (known parents + the current parent's subs +
+    // the TRG rules text), rendered by loadLocationBlock above. undefined when disabled/empty so
+    // an enabled 'location' slot with nothing to say emits nothing.
+    location: locationBlock.block || undefined,
     // Deprecated fused alias — presets that still carry a memory_recall slot get the legacy block.
     memory_recall: memoryContext.fused || undefined,
   };
@@ -754,12 +769,13 @@ async function assembleNarratorSystemText(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
+  chatId: string,
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
 ): Promise<{ text: string; recentHistoryRendered: boolean }> {
-  const items = await buildNarratorStackItems(db, settings, userId, characterId, presetId, memoryContext, recentHistoryMessages);
+  const items = await buildNarratorStackItems(db, settings, userId, chatId, characterId, presetId, memoryContext, recentHistoryMessages);
   return {
     text: items.map((i) => i.content).join('\n\n'),
     recentHistoryRendered: items.some((i) => i.markerKey === 'recent_history'),
@@ -788,7 +804,7 @@ async function trimToLiveWindow(messages: LlmMessage[], settings: OrchestratorSe
 // caller has one (post-turn fire sites pass turnLlm — the same connection the story itself ran
 // on, mirroring VLZ's describer defaulting to the main chat LLM); restart triggers
 // (ensureActiveLocationImage, the swipe-route fire) pass none and fall back to deps.llm.
-function fireLocationImageGeneration(
+export function fireLocationImageGeneration(
   deps: HttpServerDeps,
   userId: string,
   chatId: string | undefined,
@@ -1006,7 +1022,7 @@ async function assembleSessionTurnContext(
     // appended at the end"). When the slot rendered, the messages array is emptied — the stack
     // alone carries the context; the LLM adapters emit a single empty user message so providers
     // don't reject the request shape (the user's "send it as it is").
-    const narrator = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed);
+    const narrator = await assembleNarratorSystemText(db, settings, userId, chatId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed);
     return {
       systemPrompt: narrator.text,
       messagesForLlm: narrator.recentHistoryRendered ? [] : resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
@@ -1193,7 +1209,7 @@ async function buildPromptPreview(  deps: HttpServerDeps,
 
     if (session.kind === 'rp' && session.promptStackPresetId) {
       systemStack.push(
-        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed)),
+        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, chatId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed)),
       );
     } else {
       let system = session.params.system;
@@ -1303,7 +1319,7 @@ async function regenerateSwipe(
   detail: ChatDetail,
   messageId: string,
 ): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
-  const { db, chats } = deps;
+  const { db, settings, chats } = deps;
   const { session } = detail;
   const priorMessages = detail.messages.slice(0, -1);
   const messagesForLlm: LlmMessage[] = priorMessages.map((m) => ({ role: m.role, content: m.content }));
@@ -1374,21 +1390,28 @@ async function regenerateSwipe(
   const updated = await chats.recordSwipe(userId, chatId, messageId, reply);  if (!updated) {
     return { ok: false, error: 'message no longer exists' };
   }
-  // Stage 2 (docs/vistalyze_integration/segway.md §4): post-cleanup heuristic extraction against
-  // the regenerated text — recordSwipe above just made its swipe active, which is the anchor the
-  // scraper's transient rows attach to. Fail-open inside the scraper: never blocks the turn. The
-  // returned locationId feeds endpoint.md §5's decoupled image-generation trigger (fired by the
-  // caller after the response is sent — never awaited inline here). 'replace' mode: the turn
-  // being regenerated is discarded, so previous_scene_id (the last-turn location state) is left
-  // pointing at the last *settled* location — the revert target must survive a chain of swipes.
-  const locationId = await scrapeTurnPresence(
-    { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
-    userId,
-    chatId,
-    messageId,
-    reply,
-    'replace',
-  );
+  // Stage 2 (docs/vistalyze_integration/segway.md §4, location.md §4.2): post-cleanup heuristic
+  // extraction against the regenerated text — recordSwipe above just made its swipe active,
+  // which is the anchor the scraper's transient rows attach to. Fail-open inside the scraper:
+  // never blocks the turn. The returned locationId feeds endpoint.md §5's decoupled
+  // image-generation trigger (fired by the caller after the response is sent — never awaited
+  // inline here). 'replace' mode: the turn being regenerated is discarded, so previous_scene_id
+  // (the last-turn location state) is left pointing at the last *settled* location — the revert
+  // target must survive a chain of swipes.
+  // location.md §4.2's header-good gate: only scrape when the reply's header parses — a bad
+  // header is left to the cleanup subloop, which repairs it and then fires the deferred scrape
+  // on the repaired text (cleanupLoop.ts's onLocationScraped hook), so nothing re-scrapes a
+  // headerless text and no wasted ensureActiveSwipe row is minted for it.
+  const locationId = parseStoryHeader(reply)
+    ? await scrapeTurnPresence(
+        { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+        userId,
+        chatId,
+        messageId,
+        reply,
+        'replace',
+      )
+    : undefined;
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
   }
@@ -1411,7 +1434,7 @@ async function handleChatCompletions(
   res: ServerResponse,
   deps: HttpServerDeps,
 ): Promise<void> {
-  const { db, tools, apiKeys, accessIdentity, chats } = deps;
+  const { db, settings, tools, apiKeys, accessIdentity, chats } = deps;
 
   const userId = await authenticate(req, apiKeys, accessIdentity);
   if (!userId) {
@@ -1662,14 +1685,20 @@ async function handleChatCompletions(
       // 'extend': a genuinely new turn — a location change advances previous_scene_id
       // (endpoint.md §5.1.8's last-turn location state), so the background can revert to the
       // location that was showing before this turn while the new render is pending.
-      scrapedLocationId = await scrapeTurnPresence(
-        { db, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
-        userId,
-        body.chat_id,
-        assistantMessage.messageId,
-        reply,
-        'extend',
-      );
+      // location.md §4.2's header-good gate: only scrape when the reply's header parses — a bad
+      // header is left to the cleanup subloop, which repairs it and then fires the deferred
+      // scrape on the repaired text (cleanupLoop.ts's onLocationScraped hook). This is the same
+      // race ensureFirstTurnHeader.ts already closes for turn 1, generalized to every turn.
+      scrapedLocationId = parseStoryHeader(reply)
+        ? await scrapeTurnPresence(
+            { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+            userId,
+            body.chat_id,
+            assistantMessage.messageId,
+            reply,
+            'extend',
+          )
+        : undefined;
     }
     // First exchange in a still-untitled session names it, once — bigBrain never retitles a
     // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
@@ -2131,6 +2160,40 @@ async function handleImageSettingsSet(req: IncomingMessage, res: ServerResponse,
   }
   await setImageSettings(deps.settings, parsed);
   sendJson(res, 200, await getImageSettings(deps.settings));
+}
+
+// location.md §6.3 — the Locations page's unified settings surface: the tracker's three keys
+// plus the room describer's two (moved entirely from the Backgrounds page; the image-settings
+// endpoint above still accepts the describer_* keys for back-compat). Same admin gate + live
+// no-restart shape as every other settings pair.
+async function handleLocationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getLocationSettings(deps.settings));
+}
+
+async function handleLocationSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetLocationSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected { split_enabled?, injection_enabled?, injection_prompt?, describer_prompt?, describer_history_pairs? }',
+    });
+    return;
+  }
+  await setLocationSettings(deps.settings, parsed);
+  sendJson(res, 200, await getLocationSettings(deps.settings));
+}
+
+// location.md §6.2.4 — the Locations page's read-only known-locations browser (parent/sub
+// grouping, lifecycle status, image thumbnail). Cross-user admin roster, same as the render-
+// status table; read-only, no POST counterpart.
+async function handleLocationsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { locations: await getLocationsAdmin(deps.db) });
 }
 
 async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -3307,6 +3370,30 @@ async function handleRequest(
       return;
     }
     await handleImageSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/location-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLocationSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/location-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLocationSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/locations') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLocationsGet(res, deps);
     return;
   }
   if (req.method === 'GET' && req.url === '/v1/admin/timezone') {

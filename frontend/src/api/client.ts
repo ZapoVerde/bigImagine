@@ -5,6 +5,8 @@ import type {
   ChatMemorySettings,
   ChatMemorySyncStatusRow,
   LocationRenderStatusRow,
+  LocationSettings,
+  LocationAdminRow,
   CanonSettings,
   ChatMessage,
   ChatParams,
@@ -613,6 +615,40 @@ export function adminSetImageSettings(
   adminKey: string | null,
 ): Promise<ImageSettings> {
   return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey, { method: 'POST', body: patch });
+}
+
+/** GET /v1/admin/location-settings — the Locations page's unified tracker settings (location.md
+ *  §6.3): split/injection toggles, the known-locations block prompt, and the room describer's
+ *  prompt/history-pairs (moved here from the Backgrounds page, migration 0083; the image-settings
+ *  endpoint still accepts the describer_* keys for back-compat). Admin-gated like every
+ *  Settings-tab GET. */
+export function adminGetLocationSettings(adminKey: string | null): Promise<LocationSettings> {
+  return jsonRequest<LocationSettings>('/v1/admin/location-settings', adminKey);
+}
+
+/** POST /v1/admin/location-settings — partial patch (any subset of split_enabled,
+ *  injection_enabled, injection_prompt, describer_prompt, describer_history_pairs); the server
+ *  rejects a body with zero fields or wrong-typed values. Returns the full updated set. No
+ *  restart: the scraper and the marker-slot renderer read the values live. */
+export function adminSetLocationSettings(
+  patch: {
+    split_enabled?: boolean;
+    injection_enabled?: boolean;
+    injection_prompt?: string;
+    describer_prompt?: string;
+    describer_history_pairs?: string;
+  },
+  adminKey: string | null,
+): Promise<LocationSettings> {
+  return jsonRequest<LocationSettings>('/v1/admin/location-settings', adminKey, { method: 'POST', body: patch });
+}
+
+/** GET /v1/admin/locations — the Locations page's read-only known-locations browser (location.md
+ *  §6.2.4), cross-user roster: every location with its parent place (parent_location_id) and
+ *  lifecycle status. No POST counterpart — the tracker owns row creation. */
+export async function adminGetLocationsAdmin(adminKey: string | null): Promise<LocationAdminRow[]> {
+  const body = await jsonRequest<{ locations: LocationAdminRow[] }>('/v1/admin/locations', adminKey);
+  return body.locations;
 }
 
 /** GET /v1/admin/chat-background-settings — the SettingsView "Chat Background" fieldset's saved

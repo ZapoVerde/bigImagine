@@ -73,7 +73,14 @@ export async function ensureFirstTurnHeader(
     const config = await resolveCleanupConfig(deps.settings);
     // rules deliberately empty — this pass only guarantees the scene header (the location/bg
     // machinery's input), never slop or footer work, which stays with the async subloop.
-    const plan = planCleanup(rawReply, [], config.header, config.footer, { history, userName: config.userName });
+    // knownLocations is '' by definition on turn 1 (a brand-new chat has no scene/locations yet,
+    // so loadLocationBlock would render nothing) — passed explicitly so the default template's
+    // {{known_locations}} token resolves and never leaks verbatim into the repair prompt.
+    const plan = planCleanup(rawReply, [], config.header, config.footer, {
+      history,
+      userName: config.userName,
+      knownLocations: '',
+    });
     const headerStep = plan.steps.find((s) => s.kind === 'repair-header');
     if (!headerStep) {
       log.debug('ensureFirstTurnHeader: header already conforms, no repair needed', { chatId });

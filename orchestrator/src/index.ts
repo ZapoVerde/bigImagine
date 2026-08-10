@@ -68,7 +68,7 @@ import { createOrchestratorSettingsStore } from './io/orchestratorSettings.js';
 import { createToolRegistry } from './orchestrator/toolRegistry.js';
 import { loadPlugins } from './orchestrator/pluginLoader.js';
 import { createApiKeyStore } from './server/apiKeyStore.js';
-import { startHttpServer } from './server/httpServer.js';
+import { fireLocationImageGeneration, startHttpServer } from './server/httpServer.js';
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -198,8 +198,6 @@ async function main(): Promise<void> {
   // under callContext's kind 'system' — never capped, per the user's "no cap" call). Needs the
   // chats store for recordSwipe/ensureActiveSwipe writebacks; the engine it runs
   // (orchestrator/cleanupHeuristics.ts) is pure and shared.
-  startCleanupLoop({ db, llm, settings, chats });
-
   // Optional — a no-op resolver unless BIGBRAIN_ACCESS_TEAM_DOMAIN/AUD/EMAILS are all set. See
   // io/accessIdentity.ts.
   const accessIdentity = createAccessIdentityResolver(process.env);
@@ -211,7 +209,11 @@ async function main(): Promise<void> {
   // by this process beyond this boolean (those secrets stay scoped to the backup container only).
   const backupConfigured = process.env.BIGBRAIN_BACKUP_CONFIGURED === 'true';
 
-  startHttpServer({
+  // The HTTP layer's deps, built once and shared by the server and the cleanup loop's
+  // onLocationScraped hook (location.md §4.3): the deferred post-repair scrape resolves a
+  // location, and the same decoupled describe→render chain fires for it as for an immediate
+  // scrape — kept out of cleanupLoop.ts's own imports so it never depends on the HTTP layer.
+  const httpDeps: Parameters<typeof startHttpServer>[0] = {
     llm,
     db,
     embeddings,
@@ -227,7 +229,17 @@ async function main(): Promise<void> {
     modelName: 'bigbrain',
     port,
     backupConfigured,
+  };
+
+  startCleanupLoop({
+    db,
+    llm,
+    settings,
+    chats,
+    onLocationScraped: (userId, chatId, locationId) => fireLocationImageGeneration(httpDeps, userId, chatId, locationId, llm),
   });
+
+  startHttpServer(httpDeps);
 }
 
 main().catch((err) => {

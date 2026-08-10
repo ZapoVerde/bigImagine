@@ -84,6 +84,7 @@ import { registerTurnAbort, unregisterTurnAbort, isAbortError } from './turnAbor
 import {
   DEFAULT_CLEANUP_CONFIG,
   applyRepairSteps,
+  inspectHeader,
   planCleanup,
   type CleanupPlan,
   type RegionConfig,
@@ -91,6 +92,7 @@ import {
   type SlopAction,
   type SlopRule,
 } from './cleanupHeuristics.js';
+import { loadLocationBlock, scrapeTurnPresence } from './locationAndPresenceScraper.js';
 
 const POLL_INTERVAL_MS = 5_000; // the pill/user watches for the rewrite — snappy, unlike the 30s chat-memory digest
 /** How much of the chat's history precedes one message for {{history, N}} resolution. formatHistoryPairs
@@ -114,6 +116,13 @@ export interface CleanupLoopDeps {
   llm: LlmProvider;
   settings: OrchestratorSettingsStore;
   chats: ChatSessionStore;
+  /** location.md §4.3 — fired when the deferred post-repair scrape resolves a location (the
+   *  call-site scrape was skipped because the raw header was bad; the repaired text now has a
+   *  header, so the standard describe→render chain runs for the newly-established location).
+   *  Wired at the composition root (index.ts) to httpServer's fireLocationImageGeneration —
+   *  kept out of this module's direct imports so cleanupLoop never depends on the HTTP layer.
+   *  Fire-and-forget: the callback must never throw into the tick (fail-open, location.md §1.3). */
+  onLocationScraped?: (userId: string, chatId: string, locationId: string) => void;
 }
 
 interface UserRow {
@@ -356,8 +365,18 @@ async function processDueMessage(
     }
     inFlightRepairs.add(inFlightKey);
 
-    const history = await loadHistory(deps.db, userId, chatId, message.message_id, message.created_at);
-    const plan = planCleanup(message.content, rules, config.header, config.footer, { history, userName: config.userName });
+    const [history, locationBlock] = await Promise.all([
+      loadHistory(deps.db, userId, chatId, message.message_id, message.created_at),
+      // location.md §5.5 — the known-locations block for the {{known_locations}} header-repair
+      // token. Fail-open: '' when disabled or empty, so a template carrying the token still
+      // resolves (never leaks the literal token into the repair prompt).
+      loadLocationBlock({ db: deps.db, settings: deps.settings }, userId, chatId),
+    ]);
+    const plan = planCleanup(message.content, rules, config.header, config.footer, {
+      history,
+      userName: config.userName,
+      knownLocations: locationBlock.block,
+    });
     const steps = plan.steps;
 
     // applyRepairSteps always runs against plan.text (the post-'remove' text) — so even with zero
@@ -393,6 +412,39 @@ async function processDueMessage(
       }
       await recordJob(deps.db, userId, chatId, message.message_id, result.newSwipeId, 'done', true, describePlan(plan));
       log.info(`cleanup loop: rewrote message ${message.message_id} in chat ${chatId}`, { notes: describePlan(plan) });
+
+      // location.md §4.3 — the deferred post-cleanup scrape: the raw reply's header was bad, so
+      // the call-site scrape (httpServer.ts) skipped it; the header was just repaired and now
+      // passes inspection — scrape the REPAIRED text so this turn resolves its location/scene/
+      // presence, and fire the describe→render chain for the newly-established location. Closes
+      // the race documented in ensureFirstTurnHeader.ts (before the tracker, nothing re-scraped
+      // after a repair). Fire-and-forget, fail-open: never blocks the tick.
+      const headerRepaired = steps.some((s, i) => s.kind === 'repair-header' && outputs[i] !== null);
+      if (headerRepaired && inspectHeader(cleaned, config.header).status === 'ok') {
+        // Mode from the cleaned swipe's ordinal (location.md §4.3.2): the cleanup writeback
+        // always adds exactly one swipe, so index 1 = the message was never regenerated
+        // ('extend' — a location change advances previous_scene_id, the 0076 revert target);
+        // index ≥ 2 = the active content was itself a regeneration ('replace' — never advances
+        // it). A manual regeneration of an extend turn counts as replace, which is correct.
+        const mode = (result.message.swipes?.index ?? 0) > 1 ? 'replace' : 'extend';
+        void (async () => {
+          try {
+            const locationId = await scrapeTurnPresence(
+              { db: deps.db, settings: deps.settings, ensureActiveSwipe: (u, c, m) => deps.chats.ensureActiveSwipe(u, c, m) },
+              userId,
+              chatId,
+              message.message_id,
+              cleaned,
+              mode,
+            );
+            if (locationId) deps.onLocationScraped?.(userId, chatId, locationId);
+          } catch (err) {
+            // scrapeTurnPresence is fail-open internally; this belt-and-braces guard keeps the
+            // callback from ever taking the tick down (location.md §1.3).
+            log.warn(`cleanup loop: deferred scrape failed for message ${message.message_id} (fail-open)`, { chatId, err });
+          }
+        })();
+      }
       return;
     }
 

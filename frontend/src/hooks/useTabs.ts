@@ -15,7 +15,8 @@ export type TabType =
   | 'characters'
   | 'browse-chub'
   | 'cleanup'
-  | 'backgrounds';
+  | 'backgrounds'
+  | 'locations';
 // 'rp' behaves like 'chat' (many instances, each keyed by chatId), not like a singleton summoned
 // view — it's excluded here for that reason, not because it's a specialist view (see openRp below).
 export type SummonableType = Exclude<TabType, 'blank' | 'chat' | 'rp'>;
@@ -45,6 +46,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   'browse-chub': 'Browse Chub',
   cleanup: 'Cleanup',
   backgrounds: 'Backgrounds',
+  locations: 'Locations',
 };
 
 function newChatTab(): TabInstance {

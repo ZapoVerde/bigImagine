@@ -14,10 +14,10 @@ import './BackgroundsView.css';
 // The Backgrounds management page — every bg-gen knob in one place, the way RagView pulled the
 // chat-memory pipeline out of SettingsView. Three sections:
 //   1. Image Generation (moved from SettingsView): the Master Image Prompt Template
-//      synthesizeImagePrompt.ts expands per render (endpoint.md §4.2), the room-describer prompt
-//      describeLocation.ts expands (describer.md, migration 0078), and how many trailing
-//      turn-pairs the describer reads as context. The active image backend itself is managed in
-//      the Connections tab (io/imageConnections.ts) — this page tunes what gets sent to it.
+//      synthesizeImagePrompt.ts expands per render (endpoint.md §4.2). The room-describer prompt
+//      and its turn-pair count moved to the Locations page (location.md §6.3) — the describer is
+//      the location tracker's now. The active image backend itself is managed in the Connections
+//      tab (io/imageConnections.ts) — this page tunes what gets sent to it.
 //   2. Chat Background (moved from SettingsView): how the rendered location background is
 //      displayed in ChatView — the parallax pan toggle, the dimming veil, and the bubble fill
 //      (parallax_fade_teststep.md §2.2, migration 0073).
@@ -37,8 +37,6 @@ export default function BackgroundsView() {
   // --- Image Generation settings (endpoint.md §2.2, bi_principles.md §18) ---
   const [imageSettings, setImageSettingsState] = useState<ImageSettings | null>(null);
   const [selectedImageTemplate, setSelectedImageTemplate] = useState('');
-  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
-  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
   const [imageStatus, setImageStatus] = useState('');
 
   // --- Chat Background settings (parallax_fade_teststep.md §2.2 + migration 0073) ---
@@ -63,8 +61,6 @@ export default function BackgroundsView() {
   function applyImageSettings(settings: ImageSettings) {
     setImageSettingsState(settings);
     setSelectedImageTemplate(settings.template);
-    setSelectedDescriberPrompt(settings.describerPrompt);
-    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
   }
 
   function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
@@ -134,16 +130,10 @@ export default function BackgroundsView() {
   // what it was (default or a prior override), it isn't silently re-saved as an override.
   async function saveImageSettings() {
     if (!imageSettings) return;
-    const patch: { template?: string; describer_prompt?: string; describer_history_pairs?: string } = {};
-    if (selectedImageTemplate !== imageSettings.template) patch.template = selectedImageTemplate;
-    if (selectedDescriberPrompt !== imageSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
-    if (selectedDescriberHistoryPairs !== imageSettings.describerHistoryPairs) {
-      patch.describer_history_pairs = selectedDescriberHistoryPairs;
-    }
-    if (Object.keys(patch).length === 0) return;
+    if (selectedImageTemplate === imageSettings.template) return;
     setImageStatus('');
     try {
-      const updated = await adminSetImageSettings(patch, adminKey);
+      const updated = await adminSetImageSettings({ template: selectedImageTemplate }, adminKey);
       applyImageSettings(updated);
       setImageStatus('Saved — applies to the next location render, no restart needed.');
     } catch (err) {
@@ -204,11 +194,11 @@ export default function BackgroundsView() {
     <div className="backgrounds-view">
       <h1>Backgrounds</h1>
       <div className="status backgrounds-view-intro">
-        Everything about location backgrounds in one place: how the background image is created
-        (the image-gen template + the room describer that feeds it) and how it's shown in the chat
-        (the parallax pan, the dimming veil, and the bubble fill). The active image backend itself
-        is managed on the Connections tab. The render-status table below is proof the pipeline
-        actually ran — the same admin read the pipeline's logs back.
+        How the location background image is created (the master image-gen template) and how
+        it's shown in the chat (the parallax pan, the dimming veil, and the bubble fill). The
+        room-describer that turns a location name into a description lives on the Locations tab;
+        the active image backend is managed on the Connections tab. The render-status table
+        below is proof the pipeline actually ran — the same admin read the pipeline's logs back.
       </div>
 
       <fieldset>
@@ -232,48 +222,9 @@ export default function BackgroundsView() {
           default back.
         </div>
         <br />
-        <label>
-          Room-describer prompt {imageSettings?.describerPromptIsDefault && <em>(default)</em>}
-          <br />
-          <textarea
-            value={selectedDescriberPrompt}
-            onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
-            rows={10}
-            placeholder="[SYSTEM: TASK — LOCATION VISUAL ARCHIVIST]… (the built-in default)"
-          />
-        </label>
-        <div className="status">
-          The describer LLM call that turns a newly-minted location name into a real room
-          description (describer.md). Macros expanded per call are{' '}
-          <code>{'{{location_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
-          <code>Visuals:</code> half fills <code>visual_description</code> (which flows into the
-          template above); <code>Definition:</code> fills the location's definition. Empty means
-          the built-in default.
-        </div>
-        <label>
-          Room-describer context (turn-pairs)
-          <br />
-          <input
-            type="text"
-            inputMode="numeric"
-            value={selectedDescriberHistoryPairs}
-            onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
-            placeholder="1"
-          />
-        </label>
-        <div className="status">
-          How many trailing turn-pairs the describer reads as narrative context (default 1). Leave
-          empty for the default.
-        </div>
-        <br />
         <button
           onClick={saveImageSettings}
-          disabled={
-            !imageSettings ||
-            (selectedImageTemplate === imageSettings.template &&
-              selectedDescriberPrompt === imageSettings.describerPrompt &&
-              selectedDescriberHistoryPairs === imageSettings.describerHistoryPairs)
-          }
+          disabled={!imageSettings || selectedImageTemplate === imageSettings.template}
         >
           Save
         </button>

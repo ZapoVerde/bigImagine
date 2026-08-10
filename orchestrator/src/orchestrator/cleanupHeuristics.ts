@@ -139,6 +139,11 @@ export interface RepairVars {
   /** {{user}} — the household's persona_name setting, resolved the same way the rest of the
    *  app resolves {{user}} (interpolateMacros.ts's userName; empty when unset). */
   userName?: string;
+  /** {{known_locations}} — the known-locations <locations> block (location.md §5.5), loaded by
+   *  the async callers (cleanupLoop, ensureFirstTurnHeader) via loadLocationBlock and passed
+   *  in here — buildRepairPrompt stays pure/sync (bi_principles.md §8). Empty when unset, so a
+   *  template carrying the token still resolves (never leaks the literal token). */
+  knownLocations?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,13 +347,19 @@ export function parseHistoryPairs(arg: string | undefined): number {
   return Number.isInteger(n) && n >= 0 ? n : 2;
 }
 
-/** Resolves a repair (or slop) prompt template: {{history, N}}/{{prev_turns, N}} through the
- *  interpolateMacros resolveArg hook, {{message}} and {{user}} (the household's persona_name)
- *  through the registry. Deterministic given the same vars (bi_principles.md §8). */
+/** Resolves a repair (or slop) prompt template: {{history, N}}/{{prev_turns, N}} and
+ *  {{known_locations}} (location.md §5.5) through the interpolateMacros resolveArg hook,
+ *  {{message}} and {{user}} (the household's persona_name) through the registry. Deterministic
+ *  given the same vars (bi_principles.md §8). */
 export function buildRepairPrompt(template: string, vars: RepairVars): string {
   return interpolateMacros(template, { message: vars.message, userName: vars.userName }, (name, arg) => {
     if (name === 'history' || name === 'prev_turns') {
       return formatHistoryPairs(vars.history ?? [], parseHistoryPairs(arg));
+    }
+    if (name === 'known_locations') {
+      // The block is loaded by the async caller (loadLocationBlock); '' here keeps the token
+      // from leaking verbatim into the prompt when the caller has none (turn 1, disabled).
+      return vars.knownLocations ?? '';
     }
     return undefined;
   });
@@ -393,10 +404,10 @@ export function planCleanup(
   rules: SlopRule[],
   header: RegionConfig,
   footer: RegionConfig,
-  opts: { history?: LlmMessage[]; historyPairs?: number; userName?: string } = {},
+  opts: { history?: LlmMessage[]; historyPairs?: number; userName?: string; knownLocations?: string } = {},
 ): CleanupPlan {
   const slop = evaluateSlopRules(text, rules);
-  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs, userName: opts.userName };
+  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs, userName: opts.userName, knownLocations: opts.knownLocations };
   const h = inspectHeader(slop.text, header);
   const f = inspectFooter(slop.text, footer);
 
@@ -480,7 +491,9 @@ export const DEFAULT_CLEANUP_CONFIG = {
     '- Era: AD/BC by default, or the story\'s own established calendar era (e.g. "41st Millennium", "3 ABY").\n' +
     '- Location: "General Area - Specific Room" when a specific spot is known, otherwise just the general area.\n' +
     '- Present: the comma-separated roster of every character physically in the room at the end of ' +
-    'this turn, from the history — never invented, never guessed from off-screen mentions.\n\n' +
+    'this turn, from the history — never invented, never guessed from off-screen mentions.\n' +
+    '{{known_locations}}\n' +
+    '\n' +
     'Recent conversation:\n' +
     '{{history, 2}}\n\n' +
     'Reply to fix:\n' +

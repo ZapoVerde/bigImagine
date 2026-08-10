@@ -35,12 +35,16 @@
  *
  * @api-declaration
  * parseStoryHeader(text) -> StoryHeader | null — pure; the two-line header parse, no IO
+ * splitLocationName(name) -> { parent, sub } — pure; the " - " parent/sub split (location.md §3.1)
  * scrapeTurnPresence(deps, userId, chatId, messageId, text, mode) -> Promise<string | undefined> —
  *   fail-open; parse, anchor the turn's active swipe, then extract location/scene/characters/
  *   presence, returning the resolved location id (the async image-gen trigger's target). mode is
  *   'extend' for a genuinely new turn (a location change advances chat_sessions.previous_scene_id)
  *   or 'replace' for a swipe regeneration (the replaced turn's location must NOT become the
  *   previous one — the revert target stays the last settled location, endpoint.md §5.1.8)
+ * loadLocationBlock(deps, userId, chatId) -> Promise<LocationBlockResult> — fail-open; the
+ *   known-locations <locations> block (location.md §5.2), shared by the 'location' marker slot
+ *   and the {{known_locations}} header-repair token
  *
  * @contract
  *   assertions:
@@ -56,6 +60,8 @@ import type { PostgresClient } from '../io/postgres.js';
 import type { DbSession } from '../io/postgres.js';
 import { log } from '../io/logger.js';
 import { toImageGenSeed } from '../util/synthesizeImagePrompt.js';
+import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
+import { renderLocationBlock, type LocationBlockLists } from '../util/renderLocationBlock.js';
 
 /** The two-line header block (docs/vistalyze_integration/cleanup_prompt.md §2.4), parsed. */
 export interface StoryHeader {
@@ -98,11 +104,31 @@ export function parseStoryHeader(text: string): StoryHeader | null {
   return { timeOfDay: headerMatch[1]!.trim(), dateLine: headerMatch[2]!.trim(), location: headerMatch[3]!.trim(), present };
 }
 
+/**
+ * Pure split of a header location string into parent/place + sub/location — Triggeryze's parent
+ * rule (location-tracker.json's Extract parent location): everything before the FIRST " - " is
+ * the parent; the sub keeps the FULL string as its name (location.md §3.1 — locations.name stays
+ * verbatim so every exact-name seam keeps working). No separator, a leading separator, or an
+ * empty parent after trim => standalone (the whole name is its own parent).
+ *   "The Tavern - Kitchen"            → { parent: "The Tavern", sub: "The Tavern - Kitchen" }
+ *   "The Tavern - Kitchen - Cellar"   → { parent: "The Tavern", sub: "The Tavern - Kitchen - Cellar" }
+ *   "The Smoking Pipe"                → { parent: "The Smoking Pipe", sub: null }
+ */
+export function splitLocationName(name: string): { parent: string; sub: string | null } {
+  const idx = name.indexOf(' - ');
+  if (idx <= 0) return { parent: name, sub: null };
+  const parent = name.slice(0, idx).trim();
+  if (parent === '' || parent === name) return { parent: name, sub: null };
+  return { parent, sub: name };
+}
+
 /** The scraper's narrow dependency surface. ensureActiveSwipe lives in chatSessions.ts (the
  *  single owner of chat_message_swipes writes, per bi_principles.md §8) and is injected rather
- *  than re-implemented here. */
+ *  than re-implemented here. settings supplies the location_split_enabled switch (location.md
+ *  §2.4) — read live, no restart, same as every other household setting. */
 export interface TurnPresenceScrapeDeps {
   db: PostgresClient;
+  settings: OrchestratorSettingsStore;
   /** Returns the message's active swipe id, creating the message's own swipe row if it has none
    *  yet (fresh assistant turns are persisted swipe-less; recordSwipe's regeneration always has
    *  one). Undefined when the message doesn't exist. */
@@ -139,7 +165,12 @@ export async function scrapeTurnPresence(
       log.warn('post-cleanup scraper: turn has no anchorable swipe, skipping extraction', { chatId, messageId });
       return undefined;
     }
-    return await deps.db.withUserScope(userId, (session) => extractFromHeader(session, userId, chatId, swipeId, header, mode));
+    // The parent/sub split switch (location.md §2.4), read live per scrape. Off = today's flat
+    // behavior: the full header string resolves-or-creates one row with no parent link.
+    const splitEnabled = (await deps.settings.get('location_split_enabled')) !== 'false';
+    return await deps.db.withUserScope(userId, (session) =>
+      extractFromHeader(session, userId, chatId, swipeId, header, mode, splitEnabled),
+    );
   } catch (err) {
     // bi_principles.md §11: log the seam — a silent failure here would quietly lose trusted
     // scene state, but it must never take the turn down with it.
@@ -167,8 +198,9 @@ async function extractFromHeader(
   swipeId: string,
   header: StoryHeader,
   mode: 'extend' | 'replace',
+  splitEnabled: boolean,
 ): Promise<string> {
-  const locationId = await resolveLocation(session, userId, chatId, swipeId, header);
+  const locationId = await resolveLocation(session, userId, chatId, swipeId, header, splitEnabled);
   const sceneId = await resolveScene(session, userId, chatId, locationId, mode);
   const characterIds = await resolvePresentCharacters(session, userId, chatId, swipeId, header.present);
   await replaceScenePresence(session, userId, sceneId, characterIds);
@@ -181,15 +213,45 @@ async function extractFromHeader(
   return locationId;
 }
 
-/** segway.md §4.2: resolve-or-create the location. A matched row's environment is refreshed
- *  (jsonb merge, so any richer weather/mood a future Vistalyze pass wrote survives); a new row
- *  is transient, anchored to this turn's swipe, with visual_description seeded from the
- *  extracted name and environment from the extracted time/date. A matched *transient* row is
- *  re-anchored to this turn's swipe too — continued use of the same place across turns is the
- *  active-timeline signal, so the row must follow the current turn's swipe, not stay pinned to
- *  the turn that first created it (which the sync tick may otherwise demote as an alternate
- *  timeline even though the live story still stands in it). Permanent/user-authored rows keep
- *  their identity untouched.
+/** segway.md §4.2 + location.md §3.2: resolve-or-create the location, parent first. The header
+ *  string is split (location.md §3.1): when it names a sub ("The Tavern - Kitchen"), the parent
+ *  row ("The Tavern") is resolved-or-created first — via the same resolveOrCreateLocationRow
+ *  path as everything else (bi_principles.md §8: one code path) — and the sub row is minted with
+ *  parent_location_id pointing at it. Both rows are transient on this turn's swipe, so the sync
+ *  tick promotes/demotes them together and a swipe replace demotes both (location.md §2.2).
+ *  Fail-open: a parent-row failure degrades to the sub minted standalone — never drop the turn's
+ *  location over a grouping row. When the split is disabled (location_split_enabled = 'false')
+ *  the header string resolves flat, exactly as before the tracker. */
+async function resolveLocation(
+  session: DbSession,
+  userId: string,
+  chatId: string,
+  swipeId: string,
+  header: StoryHeader,
+  splitEnabled: boolean,
+): Promise<string> {
+  const environment = JSON.stringify({ time_of_day: header.timeOfDay, date: header.dateLine });
+  const { parent, sub } = splitLocationName(header.location);
+  let parentLocationId: string | null = null;
+  if (splitEnabled && sub) {
+    try {
+      parentLocationId = await resolveOrCreateLocationRow(session, userId, chatId, swipeId, parent, environment, null, splitEnabled);
+    } catch (err) {
+      log.warn('post-cleanup scraper: parent location resolve failed, minting sub standalone (fail-open)', { chatId, parent, err });
+    }
+  }
+  return resolveOrCreateLocationRow(session, userId, chatId, swipeId, header.location, environment, parentLocationId, splitEnabled);
+}
+
+/** The resolve-or-create core shared by sub and parent rows (segway.md §4.2). A matched row's
+ *  environment is refreshed (jsonb merge, so any richer weather/mood a future Vistalyze pass
+ *  wrote survives); a new row is transient, anchored to this turn's swipe, with visual_description
+ *  seeded from the extracted name and environment from the extracted time/date. A matched
+ *  *transient* row is re-anchored to this turn's swipe too — continued use of the same place
+ *  across turns is the active-timeline signal, so the row must follow the current turn's swipe,
+ *  not stay pinned to the turn that first created it (which the sync tick may otherwise demote as
+ *  an alternate timeline even though the live story still stands in it). Permanent/user-authored
+ *  rows keep their identity untouched.
  *
  *  The no-match mint path carries the rendered image fingerprint (§4.2.5, endpoint.md §5.1.2's
  *  "same place reuses its image" rule): a rerun/regeneration of the turn that anchored a row
@@ -200,32 +262,50 @@ async function extractFromHeader(
  *  chat, so another chat's row of the same name never leaks in), which makes the follow-up
  *  generation pass a §5.1.2 cache hit: zero provider cost, and the visible bg never changes for
  *  the same room. A genuinely new place (no prior image) mints blank and renders as before. */
-async function resolveLocation(
+async function resolveOrCreateLocationRow(
   session: DbSession,
   userId: string,
   chatId: string,
   swipeId: string,
-  header: StoryHeader,
+  name: string,
+  environment: string,
+  parentLocationId: string | null,
+  splitEnabled: boolean,
 ): Promise<string> {
-  const environment = JSON.stringify({ time_of_day: header.timeOfDay, date: header.dateLine });
-  const matched = await session.query<{ location_id: string; status: string | null }>(
-    `select location_id, status from locations
+  const matched = await session.query<{ location_id: string; status: string | null; parent_location_id: string | null }>(
+    `select location_id, status, parent_location_id from locations
      where user_id = $1 and name = $2 and ${ELIGIBLE_TRANSIENT_CLAUSE}
      order by (status is null) desc, (status = 'permanent') desc, location_id`,
-    [userId, header.location, chatId],
+    [userId, name, chatId],
   );
   if (matched[0]) {
+    // Backfill the parent link when the split is enabled and this row predates it (minted while
+    // the split was off -> parent_location_id null): without this the row would show up in BOTH
+    // the parents and subs lists of the <locations> block (name-like fallback) and read
+    // parentName: null in the admin roster. Same resolve-or-create path as the mint; fail-open
+    // to leaving the row standalone. coalesce keeps an existing link untouched.
+    let effectiveParentId = parentLocationId;
+    if (splitEnabled && !effectiveParentId) {
+      const { parent, sub } = splitLocationName(name);
+      if (sub) {
+        try {
+          effectiveParentId = await resolveOrCreateLocationRow(session, userId, chatId, swipeId, parent, environment, null, splitEnabled);
+        } catch (err) {
+          log.warn('post-cleanup scraper: parent link backfill failed, row stays standalone (fail-open)', { chatId, parent, err });
+        }
+      }
+    }
     // Re-anchor a transient match to the turn that's using it now (see the doc above); leave
     // permanent/user-authored rows alone.
     await session.query(
       matched[0].status === 'transient'
-        ? `update locations set environment = environment || $3::jsonb, anchor_swipe_id = $4, updated_at = now()
+        ? `update locations set environment = environment || $3::jsonb, anchor_swipe_id = $4, parent_location_id = coalesce(parent_location_id, $5), updated_at = now()
            where location_id = $1 and user_id = $2`
-        : `update locations set environment = environment || $3::jsonb, updated_at = now()
+        : `update locations set environment = environment || $3::jsonb, parent_location_id = coalesce(parent_location_id, $4), updated_at = now()
            where location_id = $1 and user_id = $2`,
       matched[0].status === 'transient'
-        ? [matched[0].location_id, userId, environment, swipeId]
-        : [matched[0].location_id, userId, environment],
+        ? [matched[0].location_id, userId, environment, swipeId, effectiveParentId]
+        : [matched[0].location_id, userId, environment, effectiveParentId],
     );
     return matched[0].location_id;
   }
@@ -249,23 +329,23 @@ async function resolveLocation(
      where user_id = $1 and name = $2 and anchor_chat_id = $3 and image_url is not null
      order by image_generated_at desc nulls last
      limit 1`,
-    [userId, header.location, chatId],
+    [userId, name, chatId],
   );
   // The minted description: the prior row's real description when it has one (non-empty and not
   // just the name), else the name-seed this mint would otherwise write — a genuinely new place
   // still seeds from its name and the describer enriches it after.
   const carriedDescription =
-    prior?.visual_description && prior.visual_description.trim() !== '' && prior.visual_description !== header.location
+    prior?.visual_description && prior.visual_description.trim() !== '' && prior.visual_description !== name
       ? prior.visual_description
-      : header.location;
+      : name;
 
   const [created] = await session.query<{ location_id: string }>(
-    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
-     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10, $11)
+    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id, parent_location_id)
+     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10, $11, $12)
      returning location_id`,
     [
       userId,
-      header.location,
+      name,
       carriedDescription,
       prior?.definition ?? null,
       environment,
@@ -275,6 +355,7 @@ async function resolveLocation(
       prior?.image_render_hash ?? null,
       chatId,
       swipeId,
+      parentLocationId,
     ],
   );
   return created!.location_id;
@@ -392,5 +473,105 @@ async function replaceScenePresence(session: DbSession, userId: string, sceneId:
        on conflict (scene_id, character_id) do nothing`,
       [sceneId, characterId, userId],
     );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The known-locations block (location.md §5) — shared by the 'location' marker slot
+// (httpServer.ts's buildNarratorStackItems) and the {{known_locations}} header-repair token
+// (cleanupHeuristics.ts's buildRepairPrompt, loaded by the async callers)
+// ---------------------------------------------------------------------------
+
+export interface LocationBlockDeps {
+  db: PostgresClient;
+  settings: OrchestratorSettingsStore;
+}
+
+/** The rendered block plus the current parent (for the block's sub-section header). */
+export interface LocationBlockResult {
+  /** The fully rendered <locations> block, or '' when disabled / no eligible locations / error. */
+  block: string;
+  /** The split parent of the current scene's active location, or null. */
+  currentParent: string | null;
+}
+
+/** location.md §5.2 — the shared loader both injection seams use. Fail-open (location.md §1.3):
+ *  any error, missing scene, or empty list returns { block: '', currentParent: null } — the
+ *  caller's empty-block rule then emits nothing, and a turn is never blocked over context.
+ *
+ *  Lists are eligibility-filtered (segway.md §2.6's ELIGIBLE_TRANSIENT_CLAUSE, scoped to this
+ *  chat's active swipe path) so an inactive/alternate-timeline row never pollutes the block.
+ *  Parents = eligible rows with parent_location_id null (parent rows AND standalone locations)
+ *  plus the current parent by derivation when its row is missing/ineligible — the current parent
+ *  must always be listed; it is the block's anchor. Subs = eligible rows of the current parent
+ *  by parent_location_id, with a name-prefix fallback so rows minted while the split was
+ *  disabled still group. */
+export async function loadLocationBlock(
+  deps: LocationBlockDeps,
+  userId: string,
+  chatId: string,
+): Promise<LocationBlockResult> {
+  try {
+    if ((await deps.settings.get('location_injection_enabled')) === 'false') {
+      return { block: '', currentParent: null };
+    }
+    const template = await deps.settings.get('location_injection_prompt');
+    return await deps.db.withUserScope(userId, async (session) => {
+      // The current scene's active location via the chat_sessions.scene_id cache pointer
+      // (segway.md §2.2), eligibility-filtered like every model-facing read (a stale pointer
+      // reads absent, and the block then degrades to parents-only).
+      const [sceneRow] = await session.query<{ location_id: string; name: string }>(
+        `select l.location_id, l.name
+         from chat_sessions cs
+         join scenes s on s.scene_id = cs.scene_id
+         join locations l on l.location_id = s.active_location_id and l.user_id = $1
+         where cs.chat_id = $2
+           and ${ELIGIBLE_TRANSIENT_CLAUSE}
+         limit 1`,
+        [userId, chatId, chatId],
+      );
+      const currentName = sceneRow?.name ?? null;
+      const currentParent = currentName ? splitLocationName(currentName).parent : null;
+
+      // The parent row for the subs query (by name — the current location row is the sub when a
+      // room is named; the parent is a separate row).
+      let parentRowId: string | null = null;
+      if (currentParent) {
+        const [parentRow] = await session.query<{ location_id: string }>(
+          'select location_id from locations where user_id = $1 and name = $2 limit 1',
+          [userId, currentParent],
+        );
+        parentRowId = parentRow?.location_id ?? null;
+      }
+
+      const [parentRows, subRows] = await Promise.all([
+        session.query<{ name: string }>(
+          `select name from locations
+           where user_id = $1 and parent_location_id is null
+             and ${ELIGIBLE_TRANSIENT_CLAUSE}
+           order by name`,
+          [userId, chatId, chatId],
+        ),
+        currentParent
+          ? session.query<{ name: string }>(
+              `select name from locations
+               where user_id = $1
+                 and (parent_location_id = $2 or name like $4)
+                 and ${ELIGIBLE_TRANSIENT_CLAUSE}
+               order by name`,
+              [userId, parentRowId, chatId, `${currentParent} - %`],
+            )
+          : Promise.resolve([]),
+      ]);
+
+      const parents = [...new Set([...parentRows.map((r) => r.name), ...(currentParent && !parentRows.some((r) => r.name === currentParent) ? [currentParent] : [])])];
+      const subs = [...new Set(subRows.map((r) => r.name))];
+      const block = renderLocationBlock(template, { parents, subs, currentParent } satisfies LocationBlockLists);
+      return { block, currentParent };
+    });
+  } catch (err) {
+    // Fail-open: the block is context, never a gate (location.md §1.3, bi_principles.md §11).
+    log.warn('loadLocationBlock: failed, emitting no block (fail-open)', { chatId, err });
+    return { block: '', currentParent: null };
   }
 }

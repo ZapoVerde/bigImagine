@@ -104,17 +104,22 @@ function createFakePool() {
             return { rows: row ? [{ location_id: row.location_id, status: row.status }] : [] };
           }
           if (sql.includes('update locations set environment')) {
-            const [locationId, userId, environmentJson, anchorSwipeId] = params;
+            const [locationId, userId, environmentJson] = params;
             const row = locations.find((l) => l.location_id === locationId && l.user_id === userId);
             if (row) {
               row.environment = { ...row.environment, ...JSON.parse(environmentJson) };
-              // re-anchor: a matched transient row follows the turn that's using it now
-              if (row.status === 'transient' && anchorSwipeId !== undefined) row.anchor_swipe_id = anchorSwipeId;
+              // re-anchor: a matched transient row follows the turn that's using it now. The
+              // transient branch carries the swipe as param 4; both branches may carry a
+              // backfilled parent link as the last param (SQL uses coalesce, so a null link
+              // never clobbers — mirrored here by only writing strings).
+              if (row.status === 'transient' && typeof params[3] === 'string') row.anchor_swipe_id = params[3];
+              const last = params[params.length - 1];
+              if (typeof last === 'string') row.parent_location_id = last;
             }
             return { rows: [] };
           }
           if (sql.startsWith('insert into locations')) {
-            const [userId, name, visualDescription, definition, environmentJson, seed, imageUrl, renderedInput, renderHash, chatId, swipeId] = params;
+            const [userId, name, visualDescription, definition, environmentJson, seed, imageUrl, renderedInput, renderHash, chatId, swipeId, parentLocationId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
@@ -129,6 +134,7 @@ function createFakePool() {
               status: 'transient',
               anchor_chat_id: chatId,
               anchor_swipe_id: swipeId,
+              parent_location_id: parentLocationId ?? null,
             };
             locations.push(row);
             return { rows: [{ location_id: row.location_id }] };
@@ -282,12 +288,17 @@ Present: Mair, Seraphina, Mair`;
   assert(parseStoryHeader('[ Morning | Thursday, July 1, 2026 AD | Deck 6 ]\nPresent:') !== null, 'an empty Present: roster is authoritative (presence replaced with nothing)');
 }
 
+// location_split_enabled (location.md §2.4), read live per scrape. This suite keeps exercising
+// the FLAT (downgrade) path — off — so its original row-count/presence assertions hold
+// unchanged; the split (parent/sub) path is covered by verify-location-tracker.mjs.
+const FAKE_SETTINGS = { get: async () => 'false' };
+
 // --- scrapeTurnPresence: happy path, first visit -------------------------------------------------
 {
   const pool = poolWithActiveSwipe(createFakePool());
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   assert(pool.locations.length === 1, 'a new location row is created');
   assert(
@@ -343,7 +354,7 @@ Present: Mair, Seraphina, Mair`;
   });
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   assert(pool.locations.length === 1 && pool.locations[0].environment.weather === 'clear', 'a permanent location is matched, not duplicated');
   assert(pool.locations[0].environment.time_of_day === 'Late Evening', 'a matched location\'s environment is refreshed from the header');
@@ -369,7 +380,7 @@ Present: Mair, Seraphina, Mair`;
     anchor_swipe_id: '99999999-9999-9999-9999-999999999999', // not on this chat's active path
   });
   const db = createPostgresClient(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: fakeEnsureActiveSwipe(pool).fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: fakeEnsureActiveSwipe(pool).fn }, USER, CHAT, MSG, HEADER);
   assert(pool.locations.length === 2, 'an ineligible (inactive/alternate-swipe) location is not matched — a fresh transient row is created instead of resurrecting it');
 }
 
@@ -397,7 +408,7 @@ Present: Mair, Seraphina, Mair`;
   });
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   assert(pool.locations.length === 2, 'the superseded row is not matched — a fresh row is minted (timeline semantics unchanged)');
   const fresh = pool.locations.find((l) => l.location_id !== 'eeeeeeee-0000-0000-0000-000000000005');
@@ -433,7 +444,7 @@ Present: Mair, Seraphina, Mair`;
   });
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   const fresh = pool.locations.find((l) => l.location_id !== 'ffffffff-0000-0000-0000-000000000006');
   assert(fresh.visual_description === 'A wide taproom with low oak beams, a great hearth, and lanterns casting warm light across scarred tables.', 'a described prior\'s visual_description is carried onto the fresh row (hash-match keeps the §5.1.2 cache hit)');
@@ -475,13 +486,48 @@ Present: Mair, Seraphina, Mair`;
 
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   assert(pool.locations.length === 1, 'the transient row is matched — no duplicate is created on reuse');
   assert(pool.locations[0].anchor_swipe_id === sb, 'the matched transient location is re-anchored to the turn that is using it now');
   assert(pool.characters.length === 2, 'the transient character is matched — only Seraphina is newly registered');
   assert(pool.characters[0].anchor_swipe_id === sb, 'the matched transient character is re-anchored to the current turn\'s swipe too');
   assert(pool.scenes.length === 1, 'one scene is resolved for the reused location');
+}
+
+// --- Parent-link backfill: a row minted while the split was OFF gets linked on the matched path ----
+// (review 2026-08-10) Once location_split_enabled turns on, a pre-split sub row (parent_location_id
+// null) must be backfilled on the next match — otherwise it shows in BOTH the parents and subs
+// lists of the <locations> block (name-like fallback) and reads parentName: null in the admin
+// roster. The parent row is resolved-or-created through the same path as the mint.
+{
+  const pool = createFakePool();
+  const sb = randomUUID();
+  pool.chatMessages.push({ message_id: 'msg-5', chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: 'swipe-old' });
+  pool.chatMessages.push({ message_id: MSG, chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: sb });
+  pool.chatSessions.set(CHAT, { scene_id: null });
+  pool.locations.push({
+    location_id: randomUUID(),
+    user_id: USER,
+    name: 'The Drunken Kraken - Main Hall',
+    visual_description: 'Smoky.',
+    environment: {},
+    status: 'transient',
+    anchor_chat_id: CHAT,
+    anchor_swipe_id: 'swipe-old',
+    parent_location_id: null, // pre-split mint: no link
+  });
+  const settings = { get: async (k) => (k === 'location_split_enabled' ? 'true' : 'false') };
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, settings, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+
+  assert(pool.locations.length === 2, 'the pre-split sub is matched (no duplicate) and the parent row is backfilled into existence');
+  const sub = pool.locations.find((l) => l.name === 'The Drunken Kraken - Main Hall');
+  const parent = pool.locations.find((l) => l.name === 'The Drunken Kraken');
+  assert(!!parent, 'the parent row name is the derived portion before the first " - "');
+  assert(sub.parent_location_id === parent.location_id, 'the matched sub row is linked to the resolved-or-created parent row');
+  assert(sub.anchor_swipe_id === sb, 'the matched transient sub is still re-anchored to the current turn\'s swipe');
 }
 
 // --- endpoint.md §5.1.8: previous_scene_id advances on extending turns, never on swipe regen ---
@@ -520,7 +566,7 @@ Present: Mair, Seraphina, Mair`;
   // Extending turn: the story moves to a new location -> previous_scene_id = the old scene.
   const harborHeader = `[ Morning | Thursday, July 1, 2026 AD | The Harbor - Docks ]
 Present: Seraphina`;
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, harborHeader, 'extend');
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, harborHeader, 'extend');
   const afterExtendSceneId = pool.chatSessions.get(CHAT).scene_id;
   assert(afterExtendSceneId !== 'scene-tavern' && pool.scenes.some((s) => s.scene_id === afterExtendSceneId), 'an extending turn stamps the new scene');
   assert(pool.chatSessions.get(CHAT).previous_scene_id === 'scene-tavern', 'an extending turn that changes location advances previous_scene_id to the old scene (endpoint.md §5.1.8)');
@@ -529,7 +575,7 @@ Present: Seraphina`;
   // the revert target stays the last settled location across a chain of swipes.
   const cliffsHeader = `[ Noon | Thursday, July 1, 2026 AD | The Cliffs - Lookout ]
 Present: Seraphina`;
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, cliffsHeader, 'replace');
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, cliffsHeader, 'replace');
   const afterReplaceSceneId = pool.chatSessions.get(CHAT).scene_id;
   assert(afterReplaceSceneId !== afterExtendSceneId, 'a swipe regeneration still stamps the regenerated turn\'s scene');
   assert(pool.chatSessions.get(CHAT).previous_scene_id === 'scene-tavern', 'a swipe regeneration never advances previous_scene_id — the revert target survives the swipe chain (§5.1.8)');
@@ -546,7 +592,7 @@ Present: Seraphina`;
   const ensure = fakeEnsureActiveSwipe(pool);
   let threw = false;
   try {
-    await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+    await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
   } catch {
     threw = true;
   }
@@ -558,7 +604,7 @@ Present: Seraphina`;
   const pool = poolWithActiveSwipe(createFakePool());
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, 'She met his gaze and refused to flinch.');
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, 'She met his gaze and refused to flinch.');
   assert(pool.locations.length === 0 && pool.characters.length === 0 && pool.scenes.length === 0, 'a headerless turn writes nothing');
   assert(ensure.calls.length === 0, 'no swipe anchor is requested for a headerless turn');
 }
@@ -568,7 +614,7 @@ Present: Seraphina`;
   const pool = createFakePool(); // no chat message at all
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
-  await scrapeTurnPresence({ db, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
   assert(pool.locations.length === 0, 'a turn with no anchorable message writes nothing and does not crash');
 }
 

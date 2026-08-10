@@ -745,6 +745,95 @@ export async function setImageSettings(
   for (const [key, value] of writes) await store.set(key, value);
 }
 
+// --- Location Tracker settings (docs/vistalyze_integration/location.md §6.3) ---
+// The Locations page's unified settings surface: the tracker's three keys plus the room
+// describer's two (moved entirely from the Backgrounds page — the image-settings endpoint above
+// keeps accepting the describer_* patch keys for back-compat, but the page no longer sends them).
+
+export interface LocationSettings {
+  splitEnabled: boolean;
+  injectionEnabled: boolean;
+  injectionPrompt: string;
+  injectionPromptIsDefault: boolean;
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
+}
+
+export async function getLocationSettings(store: OrchestratorSettingsStore): Promise<LocationSettings> {
+  const [splitEnabled, injectionEnabled, injectionPrompt, describerPrompt, describerHistoryPairs] = await Promise.all([
+    store.get('location_split_enabled'),
+    store.get('location_injection_enabled'),
+    store.get('location_injection_prompt'),
+    store.get('location_describer_prompt'),
+    store.get('location_describer_history_pairs'),
+  ]);
+  return {
+    splitEnabled: splitEnabled !== 'false',
+    injectionEnabled: injectionEnabled !== 'false',
+    injectionPrompt: injectionPrompt ?? '',
+    injectionPromptIsDefault: !injectionPrompt,
+    describerPrompt: describerPrompt ?? '',
+    describerPromptIsDefault: !describerPrompt,
+    describerHistoryPairs: describerHistoryPairs ?? '',
+  };
+}
+
+export function parseSetLocationSettingsBody(
+  raw: unknown,
+):
+  | {
+      split_enabled?: string;
+      injection_enabled?: string;
+      injection_prompt?: string;
+      describer_prompt?: string;
+      describer_history_pairs?: string;
+    }
+  | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { split_enabled, injection_enabled, injection_prompt, describer_prompt, describer_history_pairs } = raw as Record<string, unknown>;
+  if (
+    split_enabled === undefined &&
+    injection_enabled === undefined &&
+    injection_prompt === undefined &&
+    describer_prompt === undefined &&
+    describer_history_pairs === undefined
+  ) {
+    return undefined;
+  }
+  if (split_enabled !== undefined && typeof split_enabled !== 'boolean') return undefined;
+  if (injection_enabled !== undefined && typeof injection_enabled !== 'boolean') return undefined;
+  if (injection_prompt !== undefined && typeof injection_prompt !== 'string') return undefined;
+  if (describer_prompt !== undefined && typeof describer_prompt !== 'string') return undefined;
+  if (describer_history_pairs !== undefined && typeof describer_history_pairs !== 'string') return undefined;
+  return {
+    split_enabled: split_enabled === undefined ? undefined : split_enabled ? 'true' : 'false',
+    injection_enabled: injection_enabled === undefined ? undefined : injection_enabled ? 'true' : 'false',
+    injection_prompt,
+    describer_prompt,
+    describer_history_pairs,
+  };
+}
+
+export async function setLocationSettings(
+  store: OrchestratorSettingsStore,
+  patch: {
+    split_enabled?: string;
+    injection_enabled?: string;
+    injection_prompt?: string;
+    describer_prompt?: string;
+    describer_history_pairs?: string;
+  },
+): Promise<void> {
+  const writes: Array<[SettingName, string]> = [];
+  if (patch.split_enabled !== undefined) writes.push(['location_split_enabled', patch.split_enabled]);
+  if (patch.injection_enabled !== undefined) writes.push(['location_injection_enabled', patch.injection_enabled]);
+  if (patch.injection_prompt !== undefined) writes.push(['location_injection_prompt', patch.injection_prompt]);
+  if (patch.describer_prompt !== undefined) writes.push(['location_describer_prompt', patch.describer_prompt]);
+  if (patch.describer_history_pairs !== undefined) writes.push(['location_describer_history_pairs', patch.describer_history_pairs]);
+  for (const [key, value] of writes) await store.set(key, value);
+}
+
 export interface ImageConnectionTestResult {
   ok: boolean;
   latencyMs: number;
@@ -1567,6 +1656,50 @@ export async function getLocationRenderStatus(db: PostgresClient): Promise<Locat
         rendered: r.rendered,
         hasRenderHash: r.has_render_hash,
         imageGeneratedAt: r.image_generated_at,
+        updatedAt: r.updated_at,
+      });
+    }
+  }
+  return rows;
+}
+
+// --- Locations browser (location.md §6.2.4) ---
+// The Locations page's read-only known-locations table: every row with its parent (via
+// parent_location_id, migration 0083), lifecycle status, and image thumbnail. Cross-user roster,
+// the same shape as getLocationRenderStatus above — locations is user_id-scoped + RLS-forced,
+// so an admin key alone can't read it. Parent-first ordering (coalesce on the parent's name)
+// groups a place with its rooms.
+
+export interface LocationAdminRow {
+  locationId: string;
+  userId: string;
+  name: string;
+  parentName: string | null;
+  status: string;
+  imageUrl: string | null;
+  updatedAt: string;
+}
+
+export async function getLocationsAdmin(db: PostgresClient): Promise<LocationAdminRow[]> {
+  const users = await db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
+  const rows: LocationAdminRow[] = [];
+  for (const { user_id: userId } of users) {
+    const userRows = await db.withUserScope(userId, (session) =>
+      session.query<{ location_id: string; name: string; parent_name: string | null; status: string; image_url: string | null; updated_at: string }>(
+        `select l.location_id, l.name, p.name as parent_name, l.status, l.image_url, l.updated_at
+         from locations l
+         left join locations p on p.location_id = l.parent_location_id
+         order by coalesce(p.name, l.name), l.name`,
+      ),
+    );
+    for (const r of userRows) {
+      rows.push({
+        locationId: r.location_id,
+        userId,
+        name: r.name,
+        parentName: r.parent_name,
+        status: r.status,
+        imageUrl: r.image_url,
         updatedAt: r.updated_at,
       });
     }

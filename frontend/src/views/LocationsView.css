@@ -1,0 +1,110 @@
+/* The Locations page (LocationsView.tsx) — the location tracker's settings + the known-locations
+   browser. Mirrors BackgroundsView.css's shared chrome (view padding, status lines, admin-key
+   form) with its own prefixed classes; the badge/status-table look matches the Backgrounds page's
+   render-status table so the two read as one family. */
+.locations-view {
+  padding: 16px 20px;
+  max-width: 860px;
+}
+
+.locations-view h1 {
+  margin: 0 0 8px;
+}
+
+.locations-view fieldset {
+  border: 1px solid #3f3f46;
+  border-radius: 8px;
+  margin: 16px 0;
+  padding: 14px;
+}
+
+.locations-view legend {
+  padding: 0 6px;
+  font-weight: 600;
+}
+
+.locations-view label {
+  display: block;
+  margin: 8px 0;
+}
+
+.locations-view textarea {
+  width: 100%;
+  margin-top: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  resize: vertical;
+}
+
+.locations-view input[type='text'] {
+  margin-top: 4px;
+}
+
+.locations-view em {
+  color: #a1a1aa;
+}
+
+.locations-view-intro,
+.locations-contract {
+  margin: 10px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.locations-contract code,
+.locations-view-intro code,
+.locations-view .status code {
+  background: #27272a;
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 12px;
+}
+
+.loc-refresh {
+  margin-bottom: 8px;
+}
+
+.loc-error {
+  color: #f87171;
+}
+
+.loc-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.loc-status-table th,
+.loc-status-table td {
+  border: 1px solid #3f3f46;
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.loc-room-row {
+  color: #a1a1aa;
+}
+
+.loc-badge-status {
+  display: inline-block;
+  background: #27272a;
+  border: 1px solid #3f3f46;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.loc-thumb {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.badge-yes {
+  color: #4ade80;
+}
+
+.badge-no {
+  color: #71717a;
+}

@@ -455,3 +455,28 @@ Already applied by hand, not run automatically (see the file for the exact comma
   against `pg_get_constraintdef` after applying).
   Applied by hand against the live DB — the `add column`s are individually re-runnable; the index
   and FK constraint are one-shot, so apply once and verify.
+- `0081_recent_history_slot.sql` — `recent_history` becomes a LIVE marker: the active context
+  (last sent turn + live-window turns) rendered into the stack where the preset ordered the slot,
+  wrapped in the preset's own HTML tags, so the user can manage/order/mute it from Prompt Stacks
+  (2026-08-10 direction; the messages-array-era wording is gone).
+- `0082_rp_no_tools.sql` — the RP lane runs with NO tools at all (2026-08-10 direction: "We simply
+  let it execute the comfy 2 stack, with no funny business"). Normalizes existing rp chats'
+  `tool_names` to `'{}'` (new ones already default via `DEFAULT_RP_TOOLS`), so the RP turn never
+  creates characters/locations on its own.
+- `0083_location_tracking.sql` — the Location Tracker (docs/vistalyze_integration/location.md), the
+  parent/sub "places ↔ locations" model + tracker settings keys, modeled on Triggeryze's
+  location-tracker pattern. Adds `locations.parent_location_id` (self-FK, `on delete set null`):
+  a "place" ("The Tavern") is a parent row, a "location" ("The Tavern - Kitchen") is a sub row;
+  `locations.name` stays the full header string verbatim, the parent name is derived by split
+  (`splitLocationName` in the scraper) and the parent row's name is that derived portion. Parent
+  rows are plain transient rows anchored to the same swipe as their first sub, so the existing
+  lifecycle applies unchanged: demoted to `inactive` on swipe replace, deleted on chat delete via
+  `anchor_swipe_id`'s cascade. One-shot backfill (idempotent, safe to re-run) creates parent rows
+  for legacy "X - Y" names. Three new `orchestrator_settings` keys (CHECK widened to match 0080's
+  rebuild style): `location_split_enabled` (gate the split + parent-row creation),
+  `location_injection_enabled` (gate the always-on `<locations>` marker slot — the slot itself is
+  part of every prompt stack, tick/untick/delete from Prompt Stacks), `location_injection_prompt`
+  (the user-editable block template, empty = built-in default, rendered by
+  `orchestrator/src/util/renderLocationBlock.ts`). Index on `parent_location_id`.
+  Applied by hand against the live DB — the `add column`/settings inserts are individually
+  re-runnable; the FK constraint and backfill are guarded to run once, so apply once and verify.

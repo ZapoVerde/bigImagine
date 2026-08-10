@@ -312,6 +312,33 @@ export interface ImageSettings {
   describerHistoryPairs: string;
 }
 
+// GET /v1/admin/location-settings — the Locations page's unified tracker settings (location.md
+// §6.3): the split/injection toggles, the known-locations block prompt, and the room describer's
+// prompt/history-pairs (moved here from the Backgrounds page, migration 0083; the image-settings
+// endpoint still accepts the describer_* patch keys for back-compat).
+export interface LocationSettings {
+  splitEnabled: boolean;
+  injectionEnabled: boolean;
+  injectionPrompt: string;
+  injectionPromptIsDefault: boolean;
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
+}
+
+// GET /v1/admin/locations — one row of the Locations page's read-only known-locations browser
+// (location.md §6.2.4): the location with its parent place (via parent_location_id) and its
+// lifecycle status.
+export interface LocationAdminRow {
+  locationId: string;
+  userId: string;
+  name: string;
+  parentName: string | null;
+  status: string;
+  imageUrl: string | null;
+  updatedAt: string;
+}
+
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions
 export interface ChatParams {
   system?: string;
