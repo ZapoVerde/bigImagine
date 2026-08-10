@@ -94,7 +94,6 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
           <>
             <div className="prompt-inspector-stats">
               <span className="prompt-inspector-stats-total">{preview.totalEstimatedTokens.toLocaleString()} est. tokens</span>
-              <span className="prompt-inspector-stats-secondary">{preview.totalChars.toLocaleString()} characters</span>
             </div>
 
             {preview.groups.map((group, i) => (
@@ -118,7 +117,7 @@ function itemLabel(item: PromptPreviewItem): string {
 // collapsible blocks — plus, when the trace captured one, the model's reply as a block in the
 // same style (labeled "Reply", role assistant). The Main Prompt — the full system stack plus the
 // entire trimmed conversation history — is rendered as a TAG TREE: its sub-sections grouped by
-// the author's own HTML-style tags, each a collapsible row with a token/char budget (the user's
+// the author's own HTML-style tags, each a collapsible row with a token budget (the user's
 // approved spec, docs/prompt-inspector-tag-tree.md). Matching is loss-tolerant: broken or
 // unmatched tags are inert, and their text rolls up to the enclosing level — so the tree view is
 // exactly the text the model saw, never a rearrangement. When no tags match at all, it degrades
@@ -162,7 +161,7 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
               <span className="prompt-inspector-item-label">{itemLabel(item)}</span>
               <span className={`prompt-inspector-item-role prompt-inspector-item-role-${item.role}`}>{item.role}</span>
               <span className="prompt-inspector-item-tokens">
-                {item.estimatedTokens.toLocaleString()} tk · {item.chars.toLocaleString()} ch
+                {item.estimatedTokens.toLocaleString()} tk
               </span>
             </summary>
             <pre className="prompt-inspector-item-content">{item.content}</pre>
@@ -178,7 +177,7 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
             <span className="prompt-inspector-item-label">Reply</span>
             <span className="prompt-inspector-item-role prompt-inspector-item-role-assistant">assistant</span>
             <span className="prompt-inspector-item-tokens">
-              {group.reply.estimatedTokens.toLocaleString()} tk · {group.reply.chars.toLocaleString()} ch
+              {group.reply.estimatedTokens.toLocaleString()} tk
             </span>
           </summary>
           <pre className="prompt-inspector-item-content">{group.reply.content}</pre>
@@ -196,7 +195,7 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
 // display-only tag tree by orchestrator's util/promptTagTree.ts (pure, exported as
 // @bigbrain/orchestrator/prompt-tag-tree). No tags matched → the same single collapsed block the
 // panel showed before the tree existed. Tags matched → the tree: each section a collapsible row,
-// collapsed by default, with its canonical tag name and its own token/char budget; text that
+// collapsed by default, with its canonical tag name and its own token budget; text that
 // belongs to no matched section (untagged preamble, history between tags, broken-tag leftovers)
 // rolls up and renders as "untagged text" at the enclosing level — nothing is ever dropped.
 function MainPromptTree({
@@ -221,7 +220,7 @@ function MainPromptTree({
           <span className="prompt-inspector-item-label">Complete prompt text</span>
           <CacheBadge end={text.length} stablePrefixChars={stablePrefixChars} />
           <span className="prompt-inspector-item-tokens">
-            {sectionTokens.toLocaleString()} tk · {totalChars.toLocaleString()} ch
+            {sectionTokens.toLocaleString()} tk
           </span>
         </summary>
         <pre className="prompt-inspector-item-content">{text}</pre>
@@ -308,7 +307,7 @@ function PromptTagTreeView({
               stablePrefixChars={stablePrefixChars}
             />
             <span className="prompt-inspector-item-tokens">
-              {Math.ceil(own.length / 4).toLocaleString()} tk · {own.length.toLocaleString()} ch
+              {Math.ceil(own.length / 4).toLocaleString()} tk
             </span>
           </summary>
           <pre className="prompt-inspector-tag-own">{own}</pre>
@@ -361,7 +360,7 @@ function PromptTagSectionView({
         <span className="prompt-inspector-tag-name">{section.name}</span>
         <CacheBadge end={section.end} stablePrefixChars={stablePrefixChars} />
         <StabilityBadge stat={stat} />
-        <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk · {chars.toLocaleString()} ch</span>
+        <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk</span>
       </div>
     );
   }
@@ -376,7 +375,7 @@ function PromptTagSectionView({
             {section.children.length} section{section.children.length === 1 ? '' : 's'}
           </span>
         )}
-        <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk · {chars.toLocaleString()} ch</span>
+        <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk</span>
       </summary>
       {hasOwn && <pre className="prompt-inspector-tag-own">{own}</pre>}
       {hasChildren && (

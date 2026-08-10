@@ -173,7 +173,8 @@ Every case preserves all text; the only variable is *which level* it displays at
 - The Main Prompt group renders through `parsePromptTagTree(joinedText)`: the root stays the
   top-level "Main Prompt" collapsible; each matched section is a nested `<details>` with:
   - the tag name as its label (`<inner thoughts>` shown as `inner thoughts`),
-  - an `N tk · M ch` badge (same style as today's item badges),
+  - an `N tk` badge (same style as today's item badges; the char count was dropped from the
+    whole inspector — tk is the only budget shown),
   - indentation per depth (mobile-safe: a single indent step, `padding-left`, no horizontal
     scroll — `bi_principles.md` §19),
   - children rendered recursively inside.

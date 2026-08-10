@@ -108,11 +108,6 @@
   font-weight: var(--font-weight-semibold);
 }
 
-.prompt-inspector-stats-secondary {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-}
-
 .prompt-inspector-section-title {
   display: flex;
   align-items: baseline;
