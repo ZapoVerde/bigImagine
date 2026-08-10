@@ -258,6 +258,8 @@ export default function App() {
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onOpenChat={openChat}
+                onOpenRp={openRp}
+                onChatsDeleted={handleChatsDeleted}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
               />
@@ -270,6 +272,8 @@ export default function App() {
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
                 onTitleChange={(title) => updateTab(tab.id, { title })}
                 onOpenChat={openChat}
+                onOpenRp={openRp}
+                onChatsDeleted={handleChatsDeleted}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
                 onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}

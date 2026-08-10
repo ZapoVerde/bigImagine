@@ -243,6 +243,87 @@
   display: none;
 }
 
+/* ⋯ menu → "Restart chat": modal scrim + panel (no modal precedent in the app, so this follows
+   the .chat-delete-bar visual language — panel surface, danger-tinted confirm). position:fixed
+   so the placement inside .chat-view doesn't matter; panel is full-width-ish and centered on
+   mobile, capped at 22rem on desktop (§19 — narrow case wins). */
+.chat-restart-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.chat-restart-dialog-panel {
+  width: 100%;
+  max-width: 22rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding: 1.1rem;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 0.6rem 2rem rgba(0, 0, 0, 0.35);
+}
+
+.chat-restart-dialog-title {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.chat-restart-dialog-desc {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  opacity: 0.85;
+}
+
+.chat-restart-delete-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.chat-restart-warning {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+.chat-restart-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.chat-restart-dialog-actions button {
+  min-height: 2.5rem;
+  padding: 0.55rem 1rem;
+  font-size: var(--font-size-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+}
+
+.chat-restart-dialog-actions button.chat-restart-confirm {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
+.chat-restart-dialog-actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Not mobile-only either, same reasoning as the chat-menu-button above — BranchMapPanel
    has no persistent rail of its own. Offered on every chat, not just 'rp'. */
 .chat-branch-map-summon {

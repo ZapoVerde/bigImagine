@@ -15,6 +15,7 @@ import {
   callTool,
   chatCompletion,
   createChat,
+  deleteChat,
   deleteMessage,
   editMessageContent,
   forkChat,
@@ -90,6 +91,12 @@ interface ChatViewProps {
   /** Focuses (or opens) a chat tab by id — used by the "Fork from here" action to jump straight
    *  to the new branch once it's created (useTabs.ts's openChat). */
   onOpenChat?: (chatId: string, title?: string) => void;
+  /** Opens/switches to a fresh RP chat tab — used by the ⋯ menu's "Restart chat" so the
+   *  restarted session opens without navigating away (useTabs.ts's openRp). */
+  onOpenRp?: (chatId: string, title?: string) => void;
+  /** Fires when this chat was hard-deleted server-side, so App can close its tab and drop it
+   *  from the history browsers (same contract CharactersView's onChatsDeleted uses). */
+  onChatsDeleted?: (chatIds: string[]) => void;
   /** Mobile-only: whether the app-level top bars (TabStrip + TimerStrip + this chat's header) are
    *  currently collapsed away — owned by App.tsx, which applies .app.top-bars-hidden. ChatView
    *  both drives it (scroll-down on the history collapses, scroll-up / pull-down-at-top restores)
@@ -164,7 +171,19 @@ function readImageAsBase64(file: File): Promise<string> {
 // Not real token streaming: runTurn resolves the full reply server-side before anything is sent
 // back (httpServer.ts), so there's nothing to stream client-side either — just wait for the
 // full response.
-export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange, onOpenChat, topBarsHidden, onTopBarsHiddenChange, onPromptRefresh, active }: ChatViewProps) {
+export default function ChatView({
+  apiKey,
+  chatId,
+  onChatCreated,
+  onTitleChange,
+  onOpenChat,
+  onOpenRp,
+  onChatsDeleted,
+  topBarsHidden,
+  onTopBarsHiddenChange,
+  onPromptRefresh,
+  active,
+}: ChatViewProps) {
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -351,6 +370,12 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
   const [stagedImages, setStagedImages] = useState<StagedImageFile[]>([]);
   const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // ⋯ menu → "Restart chat": modal + "delete old chat" tick box. Unchecked by default — the
+  // delete is destructive, so it needs the user's explicit tick (bi_principles.md §3).
+  const [restartOpen, setRestartOpen] = useState(false);
+  const [restartDeleteOld, setRestartDeleteOld] = useState(false);
+  const [restarting, setRestarting] = useState(false);
 
   // Per-message edit UI state
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -1232,6 +1257,50 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
     }
   }
 
+  /** Best-effort mirror of CharactersView.applyDefaultStack: a fresh RP chat opts into the async
+   *  cleanup subloop (migration 0072) and gets the user's default prompt stack (0061) so it
+   *  doesn't start stack-less. Either can fail independently without blocking the restart. */
+  async function applyDefaultStack(chatId: string) {
+    try {
+      const stacks = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
+      const defaultStack = stacks.find((s) => s.isDefault);
+      if (defaultStack) {
+        await callTool('apply_prompt_stack_to_chat', { chatId, presetId: defaultStack.presetId }, apiKey);
+      }
+      await updateChat(chatId, { cleanup_enabled_at: new Date().toISOString() }, apiKey);
+    } catch {
+      // best-effort
+    }
+  }
+
+  /** ⋯ menu → "Restart chat": starts a brand-new RP chat with the same character — the exact
+   *  Start RP flow (CharactersView.startRp) — and opens it in a new tab. "Delete old chat"
+   *  ticked = hard-delete THIS chat server-side afterwards: its messages/swipes, memory sync
+   *  points, canon facts (0058) and scenes (0067) all cascade with the row, and App closes its
+   *  tab (onChatsDeleted). The new chat is created first, so a failed delete can never leave the
+   *  user with nothing — worst case the old chat survives and an error is shown. */
+  async function restartChat() {
+    if (!activeChat?.characterId) return;
+    setRestarting(true);
+    setError(null);
+    try {
+      const chat = await createChat(apiKey, { title: activeChat.title, kind: 'rp' });
+      await callTool('apply_character_to_chat', { characterId: activeChat.characterId, chatId: chat.chatId }, apiKey);
+      await applyDefaultStack(chat.chatId);
+      if (restartDeleteOld) {
+        await deleteChat(activeChat.chatId, apiKey);
+        onChatsDeleted?.([activeChat.chatId]);
+      }
+      setRestartOpen(false);
+      setRestartDeleteOld(false);
+      onOpenRp?.(chat.chatId, activeChat.title);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to restart chat');
+    } finally {
+      setRestarting(false);
+    }
+  }
+
   /** Mobile tap-to-reveal for a message's action row: tapping the bubble toggles which message's
    *  row is visible (one at a time). Action-button clicks stopPropagation inside the row, so
    *  using the buttons doesn't collapse the row mid-use. */
@@ -1303,6 +1372,23 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
         }}
       >
         📎 Attach file or image
+      </button>
+      <button
+        type="button"
+        role="menuitem"
+        title={
+          activeChat?.characterId
+            ? 'Start a fresh chat with this character'
+            : 'No character attached to this chat'
+        }
+        disabled={!activeChat?.characterId || sending || restarting}
+        onClick={() => {
+          setRestartDeleteOld(false);
+          setRestartOpen(true);
+          setChatMenuOpen(false);
+        }}
+      >
+        🔁 Restart chat
       </button>
       <button
         type="button"
@@ -1793,6 +1879,54 @@ export default function ChatView({ apiKey, chatId, onChatCreated, onTitleChange,
           archived={!!activeChat.archivedAt}
           onClose={() => setSyncStatusOpen(false)}
         />
+      )}
+
+      {restartOpen && activeChat?.characterId && (
+        <div
+          className="chat-restart-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Restart chat"
+          onClick={(e) => {
+            // Click on the scrim (not the panel) cancels; the busy flag blocks it mid-restart.
+            if (e.target === e.currentTarget && !restarting) setRestartOpen(false);
+          }}
+        >
+          <div className="chat-restart-dialog-panel">
+            <div className="chat-restart-dialog-title">Restart this chat?</div>
+            <p className="chat-restart-dialog-desc">
+              Starts a fresh RP chat with <strong>{activeChat.title}</strong> and opens it. The old
+              chat stays in the sidebar unless you delete it below.
+            </p>
+            <label className="chat-restart-delete-option">
+              <input
+                type="checkbox"
+                checked={restartDeleteOld}
+                onChange={(e) => setRestartDeleteOld(e.target.checked)}
+                disabled={restarting}
+              />
+              Delete the old chat
+            </label>
+            {restartDeleteOld && (
+              <p className="chat-restart-warning">
+                This permanently deletes the old chat's messages, memory, canon facts and scenes.
+              </p>
+            )}
+            <div className="chat-restart-dialog-actions">
+              <button type="button" onClick={() => setRestartOpen(false)} disabled={restarting}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="chat-restart-confirm"
+                onClick={restartChat}
+                disabled={restarting}
+              >
+                {restarting ? 'Restarting…' : 'Restart chat'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className={`chat-settings-rail${settingsCollapsed ? ' collapsed' : ''}`}>
