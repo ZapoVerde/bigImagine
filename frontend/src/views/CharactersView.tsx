@@ -285,8 +285,9 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   }
 
   // Creates a kind: 'rp' chat (db/migrations/0049_chat_kind.sql) — the only kind a character
-  // starts from here now. The created chat gets the RP recall-tool allow-list and no
-  // household_memory leakage by construction (chatSessions.ts), and opens into its own RP sidebar
+  // starts from here now. The created chat runs with no tools at all (DEFAULT_RP_TOOLS = [],
+  // 2026-08-10 — the RP model just executes its prompt stack) and no household_memory leakage by
+  // construction (chatSessions.ts), and opens into its own RP sidebar
   // section/tab type rather than the general chat one. The Prompt Stack picker itself still lives
   // in the RP chat's own settings panel once it's open — this just auto-applies whichever preset
   // the user has marked default (migration 0061), the same explicit signal a manual Apply click

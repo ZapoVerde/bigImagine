@@ -555,7 +555,7 @@ assert(created.toolNames === null, 'a new chat allows all tools (toolNames null)
   const rpChat = await store.createChat(USER_A, { title: 'An RP', kind: 'rp' });
   assert(
     JSON.stringify(rpChat.toolNames) === JSON.stringify(DEFAULT_RP_TOOLS),
-    "an rp chat defaults to DEFAULT_RP_TOOLS (the recall pair), not null/all and not []",
+    "an rp chat defaults to DEFAULT_RP_TOOLS ([]) — no tools at all, not the recall pair and not null/all",
   );
   const explicitRp = await store.createChat(USER_A, { title: 'RP no tools', kind: 'rp', toolNames: [] });
   assert(JSON.stringify(explicitRp.toolNames) === '[]', 'an explicit toolNames overrides the rp default');

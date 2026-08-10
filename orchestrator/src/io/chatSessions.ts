@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatSessions.ts
- * @stamp 2026-08-07
+ * @stamp 2026-08-10
  * @architectural-role IO Wrapper — persisted chat sessions, messages, and folders
  * @description
  * The Postgres-backed store behind the frontend Chat tab's history sidebar
@@ -27,13 +27,12 @@
  * panel is focused on, if any — written by httpServer.ts from runTurn's focusedNoteId, or cleared
  * by the frontend's own close action; this store just persists whatever it's given.
  *
- * An 'rp' chat's default tool_names is DEFAULT_RP_TOOLS (the recall pair, see below), not []
- * and not null: the user's read-path decision for the RP lane (docs/chat-memory.md §2, and
- * io/chatMemory/recallForPrompt.ts's own preamble) is CNZ-shaped — silent per-turn auto-recall
- * *plus* the still-enabled recall tools, so the model can dig deeper mid-turn than the
- * auto-injected block reaches. The roleplay/household isolation principle is preserved by the
- * allow-list itself: RP chats only ever see the recall tools unless explicitly widened, never
- * the household-assistant toolset, by construction.
+ * An 'rp' chat's default tool_names is DEFAULT_RP_TOOLS = [] (no tools at all, 2026-08-10
+ * user direction: the RP lane just executes its prompt stack — "no funny business"), not the
+ * old recall pair and not null. The roleplay/household isolation principle is preserved by the
+ * empty list itself: RP turns never carry a tool manifest, so the model can't call anything
+ * (recall_chat_history/recall_canon_facts included). Auto-recall is unaffected — it's server-
+ * side injection into the stack (io/chatMemory/recallForPrompt.ts), never a model tool call.
  *
  * forkChat/archiveChat (db/migrations/0040_chat_branching.sql, docs/chat-memory.md): a fork is a
  * new chat_sessions row, constructed correct from birth rather than detected-and-healed —
@@ -58,7 +57,8 @@
  * createChatSessionStore(db) -> ChatSessionStore
  *   .listChats(userId, {search?, folderId?, kind?}) — summaries, updated_at desc
  *   .createChat(userId, {title?, folderId?, kind?, toolNames?}) — full new session row; kind
- *     defaults to 'chat', and an 'rp' chat defaults toolNames to DEFAULT_RP_TOOLS unless overridden
+ *     defaults to 'chat', and an 'rp' chat defaults toolNames to DEFAULT_RP_TOOLS ([]) unless
+ *     overridden
  *   .getChat(userId, chatId) — {session, messages} or undefined; each message carries a `swipes`
  *     {index, count} whenever it's ever been regenerated (see recordSwipe/cycleSwipe below),
  *     undefined otherwise
@@ -134,9 +134,9 @@ export interface ChatSessionRow {
   archivedAt: string | null;
   /** Set once at creation, never patched afterward (db/migrations/0049_chat_kind.sql) — 'rp' chats
    *  get no household_memory read/write (httpServer.ts's buildChatMemorySystemPrompt and archive
-   *  route) and start with DEFAULT_RP_TOOLS (the recall pair) rather than null, keeping roleplay
+   *  route) and start with DEFAULT_RP_TOOLS ([]) rather than null, keeping roleplay
    *  isolated from household assistant behavior by construction rather than by a checkbox someone
-   *  has to remember to set — the allow-list itself is the isolation. */
+   *  has to remember to set — the empty list itself is the isolation (no tool calls at all). */
   kind: 'chat' | 'rp';
   /** Which character this chat is playing, if any — set by applyCharacterToChatTool.ts. Lets a
    *  later apply_prompt_stack_to_chat pull that character's fields without the caller re-passing
@@ -307,14 +307,15 @@ export interface ChatLineageNode {
  *  keeping the tools themselves enabled lets the model reach deeper mid-turn than the
  *  auto-injected block covers. Names are matched against the registered tool registry at
  *  turn time (httpServer.ts's filterToolRegistry), so a plugin not being loaded simply yields
- *  an empty view, never an error. */
-export const DEFAULT_RP_TOOLS: string[] = ['recall_chat_history', 'recall_canon_facts'];
+ *  an empty view, never an error. Empty since 2026-08-10 (user direction): the RP lane runs
+ *  with no tool calls at all — the model just executes its prompt stack; httpServer.ts
+ *  enforces the same on every rp-kind turn regardless of what a row stores. */
+export const DEFAULT_RP_TOOLS: string[] = [];
 
 export interface ChatSessionStore {
   listChats(userId: string, opts?: { search?: string; folderId?: string; kind?: 'chat' | 'rp' }): Promise<ChatSummary[]>;
   /** kind defaults to 'chat'. When init.kind === 'rp' and toolNames isn't explicitly given, tool_names
-   *  defaults to DEFAULT_RP_TOOLS (the RP-lane recall pair) rather than null (all tools) — see this
-   *  file's own preamble. */
+   *  defaults to DEFAULT_RP_TOOLS ([]) rather than null (all tools) — see this file's own preamble. */
   createChat(
     userId: string,
     init?: { title?: string; folderId?: string; kind?: 'chat' | 'rp'; toolNames?: string[] | null },
@@ -538,9 +539,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
     async createChat(userId, init = {}) {
       return db.withUserScope(userId, async (session) => {
         const kind = init.kind ?? 'chat';
-        // RP defaults to the recall-tool allow-list (DEFAULT_RP_TOOLS), not [] and not null —
-        // enforced here so every RP-creating call site gets the guarantee for free, rather than
-        // each one having to remember to pass it (see this file's own preamble).
+        // RP defaults to no tools at all (DEFAULT_RP_TOOLS = []), never the recall pair and
+        // never null (all tools) — enforced here so every RP-creating call site gets the
+        // guarantee for free (see this file's own preamble; httpServer.ts re-enforces it per
+        // turn so even a stale/widened row can't leak tools to the RP model).
         const toolNames = init.toolNames !== undefined ? init.toolNames : kind === 'rp' ? DEFAULT_RP_TOOLS : null;
         const rows = await session.query<SessionDbRow>(
           `insert into chat_sessions (user_id, title, folder_id, kind, tool_names) values ($1, coalesce($2, 'New chat'), $3, $4, $5)

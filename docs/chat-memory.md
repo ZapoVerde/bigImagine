@@ -236,10 +236,11 @@ recallForPrompt.ts`'s `buildAutoRecallParts`, the CNZ-style silent retrieval the
    fused alias of all three (the legacy single block) for presets that haven't migrated.
 
 Fail-open by contract: any error (embeddings provider down, DB hiccup) logs a warning and injects
-nothing — retrieval must never break or stall a turn. The tools stay enabled alongside it (an RP
-chat's default `tool_names` is `DEFAULT_RP_TOOLS` = `recall_chat_history` + `recall_canon_facts`,
-`io/chatSessions.ts`), so the model can reach deeper mid-turn than the auto-injected block covers —
-the auto-recall is the baseline, the tools are the escalation, not a replacement.
+nothing — retrieval must never break or stall a turn. The model itself has no recall tools since
+2026-08-10: an RP chat's default `tool_names` is `DEFAULT_RP_TOOLS` = `[]` (and the server enforces
+zero tools on every rp turn regardless of stored `tool_names`, `httpServer.ts`) — the RP lane just
+executes its prompt stack. The tools were the old mid-turn escalation; auto-recall is the only
+recall path now, and it never needed a model tool call.
 
 ## Branching, and Why the Healing Problem Mostly Disappears
 

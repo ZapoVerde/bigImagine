@@ -1,3 +1,4 @@
+/* @stamp 2026-08-10 */
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -1852,9 +1853,10 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   const [maxTokens, setMaxTokens] = useState(session?.params.max_tokens?.toString() ?? '');
   const [model, setModel] = useState(session?.params.model ?? '');
   const [folderId, setFolderId] = useState(session?.folderId ?? '');
-  // null toolNames = all tools allowed
+  // null toolNames = all tools allowed (chat-kind only: the RP lane never carries tools — the
+  // checklist below is hidden for rp chats and save() omits tool_names for them)
   const [selectedTools, setSelectedTools] = useState<Set<string>>(
-    new Set(session?.toolNames ?? allToolNames),
+    new Set(session?.kind === 'rp' ? [] : (session?.toolNames ?? allToolNames)),
   );
   const [saved, setSaved] = useState(false);
 
@@ -2001,7 +2003,8 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
     await onSave({
       title: title.trim() || session?.title || 'New chat',
       params,
-      tool_names: allSelected ? null : [...selectedTools],
+      // RP chats run with no tools at all (server-enforced per turn) — never send a manifest.
+      ...(session?.kind === 'rp' ? {} : { tool_names: allSelected ? null : [...selectedTools] }),
       folder_id: folderId || null,
       // The toggle is the only cleanup switch now: enabled stamps the loop's window at now()
       // (so only messages that land from here on are cleaned — never a retro pass over old
@@ -2146,16 +2149,23 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         </select>
       </label>
 
-      {allToolNames.length > 0 && (
-        <fieldset className="tool-checklist">
-          <legend>Tools available in this chat</legend>
-          {allToolNames.map((name) => (
-            <label key={name} className="tool-item">
-              <input type="checkbox" checked={selectedTools.has(name)} onChange={() => toggleTool(name)} />
-              {name}
-            </label>
-          ))}
-        </fieldset>
+      {session?.kind === 'rp' ? (
+        <p className="model-connection-note">
+          RP chats run with no tools — the model just executes the prompt stack (server-enforced
+          per turn). Auto-recall still injects into the stack server-side.
+        </p>
+      ) : (
+        allToolNames.length > 0 && (
+          <fieldset className="tool-checklist">
+            <legend>Tools available in this chat</legend>
+            {allToolNames.map((name) => (
+              <label key={name} className="tool-item">
+                <input type="checkbox" checked={selectedTools.has(name)} onChange={() => toggleTool(name)} />
+                {name}
+              </label>
+            ))}
+          </fieldset>
+        )
       )}
 
       <div className="settings-actions">

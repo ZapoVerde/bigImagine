@@ -1,3 +1,4 @@
+/* @stamp 2026-08-10 */
 /**
  * Hand-written response shapes for bigBrain's tool-call and chat endpoints.
  *
@@ -345,8 +346,9 @@ export interface ChatSessionRow {
   /** Set once, explicitly, via the Archive action — null means still ongoing. */
   archivedAt: string | null;
   /** Set once at creation, never changed afterward. An 'rp' chat gets no household_memory
-   *  read/write and starts with DEFAULT_RP_TOOLS (the recall pair) — see
-   *  orchestrator/src/io/chatSessions.ts. */
+   *  read/write and runs with no tools at all (DEFAULT_RP_TOOLS = [], 2026-08-10 — the RP
+   *  model just executes its prompt stack) — see orchestrator/src/io/chatSessions.ts; the
+   *  server re-enforces zero tools per rp turn regardless of this column. */
   kind: 'chat' | 'rp';
   /** Which character this chat is playing, if any — set by apply_character_to_chat. */
   characterId: string | null;

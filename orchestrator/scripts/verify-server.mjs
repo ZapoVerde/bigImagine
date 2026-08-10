@@ -2345,6 +2345,36 @@ server.close();
     );
   }
 
+  // --- The RP lane runs with NO tools at all (2026-08-10 user direction) ---
+  // Whatever tool_names the session row carries (the legacy recall pair, null = all registered
+  // tools, anything), an rp turn's LLM call must never receive a tool manifest — the model just
+  // executes its prompt stack and can't create characters or call anything else. The worst case
+  // here is toolNames: null (= all tools, the pre-allow-list behavior): the server's rp override
+  // still has to collapse it to an empty registry.
+  {
+    const noToolsChat = await chatsRp.createChat(userIdRp, { kind: 'rp' });
+    await chatsRp.updateChat(userIdRp, noToolsChat.chatId, {
+      kind: 'rp',
+      characterId: 'char-ava',
+      toolNames: null, // the worst case: null = all registered tools
+    });
+    await chatsRp.appendMessages(userIdRp, noToolsChat.chatId, [{ role: 'assistant', content: 'Hello.' }]);
+    before = capturedRp.length;
+    const noToolsRes = await fetch(`${baseRp}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'go on' }],
+        chat_id: noToolsChat.chatId,
+      }),
+    });
+    assert(noToolsRes.status === 200, 'an rp chat with toolNames null (all tools) still succeeds');
+    assert(
+      Array.isArray(capturedRp[before].toolDefs) && capturedRp[before].toolDefs.length === 0,
+      "the rp turn's LLM call carries zero tool definitions even when the session row allows all tools",
+    );
+  }
+
   // --- Swipe display decoration: alternate greetings carry resolvedContent too ---
   // The swipe routes return one message the client swaps into view in place (a card's alternate
   // greetings load in as that opening message's swipe history), so its display copy is resolved

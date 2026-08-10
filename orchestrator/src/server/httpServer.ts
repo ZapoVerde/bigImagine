@@ -204,7 +204,7 @@ import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
-import { filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
+import { createToolRegistry, filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
   getCanonSettings,
@@ -1309,7 +1309,12 @@ async function regenerateSwipe(
   const messagesForLlm: LlmMessage[] = priorMessages.map((m) => ({ role: m.role, content: m.content }));
   const anchorMessageId = [...priorMessages].reverse().find((m) => m.role === 'user')?.messageId;
 
-  const sessionTools = session.toolNames !== null ? filterToolRegistry(deps.tools, session.toolNames) : deps.tools;
+  // The RP lane runs with NO tools at all (2026-08-10 user direction: "simply let it execute the
+  // prompt stack, with no funny business") — whatever tool_names the session row carries (the old
+  // recall pair, null = all, anything) never reaches the model. Auto-recall is unaffected: it's
+  // server-side injection into the stack, not a model tool call.
+  const sessionTools =
+    session.kind === 'rp' ? createToolRegistry([]) : session.toolNames !== null ? filterToolRegistry(deps.tools, session.toolNames) : deps.tools;
   const { turnLlm } = await resolveTurnLlm(deps, session.params, chatId);
   const timezone = await getHouseholdTimezone(deps.settings);
   const { systemPrompt, messagesForLlm: trimmed } = await assembleSessionTurnContext(
@@ -1487,6 +1492,11 @@ async function handleChatCompletions(
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
     }
   }
+  // The RP lane runs with NO tools at all (2026-08-10 user direction) — the model just executes
+  // its prompt stack (the Comfy 2 preset) and can never emit a tool call, character creation
+  // included. Overrides any stored tool_names value (the legacy recall pair, or null = all).
+  // Auto-recall still injects into the stack server-side; it never needed a model tool call.
+  if (sessionKind === 'rp') sessionTools = createToolRegistry([]);
 
   const { turnLlm, turnDefaultModel } = await resolveTurnLlm(deps, sessionParams, body.chat_id);
 

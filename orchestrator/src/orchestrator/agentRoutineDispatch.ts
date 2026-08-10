@@ -59,7 +59,7 @@ import type { PostgresClient } from '../io/postgres.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { nextDailyOccurrence } from '../util/nextOccurrence.js';
 import { runTurn } from './loop.js';
-import { filterToolRegistry, type ToolRegistry } from './toolRegistry.js';
+import { createToolRegistry, filterToolRegistry, type ToolRegistry } from './toolRegistry.js';
 
 const POLL_INTERVAL_MS = 5_000;
 
@@ -119,7 +119,15 @@ async function runAgentRoutine(deps: AgentRoutineDispatchDeps, userId: string, j
   }
 
   const sessionParams = detail.session.params;
-  const sessionTools = detail.session.toolNames !== null ? filterToolRegistry(deps.tools, detail.session.toolNames) : deps.tools;
+  // Same RP rule as server/httpServer.ts: an rp-kind chat's turns never see tools — the model
+  // just executes the prompt stack. (The migration normalizes stored tool_names for existing rp
+  // rows; this guard makes the invariant hold even if a row ever carries a non-empty list again.)
+  const sessionTools =
+    detail.session.kind === 'rp'
+      ? createToolRegistry([])
+      : detail.session.toolNames !== null
+        ? filterToolRegistry(deps.tools, detail.session.toolNames)
+        : deps.tools;
   const timezone = (await deps.settings.get('household_timezone')) ?? 'UTC';
   const systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
 
