@@ -21,6 +21,65 @@ function newCustomSlot(): ContextStackSlot {
   return { slotType: 'custom', enabled: true, customRole: 'system', customContent: '' };
 }
 
+// --- migration 0086: slot groups (contiguous groupName runs) ---
+// slotGroupRunsDisplay keeps EMPTY-name runs (groupName set but not yet named): the editor must
+// show the toggle ON and the opener's name box for a mid-edit group even though it ships no tags
+// yet — that is exactly the state "toggle on, type the name" lives in. The SANITIZED-name
+// equality mirrors the backend's groupRuns rule (assemblePromptStack.ts); isBareSlot below holds
+// the backend's empty-name→no-tags consequence (unnamed members render red until named).
+
+function sanitizeGroupName(raw: string | null | undefined): string {
+  return (raw ?? '').replace(/[<>]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+export interface SlotGroupRun {
+  /** Sanitized group name ('' while the opener is mid-edit — such a run emits no tags yet). */
+  name: string;
+  startIndex: number;
+  endIndex: number;
+}
+
+/** Display runs: contiguous runs of groupName-set slots, empty names included (they get no color
+ *  stripe and no closer chip — those need a name — but the toggle shows ON and the opener shows
+ *  its name box so the user can type one). The SANITIZED-name equality mirrors the backend's
+ *  groupRuns rule (assemblePromptStack.ts) exactly; the only difference is keeping empty-name
+ *  runs visible so "toggle on, type the name" works in the editor. */
+function slotGroupRunsDisplay(slots: ContextStackSlot[]): SlotGroupRun[] {
+  const runs: SlotGroupRun[] = [];
+  let i = 0;
+  while (i < slots.length) {
+    if (slots[i]!.groupName === undefined) {
+      i++;
+      continue;
+    }
+    const name = sanitizeGroupName(slots[i]!.groupName);
+    let j = i + 1;
+    while (j < slots.length && slots[j]!.groupName !== undefined && sanitizeGroupName(slots[j]!.groupName) === name) j++;
+    runs.push({ name, startIndex: i, endIndex: j - 1 });
+    i = j;
+  }
+  return runs;
+}
+
+/** Stable hue for a group name, drawn from a palette that EXCLUDES red — red is reserved for the
+ *  coverage warning (an enabled slot whose content has no enclosing tags). Same name → same hue. */
+function groupHue(name: string): number {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.codePointAt(0)!) % 1000;
+  return 20 + (h % 320); // 20..339 — red (≈0-20, 340-360) excluded
+}
+
+/** Red-coverage rule: an enabled slot whose content ships bare — no 0085 tagEnabled and not a
+ *  member of a NAMED group — is highlighted red. Disabled slots and empty custom blocks render
+ *  nothing, so they don't count. */
+function isBareSlot(slot: ContextStackSlot): boolean {
+  if (slot.enabled === false) return false;
+  if (slot.tagEnabled) return false;
+  if (sanitizeGroupName(slot.groupName)) return false;
+  if (slot.slotType === 'custom' && !slot.customContent?.trim()) return false;
+  return true;
+}
+
 // A SillyTavern Prompt-Manager-style editor for plugins/context-stack-presets: a left list of
 // saved presets (plus the shipped read-only builtins), a right pane with the selected preset's
 // ordered, reorderable, individually-toggleable slot list. There is deliberately no "apply to this
@@ -165,6 +224,34 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
     setDraftSlots((prev) => prev.map((s, i) => (i === index ? { ...s, enabled: !(s.enabled ?? true) } : s)));
   }
 
+  /** Migration 0086: the single group toggle. ON joins the adjacent run if there is one (copies
+   *  its name — every member of a run carries the same groupName), else starts a new run whose
+   *  opener is this slot ('' — the name box appears on it). OFF drops the slot from its run. */
+  function toggleGroup(index: number) {
+    setDraftSlots((prev) => {
+      const next = [...prev];
+      const slot = next[index]!;
+      if (sanitizeGroupName(slot.groupName) || slot.groupName !== undefined) {
+        next[index] = { ...slot, groupName: undefined };
+        return next;
+      }
+      const prevName = index > 0 ? next[index - 1]!.groupName : undefined;
+      const nextName = index < next.length - 1 ? next[index + 1]!.groupName : undefined;
+      const neighbour = prevName !== undefined ? prevName : nextName;
+      next[index] = { ...slot, groupName: neighbour ?? '' };
+      return next;
+    });
+  }
+
+  /** Editing the opener's name box propagates to every member of the run (they all carry the
+   *  same groupName, so contiguity + equality keep the run intact and the closer chip follows).
+   *  Uses the DISPLAY runs: a mid-edit run has an empty name, so the backend-exact named-run
+   *  rule wouldn't find it — but typing the name is exactly what turns it into a real run. */
+  function setGroupName(index: number, name: string) {
+    const run = slotGroupRunsDisplay(draftSlots).find((r) => index >= r.startIndex && index <= r.endIndex);
+    setDraftSlots((prev) => prev.map((s, i) => (run && i >= run.startIndex && i <= run.endIndex ? { ...s, groupName: name } : s)));
+  }
+
   function removeSlot(index: number) {
     setDraftSlots((prev) => prev.filter((_, i) => i !== index));
     setExpandedIndex(null);
@@ -211,6 +298,12 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
     selected != null &&
     !isBuiltin &&
     (draftName.trim() !== selected.name || JSON.stringify(draftSlots) !== JSON.stringify(selected.slots));
+
+  // Migration 0086: the group runs of the current draft — computed once per render, shared by the
+  // opener name box, the closer chip, the member color stripe, and the bare-slot red highlight.
+  // Display runs (empty-name runs included) so a freshly toggled, not-yet-named group still shows
+  // its toggle ON and its opener's name box — the state "toggle on, type the name" lives in.
+  const draftGroupRuns = slotGroupRunsDisplay(draftSlots);
 
   async function save() {
     if (!selected || isBuiltin) return;
@@ -318,77 +411,109 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
             )}
 
             <div className="stack-slot-list">
-              {draftSlots.map((slot, idx) => (
-                <div
-                  key={idx}
-                  className={`stack-slot-row${slot.enabled === false ? ' disabled' : ''}${expandedIndex === idx ? ' expanded' : ''}`}
-                  draggable={!isBuiltin}
-                  onDragStart={() => {
-                    dragIndexRef.current = idx;
-                  }}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => handleDrop(idx)}
-                >
-                  <div className="stack-slot-main">
-                    <span className="stack-slot-grip" aria-hidden="true">
-                      &#8942;&#8942;
-                    </span>
-                    <div className="stack-slot-reorder">
+              {draftSlots.map((slot, idx) => {
+                const run = draftGroupRuns.find((r) => idx >= r.startIndex && idx <= r.endIndex);
+                const inGroup = run != null;
+                const isOpener = inGroup && idx === run!.startIndex;
+                const isCloser = inGroup && idx === run!.endIndex;
+                const named = inGroup && run!.name !== '';
+                const hue = named ? groupHue(run!.name) : undefined;
+                return (
+                  <div
+                    key={idx}
+                    className={`stack-slot-row${slot.enabled === false ? ' disabled' : ''}${expandedIndex === idx ? ' expanded' : ''}${named ? ' group-member' : ''}${isBareSlot(slot) ? ' bare' : ''}`}
+                    style={hue !== undefined ? ({ ['--group-hue' as string]: `${hue}` } as React.CSSProperties) : undefined}
+                    draggable={!isBuiltin}
+                    onDragStart={() => {
+                      dragIndexRef.current = idx;
+                    }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => handleDrop(idx)}
+                  >
+                    <div className="stack-slot-main">
+                      <span className="stack-slot-grip" aria-hidden="true">
+                        &#8942;&#8942;
+                      </span>
+                      <div className="stack-slot-reorder">
+                        <button
+                          type="button"
+                          disabled={isBuiltin || idx === 0}
+                          onClick={() => moveSlot(idx, -1)}
+                          aria-label="Move slot up"
+                        >
+                          &#9650;
+                        </button>
+                        <button
+                          type="button"
+                          disabled={isBuiltin || idx === draftSlots.length - 1}
+                          onClick={() => moveSlot(idx, 1)}
+                          aria-label="Move slot down"
+                        >
+                          &#9660;
+                        </button>
+                      </div>
+                      <label className="stack-slot-toggle" title={slot.enabled === false ? 'Slot disabled' : 'Toggle this slot on/off'}>
+                        <input
+                          type="checkbox"
+                          checked={slot.enabled ?? true}
+                          disabled={isBuiltin}
+                          onChange={() => toggleEnabled(idx)}
+                        />
+                      </label>
+                      <label
+                        className={`stack-slot-tag-toggle${slot.tagEnabled ? ' on' : ''}`}
+                        title="Wrap in HTML-style tags — encloses the name in <…> with a closing tag at the end (a hint to the LLM, not real HTML)"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={slot.tagEnabled ?? false}
+                          disabled={isBuiltin}
+                          onChange={() => updateSlot(idx, { tagEnabled: !(slot.tagEnabled ?? false) })}
+                        />
+                        <span className="stack-slot-tag-glyph">{'< >'}</span>
+                      </label>
+                      <label
+                        className={`stack-slot-group-toggle${inGroup ? ' on' : ''}`}
+                        title="Group this slot with its neighbours — the first member of a run is the opener (its name box appears here), the last is the closer (</Name> chip). One set of tags wraps the whole run."
+                      >
+                        <input
+                          type="checkbox"
+                          checked={inGroup}
+                          disabled={isBuiltin}
+                          onChange={() => toggleGroup(idx)}
+                        />
+                        <span className="stack-slot-group-glyph">{'{ }'}</span>
+                      </label>
+                      {isOpener && !isBuiltin && (
+                        <input
+                          className="stack-slot-group-name"
+                          value={slot.groupName ?? ''}
+                          placeholder="Group name"
+                          onChange={(e) => setGroupName(idx, e.target.value)}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      )}
                       <button
                         type="button"
-                        disabled={isBuiltin || idx === 0}
-                        onClick={() => moveSlot(idx, -1)}
-                        aria-label="Move slot up"
+                        className="stack-slot-label"
+                        onClick={() => setExpandedIndex(expandedIndex === idx ? null : idx)}
                       >
-                        &#9650;
+                        {slotLabel(slot)}
                       </button>
-                      <button
-                        type="button"
-                        disabled={isBuiltin || idx === draftSlots.length - 1}
-                        onClick={() => moveSlot(idx, 1)}
-                        aria-label="Move slot down"
-                      >
-                        &#9660;
-                      </button>
+                      {isCloser && named && (
+                        <span className="stack-slot-group-close">{`</${run!.name}>`}</span>
+                      )}
+                      {!isBuiltin && (
+                        <button
+                          type="button"
+                          className="stack-slot-delete"
+                          onClick={() => removeSlot(idx)}
+                          aria-label="Remove slot"
+                        >
+                          &times;
+                        </button>
+                      )}
                     </div>
-                    <label className="stack-slot-toggle" title={slot.enabled === false ? 'Slot disabled' : 'Toggle this slot on/off'}>
-                      <input
-                        type="checkbox"
-                        checked={slot.enabled ?? true}
-                        disabled={isBuiltin}
-                        onChange={() => toggleEnabled(idx)}
-                      />
-                    </label>
-                    <label
-                      className={`stack-slot-tag-toggle${slot.tagEnabled ? ' on' : ''}`}
-                      title="Wrap in HTML-style tags — encloses the name in <…> with a closing tag at the end (a hint to the LLM, not real HTML)"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={slot.tagEnabled ?? false}
-                        disabled={isBuiltin}
-                        onChange={() => updateSlot(idx, { tagEnabled: !(slot.tagEnabled ?? false) })}
-                      />
-                      <span className="stack-slot-tag-glyph">{'< >'}</span>
-                    </label>
-                    <button
-                      type="button"
-                      className="stack-slot-label"
-                      onClick={() => setExpandedIndex(expandedIndex === idx ? null : idx)}
-                    >
-                      {slotLabel(slot)}
-                    </button>
-                    {!isBuiltin && (
-                      <button
-                        type="button"
-                        className="stack-slot-delete"
-                        onClick={() => removeSlot(idx)}
-                        aria-label="Remove slot"
-                      >
-                        &times;
-                      </button>
-                    )}
-                  </div>
                   {expandedIndex === idx && (
                     <div className="stack-slot-editor">
                       <label>
@@ -444,7 +569,8 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                     </div>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             {!isBuiltin && (

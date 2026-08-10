@@ -191,7 +191,7 @@ import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js'
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
-import { wrapSlotContent, type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
+import { groupTagsForRendered, wrapSlotContent, type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
@@ -748,16 +748,33 @@ async function buildNarratorStackItems(
   // produced it. assemblePromptStack itself has no reason to know that; a display concern doesn't
   // belong in the platform's canonical prompt-assembly pure function.
   const items: PromptPreviewItem[] = [];
-  for (const slot of slots) {
+  const renderedIndices: number[] = [];
+  for (let i = 0; i < slots.length; i++) {
+    const slot = slots[i]!;
     if (!slot.enabled) continue;
     if (slot.slotType === 'custom') {
       if (!slot.customContent) continue;
+      renderedIndices.push(i);
       items.push(toPreviewItem(slot.customRole ?? 'system', wrapSlotContent(interpolateMacros(slot.customContent, snapshot), slot), { label: slot.label }));
       continue;
     }
     const value = slot.markerKey ? fields[slot.markerKey as MarkerKey] : undefined;
     if (!value) continue;
+    renderedIndices.push(i);
     items.push(toPreviewItem('system', wrapSlotContent(interpolateMacros(value, snapshot), slot), { markerKey: slot.markerKey, label: slot.label }));
+  }
+  // Migration 0086: same group-tag wrapping assemblePromptStack applies, so the real prompt and
+  // the inspector can never drift — <Name> around the run's first rendered member, </Name> around
+  // the last (groupTagsForRendered), outside the slot's own 0085 tags.
+  const groupTags = groupTagsForRendered(slots, renderedIndices);
+  for (let m = 0; m < items.length; m++) {
+    const tags = groupTags.get(renderedIndices[m]!);
+    if (!tags) continue;
+    const { open, close } = tags;
+    items[m] = {
+      ...items[m]!,
+      content: `${open ? `${open}\n` : ''}${items[m]!.content}${close ? `\n${close}` : ''}`,
+    };
   }
   return items;
 }

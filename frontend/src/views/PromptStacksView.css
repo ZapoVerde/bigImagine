@@ -331,6 +331,94 @@
   opacity: 0.55;
 }
 
+/* Migration 0086 — the "group with neighbours" toggle: a { } glyph between the tag toggle and
+   the label. ON joins/starts a contiguous group; the opener shows a name box, the closer a
+   </Name> chip, and every member row carries the run's color stripe (--group-hue). */
+.stack-slot-group-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stack-slot-group-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stack-slot-group-glyph {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-faint);
+  background: var(--color-bg-surface);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.stack-slot-group-toggle:hover .stack-slot-group-glyph {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+.stack-slot-group-toggle.on .stack-slot-group-glyph {
+  color: hsl(var(--group-hue, 200) 70% 55%);
+  border-color: hsl(var(--group-hue, 200) 70% 55%);
+  background: color-mix(in srgb, hsl(var(--group-hue, 200) 70% 55%) 12%, transparent);
+}
+
+.stack-slot-group-toggle:has(input:disabled) {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* A row that is part of a group carries the run's color as a left stripe; red is never used here
+   (it is reserved for the .bare coverage warning below). */
+.stack-slot-row.group-member {
+  border-left: 3px solid hsl(var(--group-hue, 200) 70% 55%);
+}
+
+.stack-slot-row.group-member.bare {
+  border-left-color: var(--color-danger);
+}
+
+/* The opener's inline name box — appears on the first member of a run. */
+.stack-slot-group-name {
+  flex-shrink: 1;
+  min-width: 5rem;
+  max-width: 9rem;
+  font-size: var(--font-size-sm);
+  padding: 0.15rem 0.35rem;
+  border: 1px solid hsl(var(--group-hue, 200) 70% 55%);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--color-bg-surface);
+  color: inherit;
+}
+
+/* The closer's auto chip — mirrors the opener's name live (</Name>). */
+.stack-slot-group-close {
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border: 1px dashed hsl(var(--group-hue, 200) 70% 55%);
+  border-radius: var(--radius-sm, 4px);
+  color: hsl(var(--group-hue, 200) 70% 55%);
+  white-space: nowrap;
+}
+
+/* The coverage warning (red is reserved for this): an enabled slot whose content ships bare —
+   no 0085 tagEnabled and not a member of a named group. Red stripe, red-tinted background. */
+.stack-slot-row.bare {
+  box-shadow: inset 3px 0 0 var(--color-danger);
+  background: var(--color-danger-bg);
+}
+
 .stack-slot-label {
   flex: 1;
   text-align: left;

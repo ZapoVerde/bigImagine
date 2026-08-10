@@ -788,6 +788,10 @@ export interface ContextStackSlot {
   /** Migration 0085: wrap this slot's assembled content in <Friendly Name>…</Friendly Name>
    *  HTML-style tags — a hint to the LLM, not real HTML. Default off. */
   tagEnabled?: boolean;
+  /** Migration 0086: this slot is a member of a group. Every member of a contiguous run carries
+   *  the same groupName (the opener's name); the first member of a run is the opener (its name
+   *  box appears there), the last is the closer (</Name> chip). Default unset. */
+  groupName?: string | null;
 }
 
 // plugins/context-stack-presets/src/getContextStackPresetsTool.ts

@@ -495,3 +495,15 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Assembly-relevant (unlike 0060's purely cosmetic `label`): `assemblePromptStack.ts`'s
   `PromptStackSlot` gains `tagEnabled`/`label`, and the per-turn narrator path wraps with the same
   shared helper so the real prompt and the inspector agree. Hand-applied to the live DB.
+- `0086_context_stack_slot_groups.sql` — slot **grouping** (2026-08-14): wrap a contiguous run of
+  slots in one set of HTML-style tags. Adds `context_stack_slots.group_name` (text, nullable —
+  NULL = not in a group). One toggle per slot row: the first toggled slot of a contiguous run is
+  the opener (name text box), the last is the closer (auto `</Name>` chip mirroring the opener's
+  name); every member carries the same `group_name`, and assembly derives runs from contiguity +
+  equality (opener/closer need no flags). `<Name>` attaches to the first rendered member,
+  `</Name>` to the last; disabled/empty members stay inside the group positionally. Names are
+  sanitized like 0085's (trim, collapse whitespace, strip `<`/`>`); empty name emits no tags and
+  breaks a run. Default NULL keeps existing stacks byte-identical (§17 cache contract). Editor
+  gives each group a stable name-derived color from a palette that excludes red — red is reserved
+  for the coverage warning (enabled slot with no enclosing tags). Not yet hand-applied to the
+  live DB.

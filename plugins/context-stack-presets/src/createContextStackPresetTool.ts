@@ -71,6 +71,11 @@ export function createCreateContextStackPresetTool(): RegisteredTool {
                   description:
                     'Defaults to false. When true, this slot\'s content is wrapped in HTML-style tags named after the slot, e.g. <Chat History>…</Chat History> — a hint to the LLM, not real HTML.',
                 },
+                groupName: {
+                  type: ['string', 'null'],
+                  description:
+                    'Defaults to null. When set, this slot joins a GROUP of contiguous slots wrapped in one set of HTML-style tags: the first member of a contiguous run is the opener (its groupName is the tag name, e.g. <World Info>), the last member is the closer (</World Info>). Every member of the run carries the same groupName.',
+                },
               },
               required: ['slotType'],
               additionalProperties: false,
@@ -93,9 +98,9 @@ export function createCreateContextStackPresetTool(): RegisteredTool {
       const slotRows: SlotRow[] = [];
       for (const [position, slot] of args.slots.entries()) {
         const [row] = await ctx.db.query<SlotRow>(
-          `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-           returning slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled`,
+          `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           returning slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name`,
           slotInputToInsertParams(slot, presetRow!.preset_id, position),
         );
         slotRows.push(row!);

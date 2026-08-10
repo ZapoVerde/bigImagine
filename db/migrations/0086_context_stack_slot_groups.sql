@@ -1,0 +1,24 @@
+-- Slot grouping: wrap a contiguous run of slots in one set of HTML-style tags (2026-08-14
+-- user direction). One toggle per slot row; the FIRST toggled slot in a contiguous run is the
+-- opener (a name text box appears there), the LAST toggled slot is the closer (a closing chip
+-- </Name> appears there, mirroring the opener's name live). This column is the whole storage:
+-- every member of a run carries the same group_name (the opener's name, propagated on edit);
+-- assembly derives the runs from contiguity + equality, so the opener/closer need no flags —
+-- toggle a later slot on and the closer moves, toggle the closer off and the previous member
+-- closes the run. A single toggled slot is a one-slot run (<Name>...content...</Name>).
+--
+-- Assembly (assemblePromptStack.ts groupRuns/groupTagsForRendered, shared with the per-turn
+-- narrator path): the open tag attaches to the FIRST rendered member of a run, the close tag to
+-- the LAST rendered member — disabled/empty members render nothing but stay inside the group
+-- positionally. Names are sanitized like 0085's slot tags (trim, collapse whitespace, strip
+-- literal < >); an empty name emits no tags and breaks a run. Default OFF (NULL) keeps every
+-- existing stack byte-identical (bi_principles.md §17 prompt-cache contract).
+--
+-- Editor: each group gets a stable color derived from its name, drawn from a palette that
+-- EXCLUDES red — red is reserved for the coverage warning (an enabled slot whose content has no
+-- enclosing tags, i.e. no tagEnabled and not in a named group, is highlighted red).
+--
+-- Applied by hand against the dedicated BigImagine database:
+--   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0086_context_stack_slot_groups.sql
+
+alter table context_stack_slots add column group_name text;

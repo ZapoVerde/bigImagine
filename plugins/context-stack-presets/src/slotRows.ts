@@ -33,6 +33,7 @@ export interface SlotRow {
   custom_content: string | null;
   label: string | null;
   tag_enabled: boolean;
+  group_name: string | null;
 }
 
 export interface SlotInput {
@@ -46,6 +47,9 @@ export interface SlotInput {
   label?: string;
   /** Migration 0085: wrap this slot's assembled content in <Friendly Name>…</Friendly Name>. */
   tagEnabled?: boolean;
+  /** Migration 0086: this slot is a member of a group. Every member of a contiguous run carries
+   *  the same groupName (the opener's name); first member = opener, last = closer. */
+  groupName?: string | null;
 }
 
 function isValidSlotInput(value: unknown): value is SlotInput {
@@ -55,6 +59,7 @@ function isValidSlotInput(value: unknown): value is SlotInput {
   if (v.enabled !== undefined && typeof v.enabled !== 'boolean') return false;
   if (v.label !== undefined && typeof v.label !== 'string') return false;
   if (v.tagEnabled !== undefined && typeof v.tagEnabled !== 'boolean') return false;
+  if (v.groupName !== undefined && v.groupName !== null && typeof v.groupName !== 'string') return false;
 
   if (v.slotType === 'marker') {
     return typeof v.markerKey === 'string' && v.markerKey !== '';
@@ -72,6 +77,7 @@ export function isSlotInputArray(value: unknown): value is SlotInput[] {
 
 export function slotRowToWire(row: SlotRow): SlotInput {
   const label = row.label ?? undefined;
+  const groupName = row.group_name ?? undefined;
   if (row.slot_type === 'custom') {
     return {
       slotType: 'custom',
@@ -80,21 +86,23 @@ export function slotRowToWire(row: SlotRow): SlotInput {
       customContent: row.custom_content!,
       label,
       tagEnabled: row.tag_enabled,
+      groupName,
     };
   }
-  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key!, label, tagEnabled: row.tag_enabled };
+  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key!, label, tagEnabled: row.tag_enabled, groupName };
 }
 
 export function slotInputToInsertParams(
   input: SlotInput,
   presetId: string,
   position: number,
-): [string, number, string, string | null, boolean, string | null, string | null, string | null, boolean] {
+): [string, number, string, string | null, boolean, string | null, string | null, string | null, boolean, string | null] {
   const enabled = input.enabled ?? true;
   const label = input.label ?? null;
   const tagEnabled = input.tagEnabled ?? false;
+  const groupName = input.groupName ?? null;
   if (input.slotType === 'marker') {
-    return [presetId, position, 'marker', input.markerKey!, enabled, null, null, label, tagEnabled];
+    return [presetId, position, 'marker', input.markerKey!, enabled, null, null, label, tagEnabled, groupName];
   }
-  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!, label, tagEnabled];
+  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!, label, tagEnabled, groupName];
 }

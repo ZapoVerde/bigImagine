@@ -93,7 +93,7 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
       if (!chat) return { applied: false, reason: 'chat not found' };
 
       const slotRows = await ctx.db.query<SlotRow>(
-        `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled
+        `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name
          from context_stack_slots where preset_id = $1 order by position`,
         [args.presetId],
       );
@@ -110,6 +110,7 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
         customContent: row.custom_content ?? undefined,
         label: row.label ?? undefined,
         tagEnabled: row.tag_enabled,
+        groupName: row.group_name ?? undefined,
       }));
 
       let character: CharacterFieldsRow | undefined;

@@ -57,13 +57,13 @@ function createFakePool() {
   const standardId = 'preset-standard';
   presets.push({ preset_id: standardId, user_id: SYSTEM_USER_ID, name: 'Standard', is_builtin: true, updated_at: nextUpdatedAt() });
   slots.push(
-    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
-    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
-    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
+    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false, group_name: null },
+    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false, group_name: null },
+    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false, group_name: null },
   );
   const minimalId = 'preset-minimal';
   presets.push({ preset_id: minimalId, user_id: SYSTEM_USER_ID, name: 'Minimal', is_builtin: true, updated_at: nextUpdatedAt() });
-  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false });
+  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false, group_name: null });
 
   return {
     presets,
@@ -97,12 +97,12 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into context_stack_slots')) {
-            const [presetId, position, slotType, markerKey, enabled, customRole, customContent, label, tagEnabled] = params;
+            const [presetId, position, slotType, markerKey, enabled, customRole, customContent, label, tagEnabled, groupName] = params;
             const parent = presets.find((p) => p.preset_id === presetId);
             assert(!!parent && parent.user_id === scopedUserId, 'insert into context_stack_slots is scoped to the owning preset\'s user');
-            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent, label: label ?? null, tag_enabled: tagEnabled ?? false };
+            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent, label: label ?? null, tag_enabled: tagEnabled ?? false, group_name: groupName ?? null };
             slots.push(row);
-            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content, label: row.label, tag_enabled: row.tag_enabled }] };
+            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content, label: row.label, tag_enabled: row.tag_enabled, group_name: row.group_name }] };
           }
 
           if (sql.startsWith('select preset_id, name, is_builtin, updated_at from context_stack_presets')) {
@@ -181,7 +181,7 @@ function createFakePool() {
           if (sql.startsWith('select slot_type, marker_key') && sql.includes('order by position')) {
             const [presetId] = params;
             const matches = slots.filter((s) => s.preset_id === presetId).slice().sort((a, b) => a.position - b.position);
-            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled }) => ({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled })) };
+            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name }) => ({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name })) };
           }
 
           if (sql.startsWith('delete from context_stack_presets')) {
@@ -452,6 +452,51 @@ const untagged = await db.withUserScope(userId, (session) =>
 assert(
   untagged.slots.every((s) => s.tagEnabled === false),
   'tagEnabled defaults to false (off) for slots that do not set it — existing stacks stay byte-identical',
+);
+
+// --- migration 0086: groupName round-trips and lands in the prompt ---
+const groupedPreset = await db.withUserScope(userId, (session) =>
+  createTool.handler(
+    {
+      name: 'Grouped Stack',
+      slots: [
+        { slotType: 'marker', markerKey: 'description', groupName: 'World Info' },
+        { slotType: 'marker', markerKey: 'scenario', groupName: 'World Info' },
+        { slotType: 'marker', markerKey: 'system' },
+      ],
+    },
+    { userId, db: session },
+  ),
+);
+assert(
+  groupedPreset.slots[0].groupName === 'World Info' && groupedPreset.slots[1].groupName === 'World Info' && groupedPreset.slots[2].groupName === undefined,
+  'create_context_stack_presets persists groupName per slot and returns it on the wire (unset stays undefined)',
+);
+const groupedReadBack = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  groupedReadBack.find((p) => p.presetId === groupedPreset.presetId)?.slots[1].groupName === 'World Info',
+  'get_context_stack_presets round-trips groupName — load→edit→save cannot silently drop a group',
+);
+pool.chatSessions.push({ chat_id: 'chat-4', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+const appliedGrouped = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ chatId: 'chat-4', presetId: groupedPreset.presetId }, { userId, db: session }),
+);
+assert(
+  appliedGrouped.systemText.includes('<World Info>\nA grizzled tavern keeper.') && appliedGrouped.systemText.includes('A dusty roadside inn.\n</World Info>'),
+  'apply_prompt_stack_to_chat wraps a contiguous groupName run in one set of <Group Name>…</Group Name> tags',
+);
+const ungrouped = await db.withUserScope(userId, (session) =>
+  createTool.handler(
+    {
+      name: 'Ungrouped Stack',
+      slots: [{ slotType: 'marker', markerKey: 'system' }],
+    },
+    { userId, db: session },
+  ),
+);
+assert(
+  ungrouped.slots.every((s) => s.groupName === undefined),
+  'groupName defaults to unset (null) for slots that do not set it — existing stacks stay byte-identical',
 );
 
 // --- set_default_context_stack_preset (migrations 0061 prompt + 0071 cleanup) ---

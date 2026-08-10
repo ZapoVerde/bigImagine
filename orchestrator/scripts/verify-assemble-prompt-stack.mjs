@@ -4,7 +4,7 @@
 // assertions plugins/context-stack-presets's own verify script already had for this function
 // before the move.
 
-import { assemblePromptStack } from '../dist/util/assemblePromptStack.js';
+import { assemblePromptStack, groupRuns, groupTagsForRendered } from '../dist/util/assemblePromptStack.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -81,6 +81,100 @@ const sanitized = assemblePromptStack(
 assert(
   sanitized[0].content === '<My Weird Label>\na\n</My Weird Label>',
   'tag names are sanitized: literal < > stripped, newlines/whitespace collapsed to single spaces',
+);
+
+// --- migration 0086: slot grouping (groupName, contiguous runs) ---
+const grouped = assemblePromptStack(
+  { description: 'A quiet tavern.', scenario: 'Rain falls.', system: 'Be concise.' },
+  [
+    { slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'World Info' },
+    { slotType: 'marker', markerKey: 'scenario', enabled: true, groupName: 'World Info' },
+    { slotType: 'marker', markerKey: 'system', enabled: true },
+  ],
+);
+assert(
+  grouped[0].content === '<World Info>\nA quiet tavern.' && grouped[1].content === 'Rain falls.\n</World Info>',
+  'a contiguous groupName run wraps the opener with <Name> and the closer with </Name> (members in between untouched)',
+);
+assert(
+  grouped[2].content === 'Be concise.',
+  'a slot outside any group is untouched',
+);
+
+const singleMemberGroup = assemblePromptStack(
+  { description: 'd' },
+  [{ slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'Solo' }],
+);
+assert(
+  singleMemberGroup[0].content === '<Solo>\nd\n</Solo>',
+  'a one-slot group wraps just itself with both tags',
+);
+
+const disabledInRun = assemblePromptStack(
+  { description: 'A quiet tavern.', scenario: 'Rain falls.' },
+  [
+    { slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'World Info' },
+    { slotType: 'marker', markerKey: 'system', enabled: false, groupName: 'World Info' },
+    { slotType: 'marker', markerKey: 'scenario', enabled: true, groupName: 'World Info' },
+  ],
+);
+assert(
+  disabledInRun[0].content === '<World Info>\nA quiet tavern.' && disabledInRun[1].content === 'Rain falls.\n</World Info>',
+  'a disabled member stays inside the group positionally — tags wrap the first and last RENDERED member',
+);
+
+const splitRuns = assemblePromptStack(
+  { description: 'a', scenario: 'b', system: 'c' },
+  [
+    { slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'G1' },
+    { slotType: 'marker', markerKey: 'scenario', enabled: true },
+    { slotType: 'marker', markerKey: 'system', enabled: true, groupName: 'G2' },
+  ],
+);
+assert(
+  splitRuns[0].content === '<G1>\na\n</G1>' && splitRuns[2].content === '<G2>\nc\n</G2>',
+  'a non-member slot between two runs splits them — two independent groups',
+);
+
+const groupPlusSlotTag = assemblePromptStack(
+  { description: 'a', scenario: 'b' },
+  [
+    { slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'World Info', tagEnabled: true, label: 'Locations' },
+    { slotType: 'marker', markerKey: 'scenario', enabled: true, groupName: 'World Info' },
+  ],
+);
+assert(
+  groupPlusSlotTag[0].content === '<World Info>\n<Locations>\na\n</Locations>' && groupPlusSlotTag[1].content === 'b\n</World Info>',
+  'a slot\'s own 0085 tags nest INSIDE its group tags',
+);
+
+const emptyNameBreaksRun = assemblePromptStack(
+  { description: 'a', scenario: 'b', system: 'c' },
+  [
+    { slotType: 'marker', markerKey: 'description', enabled: true, groupName: 'G' },
+    { slotType: 'marker', markerKey: 'scenario', enabled: true, groupName: '  ' },
+    { slotType: 'marker', markerKey: 'system', enabled: true, groupName: 'G' },
+  ],
+);
+assert(
+  emptyNameBreaksRun[0].content === '<G>\na\n</G>' && emptyNameBreaksRun[1].content === 'b' && emptyNameBreaksRun[2].content === '<G>\nc\n</G>',
+  'an empty/whitespace groupName emits no tags and breaks a run (unnamed opener is mid-edit, not a group)',
+);
+
+assert(
+  assemblePromptStack({ system: 'S' }, [{ slotType: 'marker', markerKey: 'system', enabled: true, groupName: undefined }])[0].content === 'S',
+  'groupName unset (default) leaves content byte-identical — existing stacks keep their prompt-cache prefix',
+);
+
+// groupRuns/groupTagsForRendered are shared with the per-turn narrator path (httpServer.ts) —
+// assert their direct contract too, so a drift between the two assembly sites fails here first.
+assert(
+  groupRuns([{ groupName: 'A' }, { groupName: 'A' }, {}, { groupName: 'B' }]).length === 2,
+  'groupRuns derives runs purely from contiguity + equality, no opener/closer flags needed',
+);
+assert(
+  groupTagsForRendered([{ groupName: 'X' }, { groupName: 'X' }, {}], [0, 1]) instanceof Map,
+  'groupTagsForRendered returns the per-rendered-index tag map both assembly sites consume',
 );
 
 if (process.exitCode) {
