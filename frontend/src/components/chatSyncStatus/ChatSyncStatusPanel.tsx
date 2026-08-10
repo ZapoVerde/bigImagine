@@ -71,14 +71,24 @@ export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose 
         ) : status === null ? (
           <div className="chat-sync-status-loading">Loading sync status&hellip;</div>
         ) : (
-          <SyncStatusBody status={status} archived={archived} />
+          <SyncStatusBody status={status} archived={archived} chatId={chatId} apiKey={apiKey} />
         )}
       </div>
     </div>
   );
 }
 
-function SyncStatusBody({ status, archived }: { status: ChatSyncStatus; archived: boolean }) {
+function SyncStatusBody({
+  status,
+  archived,
+  chatId,
+  apiKey,
+}: {
+  status: ChatSyncStatus;
+  archived: boolean;
+  chatId: string;
+  apiKey: string | null;
+}) {
   const badgeClass =
     status.lastStatus === 'ok'
       ? 'chat-sync-badge-ok'
@@ -224,7 +234,9 @@ function SyncHistory({ chatId, apiKey, syncs }: { chatId: string; apiKey: string
                   {relativeTime(sync.createdAt)}
                 </span>
               </button>
-              {isOpen && <SyncHistoryDetail sync={sync} detail={details.get(sync.syncId)} loading={loading.has(sync.syncId)} error={errors.get(sync.syncId) ?? null} />}
+              {isOpen && (
+                <SyncHistoryDetail detail={details.get(sync.syncId)} loading={loading.has(sync.syncId)} error={errors.get(sync.syncId) ?? null} />
+              )}
             </li>
           );
         })}
@@ -234,12 +246,10 @@ function SyncHistory({ chatId, apiKey, syncs }: { chatId: string; apiKey: string
 }
 
 function SyncHistoryDetail({
-  sync,
   detail,
   loading,
   error,
 }: {
-  sync: ChatSyncStatus['syncs'][number];
   detail: ChatSyncInspection | undefined;
   loading: boolean;
   error: string | null;
