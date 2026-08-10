@@ -505,5 +505,5 @@ Already applied by hand, not run automatically (see the file for the exact comma
   sanitized like 0085's (trim, collapse whitespace, strip `<`/`>`); empty name emits no tags and
   breaks a run. Default NULL keeps existing stacks byte-identical (§17 cache contract). Editor
   gives each group a stable name-derived color from a palette that excludes red — red is reserved
-  for the coverage warning (enabled slot with no enclosing tags). Not yet hand-applied to the
-  live DB.
+  for the coverage warning (enabled slot with no enclosing tags). Hand-applied to the live DB
+  (2026-08-14).
