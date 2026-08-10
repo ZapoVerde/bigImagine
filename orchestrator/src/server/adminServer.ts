@@ -147,6 +147,8 @@ import {
 } from '../io/chatMemory/memoryInjection.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
+import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../orchestrator/describeLocation.js';
+import { DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../util/renderLocationBlock.js';
 import { loadSlopRules, replaceSlopRules, type SlopRuleInput } from '../orchestrator/cleanupLoop.js';
 import type { PostgresClient } from '../io/postgres.js';
 
@@ -771,10 +773,10 @@ export async function getLocationSettings(store: OrchestratorSettingsStore): Pro
   return {
     splitEnabled: splitEnabled !== 'false',
     injectionEnabled: injectionEnabled !== 'false',
-    injectionPrompt: injectionPrompt ?? '',
-    injectionPromptIsDefault: !injectionPrompt,
-    describerPrompt: describerPrompt ?? '',
-    describerPromptIsDefault: !describerPrompt,
+    injectionPrompt: injectionPrompt?.trim() ? injectionPrompt : DEFAULT_LOCATION_BLOCK_TEMPLATE,
+    injectionPromptIsDefault: !injectionPrompt?.trim(),
+    describerPrompt: describerPrompt?.trim() ? describerPrompt : DEFAULT_LOCATION_DESCRIBER_PROMPT,
+    describerPromptIsDefault: !describerPrompt?.trim(),
     describerHistoryPairs: describerHistoryPairs ?? '',
   };
 }

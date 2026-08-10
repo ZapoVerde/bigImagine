@@ -13,7 +13,8 @@ import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { splitLocationName, loadLocationBlock } from '../dist/orchestrator/locationAndPresenceScraper.js';
 import { renderLocationBlock, DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../dist/util/renderLocationBlock.js';
-import { parseSetLocationSettingsBody } from '../dist/server/adminServer.js';
+import { parseSetLocationSettingsBody, getLocationSettings } from '../dist/server/adminServer.js';
+import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../dist/orchestrator/describeLocation.js';
 import { buildRepairPrompt, DEFAULT_CLEANUP_CONFIG } from '../dist/orchestrator/cleanupHeuristics.js';
 
 function assert(cond, message) {
@@ -273,4 +274,21 @@ function settingsStore(overrides = {}) {
   const db2 = createPostgresClient(throwing);
   const r = await loadLocationBlock({ db: db2, settings: settingsStore() }, USER, CHAT);
   assert(r.block === '' && r.currentParent === null, 'a throwing DB is swallowed (fail-open) — no block, no crash');
+}
+
+// --- getLocationSettings default resolution (location.md §6.3) ----------------------------------
+// The Locations page shows the ACTUAL default prompt text in the boxes, not a placeholder: an
+// empty setting resolves to the built-in template while still flagging IsDefault, and an override
+// passes through unchanged.
+{
+  const s = await getLocationSettings(settingsStore());
+  assert(s.injectionPrompt === DEFAULT_LOCATION_BLOCK_TEMPLATE, 'empty injection setting resolves to the built-in block template');
+  assert(s.injectionPromptIsDefault === true, 'resolved default still flags injectionPromptIsDefault');
+  assert(s.describerPrompt === DEFAULT_LOCATION_DESCRIBER_PROMPT, 'empty describer setting resolves to the built-in describer prompt');
+  assert(s.describerPromptIsDefault === true, 'resolved default still flags describerPromptIsDefault');
+}
+{
+  const s = await getLocationSettings(settingsStore({ location_injection_prompt: '  ', location_describer_prompt: 'custom' }));
+  assert(s.injectionPrompt === DEFAULT_LOCATION_BLOCK_TEMPLATE && s.injectionPromptIsDefault === true, 'whitespace-only injection setting counts as default');
+  assert(s.describerPrompt === 'custom' && s.describerPromptIsDefault === false, 'an override passes through unchanged, not flagged default');
 }
