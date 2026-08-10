@@ -2345,6 +2345,66 @@ server.close();
     );
   }
 
+  // --- Slot groups (migration 0086): a contiguous run sharing group_name gets one tag pair ---
+  // assemblePromptStack's groupRuns/groupTagsForRendered wrap the run's first/last RENDERED member
+  // in <Name>…</Name>. buildNarratorStackItems (the per-turn narrator path) must load group_name
+  // from context_stack_slots — it was missing from loadPromptStackSlots's SELECT/mapping, so
+  // grouped slots silently lost their tags in the real fired prompt AND the prompt inspector.
+  // Regression: the fired system prompt and the prompt-preview's captured Main Prompt both carry
+  // the group tags.
+  {
+    poolRp.slotsByPreset.set('preset-group', [
+      { slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, group_name: null },
+      { slot_type: 'custom', marker_key: null, enabled: true, custom_role: 'system', custom_content: 'The world has three moons.', label: null, group_name: 'World Info' },
+      { slot_type: 'custom', marker_key: null, enabled: true, custom_role: 'system', custom_content: 'Dragons are extinct.', label: null, group_name: 'World Info' },
+    ]);
+    const groupChat = await chatsRp.createChat(userIdRp, { kind: 'rp' });
+    // Same fake-store id reuse caveat as Part 5c: earlier parts may have left a 'main' trace for
+    // this chatId, which would make the preview show stale captured text instead of this turn's.
+    clearPromptTrace(groupChat.chatId);
+    await chatsRp.updateChat(userIdRp, groupChat.chatId, {
+      kind: 'rp',
+      characterId: 'char-ava',
+      promptStackPresetId: 'preset-group',
+    });
+    const groupGreeting = 'The old maps are wrong.';
+    await chatsRp.appendMessages(userIdRp, groupChat.chatId, [{ role: 'assistant', content: groupGreeting }]);
+    before = capturedRp.length;
+    const groupRes = await fetch(`${baseRp}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'assistant', content: groupGreeting },
+          { role: 'user', content: 'what changed?' },
+        ],
+        chat_id: groupChat.chatId,
+      }),
+    });
+    assert(groupRes.status === 200, 'an RP chat whose preset groups contiguous slots succeeds');
+    const groupSent = capturedRp[before].messages;
+    const groupSystem = groupSent[0]?.content ?? '';
+    assert(
+      groupSystem.includes('<World Info>') &&
+        groupSystem.includes('The world has three moons.') &&
+        groupSystem.includes('Dragons are extinct.') &&
+        groupSystem.includes('</World Info>') &&
+        groupSystem.indexOf('<World Info>') < groupSystem.indexOf('The world has three moons.') &&
+        groupSystem.indexOf('</World Info>') > groupSystem.indexOf('Dragons are extinct.'),
+      "narrator path: grouped slots render one <World Info>…</World Info> pair around the run's rendered content",
+    );
+    // The Prompt Inspector's captured Main Prompt is that same fired text — group tags included.
+    const groupPreviewRes = await fetch(`${baseRp}/v1/chats/${groupChat.chatId}/prompt-preview`, { headers: authRp });
+    const groupPreview = await groupPreviewRes.json();
+    const groupMain = groupPreview.groups[0];
+    assert(
+      groupMain.kind === 'main' &&
+        groupMain.captured === true &&
+        groupMain.items.some((i) => i.content.includes('<World Info>') && i.content.includes('</World Info>')),
+      'prompt-preview: the captured Main Prompt group carries the group tags',
+    );
+  }
+
   // --- The RP lane runs with NO tools at all (2026-08-10 user direction) ---
   // Whatever tool_names the session row carries (the legacy recall pair, null = all registered
   // tools, anything), an rp turn's LLM call must never receive a tool manifest — the model just

@@ -582,6 +582,7 @@ interface SlotDbRow {
   custom_content: string | null;
   label: string | null;
   tag_enabled: boolean;
+  group_name: string | null;
 }
 
 // PromptStackSlot already carries the cosmetic label column (migration 0060) and the tag toggle
@@ -604,7 +605,7 @@ interface NarratorCharacterFieldsRow {
 async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlot[]> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<SlotDbRow>(
-      `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled
+      `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled, group_name
        from context_stack_slots where preset_id = $1 order by position`,
       [presetId],
     ),
@@ -617,6 +618,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
     customContent: row.custom_content ?? undefined,
     label: row.label ?? undefined,
     tagEnabled: row.tag_enabled,
+    groupName: row.group_name ?? undefined,
   }));
 }
 
