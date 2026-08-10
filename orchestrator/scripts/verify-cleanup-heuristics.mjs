@@ -237,6 +237,31 @@ const SLOP = [
   // Fail-open: empty output leaves the region untouched.
   const noop = applyRepairSteps('Kael entered.', [{ kind: 'repair-header', span: { start: 0, end: 0 }, prompt: 'x' }], ['']);
   assert(noop === 'Kael entered.', 'executor: empty repair output leaves the text unchanged (fail-open)');
+
+  // Regression: a header repair (span near 0) and a paragraph replacement (span after it) landing
+  // in the same plan must both apply cleanly. planCleanup always appends the header step after the
+  // slop steps regardless of position, so insertion order alone doesn't give descending span.start
+  // — splicing by insertion order would apply the header edit first and corrupt the not-yet-applied
+  // paragraph step's now-stale original-text coordinates.
+  const combo = '[ Bad Header ]\nShe said the bad word here.\nMore text after.';
+  const comboHeaderSpan = { start: 0, end: '[ Bad Header ]\n'.length };
+  const comboParaStart = comboHeaderSpan.end;
+  const comboParaEnd = comboParaStart + 'She said the bad word here.'.length;
+  const comboSteps = [
+    {
+      kind: 'replace-paragraph',
+      ruleId: 'r1',
+      setName: 's',
+      span: { text: combo.slice(comboParaStart, comboParaEnd), start: comboParaStart, end: comboParaEnd },
+      prompt: 'x',
+    },
+    { kind: 'repair-header', span: comboHeaderSpan, prompt: 'y' },
+  ];
+  const comboResult = applyRepairSteps(combo, comboSteps, ['She said something nice instead.', '[ Night | The Keep ]\nPresent: Kael']);
+  assert(
+    comboResult === '[ Night | The Keep ]\nPresent: Kael\nShe said something nice instead.\nMore text after.',
+    'executor: a header repair and a later paragraph replacement in the same plan both apply intact (splice order is by span position, not step insertion order)',
+  );
 }
 
 // --- Defaults are self-consistent with the fixtures --------------------------------------------

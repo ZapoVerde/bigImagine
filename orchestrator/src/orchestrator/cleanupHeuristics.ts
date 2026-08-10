@@ -427,9 +427,13 @@ export function planCleanup(
  *  leaves that region untouched (fail-open). replace-paragraph skips a span already replaced
  *  (TRG first-rule-wins on same-paragraph conflicts); llm-message output is terminal — it
  *  replaces the whole reply and later steps are moot. All spans are valid against the original
- *  `text` (the plan's post-remove text), so accepted replacements are spliced from last to first
- *  into the original string — exactly how Triggeryze's applyReplaceParagraph keeps coordinates
- *  stable across multiple paragraph replacements. */
+ *  `text` (the plan's post-remove text), so accepted replacements are spliced in descending
+ *  span.start order — insertion order alone isn't enough, since planCleanup always appends the
+ *  header step (span near 0) before the footer step (span near the end) regardless of where any
+ *  paragraph steps fall in between; splicing by insertion order would apply the header's edit
+ *  while a not-yet-processed paragraph span was still expressed in now-stale original-text
+ *  coordinates. Sorting by start descending keeps every not-yet-processed span's coordinates
+ *  valid, the same invariant Triggeryze's applyReplaceParagraph relies on. */
 export function applyRepairSteps(text: string, steps: RepairStep[], outputs: Array<string | null | undefined>): string {
   const overlaps = (a: { start: number; end: number }, b: { start: number; end: number }) => a.start < b.end && b.start < a.end;
   const accepted: Array<{ step: SpanStep; output: string }> = [];
@@ -443,6 +447,7 @@ export function applyRepairSteps(text: string, steps: RepairStep[], outputs: Arr
     if (accepted.some((a) => overlaps(a.step.span, step.span))) continue; // first rule wins
     accepted.push({ step, output: o });
   }
+  accepted.sort((a, b) => a.step.span.start - b.step.span.start);
 
   let out = text;
   for (let k = accepted.length - 1; k >= 0; k--) {
