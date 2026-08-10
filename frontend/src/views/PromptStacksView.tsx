@@ -69,14 +69,30 @@ function groupHue(name: string): number {
   return 20 + (h % 320); // 20..339 — red (≈0-20, 340-360) excluded
 }
 
-/** Red-coverage rule: an enabled slot whose content ships bare — no 0085 tagEnabled and not a
- *  member of a NAMED group — is highlighted red. Disabled slots and empty custom blocks render
- *  nothing, so they don't count. */
+/** True when the trimmed content is enclosed in ONE matching HTML-style tag pair — the same shape
+ *  the 0085 toggle and 0086 groups produce. Tag names may contain spaces (kept verbatim), the
+ *  comparison is case-insensitive and trailing whitespace-tolerant. Used by the red-coverage rule
+ *  so a HAND-tagged custom block counts as covered even with the toggle off: the check is about
+ *  the content that ships, not about which button was pushed. */
+function contentIsWrapped(content: string): boolean {
+  return /^<([^<>]+)>[\s\S]*?<\/\1>\s*$/i.test(content.trim());
+}
+
+/** Red-coverage rule: an enabled slot whose content ships bare is highlighted red. A slot is
+ *  covered (not bare) when: the 0085 toggle wraps it, it is a member of a NAMED group (0086),
+ *  or — for custom blocks — its content is already enclosed in a matching tag pair by hand.
+ *  Disabled slots and empty custom blocks render nothing, so they don't count. Marker slots'
+ *  content is assembled server-side per chat, so only the toggle/group rules can apply to them
+ *  here — the editor never sees the text that ships for a marker. */
 function isBareSlot(slot: ContextStackSlot): boolean {
   if (slot.enabled === false) return false;
   if (slot.tagEnabled) return false;
   if (sanitizeGroupName(slot.groupName)) return false;
-  if (slot.slotType === 'custom' && !slot.customContent?.trim()) return false;
+  if (slot.slotType === 'custom') {
+    const content = slot.customContent?.trim();
+    if (!content) return false;
+    if (contentIsWrapped(content)) return false;
+  }
   return true;
 }
 
