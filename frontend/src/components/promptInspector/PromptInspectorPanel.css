@@ -229,3 +229,107 @@
   position: static;
   box-shadow: none;
 }
+
+/* ---- Tag-tree view of the Main Prompt (docs/prompt-inspector-tag-tree.md) ---- */
+/* The main prompt grouped into collapsible sections by its author's own HTML-style tags. Each
+   matched section is a row showing the canonical tag name + token/char budget (+ child count
+   when nested); everything starts collapsed. Text that belongs to no matched section (untagged
+   preamble, history between tags, broken-tag leftovers) rolls up and renders as "untagged text"
+   at its level — the view is display-only over the exact sent text, nothing is dropped. */
+.prompt-inspector-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.prompt-inspector-tag {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--color-bg-surface);
+}
+
+.prompt-inspector-tag summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  cursor: pointer;
+  background: var(--color-hover-surface);
+  list-style: none;
+}
+
+.prompt-inspector-tag summary::-webkit-details-marker {
+  display: none;
+}
+
+.prompt-inspector-tag summary::before {
+  content: '▸';
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+  flex-shrink: 0;
+  transition: transform 0.12s ease;
+}
+
+.prompt-inspector-tag[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.prompt-inspector-tag-name {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-inspector-tag-count {
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0.05rem 0.35rem;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.prompt-inspector-tag-own {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  border-top: 1px dashed var(--color-border-subtle);
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+/* Single-step indent per nesting level — small enough to stay usable on mobile (the drawer is
+   17rem / 85vw wide); the left border keeps the hierarchy legible without further padding. */
+.prompt-inspector-tag-children {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0.5rem 0.85rem;
+  padding-left: 0.55rem;
+  border-left: 1px solid var(--color-border-subtle);
+}
+
+/* Empty section (<a></a>): nothing to expand, so a plain row instead of an empty <details>. */
+.prompt-inspector-tag-leaf {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.prompt-inspector-tag-leaf .prompt-inspector-tag-name {
+  color: var(--color-text-muted);
+}
