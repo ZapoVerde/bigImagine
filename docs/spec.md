@@ -251,7 +251,9 @@ Every LLM call in this loop — director, character generation, fact extraction,
   with no separate mapping layer between "card field" and "prompt slot."
 - **The assembler is a pure function.** `assemblePromptStack(fields, slots)` (`plugins/
   context-stack-presets/src/assemblePromptStack.ts`) takes a flat `fields` object (one string per
-  marker, including a pre-rendered `recent_history`) and the preset's ordered `slots`, and returns
+  marker, including `recent_history` — since 2026-08-10 this one is live-rendered by the narrator
+  path from the live-window turns, but it still reaches the assembler as one pre-rendered string)
+  and the preset's ordered `slots`, and returns
   the `LlmMessage[]` to send. It never queries the database itself — whatever resolves a turn's
   active preset (an Orchestrator, once `scenes`/`characters` exist) hands it plain data. This is
   what makes §5 step 2's fixed order into saveable, swappable data without breaking `bi_principles.

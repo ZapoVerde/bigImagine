@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/memoryInjection.ts
- * @stamp 2026-08-13
+ * @stamp 2026-08-10
  * @architectural-role Pure Functions — CNZ-style per-component memory injection templates
  * @description
  * The reader-side half of the RP memory split (the user's 2026-08-13 direction): instead of one
@@ -42,6 +42,13 @@
  *   nothing, same non-empty filter as every other marker).
  * renderFusedMemoryBlock(scene, events, arcs, autoRecallBlock) -> string — the deprecated
  *   memory_recall alias: byte-identical to the legacy buildChatMemorySystemPrompt join.
+ * formatRecentHistoryTurns(messages, charName, userName) -> string — the live-window turns
+ *   rendered as one `Name: content` line per message (deterministic — bi_principles §17), the
+ *   {{turns}} value the recent_history marker renders (2026-08-10 user direction: the active
+ *   context, last sent turn + active turns, lives INSIDE the stack inside the preset's own HTML
+ *   tags; nothing is appended as messages after it).
+ * renderRecentHistory(turns, charName, userName, template) -> string — the recent_history marker
+ *   template ({{turns}}, {{char_name}}, {{user_name}}); default = bare {{turns}}.
  *
  * @contract
  *   assertions:
@@ -49,6 +56,8 @@
  *     state_ownership: []
  *     external_io:     []
  */
+
+import type { LlmMessage } from '../llm/types.js';
 
 /** CNZ's interpolate() (SillyTavern-Canonize defaults.js) — {{#if key}}...{{/if}} conditionals
  *  first, then plain {{var}} substitution for the known vocabulary. One deliberate divergence:
@@ -100,6 +109,14 @@ export const DEFAULT_INJECT_AUTO_RECALL_PROMPT = `[The following are archived na
 export const DEFAULT_AUTO_RECALL_CHUNK_PROMPT = `<memory turns="{{turn_range}}">
 {{text}}
 </memory>`;
+
+/** DEFAULT_INJECT_RECENT_HISTORY_PROMPT — the recent_history marker's template: bare {{turns}}.
+ *  The turns are already fully rendered (formatRecentHistoryTurns) as `Name: content` lines, so
+ *  the default just places them; a bespoke override can add a header or wrap them (the template
+ *  also receives {{char_name}}/{{user_name}} for exactly that). The {{#if turns}} guard keeps an
+ *  empty window from leaking a bare header — the stack's non-empty filter would drop the slot
+ *  anyway, this just makes the template itself read naturally. */
+export const DEFAULT_INJECT_RECENT_HISTORY_PROMPT = `{{#if turns}}{{turns}}{{/if}}`;
 
 /** The structured RP memory context — what buildChatMemorySystemPrompt's rp branch returns so the
  *  narrator stack can render each component marker from its own template (and the deprecated
@@ -170,6 +187,33 @@ export function renderAutoRecall(
     .join('\n\n');
   const factBlock = facts.map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`).join('\n');
   return interpolateMemoryTemplate(template, { text, facts: factBlock });
+}
+
+/** The recent_history marker's {{turns}} value — the live-window messages rendered as one
+ *  `Name: content` line per message, in order, joined by blank lines. Deterministic (bi_principles
+ *  §17: identical window => identical bytes => the stack's stable prefix survives) and as-is (an
+ *  empty-content turn renders as just the speaker line — the 2026-08-10 user direction: "send it
+ *  as it is"; the stack is robust enough to provoke a good response). assistant -> charName,
+ *  user -> userName, any other role (system/tool) -> the role name verbatim. */
+export function formatRecentHistoryTurns(messages: LlmMessage[], charName: string, userName: string): string {
+  return messages
+    .map((m) => {
+      const speaker = m.role === 'assistant' ? charName : m.role === 'user' ? userName : m.role;
+      return `${speaker || m.role}: ${m.content}`;
+    })
+    .join('\n\n');
+}
+
+/** The recent_history marker — {{turns}} (the pre-rendered turn lines), {{char_name}}/{{user_name}}
+ *  for bespoke templates. Empty-string override = built-in default (the platform's §18 contract,
+ *  same `|| undefined` as the bridge/plot/auto-recall templates). */
+export function renderRecentHistory(
+  turns: string,
+  charName: string,
+  userName: string,
+  template = DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
+): string {
+  return interpolateMemoryTemplate(template, { turns, char_name: charName, user_name: userName });
 }
 
 /** The deprecated `memory_recall` alias — byte-identical to buildChatMemorySystemPrompt's legacy

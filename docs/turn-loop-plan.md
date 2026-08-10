@@ -83,8 +83,18 @@ not Apply-click" decision, this becomes a real per-turn call:
    (`httpServer.ts:328`) concatenates the chat-memory digest directly into the system string,
    bypassing slot position. Change: feed its result into `fields.memory_recall` instead, so a
    preset's slot ordering actually governs where it lands. Same underlying read, no new query.
-5. **`recent_history` stays out of the stack** — real `chat_messages` appended after, as already
-   decided; the marker exists in the vocabulary but nothing feeds it for chat-shaped turns.
+5. **`recent_history` is a LIVE marker now** (2026-08-10 user direction: *"I want it to work so
+   that it gets wrapped in my html tags and so that I can manage caching effectively"*) — the
+   active context (the last sent turn + the live-window turns, the same window the messages array
+   used to carry) is rendered deterministically into `fields.recent_history` by
+   `buildNarratorStackItems` and lands wherever the preset ordered the slot, wrapped in the
+   preset's own HTML tags (e.g. Comfy 2's `<narrative_execution>`). When the slot renders, the
+   caller does NOT append the window as `chat_messages` afterwards — the stack alone carries it
+   ("I do not want the messages appended at the end"), and the LLM adapters emit a single empty
+   user turn to keep the request shape valid. The builtin Standard/Minimal presets' slot was
+   disabled (`db/migrations/0081`) so the default experience is unchanged; the author of a preset
+   that enables + orders the slot is explicitly managing the cache prefix (everything before the
+   volatile block caches; the block itself is the only miss).
 6. Call `assemblePromptStack(fields, slots)`, then `interpolateMacros` over the joined result —
    same two-phase pattern `applyPromptStackToChatTool` already uses, just re-run every turn instead
    of once.

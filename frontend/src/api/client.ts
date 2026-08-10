@@ -902,6 +902,7 @@ export async function adminSetChatMemorySettings(
     inject_bridge_prompt?: string;
     inject_plot_prompt?: string;
     inject_auto_recall_prompt?: string;
+    inject_recent_history_prompt?: string;
     auto_recall_chunk_prompt?: string;
   },
   adminKey: string | null,

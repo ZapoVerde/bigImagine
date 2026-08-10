@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/openaiCompatible.ts
- * @stamp 2026-07-23
+ * @stamp 2026-08-10
  * @architectural-role IO Wrapper — LlmProvider adapter for any OpenAI-shaped chat completions
  * API (OpenRouter, DeepSeek's native endpoint, and most other current providers converge on
  * this shape)
@@ -91,6 +91,12 @@ interface OaiMessage {
 }
 
 function toOaiMessages(messages: LlmMessage[]): OaiMessage[] {
+  // The stack can carry the whole active context (recent_history in the narrator stack, with the
+  // live-window turns moved out of the messages array) — but OpenAI-compatible endpoints reject an
+  // empty messages array outright, so emit a single empty user turn as a shape-level placeholder.
+  // No instruction text: the actual context sits in the system block; this is only to keep the
+  // request valid. (2026-08-10 user direction: "send it as it is".)
+  if (messages.length === 0) return [{ role: 'user', content: '' }];
   return messages.map((m) => {
     if (m.role === 'tool') {
       return { role: 'tool', tool_call_id: m.toolCallId, content: m.content };

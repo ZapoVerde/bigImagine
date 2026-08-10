@@ -351,6 +351,36 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async () =>
   assert(turn.usage === undefined, 'Anthropic: usage is undefined, not fabricated, when the response omits it');
 });
 
+// --- Empty messages array (recent_history carries the whole context in the system block) ---
+// When the live-window turns live INSIDE the narrator stack, messagesForLlm is empty; the
+// adapters must still emit a request the provider accepts — a single empty user turn, no
+// instruction text ("send it as it is", 2026-08-10).
+await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider({ apiKey: 'test-key', model: 'test-model', baseUrl: 'https://example.invalid/v1' });
+  const turn = await llm.complete([], []);
+  assert(turn.message.content === 'ok', 'OpenAI-compatible: a turn with zero messages still completes');
+  const sent = requests[0].body.messages;
+  assert(
+    sent.length === 1 && sent[0].role === 'user' && sent[0].content === '',
+    'OpenAI-compatible: an empty messages array emits one empty user turn (shape-level placeholder only)',
+  );
+});
+
+await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requests) => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  const turn = await llm.complete([], []);
+  assert(turn.message.content === 'ok', 'Anthropic: a turn with zero messages still completes');
+  const sent = requests[0].body.messages;
+  assert(
+    sent.length === 1 &&
+      sent[0].role === 'user' &&
+      sent[0].content.length === 1 &&
+      sent[0].content[0].type === 'text' &&
+      sent[0].content[0].text === '',
+    'Anthropic: an empty messages array emits one empty user turn (shape-level placeholder only)',
+  );
+});
+
 if (process.exitCode) {
   console.error('\nLLM adapter verification FAILED');
   process.exit(1);

@@ -2293,6 +2293,58 @@ server.close();
     );
   }
 
+  // --- recent_history as a LIVE marker: the active context moves into the stack ---
+  // A preset that enables + orders the recent_history slot (the user's Comfy 2 arrangement:
+  // wrapped in its own HTML tags) must render the live-window turns inside the system prompt and
+  // NOT append them as messages afterwards — the stack alone carries the context (2026-08-10 user
+  // direction: "I do not want the messages appended at the end" / "send it as it is"). The real
+  // LLM adapters then emit a single empty user turn to keep the request shape valid.
+  {
+    poolRp.slotsByPreset.set('preset-recent', [
+      { slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null },
+      { slot_type: 'marker', marker_key: 'scenario', enabled: true, custom_role: null, custom_content: null, label: null },
+      { slot_type: 'custom', marker_key: null, enabled: true, custom_role: 'system', custom_content: '<narrative_execution>', label: null },
+      { slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null },
+      { slot_type: 'custom', marker_key: null, enabled: true, custom_role: 'system', custom_content: '</narrative_execution>', label: null },
+    ]);
+    const recentChat = await chatsRp.createChat(userIdRp, { kind: 'rp' });
+    await chatsRp.updateChat(userIdRp, recentChat.chatId, {
+      kind: 'rp',
+      characterId: 'char-ava',
+      promptStackPresetId: 'preset-recent',
+    });
+    const recentGreeting = 'The fog is lifting.';
+    await chatsRp.appendMessages(userIdRp, recentChat.chatId, [{ role: 'assistant', content: recentGreeting }]);
+    before = capturedRp.length;
+    const recentRes = await fetch(`${baseRp}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { ...authRp, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          { role: 'assistant', content: recentGreeting },
+          { role: 'user', content: 'show me the way' },
+        ],
+        chat_id: recentChat.chatId,
+      }),
+    });
+    assert(recentRes.status === 200, 'an RP chat whose preset wraps recent_history in its own tags succeeds');
+    const recentSent = capturedRp[before].messages;
+    // runTurn appends the provider's reply to the same array after capture, so the last message
+    // is the fake's 'reply' — the point is that none of the live-window turns ride along.
+    assert(
+      recentSent[0]?.role === 'system' && !recentSent.some((m) => m.role === 'user'),
+      'when recent_history renders, the live-window turns are NOT appended as messages — the system stack alone carries them',
+    );
+    const recentSystem = recentSent[0].content;
+    assert(
+      recentSystem.includes('<narrative_execution>') &&
+        recentSystem.includes('Ava: The fog is lifting.') &&
+        recentSystem.includes('Jeremy: show me the way') &&
+        recentSystem.includes('</narrative_execution>'),
+      'the live-window turns (last sent turn included) render inside the preset\'s own <narrative_execution> tags, per-speaker',
+    );
+  }
+
   // --- Swipe display decoration: alternate greetings carry resolvedContent too ---
   // The swipe routes return one message the client swaps into view in place (a card's alternate
   // greetings load in as that opening message's swipe history), so its display copy is resolved

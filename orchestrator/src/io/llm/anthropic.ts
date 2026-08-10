@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/anthropic.ts
- * @stamp 2026-07-21
+ * @stamp 2026-08-10
  * @architectural-role IO Wrapper — LlmProvider adapter for the Anthropic Messages API
  * @description
  * Translates the vendor-neutral LlmProvider contract onto Anthropic's specific request/response
@@ -72,6 +72,12 @@ function toAnthropicMessages(messages: LlmMessage[]): {
 } {
   const system = messages.find((m) => m.role === 'system')?.content;
   const rest = messages.filter((m) => m.role !== 'system');
+
+  // Same shape-level placeholder as toOaiMessages: the whole active context can live in the
+  // system block (recent_history in the narrator stack), and Anthropic's API requires ≥1 message.
+  if (rest.length === 0) {
+    return { system, messages: [{ role: 'user', content: [{ type: 'text', text: '' }] }] };
+  }
 
   const anthropicMessages: AnthropicMessage[] = rest.map((m) => {
     if (m.role === 'tool') {

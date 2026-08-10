@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/adminServer.ts
- * @stamp 2026-07-24
+ * @stamp 2026-08-10
  * @architectural-role Pure Function (request parsing) + IO Wrapper (credential store IO) — same
  * dual-role split already established by toolInvoke.ts for this codebase's other additive HTTP
  * surface
@@ -143,6 +143,7 @@ import {
   DEFAULT_INJECT_PLOT_PROMPT,
   DEFAULT_INJECT_AUTO_RECALL_PROMPT,
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
 } from '../io/chatMemory/memoryInjection.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
@@ -1023,6 +1024,8 @@ export interface ChatMemorySettings {
   injectPlotPromptIsDefault: boolean;
   injectAutoRecallPrompt: string;
   injectAutoRecallPromptIsDefault: boolean;
+  injectRecentHistoryPrompt: string;
+  injectRecentHistoryPromptIsDefault: boolean;
   autoRecallChunkPrompt: string;
   autoRecallChunkPromptIsDefault: boolean;
   // RP read-path retrieval knobs (migration 0077, io/chatMemory/recallForPrompt.ts) — read live
@@ -1050,6 +1053,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     injectBridgePrompt,
     injectPlotPrompt,
     injectAutoRecallPrompt,
+    injectRecentHistoryPrompt,
     autoRecallChunkPrompt,
   ] = await Promise.all([
     store.get('chat_memory_profile'),
@@ -1068,6 +1072,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_inject_bridge_prompt'),
     store.get('chat_memory_inject_plot_prompt'),
     store.get('chat_memory_inject_auto_recall_prompt'),
+    store.get('chat_memory_inject_recent_history_prompt'),
     store.get('chat_memory_auto_recall_chunk_prompt'),
   ]);
   return {
@@ -1098,6 +1103,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     injectPlotPromptIsDefault: !injectPlotPrompt,
     injectAutoRecallPrompt: injectAutoRecallPrompt || DEFAULT_INJECT_AUTO_RECALL_PROMPT,
     injectAutoRecallPromptIsDefault: !injectAutoRecallPrompt,
+    injectRecentHistoryPrompt: injectRecentHistoryPrompt || DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
+    injectRecentHistoryPromptIsDefault: !injectRecentHistoryPrompt,
     autoRecallChunkPrompt: autoRecallChunkPrompt || DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
     autoRecallChunkPromptIsDefault: !autoRecallChunkPrompt,
   };
@@ -1120,6 +1127,7 @@ export interface SetChatMemorySettingsBody {
   injectBridgePrompt?: string;
   injectPlotPrompt?: string;
   injectAutoRecallPrompt?: string;
+  injectRecentHistoryPrompt?: string;
   autoRecallChunkPrompt?: string;
 }
 
@@ -1146,6 +1154,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     inject_bridge_prompt,
     inject_plot_prompt,
     inject_auto_recall_prompt,
+    inject_recent_history_prompt,
     auto_recall_chunk_prompt,
   } = raw as Record<string, unknown>;
   if (
@@ -1165,6 +1174,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     inject_bridge_prompt === undefined &&
     inject_plot_prompt === undefined &&
     inject_auto_recall_prompt === undefined &&
+    inject_recent_history_prompt === undefined &&
     auto_recall_chunk_prompt === undefined
   ) {
     return undefined;
@@ -1185,6 +1195,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (inject_bridge_prompt !== undefined && typeof inject_bridge_prompt !== 'string') return undefined;
   if (inject_plot_prompt !== undefined && typeof inject_plot_prompt !== 'string') return undefined;
   if (inject_auto_recall_prompt !== undefined && typeof inject_auto_recall_prompt !== 'string') return undefined;
+  if (inject_recent_history_prompt !== undefined && typeof inject_recent_history_prompt !== 'string') return undefined;
   if (auto_recall_chunk_prompt !== undefined && typeof auto_recall_chunk_prompt !== 'string') return undefined;
   return {
     profile: profile as string | undefined,
@@ -1203,6 +1214,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     injectBridgePrompt: inject_bridge_prompt as string | undefined,
     injectPlotPrompt: inject_plot_prompt as string | undefined,
     injectAutoRecallPrompt: inject_auto_recall_prompt as string | undefined,
+    injectRecentHistoryPrompt: inject_recent_history_prompt as string | undefined,
     autoRecallChunkPrompt: auto_recall_chunk_prompt as string | undefined,
   };
 }
@@ -1224,6 +1236,7 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.injectBridgePrompt !== undefined) await store.set('chat_memory_inject_bridge_prompt', body.injectBridgePrompt);
   if (body.injectPlotPrompt !== undefined) await store.set('chat_memory_inject_plot_prompt', body.injectPlotPrompt);
   if (body.injectAutoRecallPrompt !== undefined) await store.set('chat_memory_inject_auto_recall_prompt', body.injectAutoRecallPrompt);
+  if (body.injectRecentHistoryPrompt !== undefined) await store.set('chat_memory_inject_recent_history_prompt', body.injectRecentHistoryPrompt);
   if (body.autoRecallChunkPrompt !== undefined) await store.set('chat_memory_auto_recall_chunk_prompt', body.autoRecallChunkPrompt);
 }
 

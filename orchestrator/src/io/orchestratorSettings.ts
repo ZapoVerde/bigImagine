@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/orchestratorSettings.ts
- * @stamp 2026-07-24
+ * @stamp 2026-08-10
  * @architectural-role IO Wrapper — DB-backed household-wide orchestrator settings
  * @description
  * Backs orchestrator_settings (db/migrations/0010_orchestrator_settings.sql,
@@ -227,6 +227,7 @@ export const SETTING_NAMES = [
   'chat_memory_inject_plot_prompt',
   'chat_memory_inject_auto_recall_prompt',
   'chat_memory_auto_recall_chunk_prompt',
+  'chat_memory_inject_recent_history_prompt',
   'canon_recall_top_k',
   'canon_extraction_prompt',
   'screen_lock_password',

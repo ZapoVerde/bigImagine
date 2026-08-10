@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/httpServer.ts
- * @stamp 2026-08-07
+ * @stamp 2026-08-10
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
@@ -182,6 +182,8 @@ import {
   renderPlotThreads,
   renderAutoRecall,
   renderFusedMemoryBlock,
+  formatRecentHistoryTurns,
+  renderRecentHistory,
   type RpMemoryContext,
 } from '../io/chatMemory/memoryInjection.js';
 import { scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
@@ -637,6 +639,14 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // emit, just not yet collapsed into one joined string. Both assembleNarratorSystemText (the real
 // per-turn call) and buildPromptPreview (the read-only inspector below) call this, so a preview
 // can never drift from what a turn actually sends — there is exactly one place this assembly runs.
+//
+// recentHistoryMessages (the turn's trimmed live-window messages, or undefined for callers that
+// don't have them) feeds the recent_history marker when that slot is enabled — the 2026-08-10 user
+// direction: the active context (last sent turn + active turns) renders INSIDE the stack, wrapped
+// by the preset's own HTML tags, and is NOT also appended as messages. The rendering is
+// deterministic (formatRecentHistoryTurns, bi_principles §17) so an unchanged window produces
+// identical bytes and the byte-prefix cache survives; the volatile block sits wherever the preset
+// placed the slot, which is the author's cache-management control.
 async function buildNarratorStackItems(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
@@ -644,8 +654,9 @@ async function buildNarratorStackItems(
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
+  recentHistoryMessages?: LlmMessage[],
 ): Promise<PromptPreviewItem[]> {
-  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate] = await Promise.all([
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -660,6 +671,7 @@ async function buildNarratorStackItems(
     settings.get('chat_memory_inject_plot_prompt'),
     settings.get('chat_memory_inject_auto_recall_prompt'),
     settings.get('chat_memory_auto_recall_chunk_prompt'),
+    settings.get('chat_memory_inject_recent_history_prompt'),
   ]);
   // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
   // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
@@ -688,6 +700,20 @@ async function buildNarratorStackItems(
     auto_recall:
       renderAutoRecall(memoryContext.chunks, memoryContext.facts, autoRecallTemplate || undefined, chunkTemplate || undefined, character?.name) ||
       undefined,
+    // The active context (2026-08-10 user direction): the live-window turns, last sent turn
+    // included, rendered deterministically and placed wherever the preset ordered this slot —
+    // inside the preset's own HTML wrapper tags when it authored them (e.g. Comfy 2's
+    // <narrative_execution>). Empty window => undefined => the slot's non-empty filter drops it,
+    // and the caller then keeps sending the window as plain messages (unchanged behavior).
+    recent_history:
+      recentHistoryMessages?.length
+        ? renderRecentHistory(
+            formatRecentHistoryTurns(recentHistoryMessages, character?.name ?? '', persona.name ?? ''),
+            character?.name ?? '',
+            persona.name ?? '',
+            recentHistoryTemplate || undefined,
+          ) || undefined
+        : undefined,
     // Deprecated fused alias — presets that still carry a memory_recall slot get the legacy block.
     memory_recall: memoryContext.fused || undefined,
   };
@@ -720,6 +746,10 @@ async function buildNarratorStackItems(
   return items;
 }
 
+// Returns the joined system text plus whether the recent_history slot actually rendered this turn
+// — when it did, the caller must NOT also append the live-window messages (they now live inside
+// the stack; duplicating them would double the window's tokens and put a changed byte in the
+// system block, defeating the cache prefix the user is managing).
 async function assembleNarratorSystemText(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
@@ -727,9 +757,13 @@ async function assembleNarratorSystemText(
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
-): Promise<string> {
-  const items = await buildNarratorStackItems(db, settings, userId, characterId, presetId, memoryContext);
-  return items.map((i) => i.content).join('\n\n');
+  recentHistoryMessages?: LlmMessage[],
+): Promise<{ text: string; recentHistoryRendered: boolean }> {
+  const items = await buildNarratorStackItems(db, settings, userId, characterId, presetId, memoryContext, recentHistoryMessages);
+  return {
+    text: items.map((i) => i.content).join('\n\n'),
+    recentHistoryRendered: items.some((i) => i.markerKey === 'recent_history'),
+  };
 }
 
 // The other half: raw history older than the live window is never sent at all — only reachable via
@@ -967,8 +1001,16 @@ async function assembleSessionTurnContext(
     // buildNarratorStackItems reads the character/persona once more for its own slot snapshot —
     // near-simultaneous with the turn-level buildMacroSnapshot above, so Stage 1's deterministic
     // lookups make the two byte-identical; a Stage 2 clock/RNG would want them merged into one.
-    const narratorText = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext);
-    return { systemPrompt: narratorText, messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot) };
+    // recentHistoryRendered: the live-window turns (last sent turn included) moved INTO the stack
+    // inside the preset's own tags (2026-08-10 user direction: "I do not want the messages
+    // appended at the end"). When the slot rendered, the messages array is emptied — the stack
+    // alone carries the context; the LLM adapters emit a single empty user message so providers
+    // don't reject the request shape (the user's "send it as it is").
+    const narrator = await assembleNarratorSystemText(db, settings, userId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed);
+    return {
+      systemPrompt: narrator.text,
+      messagesForLlm: narrator.recentHistoryRendered ? [] : resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
+    };
   }
 
   // No applied preset — a 'chat'-kind chat, or an 'rp' chat that's never been through Apply:
@@ -1151,7 +1193,7 @@ async function buildPromptPreview(  deps: HttpServerDeps,
 
     if (session.kind === 'rp' && session.promptStackPresetId) {
       systemStack.push(
-        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext)),
+        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed)),
       );
     } else {
       let system = session.params.system;
@@ -1164,9 +1206,14 @@ async function buildPromptPreview(  deps: HttpServerDeps,
       const memoryText = typeof memoryContext === 'string' ? memoryContext : memoryContext.fused;
       if (memoryText) systemStack.push(toPreviewItem('system', memoryText, { markerKey: 'memory_recall' }));
     }
-    trimmed = resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot);
-
-    const messages = trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content));
+    // When the recent_history slot rendered, the live-window turns are INSIDE the stack — the
+    // preview must not also list them as message items (mirrors the real turn: messagesForLlm is
+    // emptied in assembleSessionTurnContext). resolveMacrosInMessages stays gated on !rendered:
+    // the rendered block's own Stage-1 pass (buildNarratorStackItems) already resolved its macros.
+    const historyInStack = systemStack.some((i) => i.markerKey === 'recent_history');
+    const messages = historyInStack
+      ? []
+      : resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot).map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content));
     mainGroup = { kind: 'main', title: 'Main Prompt', captured: false, items: [...systemStack, ...messages] };
   }
 

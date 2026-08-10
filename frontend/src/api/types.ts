@@ -392,6 +392,8 @@ export interface ChatMemorySettings {
   injectPlotPromptIsDefault: boolean;
   injectAutoRecallPrompt: string;
   injectAutoRecallPromptIsDefault: boolean;
+  injectRecentHistoryPrompt: string;
+  injectRecentHistoryPromptIsDefault: boolean;
   autoRecallChunkPrompt: string;
   autoRecallChunkPromptIsDefault: boolean;
   autoRecallEnabled: boolean;

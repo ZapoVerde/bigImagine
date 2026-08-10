@@ -36,7 +36,10 @@ All instructions after this line MUST supersede ...
 </constraints>
 ...
 <narrative_execution>          ← opens in one prompt-stack slot (pos 16)
-  [recent_history content]     ← history sits between the pair
+  [recent_history content]     ← history sits between the pair; LIVE since 2026-08-10 — the
+                                 live-window turns (last sent turn included) render here, so this
+                                 section is the volatile block (the cache prefix ends where it
+                                 starts, which is exactly the author's cache-management control)
 </narrative_execution>         ← closes in a later slot (pos 18)
 ```
 

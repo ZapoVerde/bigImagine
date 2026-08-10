@@ -43,10 +43,13 @@ export default function RagView() {
   const [selectedLorebookCuratorPrompt, setSelectedLorebookCuratorPrompt] = useState('');
   const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
   // RP read-path injection templates (io/chatMemory/memoryInjection.ts, 2026-08-13 component
-  // split) — the bridge / plot_threads / auto_recall marker wrappers rendered per turn.
+  // split) — the bridge / plot_threads / auto_recall / recent_history marker wrappers rendered
+  // per turn. recent_history (2026-08-10) renders the active context: the live-window turns, last
+  // sent turn included, inside whatever HTML tags the preset authored around the slot.
   const [selectedInjectBridgePrompt, setSelectedInjectBridgePrompt] = useState('');
   const [selectedInjectPlotPrompt, setSelectedInjectPlotPrompt] = useState('');
   const [selectedInjectAutoRecallPrompt, setSelectedInjectAutoRecallPrompt] = useState('');
+  const [selectedInjectRecentHistoryPrompt, setSelectedInjectRecentHistoryPrompt] = useState('');
   const [selectedAutoRecallChunkPrompt, setSelectedAutoRecallChunkPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
 
@@ -79,6 +82,7 @@ export default function RagView() {
     setSelectedInjectBridgePrompt(settings.injectBridgePrompt);
     setSelectedInjectPlotPrompt(settings.injectPlotPrompt);
     setSelectedInjectAutoRecallPrompt(settings.injectAutoRecallPrompt);
+    setSelectedInjectRecentHistoryPrompt(settings.injectRecentHistoryPrompt);
     setSelectedAutoRecallChunkPrompt(settings.autoRecallChunkPrompt);
     setSelectedAutoRecallEnabled(settings.autoRecallEnabled);
     setSelectedAutoRecallPairs(settings.autoRecallPairs === null ? '' : String(settings.autoRecallPairs));
@@ -164,6 +168,7 @@ export default function RagView() {
       | 'injectBridgePrompt'
       | 'injectPlotPrompt'
       | 'injectAutoRecallPrompt'
+      | 'injectRecentHistoryPrompt'
       | 'autoRecallChunkPrompt',
   ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
@@ -175,6 +180,7 @@ export default function RagView() {
     if (field === 'injectBridgePrompt') setSelectedInjectBridgePrompt('');
     if (field === 'injectPlotPrompt') setSelectedInjectPlotPrompt('');
     if (field === 'injectAutoRecallPrompt') setSelectedInjectAutoRecallPrompt('');
+    if (field === 'injectRecentHistoryPrompt') setSelectedInjectRecentHistoryPrompt('');
     if (field === 'autoRecallChunkPrompt') setSelectedAutoRecallChunkPrompt('');
   }
 
@@ -200,6 +206,9 @@ export default function RagView() {
     if (selectedInjectPlotPrompt !== chatMemorySettings.injectPlotPrompt) memoryPatch.inject_plot_prompt = selectedInjectPlotPrompt;
     if (selectedInjectAutoRecallPrompt !== chatMemorySettings.injectAutoRecallPrompt) {
       memoryPatch.inject_auto_recall_prompt = selectedInjectAutoRecallPrompt;
+    }
+    if (selectedInjectRecentHistoryPrompt !== chatMemorySettings.injectRecentHistoryPrompt) {
+      memoryPatch.inject_recent_history_prompt = selectedInjectRecentHistoryPrompt;
     }
     if (selectedAutoRecallChunkPrompt !== chatMemorySettings.autoRecallChunkPrompt) {
       memoryPatch.auto_recall_chunk_prompt = selectedAutoRecallChunkPrompt;
@@ -510,6 +519,21 @@ export default function RagView() {
         </label>
         <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('injectAutoRecallPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Recent-history injection prompt (the active context: live-window turns, last sent turn
+          included) {chatMemorySettings?.injectRecentHistoryPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedInjectRecentHistoryPrompt}
+            onChange={(e) => setSelectedInjectRecentHistoryPrompt(e.target.value)}
+            rows={5}
+          />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('injectRecentHistoryPrompt')}>
           Reset to default
         </button>
         <br />

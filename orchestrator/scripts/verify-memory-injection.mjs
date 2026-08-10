@@ -1,17 +1,21 @@
-// Proves io/chatMemory/memoryInjection.ts in isolation — the pure template renderers for the three
-// RP memory component markers (bridge / plot_threads / auto_recall) plus the deprecated fused
-// memory_recall alias. The templates are CNZ-style {{var}}/{{#if}} interpolation; each renderer
-// returns '' when its component has no content so an enabled slot with nothing to say emits nothing.
+// Proves io/chatMemory/memoryInjection.ts in isolation — the pure template renderers for the RP
+// memory component markers (bridge / plot_threads / auto_recall / recent_history) plus the
+// deprecated fused memory_recall alias. The templates are CNZ-style {{var}}/{{#if}} interpolation;
+// each renderer returns '' when its component has no content so an enabled slot with nothing to
+// say emits nothing.
 import {
   interpolateMemoryTemplate,
   renderBridge,
   renderPlotThreads,
   renderAutoRecall,
   renderFusedMemoryBlock,
+  formatRecentHistoryTurns,
+  renderRecentHistory,
   DEFAULT_INJECT_BRIDGE_PROMPT,
   DEFAULT_INJECT_PLOT_PROMPT,
   DEFAULT_INJECT_AUTO_RECALL_PROMPT,
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
 } from '../dist/io/chatMemory/memoryInjection.js';
 
 function assert(cond, message) {
@@ -136,6 +140,59 @@ function assert(cond, message) {
     renderAutoRecall([{ ordinal: 1, summary: '', content: 'x' }], [], '' || undefined, '' || undefined, '') !== '',
     "empty auto-recall/chunk overrides fall back to the built-in defaults and still render",
   );
+}
+
+// --- formatRecentHistoryTurns + renderRecentHistory: the active-context marker ---
+{
+  const turns = formatRecentHistoryTurns(
+    [
+      { role: 'user', content: 'What is the key?' },
+      { role: 'assistant', content: 'Under the vault.' },
+      { role: 'user', content: '' }, // empty content => bare speaker line, "send it as it is"
+    ],
+    'Ava',
+    'Me',
+  );
+  assert(
+    turns === 'Me: What is the key?\n\nAva: Under the vault.\n\nMe: ',
+    'formatRecentHistoryTurns renders one "Name: content" line per message, joined by blank lines, as-is for empty content',
+  );
+}
+{
+  const turns = formatRecentHistoryTurns(
+    [
+      { role: 'user', content: 'hi' },
+      { role: 'tool', content: 'result' },
+    ],
+    'Ava',
+    'Me',
+  );
+  assert(
+    turns === 'Me: hi\n\ntool: result',
+    'non-assistant/user roles render the role name verbatim as the speaker',
+  );
+}
+{
+  const out = renderRecentHistory('Me: hi\n\nAva: hi!', 'Ava', 'Me', DEFAULT_INJECT_RECENT_HISTORY_PROMPT);
+  assert(out === 'Me: hi\n\nAva: hi!', 'default recent_history template renders the pre-rendered turns bare');
+}
+{
+  const out = renderRecentHistory('Me: hi', 'Ava', 'Me', '<history>\n{{turns}}\n</history>');
+  assert(
+    out === '<history>\nMe: hi\n</history>',
+    'bespoke template can wrap the turns in the preset author\'s own HTML tags',
+  );
+}
+{
+  const out = renderRecentHistory('Me: hi', 'Ava', 'Me', '{{char_name}} speaks to {{user_name}}: {{turns}}');
+  assert(
+    out === 'Ava speaks to Me: Me: hi',
+    'bespoke template can use {{char_name}}/{{user_name}} alongside {{turns}}',
+  );
+}
+{
+  const out = renderRecentHistory('Me: hi', 'Ava', 'Me', '' || undefined);
+  assert(out !== '', `empty override falls back to the built-in default ('' || undefined)`);
 }
 
 // --- renderFusedMemoryBlock: the deprecated memory_recall alias, legacy byte shape ---
