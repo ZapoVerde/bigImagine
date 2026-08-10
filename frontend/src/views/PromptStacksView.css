@@ -287,6 +287,50 @@
   display: flex;
 }
 
+/* Migration 0085 — the "wrap in HTML-style tags" toggle: a small < > glyph that lights up when
+   on, sitting between the enable toggle and the slot label. */
+.stack-slot-tag-toggle {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stack-slot-tag-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.stack-slot-tag-glyph {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 0.15rem 0.3rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm, 4px);
+  color: var(--color-text-faint);
+  background: var(--color-bg-surface);
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.stack-slot-tag-toggle:hover .stack-slot-tag-glyph {
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+}
+
+.stack-slot-tag-toggle.on .stack-slot-tag-glyph {
+  color: var(--color-accent, var(--color-primary, #4a9eff));
+  border-color: var(--color-accent, var(--color-primary, #4a9eff));
+  background: color-mix(in srgb, var(--color-accent, var(--color-primary, #4a9eff)) 12%, transparent);
+}
+
+.stack-slot-tag-toggle:has(input:disabled) {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .stack-slot-label {
   flex: 1;
   text-align: left;

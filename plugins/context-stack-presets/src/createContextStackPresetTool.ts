@@ -65,7 +65,12 @@ export function createCreateContextStackPresetTool(): RegisteredTool {
                 enabled: { type: 'boolean', description: 'Defaults to true.' },
                 customRole: { type: 'string', enum: ['system', 'user', 'assistant'], description: 'Required when slotType is "custom".' },
                 customContent: { type: 'string', description: 'Required when slotType is "custom": the static text for this block.' },
-                label: { type: 'string', description: 'Optional display name for this slot, e.g. "Earthy Physicality". Cosmetic only.' },
+                label: { type: 'string', description: 'Optional display name for this slot, e.g. "Earthy Physicality". Cosmetic only, except it names the wrapper tag when tagEnabled is on.' },
+                tagEnabled: {
+                  type: 'boolean',
+                  description:
+                    'Defaults to false. When true, this slot\'s content is wrapped in HTML-style tags named after the slot, e.g. <Chat History>…</Chat History> — a hint to the LLM, not real HTML.',
+                },
               },
               required: ['slotType'],
               additionalProperties: false,
@@ -88,9 +93,9 @@ export function createCreateContextStackPresetTool(): RegisteredTool {
       const slotRows: SlotRow[] = [];
       for (const [position, slot] of args.slots.entries()) {
         const [row] = await ctx.db.query<SlotRow>(
-          `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label)
-           values ($1, $2, $3, $4, $5, $6, $7, $8)
-           returning slot_type, marker_key, enabled, custom_role, custom_content, label`,
+          `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           returning slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled`,
           slotInputToInsertParams(slot, presetRow!.preset_id, position),
         );
         slotRows.push(row!);

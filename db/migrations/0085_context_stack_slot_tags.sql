@@ -1,0 +1,26 @@
+-- Per-slot "wrap in HTML-style tags" toggle (2026-08-14 user direction). When ON, the slot's
+-- friendly name is wrapped around its assembled content as a hint to the LLM:
+--
+--   <Chat History>
+--   ...content...
+--   </Chat History>
+--
+-- The name is the friendly label the editor shows (markerLabel() for marker slots, the slot's own
+-- `label` for custom slots, or a fallback), sanitized minimally: trim, collapse internal newlines
+-- to a single space, strip literal < / >. Tags are hints, not real HTML — no underscore
+-- replacement (the 2026-08-14 decision: verbatim friendly names read better to the model).
+--
+-- Default OFF: a slot only wraps when the author ticks the toggle, so every existing prompt stack
+-- assembles byte-identical to before — bi_principles.md §17's pure-function / byte-identical
+-- static-prefix contract is preserved for anyone who doesn't opt in.
+--
+-- Unlike migration 0060 (label was purely cosmetic), this column IS assembly-relevant:
+-- assemblePromptStack.ts's PromptStackSlot gains tagEnabled + label (marker slots resolve their
+-- friendly name from a server-side MARKER_LABELS mirror of frontend/src/api/markerLabels.ts), and
+-- httpServer.ts's per-turn narrator path (buildNarratorStackItems) wraps with the same shared
+-- helper so the real prompt and the inspector can never drift.
+--
+-- Applied by hand against the dedicated BigImagine database:
+--   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0085_context_stack_slot_tags.sql
+
+alter table context_stack_slots add column tag_enabled boolean not null default false;

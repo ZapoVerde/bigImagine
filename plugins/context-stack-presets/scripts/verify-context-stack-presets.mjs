@@ -57,13 +57,13 @@ function createFakePool() {
   const standardId = 'preset-standard';
   presets.push({ preset_id: standardId, user_id: SYSTEM_USER_ID, name: 'Standard', is_builtin: true, updated_at: nextUpdatedAt() });
   slots.push(
-    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null },
-    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null, label: null },
-    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null },
+    { slot_id: 's1', preset_id: standardId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
+    { slot_id: 's2', preset_id: standardId, position: 1, slot_type: 'marker', marker_key: 'description', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
+    { slot_id: 's3', preset_id: standardId, position: 2, slot_type: 'marker', marker_key: 'recent_history', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false },
   );
   const minimalId = 'preset-minimal';
   presets.push({ preset_id: minimalId, user_id: SYSTEM_USER_ID, name: 'Minimal', is_builtin: true, updated_at: nextUpdatedAt() });
-  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null });
+  slots.push({ slot_id: 's4', preset_id: minimalId, position: 0, slot_type: 'marker', marker_key: 'system', enabled: true, custom_role: null, custom_content: null, label: null, tag_enabled: false });
 
   return {
     presets,
@@ -97,12 +97,12 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into context_stack_slots')) {
-            const [presetId, position, slotType, markerKey, enabled, customRole, customContent, label] = params;
+            const [presetId, position, slotType, markerKey, enabled, customRole, customContent, label, tagEnabled] = params;
             const parent = presets.find((p) => p.preset_id === presetId);
             assert(!!parent && parent.user_id === scopedUserId, 'insert into context_stack_slots is scoped to the owning preset\'s user');
-            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent, label: label ?? null };
+            const row = { slot_id: `slot-${++counter}`, preset_id: presetId, position, slot_type: slotType, marker_key: markerKey, enabled, custom_role: customRole, custom_content: customContent, label: label ?? null, tag_enabled: tagEnabled ?? false };
             slots.push(row);
-            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content, label: row.label }] };
+            return { rows: [{ slot_type: row.slot_type, marker_key: row.marker_key, enabled: row.enabled, custom_role: row.custom_role, custom_content: row.custom_content, label: row.label, tag_enabled: row.tag_enabled }] };
           }
 
           if (sql.startsWith('select preset_id, name, is_builtin, updated_at from context_stack_presets')) {
@@ -146,11 +146,15 @@ function createFakePool() {
 
           if (sql.startsWith('select preset_id, slot_type') && sql.includes('preset_id = any')) {
             const [presetIds] = params;
+            // Project exactly the columns the caller selected — a real Postgres would reject a
+            // missing column, and returning the full row here masked the get-tool's missing
+            // tag_enabled (0085 regression caught in review).
+            const cols = sql.slice(sql.indexOf('select') + 7, sql.indexOf(' from')).split(',').map((c) => c.trim());
             const matches = slots
               .filter((s) => presetIds.includes(s.preset_id))
               .slice()
               .sort((a, b) => (a.preset_id === b.preset_id ? a.position - b.position : a.preset_id < b.preset_id ? -1 : 1));
-            return { rows: matches.map(({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label }) => ({ preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label })) };
+            return { rows: matches.map((row) => Object.fromEntries(cols.map((c) => [c, row[c]]))) };
           }
 
           if (sql.startsWith('update context_stack_presets set')) {
@@ -177,7 +181,7 @@ function createFakePool() {
           if (sql.startsWith('select slot_type, marker_key') && sql.includes('order by position')) {
             const [presetId] = params;
             const matches = slots.filter((s) => s.preset_id === presetId).slice().sort((a, b) => a.position - b.position);
-            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content, label }) => ({ slot_type, marker_key, enabled, custom_role, custom_content, label })) };
+            return { rows: matches.map(({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled }) => ({ slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled })) };
           }
 
           if (sql.startsWith('delete from context_stack_presets')) {
@@ -404,6 +408,50 @@ const appliedWithPersona = await db.withUserScope(userId, (session) =>
 assert(
   appliedWithPersona.systemText.includes('Jeremy: A software engineer who likes concise answers.'),
   'apply_prompt_stack_to_chat folds household persona_name/persona_description into the persona marker once both are set',
+);
+
+// --- migration 0085: tagEnabled round-trips through the wire shape and lands in the prompt ---
+const presetWithTags = await db.withUserScope(userId, (session) =>
+  createTool.handler(
+    {
+      name: 'Tagged Stack',
+      slots: [
+        { slotType: 'marker', markerKey: 'system', tagEnabled: true },
+        { slotType: 'marker', markerKey: 'description', tagEnabled: true },
+      ],
+    },
+    { userId, db: session },
+  ),
+);
+assert(
+  presetWithTags.slots.every((s) => s.tagEnabled === true),
+  'create_context_stack_presets persists tagEnabled per slot and returns it on the wire',
+);
+const readBack = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
+assert(
+  readBack.find((p) => p.presetId === presetWithTags.presetId)?.slots.every((s) => s.tagEnabled === true),
+  'get_context_stack_presets round-trips tagEnabled — load→edit→save cannot silently drop the toggle',
+);
+pool.chatSessions.push({ chat_id: 'chat-3', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+const appliedTagged = await db.withUserScope(userId, (session) =>
+  applyTool.handler({ chatId: 'chat-3', presetId: presetWithTags.presetId }, { userId, db: session }),
+);
+assert(
+  appliedTagged.systemText.includes('<System Prompt>\nYou are a helpful narrator.\n</System Prompt>'),
+  "apply_prompt_stack_to_chat wraps a tagEnabled marker slot's content in <Friendly Name>…</Friendly Name>",
+);
+const untagged = await db.withUserScope(userId, (session) =>
+  createTool.handler(
+    {
+      name: 'Plain Stack',
+      slots: [{ slotType: 'marker', markerKey: 'system' }],
+    },
+    { userId, db: session },
+  ),
+);
+assert(
+  untagged.slots.every((s) => s.tagEnabled === false),
+  'tagEnabled defaults to false (off) for slots that do not set it — existing stacks stay byte-identical',
 );
 
 // --- set_default_context_stack_preset (migrations 0061 prompt + 0071 cleanup) ---

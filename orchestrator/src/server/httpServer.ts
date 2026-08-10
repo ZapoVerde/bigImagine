@@ -191,7 +191,7 @@ import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js'
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { interpolateMacros, type MacroSnapshot } from '../util/interpolateMacros.js';
-import { type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
+import { wrapSlotContent, type MarkerKey, type PromptStackFields, type PromptStackSlot } from '../util/assemblePromptStack.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
@@ -581,13 +581,13 @@ interface SlotDbRow {
   custom_role: string | null;
   custom_content: string | null;
   label: string | null;
+  tag_enabled: boolean;
 }
 
-// PromptStackSlot plus the cosmetic label column (migration 0060) — assemblePromptStack's own
-// contract has no use for it (assembly doesn't care what a slot is called), but the prompt
-// inspector below (buildNarratorStackItems) needs it to label a slot the same way
+// PromptStackSlot already carries the cosmetic label column (migration 0060) and the tag toggle
+// (migration 0085) — assembly needs both, so there is no separate "with label" type anymore; the
+// prompt inspector below (buildNarratorStackItems) uses the same fields to label a slot the way
 // PromptStacksView's own slotLabel() does.
-type PromptStackSlotWithLabel = PromptStackSlot & { label?: string };
 
 interface NarratorCharacterFieldsRow {
   name: string;
@@ -601,10 +601,10 @@ interface NarratorCharacterFieldsRow {
 // context_stack_slots read applyPromptStackToChatTool.ts does, just usable from core without
 // crossing the plugin/core dependency line (assemblePromptStack itself already lives in core,
 // util/assemblePromptStack.ts, moved here 2026-08-06 for exactly this reason).
-async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlotWithLabel[]> {
+async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId: string): Promise<PromptStackSlot[]> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<SlotDbRow>(
-      `select slot_type, marker_key, enabled, custom_role, custom_content, label
+      `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled
        from context_stack_slots where preset_id = $1 order by position`,
       [presetId],
     ),
@@ -616,6 +616,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
     customRole: (row.custom_role as 'system' | 'user' | 'assistant' | null) ?? undefined,
     customContent: row.custom_content ?? undefined,
     label: row.label ?? undefined,
+    tagEnabled: row.tag_enabled,
   }));
 }
 
@@ -751,12 +752,12 @@ async function buildNarratorStackItems(
     if (!slot.enabled) continue;
     if (slot.slotType === 'custom') {
       if (!slot.customContent) continue;
-      items.push(toPreviewItem(slot.customRole ?? 'system', interpolateMacros(slot.customContent, snapshot), { label: slot.label }));
+      items.push(toPreviewItem(slot.customRole ?? 'system', wrapSlotContent(interpolateMacros(slot.customContent, snapshot), slot), { label: slot.label }));
       continue;
     }
     const value = slot.markerKey ? fields[slot.markerKey as MarkerKey] : undefined;
     if (!value) continue;
-    items.push(toPreviewItem('system', interpolateMacros(value, snapshot), { markerKey: slot.markerKey, label: slot.label }));
+    items.push(toPreviewItem('system', wrapSlotContent(interpolateMacros(value, snapshot), slot), { markerKey: slot.markerKey, label: slot.label }));
   }
   return items;
 }

@@ -782,8 +782,12 @@ export interface ContextStackSlot {
   enabled?: boolean;
   customRole?: 'system' | 'user' | 'assistant';
   customContent?: string;
-  /** Optional display name (migration 0060) — cosmetic only. */
+  /** Optional display name (migration 0060) — cosmetic only, except it names the wrapper tag
+   *  when tagEnabled (0085) is on. */
   label?: string;
+  /** Migration 0085: wrap this slot's assembled content in <Friendly Name>…</Friendly Name>
+   *  HTML-style tags — a hint to the LLM, not real HTML. Default off. */
+  tagEnabled?: boolean;
 }
 
 // plugins/context-stack-presets/src/getContextStackPresetsTool.ts

@@ -487,3 +487,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   descending-position loop instead of 0083's single UPDATE, which collides on the unique
   `(preset_id, position)` index for contiguous runs. No code change; hand-applied to the live DB
   only (frontend already labels the slot via `markerLabels.ts`).
+- `0085_context_stack_slot_tags.sql` — the per-slot "wrap in HTML-style tags" toggle
+  (2026-08-14). Adds `context_stack_slots.tag_enabled` (boolean, `not null default false`) —
+  when ON, the slot's friendly name (marker label / slot label, sanitized: trim, newlines→space,
+  strip `<`/`>`) wraps its assembled content as `<Name>\n...\n</Name>`, a hint to the LLM, not
+  real HTML. Default OFF keeps existing stacks byte-identical (§17 prompt-cache contract).
+  Assembly-relevant (unlike 0060's purely cosmetic `label`): `assemblePromptStack.ts`'s
+  `PromptStackSlot` gains `tagEnabled`/`label`, and the per-turn narrator path wraps with the same
+  shared helper so the real prompt and the inspector agree. Hand-applied to the live DB.

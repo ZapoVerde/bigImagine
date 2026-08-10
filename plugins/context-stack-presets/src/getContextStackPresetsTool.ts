@@ -58,7 +58,7 @@ export function createGetContextStackPresetsTool(): RegisteredTool {
 
       const presetIds = presetRows.map((p) => p.preset_id);
       const slotRows = await ctx.db.query<SlotRow & { preset_id: string }>(
-        `select preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label
+        `select preset_id, slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled
          from context_stack_slots where preset_id = any($1) order by preset_id, position`,
         [presetIds],
       );

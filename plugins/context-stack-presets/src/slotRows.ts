@@ -15,7 +15,7 @@
  * SlotInput — the wire shape a create/update tool call's `slots` array accepts
  * isSlotInputArray(value) — type guard for an inbound `slots` argument
  * slotRowToWire(row) — SlotRow -> SlotInput, for a tool's return value
- * slotInputToInsertParams(input, presetId, position) — SlotInput -> the 7 bound params
+ * slotInputToInsertParams(input, presetId, position) — SlotInput -> the 9 bound params
  *   context_stack_slots' insert expects, respecting its marker/custom shape check constraint
  *
  * @contract
@@ -32,6 +32,7 @@ export interface SlotRow {
   custom_role: string | null;
   custom_content: string | null;
   label: string | null;
+  tag_enabled: boolean;
 }
 
 export interface SlotInput {
@@ -40,8 +41,11 @@ export interface SlotInput {
   enabled?: boolean;
   customRole?: 'system' | 'user' | 'assistant';
   customContent?: string;
-  /** Optional display name (migration 0060) — cosmetic only, ignored by assemblePromptStack. */
+  /** Optional display name (migration 0060) — names the wrapper tag when tagEnabled (0085),
+   *  ignored by assemblePromptStack otherwise. */
   label?: string;
+  /** Migration 0085: wrap this slot's assembled content in <Friendly Name>…</Friendly Name>. */
+  tagEnabled?: boolean;
 }
 
 function isValidSlotInput(value: unknown): value is SlotInput {
@@ -50,6 +54,7 @@ function isValidSlotInput(value: unknown): value is SlotInput {
   if (v.slotType !== 'marker' && v.slotType !== 'custom') return false;
   if (v.enabled !== undefined && typeof v.enabled !== 'boolean') return false;
   if (v.label !== undefined && typeof v.label !== 'string') return false;
+  if (v.tagEnabled !== undefined && typeof v.tagEnabled !== 'boolean') return false;
 
   if (v.slotType === 'marker') {
     return typeof v.markerKey === 'string' && v.markerKey !== '';
@@ -74,20 +79,22 @@ export function slotRowToWire(row: SlotRow): SlotInput {
       customRole: row.custom_role as 'system' | 'user' | 'assistant',
       customContent: row.custom_content!,
       label,
+      tagEnabled: row.tag_enabled,
     };
   }
-  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key!, label };
+  return { slotType: 'marker', enabled: row.enabled, markerKey: row.marker_key!, label, tagEnabled: row.tag_enabled };
 }
 
 export function slotInputToInsertParams(
   input: SlotInput,
   presetId: string,
   position: number,
-): [string, number, string, string | null, boolean, string | null, string | null, string | null] {
+): [string, number, string, string | null, boolean, string | null, string | null, string | null, boolean] {
   const enabled = input.enabled ?? true;
   const label = input.label ?? null;
+  const tagEnabled = input.tagEnabled ?? false;
   if (input.slotType === 'marker') {
-    return [presetId, position, 'marker', input.markerKey!, enabled, null, null, label];
+    return [presetId, position, 'marker', input.markerKey!, enabled, null, null, label, tagEnabled];
   }
-  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!, label];
+  return [presetId, position, 'custom', null, enabled, input.customRole!, input.customContent!, label, tagEnabled];
 }

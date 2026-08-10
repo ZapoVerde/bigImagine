@@ -66,7 +66,12 @@ export function createUpdateContextStackPresetTool(): RegisteredTool {
                 enabled: { type: 'boolean' },
                 customRole: { type: 'string', enum: ['system', 'user', 'assistant'] },
                 customContent: { type: 'string' },
-                label: { type: 'string', description: 'Optional display name for this slot. Cosmetic only.' },
+                label: { type: 'string', description: 'Optional display name for this slot. Cosmetic only, except it names the wrapper tag when tagEnabled is on.' },
+                tagEnabled: {
+                  type: 'boolean',
+                  description:
+                    'Defaults to false. When true, this slot\'s content is wrapped in HTML-style tags named after the slot, e.g. <Chat History>…</Chat History> — a hint to the LLM, not real HTML.',
+                },
               },
               required: ['slotType'],
               additionalProperties: false,
@@ -101,16 +106,16 @@ export function createUpdateContextStackPresetTool(): RegisteredTool {
         slotRows = [];
         for (const [position, slot] of args.slots.entries()) {
           const [row] = await ctx.db.query<SlotRow>(
-            `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)
-             returning slot_type, marker_key, enabled, custom_role, custom_content, label`,
+            `insert into context_stack_slots (preset_id, position, slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             returning slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled`,
             slotInputToInsertParams(slot, args.presetId, position),
           );
           slotRows.push(row!);
         }
       } else {
         slotRows = await ctx.db.query<SlotRow>(
-          `select slot_type, marker_key, enabled, custom_role, custom_content, label
+          `select slot_type, marker_key, enabled, custom_role, custom_content, label, tag_enabled
            from context_stack_slots where preset_id = $1 order by position`,
           [args.presetId],
         );

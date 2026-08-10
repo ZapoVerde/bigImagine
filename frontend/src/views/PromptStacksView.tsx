@@ -340,13 +340,25 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                         &#9660;
                       </button>
                     </div>
-                    <label className="stack-slot-toggle">
+                    <label className="stack-slot-toggle" title={slot.enabled === false ? 'Slot disabled' : 'Toggle this slot on/off'}>
                       <input
                         type="checkbox"
                         checked={slot.enabled ?? true}
                         disabled={isBuiltin}
                         onChange={() => toggleEnabled(idx)}
                       />
+                    </label>
+                    <label
+                      className={`stack-slot-tag-toggle${slot.tagEnabled ? ' on' : ''}`}
+                      title="Wrap in HTML-style tags — encloses the name in <…> with a closing tag at the end (a hint to the LLM, not real HTML)"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={slot.tagEnabled ?? false}
+                        disabled={isBuiltin}
+                        onChange={() => updateSlot(idx, { tagEnabled: !(slot.tagEnabled ?? false) })}
+                      />
+                      <span className="stack-slot-tag-glyph">{'< >'}</span>
                     </label>
                     <button
                       type="button"
