@@ -99,19 +99,31 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
     }
   }
 
-  async function duplicate(preset: ContextStackPreset) {
-    const name = window.prompt('Name this prompt stack', `${preset.name} copy`);
-    if (!name?.trim()) return;
+  /** Clone base name with dedup: "X copy", "X copy 2", "X copy 3", … — case-insensitive across
+   *  all stacks (builtins included), so duplicates are impossible. */
+  function cloneNameFor(baseName: string): string {
+    const taken = new Set((presets ?? []).map((p) => p.name.trim().toLowerCase()));
+    const base = `${baseName.trim()} copy`;
+    if (!taken.has(base.toLowerCase())) return base;
+    let n = 2;
+    while (taken.has(`${base} ${n}`.toLowerCase())) n++;
+    return `${base} ${n}`;
+  }
+
+  async function clonePreset(preset: ContextStackPreset) {
+    const name = cloneNameFor(preset.name);
     try {
       const created = await callTool<ContextStackPreset>(
         'create_context_stack_preset',
-        { name: name.trim(), slots: preset.slots },
+        { name, slots: preset.slots },
         apiKey,
       );
+      // "Pop the user into the clone": the editor immediately selects the new stack, which is
+      // fully editable — cloning a built-in yields a user-owned editable stack.
       await refresh(created.presetId);
       setMobileShowEditor(true);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to duplicate prompt stack');
+      setError(err instanceof ApiError ? err.message : 'failed to clone prompt stack');
     }
   }
 
@@ -292,11 +304,10 @@ export default function PromptStacksView({ apiKey }: PromptStacksViewProps) {
                   </button>
                 </div>
               </details>
-              {isBuiltin ? (
-                <button type="button" onClick={() => duplicate(selected)}>
-                  Duplicate to customize
-                </button>
-              ) : (
+              <button type="button" onClick={() => clonePreset(selected)}>
+                Clone
+              </button>
+              {!isBuiltin && (
                 <button type="button" className="promptstacks-delete-btn" onClick={() => removePreset(selected)}>
                   Delete
                 </button>
