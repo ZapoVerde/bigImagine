@@ -715,6 +715,23 @@ export interface PromptPreviewGroup {
   stablePrefixChars?: number;
   /** When stablePrefixChars is set: epoch ms of the previous 'main' call the diff is against. */
   previousCallAt?: number;
+  /** Per-subsection identity stability over the last x calls on record
+   *  (docs/prompt-inspector-tag-tree.md §3.3): the server replays the trace's main entries as
+   *  consecutive pairs; each section (keyed by canonical tag name + occurrence index) counts one
+   *  observation per call it existed in, identical when its full span is byte-identical to the
+   *  previous call's same section. The percentage shown per section is identical / seen. Absent
+   *  when fewer than two 'main' calls are on record — same omission rule as stablePrefixChars. */
+  stability?: {
+    /** Consecutive pairs analyzed = mains on record − 1. */
+    comparisons: number;
+    sections: Array<{
+      /** Canonical tag name, plus #occ when the name repeats within a call (document order). */
+      key: string;
+      name: string;
+      seen: number;
+      identical: number;
+    }>;
+  };
 }
 
 export interface PromptPreview {

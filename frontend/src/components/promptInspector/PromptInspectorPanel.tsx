@@ -146,9 +146,15 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
       {group.kind === 'main' && group.items.length > 0 ? (
         // The whole main prompt as a tag tree — see MainPromptTree below. The cache-coverage
         // fields (stablePrefixChars/previousCallAt) come from buildPromptPreview's diff of the
-        // last fired main against the one before it; undefined when fewer than two are on record
-        // (the tree then shows no cache badges at all).
-        <MainPromptTree items={group.items} stablePrefixChars={group.stablePrefixChars} previousCallAt={group.previousCallAt} />
+        // last fired main against the one before it; and stability (per-subsection identical /
+        // seen over the trace window, docs §3.3) — all undefined when fewer than two 'main'
+        // calls are on record (the tree then shows no cache badges or stability rows at all).
+        <MainPromptTree
+          items={group.items}
+          stablePrefixChars={group.stablePrefixChars}
+          previousCallAt={group.previousCallAt}
+          stability={group.stability}
+        />
       ) : (
         group.items.map((item, i) => (
           <details key={i} className="prompt-inspector-item" open>
@@ -197,10 +203,12 @@ function MainPromptTree({
   items,
   stablePrefixChars,
   previousCallAt,
+  stability,
 }: {
   items: PromptPreviewItem[];
   stablePrefixChars?: number;
   previousCallAt?: number;
+  stability?: PromptPreviewGroup['stability'];
 }) {
   const text = items.map((i) => i.content).join('\n\n');
   const tree = parsePromptTagTree(text);
@@ -223,7 +231,12 @@ function MainPromptTree({
   return (
     <>
       {stablePrefixChars !== undefined && <CacheLegend previousCallAt={previousCallAt} />}
-      <PromptTagTreeView tree={tree} text={text} stablePrefixChars={stablePrefixChars} />
+      <PromptTagTreeView
+        tree={tree}
+        text={text}
+        stablePrefixChars={stablePrefixChars}
+        stability={stability}
+      />
     </>
   );
 }
@@ -249,24 +262,44 @@ function sectionChars(section: PromptTagSection, text: string): number {
   return ownText(section, text).length + section.children.reduce((sum, c) => sum + sectionChars(c, text), 0);
 }
 
+// Per-section stability lookup (docs/prompt-inspector-tag-tree.md §3.3): matches the server's
+// key rule exactly — canonical tag name, plus #occ when the name repeats, in preorder (a section
+// before its children, matching flattenSections' walk). Rendering walks the same order, so a
+// shared tracker yields the same keys; each rendered row looks up its stat once.
+class SectionStatLookup {
+  private occurrence = new Map<string, number>();
+  constructor(private readonly stats?: PromptPreviewGroup['stability']) {}
+  next(name: string): { seen: number; identical: number; comparisons: number } | undefined {
+    if (!this.stats) return undefined;
+    const occ = this.occurrence.get(name) ?? 0;
+    this.occurrence.set(name, occ + 1);
+    const stat = this.stats.sections.find((s) => s.key === (occ === 0 ? name : `${name}#${occ}`));
+    return stat ? { seen: stat.seen, identical: stat.identical, comparisons: this.stats.comparisons } : undefined;
+  }
+}
+
 function PromptTagTreeView({
   tree,
   text,
   stablePrefixChars,
+  stability,
 }: {
   tree: PromptTagSection;
   text: string;
   stablePrefixChars?: number;
+  stability?: PromptPreviewGroup['stability'];
 }) {
   const own = ownText(tree, text);
   const hasOwn = own.trim().length > 0;
+  const stats = new SectionStatLookup(stability);
   return (
     <div className="prompt-inspector-tree">
       {hasOwn && (
         // Untagged text at the top level (the preset's --- preamble, history between tags, …):
         // rendered as a first-class collapsed block so no part of the sent text is hidden. Its
         // cache badge covers all of its runs: every run must end at or before the stable prefix
-        // (the root's own text is rarely one contiguous span — see ownRuns below).
+        // (the root's own text is rarely one contiguous span — see ownRuns below). No stability
+        // row: untagged text has no canonical tag identity to key observations on.
         <details className="prompt-inspector-tag">
           <summary>
             <span className="prompt-inspector-tag-name">untagged text</span>
@@ -283,7 +316,7 @@ function PromptTagTreeView({
       )}
       <div className="prompt-inspector-tag-children">
         {tree.children.map((child, i) => (
-          <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} />
+          <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} stats={stats} />
         ))}
       </div>
     </div>
@@ -308,22 +341,26 @@ function PromptTagSectionView({
   section,
   text,
   stablePrefixChars,
+  stats,
 }: {
   section: PromptTagSection;
   text: string;
   stablePrefixChars?: number;
+  stats: SectionStatLookup;
 }) {
   const own = ownText(section, text);
   const chars = sectionChars(section, text);
   const tokens = Math.ceil(chars / 4);
   const hasOwn = own.trim().length > 0;
   const hasChildren = section.children.length > 0;
+  const stat = stats.next(section.name);
   if (!hasOwn && !hasChildren) {
     // Empty section (<a></a>) — nothing to expand; render as a plain row with its budget.
     return (
       <div className="prompt-inspector-tag prompt-inspector-tag-leaf">
         <span className="prompt-inspector-tag-name">{section.name}</span>
         <CacheBadge end={section.end} stablePrefixChars={stablePrefixChars} />
+        <StabilityBadge stat={stat} />
         <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk · {chars.toLocaleString()} ch</span>
       </div>
     );
@@ -333,6 +370,7 @@ function PromptTagSectionView({
       <summary>
         <span className="prompt-inspector-tag-name">{section.name}</span>
         <CacheBadge end={section.end} stablePrefixChars={stablePrefixChars} />
+        <StabilityBadge stat={stat} />
         {hasChildren && (
           <span className="prompt-inspector-tag-count">
             {section.children.length} section{section.children.length === 1 ? '' : 's'}
@@ -344,7 +382,7 @@ function PromptTagSectionView({
       {hasChildren && (
         <div className="prompt-inspector-tag-children">
           {section.children.map((child, i) => (
-            <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} />
+            <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} stats={stats} />
           ))}
         </div>
       )}
@@ -371,6 +409,25 @@ function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars
       }
     >
       {covered ? '⚡ cached' : '✎ changed'}
+    </span>
+  );
+}
+
+// Per-section stability badge (docs/prompt-inspector-tag-tree.md §3.3): the percentage of the
+// trace window's comparisons in which this section was byte-identical to the previous call's
+// same section (identical / seen over comparisons pairs). Renders nothing when stability is
+// absent (fewer than two 'main' calls on record) or when this rendered section had no
+// observation in the window (name never matched a server-side key — e.g. the section is brand
+// new this call, outside the window, or the stat list was computed before it existed).
+function StabilityBadge({ stat }: { stat?: { seen: number; identical: number; comparisons: number } }) {
+  if (!stat) return null;
+  const pct = stat.seen === 0 ? 0 : Math.round((stat.identical / stat.seen) * 100);
+  return (
+    <span
+      className={`prompt-inspector-stability-badge ${pct === 100 ? 'prompt-inspector-stability-stable' : ''}`}
+      title={`Byte-identical to the previous call in ${stat.identical} of ${stat.seen} comparisons (window: last ${stat.comparisons} call pairs)`}
+    >
+      {pct}% stable
     </span>
   );
 }

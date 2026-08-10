@@ -7,6 +7,16 @@
   overflow: hidden;
 }
 
+/* The RP drawer permanently IS the prompt inspector (Sidebar.tsx: activeType 'rp' renders
+   PromptInspectorPanel), so give it the standalone panel's 26rem so tag-tree rows and badges
+   aren't cramped. Desktop only, scoped to min-width so the mobile overlay sizing below
+   (17rem / 85vw) is untouched — same breakpoint line as the mobile block. */
+@media (min-width: 769px) {
+  .sidebar.sidebar-inspector {
+    width: 26rem;
+  }
+}
+
 .sidebar.collapsed {
   width: 2.6rem;
 }

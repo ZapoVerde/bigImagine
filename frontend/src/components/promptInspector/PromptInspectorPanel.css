@@ -361,6 +361,26 @@
   background: color-mix(in srgb, var(--color-secondary) 10%, transparent);
 }
 
+/* Per-section stability badge (docs/prompt-inspector-tag-tree.md §3.3): muted by default (some
+   churn across the trace window), green at 100% — the section has been byte-identical to the
+   previous call in every comparison the trace holds. */
+.prompt-inspector-stability-badge {
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0.05rem 0.35rem;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: var(--font-weight-regular, normal);
+}
+
+.prompt-inspector-stability-stable {
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 45%, transparent);
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+}
+
 /* Legend above the tag tree when cache badges are shown — one line, muted, explaining the two
    badges and which previous call the diff is against. */
 .prompt-inspector-cache-legend {

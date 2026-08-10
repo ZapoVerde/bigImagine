@@ -169,6 +169,7 @@ import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promptTrace.js';
 import { longestCommonPrefixLength } from '../util/commonPrefix.js';
+import { computeSectionStability, type SectionStabilityResult } from '../util/sectionStability.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
@@ -1037,6 +1038,14 @@ export interface PromptPreviewGroup {
    *  then omits the cache badges rather than showing an unknown state. */
   stablePrefixChars?: number;
   previousCallAt?: number;
+  /** Per-subsection identity stability over the last x calls on record (docs/
+   *  prompt-inspector-tag-tree.md §3.3): the trace's main entries, oldest first, are replayed as
+   *  consecutive pairs — each section (keyed by canonical tag name + occurrence index) counts one
+   *  observation per call it existed in, identical when its full span is byte-identical to the
+   *  previous call's same section. The percentage shown per section is identical / seen. Absent
+   *  when fewer than two 'main' entries are on record — same omission rule as
+   *  stablePrefixChars (fresh chat, or the in-memory trace was lost to a restart). */
+  stability?: SectionStabilityResult;
   /** The model's reply to this prompt, when the trace captured one (io/promptTrace.ts's `reply` —
    *  cleanup repairs record it; the cleaned text replaces the raw output in the message, so this
    *  is the only place it survives). Rendered as its own collapsible block; deliberately kept OUT
@@ -1109,6 +1118,15 @@ async function buildPromptPreview(  deps: HttpServerDeps,
       const joinedPrev = previousMain.items.map((i) => i.content).join('\n\n');
       mainGroup.stablePrefixChars = longestCommonPrefixLength(joinedNow, joinedPrev);
       mainGroup.previousCallAt = previousMain.capturedAt;
+    }
+    // Per-subsection stability (§3.3): replay the mains the trace holds (oldest first) as
+    // consecutive pairs — the fixed last-x-calls window, data the trace already keeps (no new
+    // state, no reset bookkeeping). Only reachable with a capture; requires ≥2 mains on record,
+    // same omission rule as the cache badges above.
+    if (mains.length >= 2) {
+      mainGroup.stability = computeSectionStability(
+        [...mains].reverse().map((m) => m.items.map((i) => i.content).join('\n\n')),
+      );
     }
   } else {
     const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));

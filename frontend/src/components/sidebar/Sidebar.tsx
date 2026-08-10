@@ -73,7 +73,7 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
   }
 
   return (
-    <div className={`sidebar${collapsed ? ' collapsed' : ''}`}>
+    <div className={`sidebar${collapsed ? ' collapsed' : ''}${props.activeType === 'rp' ? ' sidebar-inspector' : ''}`}>
       <div className="sidebar-header">
         {!collapsed && <span className="sidebar-title">{title ?? ''}</span>}
         <button
