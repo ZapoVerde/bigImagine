@@ -395,7 +395,8 @@ function PromptTagSectionView({
 // change, so the provider's prefix cache replays it — ✎ when it ends past the prefix (the section
 // itself, or something upstream of it, changed: the cache cannot replay past the first differing
 // byte). Renders nothing when stablePrefixChars is undefined (fewer than two 'main' calls on
-// record — there is nothing to diff against).
+// record — there is nothing to diff against). Icon only, so the tag name and tk count stay
+// readable — what the icons mean lives in the tooltip and the legend above the tree.
 function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars?: number }) {
   if (stablePrefixChars === undefined) return null;
   const covered = end <= stablePrefixChars;
@@ -408,7 +409,7 @@ function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars
           : 'Changed since the previous call, or downstream of a change — the prefix cache cannot replay it'
       }
     >
-      {covered ? '⚡ cached' : '✎ changed'}
+      {covered ? '⚡' : '✎'}
     </span>
   );
 }
@@ -418,7 +419,9 @@ function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars
 // same section (identical / seen over comparisons pairs). Renders nothing when stability is
 // absent (fewer than two 'main' calls on record) or when this rendered section had no
 // observation in the window (name never matched a server-side key — e.g. the section is brand
-// new this call, outside the window, or the stat list was computed before it existed).
+// new this call, outside the window, or the stat list was computed before it existed). Icon+
+// label would crowd the row — the pill is just "N%", full explanation on hover (and in the
+// legend above the tree).
 function StabilityBadge({ stat }: { stat?: { seen: number; identical: number; comparisons: number } }) {
   if (!stat) return null;
   const pct = stat.seen === 0 ? 0 : Math.round((stat.identical / stat.seen) * 100);
@@ -427,7 +430,7 @@ function StabilityBadge({ stat }: { stat?: { seen: number; identical: number; co
       className={`prompt-inspector-stability-badge ${pct === 100 ? 'prompt-inspector-stability-stable' : ''}`}
       title={`Byte-identical to the previous call in ${stat.identical} of ${stat.seen} comparisons (window: last ${stat.comparisons} call pairs)`}
     >
-      {pct}% stable
+      {pct}%
     </span>
   );
 }

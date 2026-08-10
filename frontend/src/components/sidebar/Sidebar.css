@@ -39,6 +39,14 @@
     box-shadow: 2px 0 16px rgba(0, 0, 0, 0.3);
   }
 
+  /* The inspector drawer gets the full phone: 90vw (same rationale as the desktop 26rem —
+     tag names, badges and tk counts need room to breathe). Other tabs keep the compact 17rem
+     overlay above. */
+  .sidebar.sidebar-inspector {
+    width: 90vw;
+    max-width: 90vw;
+  }
+
   .sidebar.collapsed {
     width: 0;
     box-shadow: none;

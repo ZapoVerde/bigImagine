@@ -202,10 +202,11 @@ Coverage rule:
   everything upstream of it is byte-identical to the previous call ("any words in it or upstream
   have changed" is exactly `section.end > stablePrefixChars`; a prefix cache cannot replay past
   the first differing byte, so everything downstream of an edit is changed too).
-- Badge per section: `⚡ cached` (covered) / `✎ changed` (not covered). The root "untagged text"
-  block is badged by the max end of its own-text runs; the no-tags fallback "Complete prompt
-  text" block by the whole text length. A one-line legend (with `previousCallAt` in local time)
-  sits above the tree when badges are shown.
+- Badge per section: `⚡` (covered) / `✎` (not covered) — icon only, so the tag name and token
+  count stay readable; the tooltip and the one-line legend explain the icons. The root "untagged
+  text" block is badged by the max end of its own-text runs; the no-tags fallback "Complete
+  prompt text" block by the whole text length. A one-line legend (with `previousCallAt` in local
+  time) sits above the tree when badges are shown.
 - Honest labeling: coverage is an *estimate* of provider prefix-caching; Anthropic connections
   cache nothing today (the adapter sends no `cache_control`) — the badge set shows that fact.
   Coverage describes the diff between the two recorded calls, the only deterministic ground
@@ -213,6 +214,26 @@ Coverage rule:
 
 No live-flip UX question remains: the diff never involves the live reconstruction, so the Main
 Prompt group keeps preferring the captured last turn unchanged.
+
+### 3.3 Per-subsection stability badges (companion change, implemented)
+
+Maps the same recorded bytes onto section identity across the trace window. The server replays
+the trace's `main` entries (oldest first, ≤ `MAX_ENTRIES_PER_CHAT`) as consecutive pairs — data
+the trace already holds, no new state, no reset-on-edit bookkeeping. `buildPromptPreview` emits
+on the main group, only when ≥2 `main` entries are on record (same omission rule as §3.2):
+
+- `stability = { comparisons, sections[] }` where `comparisons = mains − 1` and each section
+  observation is `{ key, name, seen, identical }`:
+  - `key` = canonical tag name, plus `#occ` when the name repeats within a call (preorder, a
+    section before its children — matches how the frontend renders rows),
+  - one observation per call the section existed in; `identical` counts the pairs where its full
+    span (tags + own text + children) was byte-identical to the previous call's same key.
+- The badge per section is `N%` — `round(identical / seen × 100)`, green at 100%, full wording
+  in the tooltip. Rows whose name matched no server-side key show no badge.
+
+Pure util `orchestrator/src/util/sectionStability.ts` (`flattenSections` +
+`computeSectionStability`), exported as `@bigbrain/orchestrator/section-stability`, verified by
+`orchestrator/scripts/verify-section-stability.mjs`.
 
 ---
 
