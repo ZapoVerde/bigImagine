@@ -54,7 +54,10 @@ Each package's own `npm run verify` is the routine a new script joins — add th
 one line to that package's `package.json` `verify` script. Nothing to register elsewhere,
 mirroring vamp's "directory membership is the routine" convention (`scripts/checks/` there;
 one script per concern here, since bigBrain's checks are wiring-shaped, not a batch of small
-pure-logic assertions).
+pure-logic assertions). The frontend's `verify` is just `tsc --noEmit` — the browser UI crosses
+no wire of its own, so type-checking is the whole of its local tier (its real wire is the
+orchestrator's HTTP surface, covered by the orchestrator's own scripts); the vite bundle build
+already runs in the root `verify`'s build step, so the frontend's `verify` doesn't repeat it.
 
 **What the fakes actually are** — this is the part worth getting right on every new script:
 
