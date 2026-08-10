@@ -83,10 +83,11 @@ export function flattenSections(text: string): SectionObservation[] {
 export function computeSectionStability(joinedTexts: string[]): SectionStabilityResult {
   const stats = new Map<string, SectionStabilityStat>();
   let previous: Map<string, string> = new Map();
+  let isFirst = true;
   for (const text of joinedTexts) {
     const current = flattenSections(text);
     const currentByKey = new Map(current.map((o) => [o.key, o.text] as const));
-    if (previous.size > 0) {
+    if (!isFirst) {
       for (const obs of current) {
         const stat = stats.get(obs.key) ?? { key: obs.key, name: obs.name, seen: 0, identical: 0 };
         stat.seen += 1;
@@ -96,6 +97,7 @@ export function computeSectionStability(joinedTexts: string[]): SectionStability
       }
     }
     previous = currentByKey;
+    isFirst = false;
   }
   return {
     comparisons: Math.max(0, joinedTexts.length - 1),

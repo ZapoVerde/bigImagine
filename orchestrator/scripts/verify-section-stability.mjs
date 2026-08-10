@@ -126,6 +126,15 @@ function assert(cond, message) {
 }
 
 {
+  // Regression: a call with zero tagged sections earlier in the window must not be treated as
+  // "no previous call yet" — the next call's sections are still seen-but-not-identical.
+  const r = computeSectionStability(['no tags here', '<a>x</a>']);
+  const a = r.sections.find((s) => s.key === 'a');
+  assert(r.comparisons === 1, 'stability: untagged-then-tagged → one comparison');
+  assert(a && a.seen === 1 && a.identical === 0, 'stability: section after an untagged call → seen 1 / identical 0, not dropped');
+}
+
+{
   // Determinism: same inputs → identical outputs.
   const inputs = ['<a>x</a><b>y</b>', '<a>x</a><b>z</b>', '<a>w</a><b>z</b>'];
   const r1 = computeSectionStability(inputs);
