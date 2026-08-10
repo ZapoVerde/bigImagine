@@ -706,6 +706,15 @@ export interface PromptPreviewGroup {
    *  the cleaned text replaces the raw reply in the message, so this is its only home). Rendered
    *  as its own collapsible block; kept out of `items` so the group's totals stay prompt-side. */
   reply?: PromptPreviewItem;
+  /** Cache-coverage report for the Main Prompt tag tree (docs/prompt-inspector-tag-tree.md §3.2):
+   *  when this is a 'main' group with ≥2 recorded turns, the length in chars (UTF-16 code units,
+   *  the same unit as the tag-tree's section offsets) of the longest prefix this turn's joined
+   *  items text shares with the previous turn's — the run the provider's prefix cache would
+   *  replay. A tag-tree section is cache-covered iff section.end <= this. Absent when fewer than
+   *  two 'main' calls are on record — the panel then shows no cache badges at all. */
+  stablePrefixChars?: number;
+  /** When stablePrefixChars is set: epoch ms of the previous 'main' call the diff is against. */
+  previousCallAt?: number;
 }
 
 export interface PromptPreview {

@@ -168,6 +168,7 @@ import { describeLocationIfNeeded } from '../orchestrator/describeLocation.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promptTrace.js';
+import { longestCommonPrefixLength } from '../util/commonPrefix.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
@@ -1026,6 +1027,16 @@ export interface PromptPreviewGroup {
   /** The prompt's items in send order — system-stack/header items first, then conversation
    *  messages, each with a rough token estimate. */
   items: PromptPreviewItem[];
+  /** Cache-coverage diff against the previous fired main (docs/prompt-inspector-tag-tree.md
+   *  §3.2, revised): stablePrefixChars = length of the longest common prefix (UTF-16 code units)
+   *  of this group's joined items text and the previous 'main' trace entry's; previousCallAt =
+   *  when that previous main fired. A section of this group's tag tree is cache-covered iff
+   *  section.end <= stablePrefixChars. Both entries are recorded at send time, so the badge is
+   *  deterministic — no live reconstruction involved. Absent when fewer than two 'main' entries
+   *  are on record (fresh chat, or the in-memory trace was lost to a restart) — the frontend
+   *  then omits the cache badges rather than showing an unknown state. */
+  stablePrefixChars?: number;
+  previousCallAt?: number;
   /** The model's reply to this prompt, when the trace captured one (io/promptTrace.ts's `reply` —
    *  cleanup repairs record it; the cleaned text replaces the raw output in the message, so this
    *  is the only place it survives). Rendered as its own collapsible block; deliberately kept OUT
@@ -1070,7 +1081,9 @@ async function buildPromptPreview(  deps: HttpServerDeps,
   // Either way the group's items stay granular (one per system-stack slot and history message) so
   // the frontend can render them individually, or join them into one block, as it prefers.
   const trace = getPromptTrace(chatId);
-  const capturedMain = [...trace].reverse().find((e) => e.kind === 'main');
+  const mains = [...trace].reverse().filter((e) => e.kind === 'main');
+  const capturedMain = mains[0];
+  const previousMain = mains[1];
 
   let mainGroup: PromptPreviewGroup;
   if (capturedMain) {
@@ -1085,6 +1098,18 @@ async function buildPromptPreview(  deps: HttpServerDeps,
         estimatedTokens: i.estimatedTokens,
       })),
     };
+    // Cache-coverage badges (§3.2, revised): diff the last fired main against the one before it.
+    // Both are recorded bytes, so the badge is deterministic — no live reconstruction, unlike the
+    // original design. stablePrefixChars = the longest common prefix of the two joined texts, in
+    // the same UTF-16 code units the frontend's tag-tree offsets use (the tree slices the same
+    // joined text). Omitted when only one (or zero) main is on record — the frontend then shows
+    // no cache badges at all.
+    if (previousMain) {
+      const joinedNow = capturedMain.items.map((i) => i.content).join('\n\n');
+      const joinedPrev = previousMain.items.map((i) => i.content).join('\n\n');
+      mainGroup.stablePrefixChars = longestCommonPrefixLength(joinedNow, joinedPrev);
+      mainGroup.previousCallAt = previousMain.capturedAt;
+    }
   } else {
     const messagesForLlm: LlmMessage[] = detail.messages.map((m) => ({ role: m.role, content: m.content }));
     let [memoryContext, trimmed] = await Promise.all([

@@ -182,27 +182,37 @@ Every case preserves all text; the only variable is *which level* it displays at
 - Token totals in the panel header stay unchanged (sum over root content).
 - The other groups (cleanup, title, …) are untouched — the tree is a Main-Prompt feature.
 
-### 3.2 Cache-coverage badges (companion change, separately approved)
+### 3.2 Cache-coverage badges (companion change, implemented)
 
-Maps the existing byte-prefix diff onto sections. The server (Phase 2 of this spec — see §5)
-already has everything needed: the trace holds the last fired `main` entry
-(`io/promptTrace.ts`), and `buildPromptPreview`'s fallback path assembles the live next-turn text
-with the identical code a real turn sends. The diff is pure string math:
+Maps the recorded byte diff onto sections. The server diffs the **last fired** `main` trace entry
+against the **one before it** — both are bytes recorded at send time (`io/promptTrace.ts`), so
+the diff is deterministic; no live reconstruction is involved. `buildPromptPreview` emits on the
+main group:
 
-- `stablePrefixChars` = length of the longest common prefix between the **live** joined text and
-  the **last fired** `main` joined text; `lastCallAt` from the trace entry.
-- A section is **cache-covered** iff `section.end <= stablePrefixChars` — i.e. the section and
-  everything upstream of it is byte-identical to the last call ("any words in it or upstream have
-  changed" is exactly `section.end > stablePrefixChars`).
-- Badge per section: `cached` (covered) / `changed` (not covered) / `—` (no last call on record:
-  fresh chat or trace lost to restart — in-memory by design, `promptTrace.ts:18-23`).
+- `stablePrefixChars` = length of the longest common prefix (UTF-16 code units, the same unit as
+  the tag-tree's section offsets — no conversion) of the two joined items texts.
+- `previousCallAt` = epoch ms of the previous fired `main` entry, for the legend.
+- Both are **omitted when fewer than two `main` entries are on record** (fresh chat, or trace
+  lost to restart — in-memory by design, `promptTrace.ts:18-23`): the panel then shows no cache
+  badges at all, exactly as before this change.
+
+Coverage rule:
+
+- A section is **cache-covered** iff `section.end <= stablePrefixChars` — the section and
+  everything upstream of it is byte-identical to the previous call ("any words in it or upstream
+  have changed" is exactly `section.end > stablePrefixChars`; a prefix cache cannot replay past
+  the first differing byte, so everything downstream of an edit is changed too).
+- Badge per section: `⚡ cached` (covered) / `✎ changed` (not covered). The root "untagged text"
+  block is badged by the max end of its own-text runs; the no-tags fallback "Complete prompt
+  text" block by the whole text length. A one-line legend (with `previousCallAt` in local time)
+  sits above the tree when badges are shown.
 - Honest labeling: coverage is an *estimate* of provider prefix-caching; Anthropic connections
   cache nothing today (the adapter sends no `cache_control`) — the badge set shows that fact.
-- **UX consequence to decide at approval**: the diff is only meaningful on the *live* next-turn
-  text. Today the panel prefers the captured last turn when one exists. Phase 2 flips the Main
-  Prompt group to the live reconstruction whenever a last call exists (with a "what the next turn
-  would send" note), keeping the captured text one click away — or adds a captured/live toggle.
-  Default recommendation: show live + note, keep "last fired" viewable.
+  Coverage describes the diff between the two recorded calls, the only deterministic ground
+  truth the server has without real cache instrumentation (which does not exist yet).
+
+No live-flip UX question remains: the diff never involves the live reconstruction, so the Main
+Prompt group keeps preferring the captured last turn unchanged.
 
 ---
 
@@ -217,8 +227,11 @@ with the identical code a real turn sends. The diff is pure string math:
 | `frontend/src/components/promptInspector/PromptInspectorPanel.tsx` | render main group through the tree (§3.1) |
 | `frontend/src/components/promptInspector/PromptInspectorPanel.css` | nested-section styles (indent, depth badge) |
 
-Phase 2 (separate approval): `orchestrator/src/server/httpServer.ts` (main group gains
-`lastCallAt`/`stablePrefixChars`), `frontend/src/api/types.ts` mirror, cache badges in the panel.
+Phase 2 (implemented): `orchestrator/src/util/commonPrefix.ts` (**new** — pure
+`longestCommonPrefixLength`), `orchestrator/scripts/verify-common-prefix.mjs` (**new** — LCP +
+coverage-rule assertions, wired into the verify chain), `orchestrator/src/server/httpServer.ts`
+(main group gains `previousCallAt`/`stablePrefixChars`), `frontend/src/api/types.ts` mirror,
+`PromptInspectorPanel.tsx`/`.css` (badges + legend).
 
 ## 5. Out of Scope (deliberately)
 

@@ -144,8 +144,11 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
       </h3>
       {group.items.length === 0 && <p className="prompt-inspector-empty">Nothing here.</p>}
       {group.kind === 'main' && group.items.length > 0 ? (
-        // The whole main prompt as a tag tree — see MainPromptTree below.
-        <MainPromptTree items={group.items} />
+        // The whole main prompt as a tag tree — see MainPromptTree below. The cache-coverage
+        // fields (stablePrefixChars/previousCallAt) come from buildPromptPreview's diff of the
+        // last fired main against the one before it; undefined when fewer than two are on record
+        // (the tree then shows no cache badges at all).
+        <MainPromptTree items={group.items} stablePrefixChars={group.stablePrefixChars} previousCallAt={group.previousCallAt} />
       ) : (
         group.items.map((item, i) => (
           <details key={i} className="prompt-inspector-item" open>
@@ -190,7 +193,15 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
 // collapsed by default, with its canonical tag name and its own token/char budget; text that
 // belongs to no matched section (untagged preamble, history between tags, broken-tag leftovers)
 // rolls up and renders as "untagged text" at the enclosing level — nothing is ever dropped.
-function MainPromptTree({ items }: { items: PromptPreviewItem[] }) {
+function MainPromptTree({
+  items,
+  stablePrefixChars,
+  previousCallAt,
+}: {
+  items: PromptPreviewItem[];
+  stablePrefixChars?: number;
+  previousCallAt?: number;
+}) {
   const text = items.map((i) => i.content).join('\n\n');
   const tree = parsePromptTagTree(text);
   if (tree.children.length === 0) {
@@ -200,6 +211,7 @@ function MainPromptTree({ items }: { items: PromptPreviewItem[] }) {
       <details className="prompt-inspector-item">
         <summary>
           <span className="prompt-inspector-item-label">Complete prompt text</span>
+          <CacheBadge end={text.length} stablePrefixChars={stablePrefixChars} />
           <span className="prompt-inspector-item-tokens">
             {sectionTokens.toLocaleString()} tk · {totalChars.toLocaleString()} ch
           </span>
@@ -208,7 +220,12 @@ function MainPromptTree({ items }: { items: PromptPreviewItem[] }) {
       </details>
     );
   }
-  return <PromptTagTreeView tree={tree} text={text} />;
+  return (
+    <>
+      {stablePrefixChars !== undefined && <CacheLegend previousCallAt={previousCallAt} />}
+      <PromptTagTreeView tree={tree} text={text} stablePrefixChars={stablePrefixChars} />
+    </>
+  );
 }
 
 // A section's own text = everything inside its span that no child section owns (tags excluded).
@@ -232,17 +249,31 @@ function sectionChars(section: PromptTagSection, text: string): number {
   return ownText(section, text).length + section.children.reduce((sum, c) => sum + sectionChars(c, text), 0);
 }
 
-function PromptTagTreeView({ tree, text }: { tree: PromptTagSection; text: string }) {
+function PromptTagTreeView({
+  tree,
+  text,
+  stablePrefixChars,
+}: {
+  tree: PromptTagSection;
+  text: string;
+  stablePrefixChars?: number;
+}) {
   const own = ownText(tree, text);
   const hasOwn = own.trim().length > 0;
   return (
     <div className="prompt-inspector-tree">
       {hasOwn && (
         // Untagged text at the top level (the preset's --- preamble, history between tags, …):
-        // rendered as a first-class collapsed block so no part of the sent text is hidden.
+        // rendered as a first-class collapsed block so no part of the sent text is hidden. Its
+        // cache badge covers all of its runs: every run must end at or before the stable prefix
+        // (the root's own text is rarely one contiguous span — see ownRuns below).
         <details className="prompt-inspector-tag">
           <summary>
             <span className="prompt-inspector-tag-name">untagged text</span>
+            <CacheBadge
+              end={Math.max(...ownRuns(tree).map(([, e]) => e))}
+              stablePrefixChars={stablePrefixChars}
+            />
             <span className="prompt-inspector-item-tokens">
               {Math.ceil(own.length / 4).toLocaleString()} tk · {own.length.toLocaleString()} ch
             </span>
@@ -252,14 +283,36 @@ function PromptTagTreeView({ tree, text }: { tree: PromptTagSection; text: strin
       )}
       <div className="prompt-inspector-tag-children">
         {tree.children.map((child, i) => (
-          <PromptTagSectionView key={i} section={child} text={text} />
+          <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} />
         ))}
       </div>
     </div>
   );
 }
 
-function PromptTagSectionView({ section, text }: { section: PromptTagSection; text: string }) {
+// A section's own text as (start, end) offset runs, in document order — the exact slices
+// ownText() concatenates. Used to badge the root's "untagged text" block (which may span several
+// disjoint runs: preamble, gaps between sections, trailing text) against the stable prefix.
+function ownRuns(section: PromptTagSection): Array<[number, number]> {
+  const runs: Array<[number, number]> = [];
+  let cursor = section.start;
+  for (const child of section.children) {
+    if (child.start > cursor) runs.push([cursor, child.start]);
+    cursor = child.end;
+  }
+  if (section.end > cursor) runs.push([cursor, section.end]);
+  return runs;
+}
+
+function PromptTagSectionView({
+  section,
+  text,
+  stablePrefixChars,
+}: {
+  section: PromptTagSection;
+  text: string;
+  stablePrefixChars?: number;
+}) {
   const own = ownText(section, text);
   const chars = sectionChars(section, text);
   const tokens = Math.ceil(chars / 4);
@@ -270,6 +323,7 @@ function PromptTagSectionView({ section, text }: { section: PromptTagSection; te
     return (
       <div className="prompt-inspector-tag prompt-inspector-tag-leaf">
         <span className="prompt-inspector-tag-name">{section.name}</span>
+        <CacheBadge end={section.end} stablePrefixChars={stablePrefixChars} />
         <span className="prompt-inspector-item-tokens">{tokens.toLocaleString()} tk · {chars.toLocaleString()} ch</span>
       </div>
     );
@@ -278,6 +332,7 @@ function PromptTagSectionView({ section, text }: { section: PromptTagSection; te
     <details className="prompt-inspector-tag">
       <summary>
         <span className="prompt-inspector-tag-name">{section.name}</span>
+        <CacheBadge end={section.end} stablePrefixChars={stablePrefixChars} />
         {hasChildren && (
           <span className="prompt-inspector-tag-count">
             {section.children.length} section{section.children.length === 1 ? '' : 's'}
@@ -289,10 +344,45 @@ function PromptTagSectionView({ section, text }: { section: PromptTagSection; te
       {hasChildren && (
         <div className="prompt-inspector-tag-children">
           {section.children.map((child, i) => (
-            <PromptTagSectionView key={i} section={child} text={text} />
+            <PromptTagSectionView key={i} section={child} text={text} stablePrefixChars={stablePrefixChars} />
           ))}
         </div>
       )}
     </details>
+  );
+}
+
+// Cache-coverage badge (docs/prompt-inspector-tag-tree.md §3.2): ⚡ when the section ends at or
+// before the stable prefix of the last call vs the one before it — byte-identical upstream of the
+// change, so the provider's prefix cache replays it — ✎ when it ends past the prefix (the section
+// itself, or something upstream of it, changed: the cache cannot replay past the first differing
+// byte). Renders nothing when stablePrefixChars is undefined (fewer than two 'main' calls on
+// record — there is nothing to diff against).
+function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars?: number }) {
+  if (stablePrefixChars === undefined) return null;
+  const covered = end <= stablePrefixChars;
+  return (
+    <span
+      className={`prompt-inspector-cache-badge ${covered ? 'prompt-inspector-cache-covered' : 'prompt-inspector-cache-changed'}`}
+      title={
+        covered
+          ? 'Unchanged since the previous call — the provider prefix cache replays this section'
+          : 'Changed since the previous call, or downstream of a change — the prefix cache cannot replay it'
+      }
+    >
+      {covered ? '⚡ cached' : '✎ changed'}
+    </span>
+  );
+}
+
+// One-line legend above the tree, only when the server could diff (stablePrefixChars set): what
+// the two badges mean, and which previous call the diff is against (epoch ms → local time).
+function CacheLegend({ previousCallAt }: { previousCallAt?: number }) {
+  return (
+    <div className="prompt-inspector-cache-legend">
+      ⚡ cached — byte-identical to the previous call
+      {previousCallAt !== undefined && ` (${new Date(previousCallAt).toLocaleString()})`}; ✎ changed —
+      edited since, or downstream of an edit. The provider prefix cache replays only the ⚡ run.
+    </div>
   );
 }

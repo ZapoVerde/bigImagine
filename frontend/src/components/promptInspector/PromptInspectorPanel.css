@@ -333,3 +333,40 @@
 .prompt-inspector-tag-leaf .prompt-inspector-tag-name {
   color: var(--color-text-muted);
 }
+
+/* Cache-coverage badge (docs/prompt-inspector-tag-tree.md §3.2): ⚡ green when the section sits
+   entirely inside the stable prefix of the last call vs the one before it (the provider prefix
+   cache replays it), ✎ amber when it or anything upstream of it changed. Only rendered when the
+   server has ≥2 'main' calls on record (stablePrefixChars set); absent → no badges at all. */
+.prompt-inspector-cache-badge {
+  font-size: var(--font-size-xs, 0.72rem);
+  border-radius: var(--radius-sm, 4px);
+  padding: 0.05rem 0.35rem;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: var(--font-weight-regular, normal);
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.prompt-inspector-cache-covered {
+  color: var(--color-success);
+  border: 1px solid color-mix(in srgb, var(--color-success) 45%, transparent);
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+}
+
+.prompt-inspector-cache-changed {
+  color: var(--color-secondary);
+  border: 1px solid color-mix(in srgb, var(--color-secondary) 45%, transparent);
+  background: color-mix(in srgb, var(--color-secondary) 10%, transparent);
+}
+
+/* Legend above the tag tree when cache badges are shown — one line, muted, explaining the two
+   badges and which previous call the diff is against. */
+.prompt-inspector-cache-legend {
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+  line-height: 1.5;
+  padding: 0.1rem 0.2rem 0.2rem;
+}
+
