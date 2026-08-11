@@ -67,7 +67,7 @@
  * system prompt, for every turn regardless of chat_id — an LLM has no reliable sense of "today"
  * on its own, and date-taking tools need it.
  *
- * docs/prompt-macros.md's Stage 1: an 'rp' chat's system prompt is scanned for `{{char}}`/
+ * docs/plans/prompt-macros.md's Stage 1: an 'rp' chat's system prompt is scanned for `{{char}}`/
  * `{{user}}`/`{{persona}}`/`{{description}}`/`{{scenario}}`/etc. (util/interpolateMacros.ts) fresh
  * on every turn, right here, before it's folded into systemPrompt — never baked once at
  * apply_prompt_stack_to_chat time, so a persona or character-card edit takes effect on the very
@@ -553,7 +553,7 @@ async function buildChatMemorySystemPrompt(
   });
 }
 
-// docs/prompt-macros.md's Stage 1 — the turn-scoped snapshot (docs §2) both the system-prompt and
+// docs/plans/prompt-macros.md's Stage 1 — the turn-scoped snapshot (docs §2) both the system-prompt and
 // the message-history resolution passes share, built fresh per turn so a persona/card edit takes
 // effect on the very next turn with no re-apply (bi_principles.md §13's live-read guarantee).
 // Character fields (name/persona/scenario) are read live rather than trusted from whatever
@@ -587,7 +587,7 @@ async function buildMacroSnapshot(
   };
 }
 
-// docs/prompt-macros.md's Stage 1 — only called when the caller already knows systemText contains
+// docs/plans/prompt-macros.md's Stage 1 — only called when the caller already knows systemText contains
 // at least one `{{`, so it always substitutes for real, never a wasted pass. The snapshot is
 // built by the caller (buildMacroSnapshot) so a turn that also resolves message history reuses
 // one frozen snapshot for both (docs §2's "resolved once, at the top of the turn").
@@ -643,7 +643,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
   }));
 }
 
-// docs/turn-loop-plan.md §3.2: the per-turn replacement for apply_prompt_stack_to_chat's
+// docs/plans/turn-loop-plan.md §3.2: the per-turn replacement for apply_prompt_stack_to_chat's
 // bake-once-at-Apply behavior. Same two-phase pattern that tool already uses (assemblePromptStack
 // then interpolateMacros) — re-run fresh every turn instead of frozen into params.system. The RP
 // memory split (2026-08-13 user direction): buildChatMemorySystemPrompt now returns structured
@@ -659,7 +659,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // scene_presence/scenes.active_location_id. chat_sessions.scene_id now exists (migration 0067)
 // and is kept stamped by the post-cleanup scraper (orchestrator/locationAndPresenceScraper.ts),
 // so the cheap "this chat's current scene" read segway.md §2.2 promised is available here — and
-// the location-tracker (docs/vistalyze_integration/location.md §5.4) now uses it: the
+// the location-tracker (docs/plans/vistalyze_integration/location.md §5.4) now uses it: the
 // 'location' marker slot is populated every turn via loadLocationBlock (the known-locations
 // <locations> block, eligibility-filtered + current-parent scoped), so a preset carrying that
 // marker emits it verbatim in its own slot order. The tool stays live for the model to call
@@ -1048,15 +1048,15 @@ async function assembleSessionTurnContext(
   sessionPromptStackPresetId: string | null,
   sessionParams: ChatParams,
   messagesForLlm: LlmMessage[],
+  timezone: string,
   lorebookSeedMessageId?: string,
 ): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[]; lorebookActivatedEntryIds: string[] }> {
-): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[] }> {
   const [memoryContext, trimmed] = await Promise.all([
     buildChatMemorySystemPrompt(db, settings, embeddings, userId, chatId, sessionKind, messagesForLlm),
     trimToLiveWindow(messagesForLlm, settings),
   ]);
 
-  // docs/prompt-macros.md's Stage 1, extended to message history: an RP chat's stored messages —
+  // docs/plans/prompt-macros.md's Stage 1, extended to message history: an RP chat's stored messages —
   // chiefly the character's seeded greeting, which apply_character_to_chat/apply_prompt_stack_to_chat
   // insert verbatim — can carry the same {{...}} tokens as its system text, and they'd otherwise
   // reach the LLM literally (and get echoed back into replies). Resolved here, at the same seam and
@@ -1074,7 +1074,7 @@ async function assembleSessionTurnContext(
   }
 
   if (sessionKind === 'rp' && sessionPromptStackPresetId) {
-    // Per-turn narrator assembly (docs/turn-loop-plan.md §3.2): re-run assemblePromptStack fresh
+    // Per-turn narrator assembly (docs/plans/turn-loop-plan.md §3.2): re-run assemblePromptStack fresh
     // every turn instead of replaying the frozen string apply_prompt_stack_to_chat baked once into
     // params.system at Apply-click — a character-card/persona/memory-digest edit takes effect on
     // the very next message, no re-apply needed. memory_recall is folded in as a field the preset's
@@ -1160,7 +1160,7 @@ export interface PromptPreviewGroup {
   /** The prompt's items in send order — system-stack/header items first, then conversation
    *  messages, each with a rough token estimate. */
   items: PromptPreviewItem[];
-  /** Cache-coverage diff against the previous fired main (docs/prompt-inspector-tag-tree.md
+  /** Cache-coverage diff against the previous fired main (docs/plans/prompt-inspector-tag-tree.md
    *  §3.2, revised): stablePrefixChars = length of the longest common prefix (UTF-16 code units)
    *  of this group's joined items text and the previous 'main' trace entry's; previousCallAt =
    *  when that previous main fired. A section of this group's tag tree is cache-covered iff
@@ -1274,7 +1274,7 @@ async function buildPromptPreview(  deps: HttpServerDeps,
 
     // Same shared-snapshot shape as assembleSessionTurnContext — one frozen snapshot for the
     // system text (legacy branch only) and the message history (both branches; a real turn's
-    // narrator path resolves messages the same way), docs/prompt-macros.md §2.
+    // narrator path resolves messages the same way), docs/plans/prompt-macros.md §2.
     const systemNeedsMacros = !session.promptStackPresetId && !!session.params.system?.includes('{{');
     const historyNeedsMacros = trimmed.some((m) => m.content.includes('{{'));
     const macroSnapshot = systemNeedsMacros || historyNeedsMacros
@@ -1472,7 +1472,7 @@ async function regenerateSwipe(
   const updated = await chats.recordSwipe(userId, chatId, messageId, reply);  if (!updated) {
     return { ok: false, error: 'message no longer exists' };
   }
-  // Stage 2 (docs/vistalyze_integration/segway.md §4, location.md §4.2): post-cleanup heuristic
+  // Stage 2 (docs/plans/vistalyze_integration/segway.md §4, location.md §4.2): post-cleanup heuristic
   // extraction against the regenerated text — recordSwipe above just made its swipe active,
   // which is the anchor the scraper's transient rows attach to. Fail-open inside the scraper:
   // never blocks the turn. The returned locationId feeds endpoint.md §5's decoupled
@@ -1568,11 +1568,11 @@ async function handleChatCompletions(
   let priorMessageCount = 0;
   let sessionKind: 'chat' | 'rp' = 'chat';
   // Which character (if any) this chat is linked to (applyCharacterToChatTool.ts) — only read
-  // here for docs/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
+  // here for docs/plans/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
   // everything else about the turn is indifferent to it.
   let sessionCharacterId: string | null = null;
   // Which context_stack_presets row (if any) drives this turn's per-turn narrator assembly
-  // (docs/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
+  // (docs/plans/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
   // the async heuristic subloop (cleanupLoop.ts), opted in per chat via cleanup_enabled_at.
   let sessionPromptStackPresetId: string | null = null;
   // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
@@ -1632,7 +1632,7 @@ async function handleChatCompletions(
   // Settings takes effect on the very next turn, no restart.
   const timezone = await getHouseholdTimezone(deps.settings);
 
-  // docs/prompt-macros.md's Stage 1: resolved fresh every turn (not baked at apply_prompt_stack_
+  // docs/plans/prompt-macros.md's Stage 1: resolved fresh every turn (not baked at apply_prompt_stack_
   // to_chat time) specifically so a persona/character-card edit takes effect on the very next
   // message with no re-apply needed — bi_principles.md §13's live-read, no-restart guarantee
   // applied to {{user}}/{{char}}/{{persona}} the same way it already applies to every other
@@ -2906,7 +2906,7 @@ async function handlePiaProxyUrlSet(req: IncomingMessage, res: ServerResponse, d
 }
 
 // GET/POST /v1/admin/persona-settings — the household's own name/description
-// (docs/prompt-macros.md's Stage 1), read live by
+// (docs/plans/prompt-macros.md's Stage 1), read live by
 // plugins/context-stack-presets' applyPromptStackToChatTool.ts. Same admin-authed,
 // read-back-in-full shape as screen-lock/notification settings.
 async function handlePersonaSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -3058,7 +3058,7 @@ async function handleChatRoutes(
         sendJson(res, 404, { error: 'not found' });
         return;
       }
-      // Display-side macro resolution (docs/prompt-macros.md's Stage 1, bi_principles.md §1): the
+      // Display-side macro resolution (docs/plans/prompt-macros.md's Stage 1, bi_principles.md §1): the
       // chat UI renders a message's resolvedContent — a per-read derived copy — so a character's
       // seeded greeting shows "Jeremy, …" instead of the literal {{user}} token, while the
       // canonical content stays verbatim and the client keeps re-sending it, so the per-turn
