@@ -11,7 +11,9 @@ import {
   adminCreateLorebookEntry,
   adminDeleteLorebook,
   adminDeleteLorebookEntry,
+  adminExportLorebookWorldInfo,
   adminGetLorebookSettings,
+  adminImportLorebookWorldInfo,
   adminListLorebooks,
   adminSetLorebookSettings,
   adminUpdateLorebook,
@@ -152,6 +154,45 @@ export default function LorebooksView() {
       applyBooks(await adminListLorebooks(adminKey));
     } catch (error) {
       setLibraryStatus(error instanceof ApiError ? 'error: ' + error.message : 'failed to create book');
+    }
+  }
+
+  // Import/export hub (plan §8a step 7, bi_principles.md §7): parses an ST world-info JSON
+  // export `{ name, entries: { [uid]: entryObject } }` (0051's format) into a new book with
+  // source_json capturing each entryObject verbatim; export reverses it losslessly.
+  async function importWorldInfo(file: File) {
+    setImportStatus('');
+    try {
+      const raw = JSON.parse(await file.text()) as { name?: unknown; entries?: unknown };
+      if (typeof raw.name !== 'string' || typeof raw.entries !== 'object' || raw.entries === null || Array.isArray(raw.entries)) {
+        setImportStatus('error: expected an ST world-info export { name: string, entries: { [uid]: entryObject } }');
+        return;
+      }
+      const result = await adminImportLorebookWorldInfo(newBookUserId, { name: raw.name, entries: raw.entries as Record<string, unknown> }, adminKey);
+      setImportStatus(`Imported ${result.entryCount} entr${result.entryCount === 1 ? 'y' : 'ies'} into "${result.name}".`);
+      applyBooks(await adminListLorebooks(adminKey));
+    } catch (error) {
+      setImportStatus(error instanceof ApiError ? 'error: ' + error.message : 'failed to import');
+    }
+  }
+
+  async function exportBook(book: LorebookAdminRow) {
+    setExportingId(book.lorebookId);
+    setLibraryStatus('');
+    try {
+      const exported = await adminExportLorebookWorldInfo(book.lorebookId, book.userId, adminKey);
+      const blob = new Blob([JSON.stringify(exported, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${book.name}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setLibraryStatus(`Exported "${book.name}" — re-importable as-is.`);
+    } catch (error) {
+      setLibraryStatus(error instanceof ApiError ? 'error: ' + error.message : 'failed to export');
+    } finally {
+      setExportingId(null);
     }
   }
 
@@ -358,6 +399,20 @@ export default function LorebooksView() {
             Create book
           </button>
         </div>
+        <div className="status">
+          Import/export (SillyTavern world-info JSON — <code>{'{ name, entries: { [uid]: entryObject } }'}</code>):{' '}
+          <input
+            type="file"
+            accept="application/json,.json"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void importWorldInfo(file);
+              e.target.value = '';
+            }}
+          />
+          <span className="model-connection-note">Imported entry objects are kept verbatim in <code>source_json</code> and round-trip losslessly (§7).</span>
+        </div>
+        {importStatus && <div className="status">{importStatus}</div>}
         <br />
         {(books ?? []).length === 0 && <div className="status">No books yet — create one above. (Import from a SillyTavern world-info export arrives with the import/export hub.)</div>}
         {(books ?? []).map((book) => (
@@ -376,6 +431,9 @@ export default function LorebooksView() {
               </span>{' '}
               <button type="button" onClick={() => deleteBook(book)} disabled={deletingId === book.lorebookId}>
                 Delete book
+              </button>{' '}
+              <button type="button" onClick={() => exportBook(book)} disabled={exportingId === book.lorebookId}>
+                {exportingId === book.lorebookId ? 'Exporting…' : 'Export'}
               </button>
             </div>
             {expandedBookId === book.lorebookId && (

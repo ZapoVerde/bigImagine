@@ -1100,6 +1100,36 @@ export async function quickAddLorebookEntry(
   });
 }
 
+// --- Lorebook import/export (plan §8a step 7, bi_principles.md §7) — admin-gated. ---
+
+export interface WorldInfoImportResult {
+  lorebookId: string;
+  name: string;
+  entryCount: number;
+}
+
+export async function adminImportLorebookWorldInfo(
+  userId: string,
+  worldInfo: { name: string; entries: Record<string, unknown> },
+  adminKey: string | null,
+): Promise<WorldInfoImportResult> {
+  return jsonRequest<WorldInfoImportResult>(`/v1/admin/lorebooks/import`, adminKey, {
+    method: 'POST',
+    body: { user_id: userId, world_info: worldInfo },
+  });
+}
+
+export async function adminExportLorebookWorldInfo(
+  lorebookId: string,
+  userId: string,
+  adminKey: string | null,
+): Promise<{ name: string; entries: Record<string, unknown> }> {
+  return jsonRequest<{ name: string; entries: Record<string, unknown> }>(
+    `/v1/admin/lorebooks/${encodeURIComponent(lorebookId)}/export?userId=${encodeURIComponent(userId)}`,
+    adminKey,
+  );
+}
+
 export async function adminSetChatMemorySettings(
   patch: {
     profile?: string;

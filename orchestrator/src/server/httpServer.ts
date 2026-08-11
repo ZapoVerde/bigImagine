@@ -218,6 +218,8 @@ import {
   createLorebookAdmin,
   createLorebookEntryAdmin,
   deleteLorebookAdmin,
+  exportLorebookWorldInfo,
+  importLorebookWorldInfo,
   deleteLorebookEntryAdmin,
   getCanonSettings,
   getChatMemorySettings,
@@ -2514,7 +2516,37 @@ async function handleAdminLorebookRoutes(req: IncomingMessage, res: ServerRespon
       sendJson(res, 201, created);
       return;
     }
-    if (rest.length === 1) {
+    // Import (step 7): POST /v1/admin/lorebooks/import with an ST world-info export
+    // `{ user_id, world_info: { name, entries: { [uid]: entryObject } } }` — parses into a new
+    // book with source_json capturing each entryObject verbatim (0051's format).
+    if (rest.length === 1 && rest[0] === 'import' && req.method === 'POST') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const body = raw as { user_id?: unknown; world_info?: unknown } | null;
+      const wi = body?.world_info;
+      if (!body || typeof body.user_id !== 'string' || !body.user_id || typeof wi !== 'object' || wi === null || Array.isArray(wi)) {
+        sendJson(res, 400, { error: 'expected { user_id: string, world_info: { name, entries } }' });
+        return;
+      }
+      const worldInfo = wi as { name?: unknown; entries?: unknown };
+      if (typeof worldInfo.name !== 'string' || !worldInfo.name.trim() || worldInfo.entries === undefined) {
+        sendJson(res, 400, { error: 'world_info must have a non-empty name and an entries object' });
+        return;
+      }
+      const result = await importLorebookWorldInfo(deps.db, deps.embeddings, body.user_id, worldInfo.name, worldInfo.entries);
+      if (!result) {
+        sendJson(res, 400, { error: 'import failed — unknown user, blank name, or malformed entries (uid keys must be non-negative integers, values must be objects)' });
+        return;
+      }
+      sendJson(res, 201, result);
+      return;
+    }
+    if (rest.length === 1 && rest[0] !== 'import') {
       const lorebookId = decodeURIComponent(rest[0]!);
       if (req.method === 'PATCH') {
         let raw: unknown;
@@ -2573,6 +2605,24 @@ async function handleAdminLorebookRoutes(req: IncomingMessage, res: ServerRespon
         sendJson(res, 200, { deleted: true });
         return;
       }
+    }
+    // Export (step 7): GET /v1/admin/lorebooks/:id/export?userId= — reverses the import
+    // losslessly (§7): `{ name, entries: { [uid]: entryObject } }` with entryObject = the
+    // verbatim source_json when the entry was imported, else an ST-shaped reconstruction.
+    if (rest.length === 2 && rest[1] === 'export' && req.method === 'GET') {
+      const lorebookId = decodeURIComponent(rest[0]!);
+      const userId = url.searchParams.get('userId');
+      if (!userId) {
+        sendJson(res, 400, { error: 'expected ?userId= query param' });
+        return;
+      }
+      const exported = await exportLorebookWorldInfo(deps.db, userId, lorebookId);
+      if (!exported) {
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      sendJson(res, 200, exported);
+      return;
     }
     sendJson(res, 404, { error: 'not found' });
     return;
