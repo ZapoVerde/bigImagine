@@ -37,7 +37,21 @@ function names(section) {
   return section.children.map((c) => c.name);
 }
 
-const ROOT_ONLY = new Set(['simple', 'preamble', 'siblings', 'nested-space-tag', 'inner-thoughts-double', 'cross-slot', 'crossed', 'missing-close', 'dangling-close', 'self-closing', 'attr-strip', 'recovery-order', 'eof-unclosed', 'comfy2-composite']);
+const ROOT_ONLY = new Set(['simple', 'preamble', 'siblings', 'nested-space-tag', 'inner-thoughts-double', 'cross-slot', 'crossed', 'missing-close', 'dangling-close', 'self-closing', 'attr-strip', 'recovery-order', 'eof-unclosed', 'group-wraps-single-tagged-child', 'empty-pair', 'comfy2-composite']);
+
+// ownText mirrors PromptInspectorPanel.tsx's ownText(): a section's displayed "own text" is its
+// [contentStart, contentEnd) span minus whatever its children occupy — the section's own tag
+// bytes are never part of it. This is the function whose old behavior (slicing [start, end)
+// instead) produced the reported bug.
+function ownText(section, text) {
+  let out = '';
+  let cursor = section.contentStart;
+  for (const child of section.children) {
+    out += text.slice(cursor, child.start);
+    cursor = child.end;
+  }
+  return out + text.slice(cursor, section.contentEnd);
+}
 
 // ---------------------------------------------------------------------------
 // §2.6 fixtures — shapes mirror the live Comfy 2 preset content verbatim where noted.
@@ -89,7 +103,17 @@ const FIXTURES = {
   // 13. Unclosed open at EOF is not a section; its completed child survives under the root.
   'eof-unclosed': `<a>text<b>inner</b>more`,
 
-  // 14. Composite in the live Comfy 2 layout order: preamble → several root sections → nested
+  // 14. Migration-0086 group whose entire body is one nested tagEnabled child — the reported
+  //     Prompt Inspector bug: "own text" must exclude the group's own delimiter bytes, or this
+  //     renders as just the two <Time and Place> tag lines with nothing between them, making the
+  //     real content (one level down, in header_instructions) look missing.
+  'group-wraps-single-tagged-child': `<Time and Place>\n<header_instructions>\nSome real prose here.\n</header_instructions>\n</Time and Place>`,
+
+  // 15. Empty tag pair — must yield NO own content, so the panel renders the dashed leaf row
+  //     (nothing to expand) instead of a details block whose body is just its own tags.
+  'empty-pair': `<a></a>`,
+
+  // 16. Composite in the live Comfy 2 layout order: preamble → several root sections → nested
   // constraints → internal-thinking section (outer tag renamed from <inner thoughts> so the
   // example inside can keep its own <inner thoughts> name) → cross-slot narrative_execution.
   'comfy2-composite': `---\nAll instructions after this line MUST supersede the module context.\n<main_instructions>\nNarrate as Ava.\n</main_instructions>\n<earthy_physicality>\nTaste, smell, touch.\n</earthy_physicality>\n<point_of_view>\nAva's POV.\n</point_of_view>\n<character_behavior_and_memory_protocol>\nAva keeps her promises.\n</character_behavior_and_memory_protocol>\n<character_autonomy_protocol>\nAva may refuse.\n</character_autonomy_protocol>\n<constraints>\n<language>\nEnglish.\n</language>\n<naming_constraints>\nNever "maiden".\n</naming_constraints>\n<No Deepity>\nNo purple prose.\n</No Deepity>\n</constraints>\n<internal thinking>\nAppend thoughts blocks.\n\n<details><summary>▸</summary>\n<inner thoughts>\n[Character]:\nfeeling\n</inner thoughts>\n</details>\n</internal thinking>\n<narrative_execution>\nAva: Welcome in.\nAnd thus the scene continues.\n</narrative_execution>`,
@@ -142,6 +166,17 @@ assert(shape(recoveryOrder) === 'root > [a > [c1 | c2]]', 'recovery-order: impli
 const eofUnclosed = parsePromptTagTree(FIXTURES['eof-unclosed']);
 assert(shape(eofUnclosed) === 'root > [b]', 'eof-unclosed: the completed <b> child survives under the root when its enclosing open is unclosed');
 
+const groupWrapsChild = parsePromptTagTree(FIXTURES['group-wraps-single-tagged-child']);
+assert(shape(groupWrapsChild) === 'root > [Time and Place > [header_instructions]]', 'group-wraps-single-tagged-child: the group nests its tagEnabled member as a child');
+{
+  const group = groupWrapsChild.children[0];
+  assert(ownText(group, FIXTURES['group-wraps-single-tagged-child']).trim() === '', "group-wraps-single-tagged-child: the group's own text (tags excluded) is empty — its whole body is the nested child, not indistinguishable-from-empty tag lines");
+}
+
+const emptyPair = parsePromptTagTree(FIXTURES['empty-pair']);
+assert(shape(emptyPair) === 'root > [a]', 'empty-pair: <a></a> still forms a section');
+assert(ownText(emptyPair.children[0], FIXTURES['empty-pair']) === '', 'empty-pair: own text (tags excluded) is exactly empty — the panel renders this as the dashed "nothing to expand" leaf row, not a details block containing only its own tags');
+
 const composite = parsePromptTagTree(FIXTURES['comfy2-composite']);
 assert(
   shape(composite) === 'root > [main_instructions | earthy_physicality | point_of_view | character_behavior_and_memory_protocol | character_autonomy_protocol | constraints > [language | naming_constraints | No Deepity] | internal thinking > [details > [summary | inner thoughts]] | narrative_execution]',
@@ -152,10 +187,37 @@ assert(
 // Global invariants: losslessness + determinism + root span, over EVERY fixture.
 // ---------------------------------------------------------------------------
 
+// contentStart/contentEnd invariant: every non-root section's own-content window sits strictly
+// inside its tag-included span (start <= contentStart <= contentEnd <= end), and reproducing the
+// text from ownText() + children (i.e. the panel's actual render) still loses nothing once each
+// section's own tag bytes are added back in.
+function reconstructViaContent(section, text) {
+  let out = text.slice(section.start, section.contentStart); // this section's own open tag
+  let cursor = section.contentStart;
+  for (const child of section.children) {
+    out += text.slice(cursor, child.start);
+    out += reconstructViaContent(child, text);
+    cursor = child.end;
+  }
+  out += text.slice(cursor, section.contentEnd);
+  out += text.slice(section.contentEnd, section.end); // this section's own close tag
+  return out;
+}
+
+function assertContentBounds(section) {
+  assert(
+    section.start <= section.contentStart && section.contentStart <= section.contentEnd && section.contentEnd <= section.end,
+    `contentStart/contentEnd of "${section.name || 'root'}" stay within [start, end]`,
+  );
+  section.children.forEach(assertContentBounds);
+}
+
 for (const [name, text] of Object.entries(FIXTURES)) {
   const tree = parsePromptTagTree(text);
   assert(reconstruct(tree, text) === text, `${name}: lossless — walking the tree reproduces the input byte-for-byte`);
+  assert(reconstructViaContent(tree, text) === text, `${name}: lossless via contentStart/contentEnd — the panel's actual own-text+tags render reproduces the input byte-for-byte`);
   assert(tree.start === 0 && tree.end === text.length, `${name}: root always spans the whole text`);
+  assertContentBounds(tree);
   assert(JSON.stringify(parsePromptTagTree(text)) === JSON.stringify(tree), `${name}: deterministic — same input yields the same tree`);
 }
 

@@ -39,6 +39,16 @@ export interface PromptTagSection {
   /** Char offsets into the source text — [start, end) of the full span, tags included. */
   start: number;
   end: number;
+  /** Offsets of this section's OWN content, i.e. [start, end) with its own open/close tag bytes
+   *  excluded — `start`/`end` for the root, which has no wrapper tag of its own. A consumer
+   *  rendering "this section's text minus its children" should slice [contentStart, contentEnd)
+   *  rather than [start, end): using the tag-included span there means a section whose entire
+   *  body is delegated to a single nested child renders as just its own two tag lines with
+   *  nothing between them — indistinguishable from "no content" even though the child holds real
+   *  text. Token/char accounting still wants the tag-included [start, end) span (those bytes are
+   *  really sent to the model), so this is additive, not a replacement for start/end. */
+  contentStart: number;
+  contentEnd: number;
   /** Direct children in document order. */
   children: PromptTagSection[];
 }
@@ -46,6 +56,7 @@ export interface PromptTagSection {
 interface OpenFrame {
   name: string;
   start: number;
+  contentStart: number;
   children: PromptTagSection[];
 }
 
@@ -78,7 +89,7 @@ function canonicalName(raw: string): string | null {
  * the input byte-for-byte) is asserted by orchestrator/scripts/verify-prompt-tag-tree.mjs.
  */
 export function parsePromptTagTree(text: string): PromptTagSection {
-  const root: PromptTagSection = { name: '', start: 0, end: text.length, children: [] };
+  const root: PromptTagSection = { name: '', start: 0, end: text.length, contentStart: 0, contentEnd: text.length, children: [] };
   const stack: OpenFrame[] = [];
 
   TAG_TOKEN_RE.lastIndex = 0;
@@ -88,7 +99,9 @@ export function parsePromptTagTree(text: string): PromptTagSection {
     if (name === null) continue;
 
     if (match[1] !== '/') {
-      stack.push({ name, start: match.index, children: [] });
+      // contentStart = right after this open tag's own '>' — the open tag itself (match[0])
+      // can't contain another '<' or '>' (the token regex excludes them), so this is exact.
+      stack.push({ name, start: match.index, contentStart: match.index + match[0].length, children: [] });
       continue;
     }
 
@@ -115,6 +128,9 @@ export function parsePromptTagTree(text: string): PromptTagSection {
       name: frame.name,
       start: frame.start,
       end: match.index + match[0].length,
+      contentStart: frame.contentStart,
+      // contentEnd = right before this close tag's own '<' — match.index is exactly that.
+      contentEnd: match.index,
       children: frame.children,
     };
     const parent = stack.length > 0 ? stack[stack.length - 1] : root;

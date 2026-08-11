@@ -240,25 +240,33 @@ function MainPromptTree({
   );
 }
 
-// A section's own text = everything inside its span that no child section owns (tags excluded).
-// For the root that is the untagged preamble/trailing text; for a section it is the text between
-// its open tag and its first child, between children, and after its last child. Slicing, never
-// rewriting — walking every section in document order reproduces the source byte-for-byte.
+// A section's own text = everything inside its span that no child section owns, with its OWN
+// open/close tag bytes also excluded (promptTagTree's contentStart/contentEnd) — for the root
+// that's the untagged preamble/trailing text (root has no wrapper tag, contentStart/End === its
+// start/end); for a real section it's the text between its open tag and its first child, between
+// children, and after its last child, before the close tag. Excluding the section's own tags here
+// matters: a section whose entire body is one nested child (e.g. a migration-0086 group wrapping
+// a single tagEnabled slot) would otherwise render its own-text block as just the two tag lines
+// with nothing between them — indistinguishable from "no content" even though the child, one
+// level down, holds the real text. Slicing, never rewriting — walking every section in document
+// order (this text, plus each child's own tags + its own text, recursively) reproduces the source
+// byte-for-byte.
 function ownText(section: PromptTagSection, text: string): string {
   let out = '';
-  let cursor = section.start;
+  let cursor = section.contentStart;
   for (const child of section.children) {
     out += text.slice(cursor, child.start);
     cursor = child.end;
   }
-  return out + text.slice(cursor, section.end);
+  return out + text.slice(cursor, section.contentEnd);
 }
 
-// Total content chars for a section: own text + everything its children own. Sections are
-// disjoint and cover the source exactly, so a section's chars always equal
-// ownText.length + Σ child chars — the same sum the rendering shows.
-function sectionChars(section: PromptTagSection, text: string): number {
-  return ownText(section, text).length + section.children.reduce((sum, c) => sum + sectionChars(c, text), 0);
+// Total content chars for a section, tag bytes included — this is what actually ships to the
+// model, so the token budget must count it even though ownText() above (display only) excludes
+// it. Sections are disjoint and their spans cover the source exactly, so this is always just
+// end - start; no need to walk children to sum it.
+function sectionChars(section: PromptTagSection): number {
+  return section.end - section.start;
 }
 
 // Per-section stability lookup (docs/plans/prompt-inspector-tag-tree.md §3.3): matches the server's
@@ -348,7 +356,7 @@ function PromptTagSectionView({
   stats: SectionStatLookup;
 }) {
   const own = ownText(section, text);
-  const chars = sectionChars(section, text);
+  const chars = sectionChars(section);
   const tokens = Math.ceil(chars / 4);
   const hasOwn = own.trim().length > 0;
   const hasChildren = section.children.length > 0;
