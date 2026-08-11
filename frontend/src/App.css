@@ -107,14 +107,15 @@ body {
    replacement for the old circular .side-fab buttons: a 6px strip pinned to the extreme screen
    edge, just under the main bar, so it survives the top bars collapsing on scroll (when the
    bars collapse the conversation reclaims the screen while the summon stays put) without ever
-   covering the conversation the way a floating circle did. The strip is the tap target; a
-   horizontal swipe from the same edge is the forgiving summon gesture (hooks/useEdgeSwipe.ts).
+   covering the conversation the way a floating circle did. The strip is the summon control —
+   grabbing it is the ONLY way to open the rail (no edge swipe; drawers open by handle, per the
+   mobile gesture plan, so a stray horizontal drag near the edge can never pull a drawer open).
    The open drawers (z-index 30) sit above the grips, so a grip is only reachable while its
    rail is closed — it stops being in the way exactly when the panel it summons is up. */
 .edge-grip {
   position: fixed;
   top: var(--topbar-height);
-  height: 28vh; /* an anchor near the top, not a full-height wall — the edge swipe covers the rest */
+  height: 28vh; /* an anchor near the top — the grip is the only summon, so no full-height wall needed */
   z-index: 20; /* above content, below the mobile drawers (30), nav drawer / modals (1000+) */
   width: 6px;
   padding: 0;
@@ -126,7 +127,7 @@ body {
 
 /* The 6px strip is the visual; the pseudo-element widens the hit area to 14px inward from the
    edge so a thumb can land on it, still inside the chat's 1rem history padding (ChatView.css)
-   — content taps past that are untouched, and the swipe gesture covers the rest of the edge. */
+   — content taps past that are untouched. */
 .edge-grip::after {
   content: '';
   position: absolute;

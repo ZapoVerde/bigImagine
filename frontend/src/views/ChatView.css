@@ -367,8 +367,8 @@
 }
 
 /* Mobile: same overlay-drawer treatment as the left Sidebar (Sidebar.css) — collapsed means gone
-   entirely (the edge grip, App.css/.edge-grip-right, plus a right-edge swipe — hooks/useEdgeSwipe.ts —
-   is the summon control now), and expanded floats above the conversation from the right instead
+   entirely (the edge grip, App.css/.edge-grip-right, is the summon control now — grab only, no
+   swipe), and expanded floats above the conversation from the right instead
    of squeezing it. */
 @media (max-width: 768px) {
   .chat-settings-rail {

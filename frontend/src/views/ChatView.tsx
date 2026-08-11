@@ -1,5 +1,5 @@
 /* @stamp 2026-08-10 */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
@@ -54,7 +54,7 @@ import StagingBar, { type StagedFile } from '../components/attachments/StagingBa
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
-import { useEdgeSwipe } from '../hooks/useEdgeSwipe';
+import { useBottomThirdSwipe } from '../hooks/useBottomThirdSwipe';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
@@ -106,8 +106,8 @@ interface ChatViewProps {
   /** Ask the app to collapse (true) or restore (false) the top bars. */
   onTopBarsHiddenChange: (hidden: boolean) => void;
   /** Whether this tab is the one currently displayed — hidden tabs stay mounted (App.tsx toggles
-   *  them with a CSS class), so the mobile edge-swipe listener below is attached only for the
-   *  visible chat, and no hidden tab's settings rail opens on a stray swipe. */
+   *  them with a CSS class), so the mobile bottom-third navigation listener below is attached
+   *  only for the visible chat, and no hidden tab navigates on a stray swipe. */
   active: boolean;
   /** RP chats only: fired once per completed turn (when this chat's message count changes) so the
    *  app can bump its promptRefreshToken — the Prompt Inspector now lives in the left sidebar
@@ -391,29 +391,12 @@ export default function ChatView({
   // same flag `sending` uses, since a swipe replaces one message's content in place and shouldn't
   // render the "new turn incoming" pending bubble the way send/rerun's own full turns do.
   const [swipingId, setSwipingId] = useState<string | null>(null);
-  // Mobile: browse an already-stored swipe (e.g. a card's alternate greetings) with a left/right
-  // finger drag on the bubble itself, same direction convention st-source/RossAscends-mods.js uses
-  // (finger-left -> next, finger-right -> prev) so it feels familiar to anyone coming from ST. A
-  // plain ref, not state — the gesture only reads position at touchend, no re-render needed mid-drag.
-  const touchSwipeStartRef = useRef<{ x: number; y: number } | null>(null);
 
   // Settings rail state — collapsed by default, but (unlike the old gear-icon toggle) available
   // even before a chat exists, so a system prompt/model/tools can be set up before the first
   // message. pendingSettings holds a save made before activeChat exists; send() applies it right
   // after the lazy createChat() so the very first message already sees it.
   const [settingsCollapsed, setSettingsCollapsed] = useState(true);
-
-  // Mobile right-edge swipe summon for the settings rail (paired with the .edge-grip-right
-  // strip at the bottom of the JSX): open-only — closing stays with the rail's own header
-  // toggle, so the gesture is unambiguous about direction. Not gated on chat kind: the rail
-  // exists for both RP and non-RP chats. enabled=false while this tab isn't the active one
-  // (hidden tabs stay mounted, and their rails must not open on a swipe meant for the chat
-  // on screen); canOpen keeps the browser's native back-edge gesture alive while the rail is
-  // already open.
-  useEdgeSwipe('right', () => setSettingsCollapsed(false), {
-    enabled: active,
-    canOpen: () => settingsCollapsed,
-  });
   const [pendingSettings, setPendingSettings] = useState<{
     params?: ChatParams;
     tool_names?: string[] | null;
@@ -445,6 +428,50 @@ export default function ChatView({
   // Read-only here — just for the settings pane's folder-assignment dropdown. Creating/deleting
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
+
+  // Mobile bottom-third navigation swipes (hooks/useBottomThirdSwipe.ts): a horizontal drag
+  // STARTING in the bottom third of the screen browses the last reply's variants — finger-left
+  // -> next, finger-right -> prev, the same direction convention SillyTavern's gesture swipes
+  // use (st-source/public/scripts/RossAscends-mods.js). The settings rail has no swipe summon
+  // at all: grabbing its .edge-grip-right strip is the only opener, and the middle of the
+  // screen is deliberately a dead zone (only the bottom third claims horizontal drags, so a
+  // drawer pull can never be triggered by accident). enabled=false while this tab isn't the
+  // active one (hidden tabs stay mounted); canSwipe keeps the browser's native back-edge
+  // gesture alive whenever the last reply has no stored variants to browse.
+  const swipeTarget = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant' && m.messageId) {
+        // The LAST reply is the swipe surface, exactly like SillyTavern's .last_mes. It only
+        // claims bottom-third drags when it actually has stored variants to browse between
+        // (>1); a single-variant last reply leaves the whole bottom third to the browser.
+        if (!m.swipes || m.swipes.count <= 1) return null;
+        return { messageId: m.messageId, swipes: m.swipes, isOpeningGreeting: i === 0 };
+      }
+    }
+    return null;
+  }, [messages]);
+  useBottomThirdSwipe(
+    (direction) => {
+      const t = swipeTarget;
+      if (!t) return;
+      const hasMoreSwipesAhead = t.swipes.index < t.swipes.count - 1;
+      if (direction === 'next') {
+        // Mirror the ‹/› buttons: never run past the last stored variant on an opening
+        // greeting (the server's swipe route stops there too); everywhere else 'next' past
+        // the newest stored variant becomes a Rerun, exactly like the arrow does.
+        if (t.isOpeningGreeting && !hasMoreSwipesAhead) return;
+        void swipe(t.messageId, 'next');
+      } else {
+        if (t.swipes.index === 0) return;
+        void swipe(t.messageId, 'prev');
+      }
+    },
+    {
+      enabled: active,
+      canSwipe: () => !!swipeTarget && !selectionMode,
+    },
+  );
 
   const historyRef = useRef<HTMLDivElement | null>(null);
   // The bottom control stack (staging bars, delete bar, input row) floats over the conversation
@@ -1441,8 +1468,6 @@ export default function ChatView({
             // button/gesture from offering an action the server would reject anyway).
             const isOpeningGreeting = i === 0 && m.role === 'assistant';
             const hasMoreSwipesAhead = m.swipes ? m.swipes.index < m.swipes.count - 1 : false;
-            const swipeNextDisabled = sending || swipingId === m.messageId || (isOpeningGreeting && !hasMoreSwipesAhead);
-            const swipePrevDisabled = sending || swipingId === m.messageId || !m.swipes || m.swipes.index === 0;
             // The last reply's bottom action bar (below) is always visible on desktop, unlike the
             // per-message hover row — arrow shown only when a swipe exists in that direction, Rerun
             // standing in for the next-arrow when there's nothing ahead to swipe to. Mobile hides
@@ -1452,34 +1477,6 @@ export default function ChatView({
             const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
             const showCounter = !!m.swipes && m.swipes.count > 1;
             const showRerun = !isOpeningGreeting && !hasMoreSwipesAhead;
-            // Mobile: a left/right drag on the bubble browses swipes the same way the ‹/› buttons
-            // do (see touchSwipeStartRef above) — only wired up when there's actually more than one
-            // stored variant to browse between.
-            const swipeGestureEnabled = isLastAssistant && m.messageId && m.swipes && m.swipes.count > 1 && !selectionMode;
-            const handleSwipeTouchStart = swipeGestureEnabled
-              ? (e: React.TouchEvent<HTMLDivElement>) => {
-                  const t = e.touches[0];
-                  if (t) touchSwipeStartRef.current = { x: t.clientX, y: t.clientY };
-                }
-              : undefined;
-            const handleSwipeTouchEnd = swipeGestureEnabled
-              ? (e: React.TouchEvent<HTMLDivElement>) => {
-                  const start = touchSwipeStartRef.current;
-                  touchSwipeStartRef.current = null;
-                  const end = e.changedTouches[0];
-                  if (!start || !end) return;
-                  const dx = end.clientX - start.x;
-                  const dy = end.clientY - start.y;
-                  // Mostly-horizontal drags only, past a minimum distance — otherwise a normal
-                  // vertical scroll of the chat history would keep getting misread as a swipe.
-                  if (Math.abs(dx) < 50 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
-                  if (dx < 0) {
-                    if (!swipeNextDisabled) swipe(m.messageId!, 'next');
-                  } else if (!swipePrevDisabled) {
-                    swipe(m.messageId!, 'prev');
-                  }
-                }
-              : undefined;
             return (
               <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}`}>
                 {selectionMode && (
@@ -1495,8 +1492,6 @@ export default function ChatView({
                 <div
                   className={`chat-bubble ${m.role}${editingId === m.messageId ? ' editing' : ''}${actionsVisibleId === m.messageId ? ' actions-visible' : ''}`}
                   onClick={() => toggleMessageActions(m.messageId)}
-                  onTouchStart={handleSwipeTouchStart}
-                  onTouchEnd={handleSwipeTouchEnd}
                 >
                 {editingId === m.messageId ? (
                   <div className="message-edit">
@@ -1863,7 +1858,9 @@ export default function ChatView({
       {/* Mobile-only edge-grip opener for the settings rail (App.css, .edge-grip) — the
           chat-header ⚙ it replaces collapsed away with the top bars on scroll, this strip
           doesn't. Same summon as the old .side-fab-right, just 6px and pinned to the screen
-          edge; a right-edge swipe opens it too (hooks/useEdgeSwipe.ts). */}
+          edge. Grabbing this strip is the ONLY summon — no edge swipe (drawers open by
+          handle, per the mobile gesture plan; swipes in the bottom third of the screen
+          browse the last reply's variants instead). */}
       <button
         type="button"
         className="edge-grip edge-grip-right mobile-only"
