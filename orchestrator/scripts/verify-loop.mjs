@@ -138,6 +138,51 @@ assert(
   'no cross-request leakage between two different users\' scoping',
 );
 
+// The Prompt Inspector's usage receipt (docs/plans/prompt-inspector-usage-cost.md): a tool-free
+// turn's RunTurnResult.usage is the first (only) round's vendor-reported usage — round 0 is the
+// only round for any RP turn, which is the only kind the inspector renders.
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const usage = { promptTokens: 9, completionTokens: 7, totalTokens: 16, cacheReadTokens: 4 };
+  const llm = createStubLlmProvider([{ message: { role: 'assistant', content: 'plain reply' }, toolCalls: [], usage }]);
+  const result = await runTurn({
+    userId: '11111111-1111-1111-1111-111111111111',
+    taskId: 'task-usage-relay',
+    messages: [{ role: 'user', content: 'hi' }],
+    llm,
+    db,
+    tools: createToolRegistry([]),
+    embeddings: stubEmbeddings,
+  });
+  assert(result.content === 'plain reply', 'a tool-free turn returns its reply as usual');
+  assert(
+    result.usage &&
+      result.usage.promptTokens === usage.promptTokens &&
+      result.usage.completionTokens === usage.completionTokens &&
+      result.usage.totalTokens === usage.totalTokens &&
+      result.usage.cacheReadTokens === usage.cacheReadTokens,
+    'RunTurnResult.usage is the first (only) round\'s vendor-reported usage, cacheReadTokens included',
+  );
+}
+{
+  // A provider that reports no usage at all: RunTurnResult.usage stays undefined — never
+  // fabricated (the receipt then simply isn't rendered).
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const llm = createStubLlmProvider([{ message: { role: 'assistant', content: 'no usage' }, toolCalls: [] }]);
+  const result = await runTurn({
+    userId: '11111111-1111-1111-1111-111111111111',
+    taskId: 'task-usage-absent',
+    messages: [{ role: 'user', content: 'hi' }],
+    llm,
+    db,
+    tools: createToolRegistry([]),
+    embeddings: stubEmbeddings,
+  });
+  assert(result.usage === undefined, 'RunTurnResult.usage is undefined when the provider reports none');
+}
+
 // A tool call for a name the registry doesn't have must degrade gracefully (an error payload
 // fed back to the LLM), never throw out of the loop and never silently no-op.
 {

@@ -106,6 +106,39 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
   );
 }
 
+// The receipt's $ figure — raw counts × raw per-million rates, USD. A pure function so the
+// frontend is the single place this arithmetic lives (docs/plans/prompt-inspector-usage-cost.md):
+// the tokens are exactly what the server relayed, the rates exactly what the admin typed, and the
+// derived figure can never drift from either. Returns undefined when any tier the calculation
+// needs is unconfigured — the caller then omits the $ figure entirely rather than computing a
+// partially-wrong total.
+function computeReceiptCost(
+  usage: NonNullable<PromptPreviewGroup['usage']>,
+  price: NonNullable<PromptPreviewGroup['price']>,
+): number | undefined {
+  const needsCacheRate = usage.cacheReadTokens !== undefined;
+  if (
+    price.inputPerMillion === undefined ||
+    price.outputPerMillion === undefined ||
+    (needsCacheRate && price.cacheHitPerMillion === undefined)
+  ) {
+    return undefined;
+  }
+  const perMillion = 1_000_000;
+  const cacheHit = usage.cacheReadTokens ?? 0;
+  const cacheMiss = usage.promptTokens - cacheHit;
+  return (
+    (cacheMiss * price.inputPerMillion + cacheHit * (price.cacheHitPerMillion ?? 0)) / perMillion +
+    (usage.completionTokens * price.outputPerMillion) / perMillion
+  );
+}
+
+// Sub-cent figures are the norm for a single turn — show enough decimals to stay meaningful
+// without trailing zeros past four places.
+function formatUsd(cost: number): string {
+  return `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
+}
+
 function itemLabel(item: PromptPreviewItem): string {
   if (item.label) return item.label;
   if (item.markerKey) return markerLabel(item.markerKey);
@@ -130,6 +163,11 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
   // would over-report by up to one token per item).
   const totalChars = group.items.reduce((sum, i) => sum + i.chars, 0);
   const sectionTokens = Math.ceil(totalChars / 4);
+  // The receipt's $ figure (docs/plans/prompt-inspector-usage-cost.md) — undefined when there's
+  // no usage (no receipt at all), or when any tier the arithmetic needs is unconfigured (a
+  // partial price omits the $ rather than pricing a tier at another tier's rate — silently
+  // pricing cache-hit tokens at the miss rate would understate savings, not just omit them).
+  const receiptCost = group.usage && group.price ? computeReceiptCost(group.usage, group.price) : undefined;
   return (
     <section className="prompt-inspector-section">
       <h3 className="prompt-inspector-section-title">
@@ -141,6 +179,32 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
         )}
         {group.items.length > 0 && <span className="prompt-inspector-section-tokens">{sectionTokens.toLocaleString()} tk</span>}
       </h3>
+      {group.usage && (
+        // Per-call usage receipt (vendor-reported tokens, not the char-count estimate above):
+        // prompt tokens split into cache-hit/miss when the vendor reported a cache-read count,
+        // plain otherwise; completion; total; and the $ figure only when every tier the
+        // arithmetic needs is configured. Absent entirely on the live-reconstruction fallback
+        // or a failed turn (no real call to report).
+        <div className="prompt-inspector-receipt">
+          {group.usage.cacheReadTokens !== undefined ? (
+            <span className="prompt-inspector-receipt-item">
+              prompt {group.usage.promptTokens.toLocaleString()} tk
+              <span className="prompt-inspector-receipt-cache">
+                {' '}
+                ({group.usage.cacheReadTokens.toLocaleString()} hit ·{' '}
+                {(group.usage.promptTokens - group.usage.cacheReadTokens).toLocaleString()} miss)
+              </span>
+            </span>
+          ) : (
+            <span className="prompt-inspector-receipt-item">prompt {group.usage.promptTokens.toLocaleString()} tk</span>
+          )}
+          <span className="prompt-inspector-receipt-item">completion {group.usage.completionTokens.toLocaleString()} tk</span>
+          <span className="prompt-inspector-receipt-item">total {group.usage.totalTokens.toLocaleString()} tk</span>
+          {receiptCost !== undefined && (
+            <span className="prompt-inspector-receipt-item prompt-inspector-receipt-cost">{formatUsd(receiptCost)}</span>
+          )}
+        </div>
+      )}
       {group.items.length === 0 && <p className="prompt-inspector-empty">Nothing here.</p>}
       {group.kind === 'main' && group.items.length > 0 ? (
         // The whole main prompt as a tag tree — see MainPromptTree below. The cache-coverage

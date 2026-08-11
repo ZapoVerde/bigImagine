@@ -117,6 +117,11 @@ export interface LlmConnectionSummary {
   providerOrder: string[] | null;
   allowFallbacks: boolean;
   quantizations: string[] | null;
+  /** USD per 1M tokens (Prompt Inspector cost receipt) — undefined = not configured, so the
+   *  inspector shows token counts only, never a fabricated $0.00. */
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
   isActive: boolean;
   updatedAt: string;
 }
@@ -136,6 +141,10 @@ export interface CreateConnectionInput {
   providerOrder?: string[];
   allowFallbacks?: boolean;
   quantizations?: string[];
+  /** USD per 1M tokens (Prompt Inspector cost receipt) — omit to leave unconfigured. */
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
 }
 
 // orchestrator/src/server/adminServer.ts parseUpdateConnectionBody's expected shape
@@ -153,6 +162,11 @@ export interface UpdateConnectionInput {
   providerOrder?: string[] | null;
   allowFallbacks?: boolean;
   quantizations?: string[] | null;
+  /** USD per 1M tokens — omit to leave the stored price untouched, null to explicitly clear it
+   *  (same three-state convention baseUrl uses). */
+  priceInputPerMillion?: number | null;
+  priceOutputPerMillion?: number | null;
+  priceCacheHitPerMillion?: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts ProfileModelsResult
@@ -855,6 +869,24 @@ export interface PromptPreviewGroup {
       seen: number;
       identical: number;
     }>;
+  };
+  /** The last turn's vendor-reported token accounting, when a turn has fired and resolved
+   *  successfully (mirrors orchestrator LlmUsage). Powers the receipt row under the title;
+   *  undefined on the live-reconstruction fallback or a failed turn. cacheReadTokens is undefined
+   *  (not 0) when the provider reported no cache accounting. */
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    cacheReadTokens?: number;
+  };
+  /** The acting connection's USD-per-1M-token rates at that turn's send time — undefined end to
+   *  end when no price was configured (tokens only, never a fabricated $0.00); a partially-set
+   *  price omits the $ figure rather than pricing a tier at another tier's rate. */
+  price?: {
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    cacheHitPerMillion?: number;
   };
 }
 

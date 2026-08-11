@@ -29,10 +29,13 @@
  * @api-declaration
  * runTurn(options: RunTurnOptions) — drives one user message through to a final chat reply,
  *   executing any tool calls the LLM requests along the way; throws if maxToolRounds is
- *   exceeded rather than returning a partial/guessed answer. Returns { content, focusedNoteId }:
- *   focusedNoteId is Canvas's hook — the id a tool's own focusHint (toolRegistry.ts) surfaced,
- *   last-one-wins across every tool call this turn, undefined if none did. This loop never asks
- *   what the id *means* (still bb_principles.md §2) — it only relays what the tool itself declared.
+ *   exceeded rather than returning a partial/guessed answer. Returns { content, focusedNoteId,
+ *   usage }: focusedNoteId is Canvas's hook — the id a tool's own focusHint (toolRegistry.ts)
+ *   surfaced, last-one-wins across every tool call this turn, undefined if none did. usage is the
+ *   LLM call's vendor-reported token accounting — present only on a zero-tool-call turn (the only
+ *   kind the Prompt Inspector renders), undefined when the provider reported none. This loop never
+ *   asks what the id *means* (still bb_principles.md §2) — it only relays what the tool itself
+ *   declared.
  *
  * @contract
  *   assertions:
@@ -43,7 +46,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { log, runWithRequestId } from '../io/logger.js';
-import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider, LlmTurn, LlmUsage } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
@@ -155,6 +158,12 @@ export interface RunTurnResult {
   /** The id a tool's focusHint surfaced this turn (Canvas) — last one wins across every tool call
    *  made in the turn, undefined if none of them declared one. */
   focusedNoteId?: string;
+  /** The first (only) LLM round's vendor-reported usage on a zero-tool-call turn — deliberately
+   *  not a sum across rounds: for a tool-using turn (any non-RP chat) it would only reflect the
+   *  first of several calls, but the Prompt Inspector only ever renders the 'main' group for
+   *  session.kind === 'rp' chats, where round 0 is provably the only round (docs/plans/
+   *  prompt-inspector-usage-cost.md). Undefined when the provider reported none. */
+  usage?: LlmUsage;
 }
 
 export async function runTurn(opts: RunTurnOptions): Promise<RunTurnResult> {
@@ -223,7 +232,7 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
 
     if (turn.toolCalls.length === 0) {
       log.info(`runTurn done`, { userId, rounds: round + 1 });
-      return { content: turn.message.content, focusedNoteId };
+      return { content: turn.message.content, focusedNoteId, usage: turn.usage };
     }
 
     for (const call of turn.toolCalls) {

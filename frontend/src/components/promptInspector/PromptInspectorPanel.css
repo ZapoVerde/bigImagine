@@ -126,6 +126,32 @@
   letter-spacing: normal;
 }
 
+/* Per-call usage/cost receipt under the section title (docs/plans/prompt-inspector-usage-cost.md):
+   a wrapping row of token counts (+ $ when every price tier the arithmetic needs is configured).
+   flex-wrap + gap, never a fixed multi-column grid — stacks top-to-bottom at phone width per
+   bi_principles.md §19, same as every other row in this panel. */
+.prompt-inspector-receipt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.9rem;
+  margin: -0.25rem 0 0.5rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.prompt-inspector-receipt-cache {
+  opacity: 0.75;
+}
+
+.prompt-inspector-receipt-cost {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent);
+}
+
 /* "fired" badge — this group is a captured background prompt's actual sent text (cleanup pass,
    title generation, …), unlike the live Main Prompt preview. */
 .prompt-inspector-captured {

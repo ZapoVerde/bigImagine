@@ -324,6 +324,35 @@
   min-width: 12rem;
 }
 
+/* Pricing fieldset (Prompt Inspector cost receipt) — same fieldset shape as the provider-pin
+   block above. The three inputs wrap (never a fixed grid) so the row stacks top-to-bottom at
+   phone width per bi_principles.md §19. */
+.connections-pricing {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.connections-pricing legend {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  padding: 0 0.3rem;
+}
+
+.connections-pricing-row {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+}
+
+.connections-pricing-row label {
+  flex: 1;
+  min-width: 8rem;
+}
+
 .connections-actions {
   display: flex;
   align-items: center;

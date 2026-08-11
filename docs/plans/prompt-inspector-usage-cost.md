@@ -9,19 +9,24 @@ connection's price is configured — at the top of the Main Prompt group in the 
 matching the breakdown Reasonix already shows in its own CLI transcript. Scoped to the main turn
 prompt only (not cleanup/title background prompts) for this pass.
 
+## Scope
+
+DeepSeek (OpenAI-compatible) only. Anthropic is deliberately out of scope — this project never
+uses it, and nothing here is written against its response shape or billing model. That is why
+there is no `cacheWriteTokens` anywhere in this plan: no in-scope vendor has a cache-creation
+tier, so the usage type and the price shape only need what DeepSeek actually bills — input,
+output, and cache-hit. `anthropic.ts` stays untouched.
+
 ## Background (why this needs new plumbing, not just a UI change)
 
-Investigated live: BigImagine currently discards prompt-caching data at the adapter layer. Both
-`anthropic.ts` and `openaiCompatible.ts` parse only `promptTokens`/`completionTokens`/
-`totalTokens` from the vendor response and drop everything else, even though the raw response
-carries cache accounting:
+Investigated live: BigImagine currently discards prompt-caching data at the adapter layer.
+`openaiCompatible.ts` parses only `promptTokens`/`completionTokens`/`totalTokens` from the vendor
+response and drops everything else, even though the raw response carries cache accounting:
 
-- Anthropic's response `usage` includes `cache_creation_input_tokens` and
-  `cache_read_input_tokens`; its `input_tokens` field **excludes** both (verified against
-  Anthropic's own prompt-caching docs) — total prompt tokens is the sum of all three.
 - DeepSeek's OpenAI-compatible response `usage` includes `prompt_cache_hit_tokens` and
   `prompt_cache_miss_tokens`; its `prompt_tokens` **is** the sum of the two (verified against
-  DeepSeek's API reference) — no adjustment needed there.
+  DeepSeek's API reference) — no adjustment needed, `promptTokens` stays exactly what the vendor
+  reports.
 
 Separately, there is no per-call pricing anywhere in the system tied to actual usage. The one
 existing pricing surface (`frontend/src/api/pricing.ts`'s `formatPricePerMillion`) only formats
@@ -55,19 +60,12 @@ usage).
   `parseUpdateConnectionBody` validate and pass through the three price fields (numbers on create;
   number-or-null on patch, same three-state convention `baseUrl`/`providerOrder` already use for
   "leave alone" vs. "explicitly clear").
-- `orchestrator/src/io/llm/types.ts` — modified — `LlmUsage` gains `cacheReadTokens?: number` and
-  `cacheWriteTokens?: number`, both optional and only ever set when the vendor response actually
-  reported them.
-- `orchestrator/src/io/llm/anthropic.ts` — modified — parses `cache_read_input_tokens` into
-  `cacheReadTokens` and `cache_creation_input_tokens` into `cacheWriteTokens`; `promptTokens`
-  becomes `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` (currently just
-  `input_tokens`, which under-counts total prompt size whenever caching is active — this is a
-  correctness fix to `promptTokens` itself, not only an addition, and it affects `llm_calls`/
-  `agent_routine` budget accounting, which already consumes `promptTokens` — see Edge Cases).
+- `orchestrator/src/io/llm/types.ts` — modified — `LlmUsage` gains `cacheReadTokens?: number`,
+  optional and only ever set when the vendor response actually reported it. No
+  `cacheWriteTokens` (no in-scope vendor has a cache-creation tier — see Scope).
 - `orchestrator/src/io/llm/openaiCompatible.ts` — modified — parses `prompt_cache_hit_tokens` into
-  `cacheReadTokens` when present; `cacheWriteTokens` stays undefined (DeepSeek has no
-  cache-creation tier). `promptTokens` is unchanged (`prompt_tokens` already includes both hit and
-  miss).
+  `cacheReadTokens` when present; `promptTokens` is unchanged (`prompt_tokens` already includes
+  both hit and miss). `anthropic.ts` is intentionally untouched.
 - `orchestrator/src/orchestrator/loop.ts` — modified — `RunTurnResult` gains `usage?: LlmUsage`;
   `runTurnInner`'s zero-tool-calls return path includes `usage: turn.usage` alongside `content`.
 - `orchestrator/src/io/promptTrace.ts` — modified — `PromptTraceEntry` gains `usage?: LlmUsage` and
@@ -92,8 +90,10 @@ usage).
 - `frontend/src/components/connections/TextConnectionEditor.tsx` — modified — three new optional
   numeric inputs (input / output / cache-hit price, USD per 1M tokens), following the existing
   `quantizations`-style draft/parse/dirty-check/save pattern already in this file.
-- `orchestrator/scripts/verify-llm-adapters.mjs` — modified — new fixtures asserting the cache-field
-  parsing and the corrected `promptTokens` sum for both adapters.
+- `orchestrator/scripts/verify-llm-adapters.mjs` — modified — new fixtures asserting the
+  cache-field parsing for the OpenAI-compatible adapter (DeepSeek): `prompt_cache_hit_tokens`
+  lands on `cacheReadTokens`, `promptTokens` is unchanged, and a response with no cache fields at
+  all leaves `cacheReadTokens` undefined.
 - `orchestrator/scripts/verify-loop.mjs` — modified — asserts `RunTurnResult.usage` is the first
   round's usage on a tool-free turn.
 - `orchestrator/scripts/verify-server.mjs` — modified — asserts a connection's price fields
@@ -102,11 +102,12 @@ usage).
 
 ## Logic
 
-**Adapters.** Each adapter's response-parsing function reads the extra `usage` fields the vendor
-already sends (see Background for exact field names and the Anthropic `promptTokens` correction)
-and sets `cacheReadTokens`/`cacheWriteTokens` on the `LlmUsage` it returns — undefined, not zero,
-when the vendor's response doesn't include a given field at all (some OpenRouter-routed models
-report no cache accounting; treat that as "unknown," not "zero cache hit").
+**Adapter.** `openaiCompatible.ts`'s response-parsing function reads the extra `usage` fields the
+vendor already sends (see Background for the exact field names) and sets `cacheReadTokens` on the
+`LlmUsage` it returns — undefined, not zero, when the vendor's response doesn't include the field
+at all (some OpenRouter-routed models report no cache accounting; treat that as "unknown," not
+"zero cache hit"). `promptTokens` is not recomputed — DeepSeek's `prompt_tokens` already includes
+the cache-hit portion. `anthropic.ts` is not touched.
 
 **Turn result.** `runTurnInner`'s only return path with zero tool calls (`round === 0` for every RP
 turn, since `httpServer.ts` always passes an empty tool registry for `session.kind === 'rp'` — both
@@ -152,7 +153,6 @@ for the rates, and no third derived number that could drift from either.
     completionTokens: number;
     totalTokens: number;
     cacheReadTokens?: number;
-    cacheWriteTokens?: number;
   }
   ```
 - `llm_connections` new columns: `price_input_per_million numeric`, `price_output_per_million
@@ -176,19 +176,6 @@ for the rates, and no third derived number that could drift from either.
   plausible for a provider whose caching isn't priced yet): show tokens split by cache-hit/miss as
   normal, but omit the $ figure entirely rather than computing a partially-wrong total — silently
   pricing cache-hit tokens at the miss rate would understate savings, not just omit them.
-- **`cacheWriteTokens` billing rate**: Anthropic bills a cache-write token at a premium over its
-  plain input rate (varies by TTL); this plan's three-tier price shape — matching Reasonix's own
-  `config.toml`, which has no cache-write tier either, since DeepSeek has no such concept — bills
-  `cacheWriteTokens` at the plain `inputPerMillion` rate. This under-states true cost for an
-  Anthropic connection using cache writes. Flagged here deliberately rather than silently
-  approximated: if this matters in practice, a fourth price tier is a small, isolated follow-up,
-  not a reason to block this pass on it.
-- **The Anthropic `promptTokens` correction changes a number `llm_calls`/`agent_routine` budget
-  caps already read.** Before this change, a cached Anthropic call under-reported its true prompt
-  size (excluded the cached portion entirely); after, `promptTokens` reflects the true total. This
-  is strictly more correct, but it means an Anthropic connection's logged/capped token usage will
-  read *higher* than before for any call that used caching — worth a one-line mention when this
-  ships, not a silent behavior change.
 - **A turn that throws or is aborted mid-call**: `traceEntry.usage`/`.price` are never set (no
   `runTurn` result to read them from) — the panel shows the prompt with no receipt, same as today's
   "no reply" case for an aborted turn.
@@ -198,9 +185,9 @@ for the rates, and no third derived number that could drift from either.
 
 ## Tests
 
-- Both adapters: a fixture response carrying the vendor's real cache fields produces the expected
-  `cacheReadTokens`/`cacheWriteTokens`/`promptTokens` on the resulting `LlmUsage`; a fixture with no
-  cache fields at all leaves both undefined (not zero) and `promptTokens` unchanged.
+- The OpenAI-compatible adapter (DeepSeek): a fixture response carrying `prompt_cache_hit_tokens`
+  produces the expected `cacheReadTokens` on the resulting `LlmUsage`, with `promptTokens`
+  unchanged; a fixture with no cache fields at all leaves `cacheReadTokens` undefined (not zero).
 - `runTurnInner`: a tool-free turn's `RunTurnResult.usage` matches the stub LLM's first (only)
   response's `usage` exactly.
 - `llmConnections`: creating and updating a connection with price fields round-trips through
@@ -219,13 +206,12 @@ for the rates, and no third derived number that could drift from either.
 - Cleanup-pass and title-generation prompts (`PromptTraceEntry`'s other `kind`s) — the receipt is
   `'main'`-only per this plan's scope decision; `PromptTraceEntry`'s new fields are structurally
   available to any kind, so extending coverage later is additive, not a rework.
-- A fourth "cache write" price tier (see Edge Cases) — approximated at the plain input rate for now.
 - Live per-provider pricing lookups (e.g. auto-filling price fields from OpenRouter's `/models`
   response) — the three fields are manually entered only, matching Reasonix's own config-file
   approach; a "prefill from OpenRouter" convenience could be a later, separate addition.
 - Any change to `llm_calls`'/`turn_metrics`' own schema or the `agent_routine` cap logic itself —
-  only the *value* `promptTokens` carries for Anthropic changes (see Edge Cases), not the
-  accounting logic that consumes it.
+  `promptTokens` keeps exactly the meaning the vendor reports, so the accounting logic that
+  consumes it is untouched.
 - Currency other than USD.
 
 ## Principles / Conventions in Play
@@ -241,5 +227,5 @@ for the rates, and no third derived number that could drift from either.
 - §19 (Mobile-First) — the new receipt row and the new Settings price inputs must hold up at phone
   width, matching every other row in `PromptInspectorPanel`/`TextConnectionEditor`.
 - `conventions.md` — every modified file keeps its existing `@architectural-role`; none of these
-  changes cross a file from one of the four kinds into another (adapters stay IO Wrappers,
+  changes cross a file from one of the four kinds into another (the adapter stays an IO Wrapper,
   `promptTrace.ts` stays a Stateful Owner, `PromptInspectorPanel.tsx` stays presentation-only).

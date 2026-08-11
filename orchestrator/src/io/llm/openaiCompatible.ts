@@ -14,7 +14,10 @@
  *
  * The response's own `usage.prompt_tokens`/`completion_tokens`/`total_tokens` are relayed onto
  * LlmTurn.usage unchanged — bb_principles.md §14's gate is what actually does anything with them,
- * this file just reports what the upstream API reported.
+ * this file just reports what the upstream API reported. DeepSeek's extra
+ * `prompt_cache_hit_tokens` is relayed as LlmUsage.cacheReadTokens the same way (see the
+ * parsing below); prompt_tokens already includes the cached portion, so promptTokens needs no
+ * adjustment for it.
  *
  * A user message carrying LlmMessage.images gets `content` reshaped from a plain string into the
  * documented OpenAI vision block array (`text` + one `image_url` per image, base64 data URI) —
@@ -276,7 +279,15 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
 
       const payload = (await response.json()) as {
         choices: { message: { content: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
-        usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+        usage?: {
+          prompt_tokens: number;
+          completion_tokens: number;
+          total_tokens: number;
+          // DeepSeek's OpenAI-compatible endpoint reports which prompt tokens came from its
+          // prompt cache; other OpenAI-compatible providers (most OpenRouter-routed models)
+          // omit it entirely. Optional here so the two are distinguishable — see below.
+          prompt_cache_hit_tokens?: number;
+        };
       };
       const choice = payload.choices[0];
       if (!choice) throw new Error('OpenAI-compatible API returned no choices');
@@ -285,6 +296,13 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
             promptTokens: payload.usage.prompt_tokens,
             completionTokens: payload.usage.completion_tokens,
             totalTokens: payload.usage.total_tokens,
+            // DeepSeek's prompt_tokens already includes the cached portion (verified against its
+            // API reference), so promptTokens is unchanged — this is purely the hit/miss split for
+            // the Prompt Inspector's receipt. Undefined (a provider that doesn't report it) stays
+            // undefined, never zero: "no cache accounting", not "zero cache hit".
+            ...(payload.usage.prompt_cache_hit_tokens !== undefined
+              ? { cacheReadTokens: payload.usage.prompt_cache_hit_tokens }
+              : {}),
           }
         : undefined;
       return fromOaiResponse(choice.message, choice.finish_reason, usage);

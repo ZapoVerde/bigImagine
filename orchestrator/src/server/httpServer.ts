@@ -167,7 +167,7 @@ import { generateLocationImage } from '../orchestrator/generateLocationImage.js'
 import { describeLocationIfNeeded } from '../orchestrator/describeLocation.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
-import { getPromptTrace, clearPromptTrace, recordPromptTrace } from '../io/promptTrace.js';
+import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { longestCommonPrefixLength } from '../util/commonPrefix.js';
 import { computeSectionStability, type SectionStabilityResult } from '../util/sectionStability.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
@@ -208,7 +208,7 @@ import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatDetail, ChatParams, ChatSessionRow, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
-import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider, LlmUsage } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ProviderCredentialStore } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -1184,6 +1184,16 @@ export interface PromptPreviewGroup {
    *  is the only place it survives). Rendered as its own collapsible block; deliberately kept OUT
    *  of `items` so the group's totals stay prompt-side (the reply was never sent to the model). */
   reply?: PromptPreviewItem;
+  /** The last turn's vendor-reported token accounting (io/promptTrace.ts's `usage`), copied from
+   *  the captured 'main' entry — present only when a turn has fired and resolved successfully
+   *  against a connection that reports usage, undefined on the live-reconstruction fallback (no
+   *  real call to report) or a turn that failed. Powers the receipt row under the group title
+   *  (docs/plans/prompt-inspector-usage-cost.md). */
+  usage?: LlmUsage;
+  /** The acting connection's USD-per-1M-token rates at that turn's send time — undefined end to
+   *  end when no price was configured ("tokens only, never a fabricated $0.00"); a partially-set
+   *  price keeps the $ figure off rather than pricing a tier at another tier's rate. */
+  price?: { inputPerMillion?: number; outputPerMillion?: number; cacheHitPerMillion?: number };
 }
 
 export interface PromptPreview {
@@ -1240,6 +1250,11 @@ async function buildPromptPreview(  deps: HttpServerDeps,
         estimatedTokens: i.estimatedTokens,
       })),
     };
+    // The turn's usage/cost receipt: copied from the trace entry the way `reply` is — absent
+    // while the entry hasn't resolved yet, absent forever on the live-reconstruction fallback
+    // below (no real call happened to report). Both fields are 'main'-only (see the plan).
+    mainGroup.usage = capturedMain.usage;
+    mainGroup.price = capturedMain.price;
     // Cache-coverage badges (§3.2, revised): diff the last fired main against the one before it.
     // Both are recorded bytes, so the badge is deterministic — no live reconstruction, unlike the
     // original design. stablePrefixChars = the longest common prefix of the two joined texts, in
@@ -1358,13 +1373,45 @@ async function buildPromptPreview(  deps: HttpServerDeps,
 // failing the whole turn, logging why per bb_principles.md §11. Shared by handleChatCompletions and
 // regenerateSwipe below — resolving which connection a chat's turn runs through doesn't depend on
 // whether the reply is being appended as a new turn or swapped in as a swipe.
+// The acting connection's per-token rates (USD per 1M tokens) for a turn — what the Prompt
+// Inspector's receipt multiplies the vendor's usage by. Undefined end to end when the connection
+// has no price configured; a tier is undefined when that tier has no rate (the receipt then omits
+// the $ figure entirely rather than pricing it at another tier's rate).
+export interface TurnPrice {
+  inputPerMillion?: number;
+  outputPerMillion?: number;
+  cacheHitPerMillion?: number;
+}
+
+// LlmProfile carries the same three price fields as the llm_connections row (io/llm/profiles.ts,
+// relayed by io/llmConnections.ts's toProfile) — this is a pure shape conversion, not a second
+// DB round-trip. All three undefined collapses to undefined: a connection with no price set must
+// read as "no price" end to end, never as a fabricated $0.00.
+function toTurnPrice(profile: {
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
+} | undefined): TurnPrice | undefined {
+  if (!profile) return undefined;
+  const { priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = profile;
+  if (priceInputPerMillion === undefined && priceOutputPerMillion === undefined && priceCacheHitPerMillion === undefined) {
+    return undefined;
+  }
+  return {
+    inputPerMillion: priceInputPerMillion,
+    outputPerMillion: priceOutputPerMillion,
+    cacheHitPerMillion: priceCacheHitPerMillion,
+  };
+}
+
 async function resolveTurnLlm(
   deps: HttpServerDeps,
   sessionParams: ChatParams,
   chatId: string | undefined,
-): Promise<{ turnLlm: LlmProvider; turnDefaultModel: string }> {
+): Promise<{ turnLlm: LlmProvider; turnDefaultModel: string; turnPrice: TurnPrice | undefined }> {
   let turnLlm = deps.llm;
   let turnDefaultModel = deps.modelName;
+  let turnPrice: TurnPrice | undefined;
   if (sessionParams.profile) {
     const profile = await deps.llmConnections.resolveByName(sessionParams.profile);
     if (profile) {
@@ -1374,13 +1421,23 @@ async function resolveTurnLlm(
       // (bb_principles.md §14 doesn't carve out an exception for "which connection").
       turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
       turnDefaultModel = profile.model;
+      // The override's own profile already carries the connection's prices — no second read.
+      turnPrice = toTurnPrice(profile);
     } else {
       log.error(
         `chat_id ${chatId} names unknown connection "${sessionParams.profile}" — falling back to the active connection`,
       );
     }
+  } else {
+    // Default branch: reuse the boot-time deps.llm singleton unchanged — this resolveActive is
+    // used ONLY to read the active connection's price fields, and must not replace turnLlm/
+    // turnDefaultModel here (no second, redundant gated provider instance for a call that's
+    // about to use the existing one). The returned profile is built from the same active row the
+    // singleton was created from, so its prices are exactly the acting connection's.
+    const active = await deps.llmConnections.resolveActive();
+    turnPrice = toTurnPrice(active);
   }
-  return { turnLlm, turnDefaultModel };
+  return { turnLlm, turnDefaultModel, turnPrice };
 }
 
 // Rerun's in-place regeneration path (docs/bi_principles.md: swipe capability on the last LLM
@@ -1410,7 +1467,7 @@ async function regenerateSwipe(
   // server-side injection into the stack, not a model tool call.
   const sessionTools =
     session.kind === 'rp' ? createToolRegistry([]) : session.toolNames !== null ? filterToolRegistry(deps.tools, session.toolNames) : deps.tools;
-  const { turnLlm } = await resolveTurnLlm(deps, session.params, chatId);
+  const { turnLlm, turnPrice } = await resolveTurnLlm(deps, session.params, chatId);
   const timezone = await getHouseholdTimezone(deps.settings);
   const { systemPrompt, messagesForLlm: trimmed } = await assembleSessionTurnContext(
     db,
@@ -1431,8 +1488,10 @@ async function regenerateSwipe(
 
   // Same Prompt Inspector capture as handleChatCompletions (io/promptTrace.ts, kind 'main') — a
   // swipe re-runs the last turn, so its regenerated prompt is the newest "Main Prompt" the
-  // inspector should show. Recorded before the call, success or not, like the cleanup pass.
-  recordPromptTrace(chatId, {
+  // inspector should show. Recorded before the call, success or not, like the cleanup pass. The
+  // entry stays live so usage/price can be attached once the turn resolves — the same "absent
+  // until the call returns, absent forever if it failed" contract as reply.
+  const traceEntry: PromptTraceEntry = {
     kind: 'main',
     title: 'Main Prompt',
     items: [
@@ -1440,12 +1499,13 @@ async function regenerateSwipe(
       ...trimmed.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content)),
     ],
     capturedAt: Date.now(),
-  });
+  };
+  recordPromptTrace(chatId, traceEntry);
 
   let reply: string;
   let focusedNoteId: string | undefined;
   try {
-    ({ content: reply, focusedNoteId } = await runTurn({
+    const turnResult = await runTurn({
       userId,
       taskId: chatId,
       messages: trimmed,
@@ -1457,7 +1517,13 @@ async function regenerateSwipe(
       tools: sessionTools,
       anchorMessageId,
       embeddings: deps.embeddings,
-    }));
+    });
+    reply = turnResult.content;
+    focusedNoteId = turnResult.focusedNoteId;
+    // Attached only after a successful resolve — a thrown/aborted turn leaves the entry without
+    // usage/price, matching reply's "absent if the call failed" contract exactly.
+    traceEntry.usage = turnResult.usage;
+    traceEntry.price = turnPrice;
   } catch (err) {
     if (isAbortError(err)) {
       // The user hit Stop — not a failure. Nothing is written (the persisted user message simply
@@ -1604,7 +1670,7 @@ async function handleChatCompletions(
   // Auto-recall still injects into the stack server-side; it never needed a model tool call.
   if (sessionKind === 'rp') sessionTools = createToolRegistry([]);
 
-  const { turnLlm, turnDefaultModel } = await resolveTurnLlm(deps, sessionParams, body.chat_id);
+  const { turnLlm, turnDefaultModel, turnPrice } = await resolveTurnLlm(deps, sessionParams, body.chat_id);
 
   // The one deterministic gate bb_principles.md §2/§11 requires for images: fail the whole turn
   // visibly, before runTurn/llm.complete is ever called, rather than silently dropping the image
@@ -1699,8 +1765,12 @@ async function handleChatCompletions(
   // Persisted chats only — no chat_id is stateless Open WebUI traffic with nothing to trace
   // against. Images ride on LlmMessage.images (util/attachmentContext.ts), never in content, so
   // this never embeds base64 blobs into the trace.
+  // The entry stays live after recordPromptTrace so usage/price can be attached once the turn
+  // resolves — the same "absent until the call returns, absent forever if it failed" contract
+  // as reply. Undefined while stateless (no chat_id): nothing to trace, nothing to attach.
+  let mainTraceEntry: PromptTraceEntry | undefined;
   if (body.chat_id) {
-    recordPromptTrace(body.chat_id, {
+    mainTraceEntry = {
       kind: 'main',
       title: 'Main Prompt',
       items: [
@@ -1708,13 +1778,14 @@ async function handleChatCompletions(
         ...messagesForLlm.map((m) => toPreviewItem(m.role as PromptPreviewItem['role'], m.content)),
       ],
       capturedAt: Date.now(),
-    });
+    };
+    recordPromptTrace(body.chat_id, mainTraceEntry);
   }
 
   let reply: string;
   let focusedNoteId: string | null | undefined;
   try {
-    ({ content: reply, focusedNoteId } = await runTurn({
+    const turnResult = await runTurn({
       userId,
       // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
       // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
@@ -1734,7 +1805,13 @@ async function handleChatCompletions(
       tools: sessionTools,
       anchorMessageId,
       embeddings: deps.embeddings,
-    }));
+    });
+    reply = turnResult.content;
+    focusedNoteId = turnResult.focusedNoteId;
+    if (mainTraceEntry) {
+      mainTraceEntry.usage = turnResult.usage;
+      mainTraceEntry.price = turnPrice;
+    }
   } catch (err) {
     // Surfaced to the client rather than falling through to startHttpServer's generic top-level
     // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed

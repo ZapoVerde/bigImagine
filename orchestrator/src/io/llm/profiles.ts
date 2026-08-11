@@ -16,7 +16,8 @@
  * io/llmConnections.ts's update(), no re-serialize-then-reparse step needed.
  *
  * @api-declaration
- * LlmProfile — kind/model/apiKey/baseUrl/supportsVision/provider, io/llmConnections.ts's
+ * LlmProfile — kind/model/apiKey/baseUrl/supportsVision/provider + per-connection pricing
+ *   (priceInputPerMillion/priceOutputPerMillion/priceCacheHitPerMillion), io/llmConnections.ts's
  *   resolveByName/resolveActive build this shape from a decrypted connection row
  * parseLlmProfiles(raw: string) — throws with a specific, actionable message on any malformed
  *   profile rather than silently dropping or guessing at it; index.ts's first-boot seed only
@@ -50,6 +51,15 @@ export interface LlmProfile {
     allowFallbacks: boolean;
     quantizations?: string[];
   };
+  /** USD per 1M tokens for the Prompt Inspector's cost receipt (docs/plans/
+   *  prompt-inspector-usage-cost.md) — relayed from the llm_connections row by
+   *  io/llmConnections.ts's toProfile, so every caller that already resolves a profile has
+   *  pricing without a second DB round-trip. Undefined means "not configured", not zero — the
+   *  receipt then shows token counts only, never a fabricated $0.00. Only ever set on the
+   *  DB-backed path; the env-var seed (parseLlmProfiles) carries no prices. */
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
 }
 
 function validateProfile(name: string, value: unknown): LlmProfile {

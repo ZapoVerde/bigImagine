@@ -30,11 +30,26 @@ function createFakeLlmConnectionStore(seedRows = []) {
   const rows = new Map(seedRows.map((r) => [r.id, { ...r }]));
   let nextId = 1;
   function toPublic(row) {
-    const { apiKey, ...rest } = row;
-    return rest;
+    const { apiKey, priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion, ...rest } = row;
+    const pub = { ...rest };
+    // Price fields follow the real store's NULL -> undefined convention: absent/cleared means
+    // "not configured" and stays off the wire (the receipt then shows tokens only).
+    if (priceInputPerMillion !== undefined && priceInputPerMillion !== null) pub.priceInputPerMillion = priceInputPerMillion;
+    if (priceOutputPerMillion !== undefined && priceOutputPerMillion !== null) pub.priceOutputPerMillion = priceOutputPerMillion;
+    if (priceCacheHitPerMillion !== undefined && priceCacheHitPerMillion !== null) pub.priceCacheHitPerMillion = priceCacheHitPerMillion;
+    return pub;
   }
   function toProfile(row) {
-    return { kind: row.kind, model: row.model, apiKey: row.apiKey, baseUrl: row.baseUrl ?? undefined, supportsVision: row.supportsVision };
+    return {
+      kind: row.kind,
+      model: row.model,
+      apiKey: row.apiKey,
+      baseUrl: row.baseUrl ?? undefined,
+      supportsVision: row.supportsVision,
+      priceInputPerMillion: row.priceInputPerMillion ?? undefined,
+      priceOutputPerMillion: row.priceOutputPerMillion ?? undefined,
+      priceCacheHitPerMillion: row.priceCacheHitPerMillion ?? undefined,
+    };
   }
   return {
     rows,
@@ -54,6 +69,9 @@ function createFakeLlmConnectionStore(seedRows = []) {
         providerOrder: init.providerOrder ?? null,
         allowFallbacks: init.allowFallbacks ?? true,
         quantizations: init.quantizations ?? null,
+        priceInputPerMillion: init.priceInputPerMillion ?? undefined,
+        priceOutputPerMillion: init.priceOutputPerMillion ?? undefined,
+        priceCacheHitPerMillion: init.priceCacheHitPerMillion ?? undefined,
         isActive: false,
         updatedAt: new Date().toISOString(),
       };
@@ -1042,6 +1060,78 @@ const patchBody = await patchRes.json();
 assert(
   patchRes.status === 200 && patchBody.model === 'claude-x-2' && patchBody.name === 'anthropic-direct',
   'PATCH /v1/admin/connections/:id updates only the given field, leaving name untouched',
+);
+
+// Per-connection pricing (docs/plans/prompt-inspector-usage-cost.md): the three price fields
+// round-trip through create/list/patch; a cleared (null) price leaves the others untouched; a
+// non-numeric or negative price is rejected at the boundary (never reaching the store).
+const createPricedRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({
+    name: 'priced-conn',
+    kind: 'openai-compatible',
+    model: 'x',
+    baseUrl: 'https://example.invalid/x',
+    apiKey: 'sk-x',
+    priceInputPerMillion: 0.14,
+    priceOutputPerMillion: 0.28,
+    priceCacheHitPerMillion: 0.014,
+  }),
+});
+const createPricedBody = await createPricedRes.json();
+assert(
+  createPricedRes.status === 201 &&
+    createPricedBody.priceInputPerMillion === 0.14 &&
+    createPricedBody.priceOutputPerMillion === 0.28 &&
+    createPricedBody.priceCacheHitPerMillion === 0.014,
+  'POST /v1/admin/connections accepts and returns the three price fields',
+);
+
+const createBadPriceRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'bad-price-conn', kind: 'anthropic', model: 'x', apiKey: 'sk-x', priceInputPerMillion: 'cheap' }),
+});
+assert(createBadPriceRes.status === 400, 'POST /v1/admin/connections rejects a non-numeric price');
+
+const createNegativePriceRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'neg-price-conn', kind: 'anthropic', model: 'x', apiKey: 'sk-x', priceOutputPerMillion: -1 }),
+});
+assert(createNegativePriceRes.status === 400, 'POST /v1/admin/connections rejects a negative price');
+
+const patchPriceClearRes = await fetch(`${base}/v1/admin/connections/${createPricedBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ priceCacheHitPerMillion: null }),
+});
+const patchPriceClearBody = await patchPriceClearRes.json();
+assert(
+  patchPriceClearRes.status === 200 &&
+    patchPriceClearBody.priceInputPerMillion === 0.14 &&
+    patchPriceClearBody.priceCacheHitPerMillion === undefined,
+  'PATCH /v1/admin/connections/:id clears one price field to null, leaving the others untouched',
+);
+
+const patchBadPriceRes = await fetch(`${base}/v1/admin/connections/${createPricedBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ priceOutputPerMillion: 'expensive' }),
+});
+assert(patchBadPriceRes.status === 400, 'PATCH /v1/admin/connections/:id rejects a non-numeric price');
+
+const pricedListBody = await (
+  await fetch(`${base}/v1/admin/connections`, { headers: { authorization: 'Bearer the-admin-key' } })
+).json();
+const pricedListed = pricedListBody.connections.find((c) => c.id === createPricedBody.id);
+assert(
+  pricedListed &&
+    pricedListed.priceInputPerMillion === 0.14 &&
+    pricedListed.priceOutputPerMillion === 0.28 &&
+    pricedListed.priceCacheHitPerMillion === undefined,
+  'GET /v1/admin/connections lists the surviving price fields and omits the cleared one',
 );
 
 const patchUnknownRes = await fetch(`${base}/v1/admin/connections/not-a-real-id`, {
@@ -2590,6 +2680,145 @@ server.close();
   assert(plainPreviewRes.status === 422, "prompt-preview stays rp-only — a 'chat'-kind session 422s");
 
   serverMain.close();
+}
+
+// --- Part 5d: the captured Main Prompt's usage/cost receipt (docs/plans/prompt-inspector-usage-cost.md) ---
+// Once a turn resolves, the captured 'main' group carries the vendor-reported usage (from
+// runTurn's result) plus the acting connection's price (resolveTurnLlm's live price read — the
+// active connection's row in the default branch). An unpriced connection still shows usage but no
+// price; a turn that throws attaches neither.
+{
+  let throwNext = false;
+  const usage = { promptTokens: 9, completionTokens: 7, totalTokens: 16, cacheReadTokens: 4 };
+  const receivingLlm = {
+    name: 'receiving-main',
+    async complete(messages) {
+      if (throwNext) {
+        throwNext = false;
+        throw new Error('provider exploded');
+      }
+      return { message: { role: 'assistant', content: 'reply' }, toolCalls: [], usage };
+    },
+  };
+  const llmConnections = createFakeLlmConnectionStore([
+    {
+      id: 'conn-priced',
+      name: 'priced',
+      kind: 'openai-compatible',
+      model: 'm',
+      apiKey: 'sk',
+      baseUrl: 'https://example.invalid/x',
+      supportsVision: false,
+      isActive: true,
+      priceInputPerMillion: 0.14,
+      priceOutputPerMillion: 0.28,
+      priceCacheHitPerMillion: 0.014,
+    },
+  ]);
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettingsStore();
+  const chats = createFakeChatSessionStore();
+  const apiKeys = createApiKeyStore('good-key-receipt:88888888-8888-8888-8888-888888888888');
+  const userId = '88888888-8888-8888-8888-888888888888';
+  const server = startHttpServer({
+    llm: receivingLlm,
+    db,
+    tools: createToolRegistry([echoTool]),
+    apiKeys,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings,
+    llmConnections,
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server.once('listening', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const auth = { authorization: 'Bearer good-key-receipt' };
+
+  const rp = await chats.createChat(userId, {});
+  await chats.updateChat(userId, rp.chatId, { kind: 'rp', params: { system: 'You are the narrator.' } });
+  clearPromptTrace(rp.chatId);
+
+  const turnRes = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello' }], chat_id: rp.chatId }),
+  });
+  assert(turnRes.status === 200, 'a turn against a priced connection succeeds (Part 5d)');
+
+  const previewRes = await fetch(`${base}/v1/chats/${rp.chatId}/prompt-preview`, { headers: auth });
+  const preview = await previewRes.json();
+  const main = preview.groups[0];
+  assert(
+    main.captured === true &&
+      main.usage &&
+      main.usage.promptTokens === 9 &&
+      main.usage.completionTokens === 7 &&
+      main.usage.totalTokens === 16 &&
+      main.usage.cacheReadTokens === 4,
+    "the captured 'main' group carries the turn's vendor-reported usage, cacheReadTokens included",
+  );
+  assert(
+    main.price &&
+      main.price.inputPerMillion === 0.14 &&
+      main.price.outputPerMillion === 0.28 &&
+      main.price.cacheHitPerMillion === 0.014,
+    "the captured 'main' group carries the acting (active) connection's price fields",
+  );
+
+  // Flip the active connection to an unpriced one — the price read is live per turn
+  // (resolveTurnLlm's default branch), so a second turn on the same server now reports usage but
+  // no price (never a fabricated $0.00).
+  llmConnections.rows.get('conn-priced').isActive = false;
+  llmConnections.rows.set('conn-plain', {
+    id: 'conn-plain',
+    name: 'plain',
+    kind: 'openai-compatible',
+    model: 'm',
+    apiKey: 'sk',
+    baseUrl: 'https://example.invalid/x',
+    supportsVision: false,
+    isActive: true,
+  });
+  clearPromptTrace(rp.chatId);
+  const turn2Res = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hello again' }], chat_id: rp.chatId }),
+  });
+  assert(turn2Res.status === 200, 'a turn against an unpriced connection succeeds (Part 5d)');
+  const preview2Res = await fetch(`${base}/v1/chats/${rp.chatId}/prompt-preview`, { headers: auth });
+  const preview2 = await preview2Res.json();
+  const main2 = preview2.groups[0];
+  assert(
+    main2.captured === true && main2.usage && main2.usage.promptTokens === 9 && main2.price === undefined,
+    "an unpriced connection: the captured group carries usage but no price field at all",
+  );
+
+  // A turn that throws: the 'main' entry was recorded before the call, but usage/price are never
+  // attached — the next preview shows the prompt with no receipt, like the "no reply" case.
+  throwNext = true;
+  clearPromptTrace(rp.chatId);
+  const throwRes = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...auth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'make it fail' }], chat_id: rp.chatId }),
+  });
+  assert(throwRes.status === 500, 'a turn whose provider call throws fails the turn (Part 5d)');
+  const preview3Res = await fetch(`${base}/v1/chats/${rp.chatId}/prompt-preview`, { headers: auth });
+  const preview3 = await preview3Res.json();
+  const main3 = preview3.groups[0];
+  assert(
+    main3.captured === true && main3.usage === undefined && main3.price === undefined,
+    'a turn that throws leaves the captured group with usage and price both undefined',
+  );
+
+  server.close();
 }
 
 // --- Part 6: Canvas — a tool call's focusHint persists as chat_sessions.canvas_note_id ---

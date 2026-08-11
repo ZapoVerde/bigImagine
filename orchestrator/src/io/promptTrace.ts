@@ -31,6 +31,12 @@
  * may also pick up a `reply` after the call returns — the model's output, which for a cleanup
  * repair is discarded the instant the cleaned text replaces it, so the trace is its only home.
  *
+ * A 'main' entry additionally picks up `usage`/`price` after the call resolves — the vendor's
+ * token accounting and the acting connection's per-token rates — so the Prompt Inspector can
+ * render a per-call cost receipt (docs/plans/prompt-inspector-usage-cost.md). Same "absent until
+ * the call returns, absent forever if it failed" contract as `reply`: set only once runTurn has
+ * resolved successfully, never on a thrown/aborted turn.
+ *
  * @api-declaration
  * recordPromptTrace(chatId, entry) — append one fired prompt to the chat's trace
  * getPromptTrace(chatId) — the chat's entries, oldest first
@@ -42,6 +48,8 @@
  *     state_ownership: [this module's Map — nothing else mutates it]
  *     external_io:     []
  */
+
+import type { LlmUsage } from './llm/types.js';
 
 export interface PromptTraceItem {
   role: 'system' | 'user' | 'assistant';
@@ -64,6 +72,20 @@ export interface PromptTraceEntry {
    *  place the reply ever exists: the cleaned text replaces it in the message, and the raw LLM
    *  output is otherwise unrecoverable. Absent when the call failed or replied empty. */
   reply?: string;
+  /** The LLM call's vendor-reported token accounting, attached after the call resolves on a
+   *  successful turn — absent until then, absent forever if the turn threw or was aborted (the
+   *  same "absent if the call failed" contract as `reply`). Structurally available to any kind,
+   *  but only ever populated on the 'main' entry today (docs/plans/prompt-inspector-usage-cost.md). */
+  usage?: LlmUsage;
+  /** The acting connection's USD-per-1M-token rates at the time the call fired — attached
+   *  alongside `usage`, and undefined end to end when the connection had no price configured
+   *  ("tokens only, never a fabricated $0.00"). Every tier undefined means no price was set;
+   *  a partially-set price omits the $ figure rather than pricing a tier at the wrong rate. */
+  price?: {
+    inputPerMillion?: number;
+    outputPerMillion?: number;
+    cacheHitPerMillion?: number;
+  };
   capturedAt: number;
 }
 

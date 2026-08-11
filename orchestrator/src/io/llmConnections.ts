@@ -62,6 +62,9 @@ export interface LlmConnectionRow {
   providerOrder: string[] | null;
   allowFallbacks: boolean;
   quantizations: string[] | null;
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
   isActive: boolean;
   updatedAt: string;
 }
@@ -84,6 +87,11 @@ export interface LlmConnectionInit {
   providerOrder?: string[];
   allowFallbacks?: boolean;
   quantizations?: string[];
+  /** USD per 1M tokens for the Prompt Inspector's cost receipt — undefined means "not
+   *  configured", so the inspector shows token counts only, never a fabricated $0.00. */
+  priceInputPerMillion?: number;
+  priceOutputPerMillion?: number;
+  priceCacheHitPerMillion?: number;
 }
 
 export interface LlmConnectionPatch {
@@ -98,6 +106,11 @@ export interface LlmConnectionPatch {
   providerOrder?: string[] | null;
   allowFallbacks?: boolean;
   quantizations?: string[] | null;
+  /** number-or-null: undefined leaves the stored price untouched, null explicitly clears it
+   *  (same three-state convention baseUrl already uses). */
+  priceInputPerMillion?: number | null;
+  priceOutputPerMillion?: number | null;
+  priceCacheHitPerMillion?: number | null;
 }
 
 export interface LlmConnectionStore {
@@ -122,12 +135,22 @@ interface ConnectionDbRow {
   provider_order: string[] | null;
   allow_fallbacks: boolean;
   quantizations: string[] | null;
+  price_input_per_million: string | null;
+  price_output_per_million: string | null;
+  price_cache_hit_per_million: string | null;
   is_active: boolean;
   updated_at: string;
 }
 
 const ROW_COLUMNS = `id, name, kind, model, base_url, supports_vision, api_key_ciphertext,
-  provider_order, allow_fallbacks, quantizations, is_active, updated_at`;
+  provider_order, allow_fallbacks, quantizations, price_input_per_million,
+  price_output_per_million, price_cache_hit_per_million, is_active, updated_at`;
+
+// numeric columns come back from pg as strings; a null column means "not configured", which maps
+// to undefined end to end (the plan's "tokens only, never $0.00" contract).
+function toPrice(value: string | null): number | undefined {
+  return value === null ? undefined : Number(value);
+}
 
 function toRow(row: ConnectionDbRow): LlmConnectionRow {
   return {
@@ -140,6 +163,9 @@ function toRow(row: ConnectionDbRow): LlmConnectionRow {
     providerOrder: row.provider_order,
     allowFallbacks: row.allow_fallbacks,
     quantizations: row.quantizations,
+    priceInputPerMillion: toPrice(row.price_input_per_million),
+    priceOutputPerMillion: toPrice(row.price_output_per_million),
+    priceCacheHitPerMillion: toPrice(row.price_cache_hit_per_million),
     isActive: row.is_active,
     updatedAt: row.updated_at,
   };
@@ -162,6 +188,9 @@ function toProfile(row: ConnectionDbRow, cipher: FieldCipher): LlmProfile {
     baseUrl: row.base_url ?? undefined,
     supportsVision: row.supports_vision,
     provider: toProviderConfig(row),
+    priceInputPerMillion: toPrice(row.price_input_per_million),
+    priceOutputPerMillion: toPrice(row.price_output_per_million),
+    priceCacheHitPerMillion: toPrice(row.price_cache_hit_per_million),
   };
 }
 
@@ -193,8 +222,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
       const rows = await db.withSystemScope((session) =>
         session.query<ConnectionDbRow>(
           `insert into llm_connections
-             (name, kind, model, api_key_ciphertext, base_url, supports_vision, provider_order, allow_fallbacks, quantizations)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             (name, kind, model, api_key_ciphertext, base_url, supports_vision, provider_order, allow_fallbacks, quantizations,
+              price_input_per_million, price_output_per_million, price_cache_hit_per_million)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            returning ${ROW_COLUMNS}`,
           [
             init.name,
@@ -206,6 +236,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
             init.providerOrder ? JSON.stringify(init.providerOrder) : null,
             init.allowFallbacks ?? true,
             init.quantizations ? JSON.stringify(init.quantizations) : null,
+            init.priceInputPerMillion ?? null,
+            init.priceOutputPerMillion ?? null,
+            init.priceCacheHitPerMillion ?? null,
           ],
         ),
       );
@@ -231,6 +264,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
       if (patch.providerOrder !== undefined) set('provider_order', patch.providerOrder ? JSON.stringify(patch.providerOrder) : null);
       if (patch.allowFallbacks !== undefined) set('allow_fallbacks', patch.allowFallbacks);
       if (patch.quantizations !== undefined) set('quantizations', patch.quantizations ? JSON.stringify(patch.quantizations) : null);
+      if (patch.priceInputPerMillion !== undefined) set('price_input_per_million', patch.priceInputPerMillion);
+      if (patch.priceOutputPerMillion !== undefined) set('price_output_per_million', patch.priceOutputPerMillion);
+      if (patch.priceCacheHitPerMillion !== undefined) set('price_cache_hit_per_million', patch.priceCacheHitPerMillion);
       if (sets.length === 0) {
         const rows = await db.withSystemScope((session) =>
           session.query<ConnectionDbRow>(`select ${ROW_COLUMNS} from llm_connections where id = $1`, [id]),

@@ -202,10 +202,17 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((v) => typeof v === 'string');
 }
 
+// Price fields (USD per 1M tokens) — a price is a finite non-negative number. Null is accepted
+// only on the patch parser (explicitly clear a previously-set price, distinct from undefined =
+// "leave it alone"), never on create.
+function isPrice(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+}
+
 export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
-    raw as Record<string, unknown>;
+  const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
+    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
   if (kind !== 'anthropic' && kind !== 'openai-compatible') return undefined;
   if (typeof model !== 'string' || !model) return undefined;
@@ -221,6 +228,9 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
   if (providerOrder !== undefined && !isStringArray(providerOrder)) return undefined;
   if (allowFallbacks !== undefined && typeof allowFallbacks !== 'boolean') return undefined;
   if (quantizations !== undefined && !isStringArray(quantizations)) return undefined;
+  if (priceInputPerMillion !== undefined && !isPrice(priceInputPerMillion)) return undefined;
+  if (priceOutputPerMillion !== undefined && !isPrice(priceOutputPerMillion)) return undefined;
+  if (priceCacheHitPerMillion !== undefined && !isPrice(priceCacheHitPerMillion)) return undefined;
   return {
     name: name.trim(),
     kind,
@@ -232,6 +242,9 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
     providerOrder: providerOrder as string[] | undefined,
     allowFallbacks: typeof allowFallbacks === 'boolean' ? allowFallbacks : undefined,
     quantizations: quantizations as string[] | undefined,
+    priceInputPerMillion: isPrice(priceInputPerMillion) ? priceInputPerMillion : undefined,
+    priceOutputPerMillion: isPrice(priceOutputPerMillion) ? priceOutputPerMillion : undefined,
+    priceCacheHitPerMillion: isPrice(priceCacheHitPerMillion) ? priceCacheHitPerMillion : undefined,
   };
 }
 
@@ -241,8 +254,8 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
 // io/llmConnections.ts's own LlmConnectionPatch already expects.
 export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { name, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations } =
-    raw as Record<string, unknown>;
+  const { name, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
+    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
@@ -255,6 +268,9 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
   if (providerOrder !== undefined && providerOrder !== null && !isStringArray(providerOrder)) return undefined;
   if (allowFallbacks !== undefined && typeof allowFallbacks !== 'boolean') return undefined;
   if (quantizations !== undefined && quantizations !== null && !isStringArray(quantizations)) return undefined;
+  if (priceInputPerMillion !== undefined && priceInputPerMillion !== null && !isPrice(priceInputPerMillion)) return undefined;
+  if (priceOutputPerMillion !== undefined && priceOutputPerMillion !== null && !isPrice(priceOutputPerMillion)) return undefined;
+  if (priceCacheHitPerMillion !== undefined && priceCacheHitPerMillion !== null && !isPrice(priceCacheHitPerMillion)) return undefined;
 
   const patch: LlmConnectionPatch = {};
   if (name !== undefined) patch.name = (name as string).trim();
@@ -266,6 +282,9 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
   if (providerOrder !== undefined) patch.providerOrder = providerOrder as string[] | null;
   if (allowFallbacks !== undefined) patch.allowFallbacks = allowFallbacks as boolean;
   if (quantizations !== undefined) patch.quantizations = quantizations as string[] | null;
+  if (priceInputPerMillion !== undefined) patch.priceInputPerMillion = priceInputPerMillion as number | null;
+  if (priceOutputPerMillion !== undefined) patch.priceOutputPerMillion = priceOutputPerMillion as number | null;
+  if (priceCacheHitPerMillion !== undefined) patch.priceCacheHitPerMillion = priceCacheHitPerMillion as number | null;
   return patch;
 }
 

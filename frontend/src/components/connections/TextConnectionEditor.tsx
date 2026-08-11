@@ -29,6 +29,9 @@ interface Draft {
   providerFallback: string;
   allowFallbacks: boolean;
   quantizations: string;
+  priceInput: string;
+  priceOutput: string;
+  priceCacheHit: string;
 }
 
 function emptyDraft(): Draft {
@@ -44,6 +47,9 @@ function emptyDraft(): Draft {
     providerFallback: '',
     allowFallbacks: true,
     quantizations: '',
+    priceInput: '',
+    priceOutput: '',
+    priceCacheHit: '',
   };
 }
 
@@ -60,6 +66,9 @@ function draftFromConnection(c: LlmConnectionSummary): Draft {
     providerFallback: c.providerOrder?.[1] ?? '',
     allowFallbacks: c.allowFallbacks,
     quantizations: (c.quantizations ?? []).join(', '),
+    priceInput: c.priceInputPerMillion?.toString() ?? '',
+    priceOutput: c.priceOutputPerMillion?.toString() ?? '',
+    priceCacheHit: c.priceCacheHitPerMillion?.toString() ?? '',
   };
 }
 
@@ -74,7 +83,10 @@ function draftEqualsConnection(draft: Draft, c: LlmConnectionSummary): boolean {
     draft.providerPrimary === (c.providerOrder?.[0] ?? '') &&
     draft.providerFallback === (c.providerOrder?.[1] ?? '') &&
     draft.allowFallbacks === c.allowFallbacks &&
-    draft.quantizations === (c.quantizations ?? []).join(', ')
+    draft.quantizations === (c.quantizations ?? []).join(', ') &&
+    draft.priceInput === (c.priceInputPerMillion?.toString() ?? '') &&
+    draft.priceOutput === (c.priceOutputPerMillion?.toString() ?? '') &&
+    draft.priceCacheHit === (c.priceCacheHitPerMillion?.toString() ?? '')
   );
 }
 
@@ -84,6 +96,16 @@ function parseQuantizations(raw: string): string[] | undefined {
     .map((s) => s.trim())
     .filter(Boolean);
   return list.length > 0 ? list : undefined;
+}
+
+// Parse one price input (USD per 1M tokens, Prompt Inspector cost receipt). Empty/whitespace =
+// not configured (undefined — the receipt then shows tokens only, never a fabricated $0.00); a
+// non-numeric or negative value is a validation error the save button surfaces inline.
+function parsePrice(raw: string): { ok: true; value: number | undefined } | { ok: false } {
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: true, value: undefined };
+  const value = Number(trimmed);
+  return Number.isFinite(value) && value >= 0 ? { ok: true, value } : { ok: false };
 }
 
 function providerOrderFromDraft(draft: Draft): string[] | undefined {
@@ -206,6 +228,13 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
       setError('Pick an API key source: a new key, or reuse an existing connection’s.');
       return;
     }
+    const priceInput = parsePrice(draft.priceInput);
+    const priceOutput = parsePrice(draft.priceOutput);
+    const priceCacheHit = parsePrice(draft.priceCacheHit);
+    if (!priceInput.ok || !priceOutput.ok || !priceCacheHit.ok) {
+      setError('Prices must be non-negative numbers (USD per 1M tokens), or left empty.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -222,6 +251,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             providerOrder: providerOrderFromDraft(draft),
             allowFallbacks: draft.allowFallbacks,
             quantizations: parseQuantizations(draft.quantizations),
+            priceInputPerMillion: priceInput.value,
+            priceOutputPerMillion: priceOutput.value,
+            priceCacheHitPerMillion: priceCacheHit.value,
           },
           adminKey,
         );
@@ -239,6 +271,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             providerOrder: providerOrderFromDraft(draft) ?? null,
             allowFallbacks: draft.allowFallbacks,
             quantizations: parseQuantizations(draft.quantizations) ?? null,
+            priceInputPerMillion: priceInput.value ?? null,
+            priceOutputPerMillion: priceOutput.value ?? null,
+            priceCacheHitPerMillion: priceCacheHit.value ?? null,
           },
           adminKey,
         );
@@ -537,6 +572,44 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
               </label>
             </fieldset>
           )}
+
+          <fieldset className="connections-pricing">
+            <legend>Pricing (Prompt Inspector receipt)</legend>
+            <div className="status">
+              USD per 1M tokens. Left empty, the inspector shows token counts only — never a
+              fabricated $0.00. When only some tiers are set, the cost figure is omitted rather
+              than pricing a tier at the wrong rate.
+            </div>
+            <div className="connections-pricing-row">
+              <label>
+                Input
+                <input
+                  value={draft.priceInput}
+                  onChange={(e) => setDraft((d) => ({ ...d, priceInput: e.target.value }))}
+                  placeholder="e.g. 0.14"
+                  inputMode="decimal"
+                />
+              </label>
+              <label>
+                Output
+                <input
+                  value={draft.priceOutput}
+                  onChange={(e) => setDraft((d) => ({ ...d, priceOutput: e.target.value }))}
+                  placeholder="e.g. 0.28"
+                  inputMode="decimal"
+                />
+              </label>
+              <label>
+                Cache hit
+                <input
+                  value={draft.priceCacheHit}
+                  onChange={(e) => setDraft((d) => ({ ...d, priceCacheHit: e.target.value }))}
+                  placeholder="e.g. 0.014"
+                  inputMode="decimal"
+                />
+              </label>
+            </div>
+          </fieldset>
 
           <div className="connections-actions">
             <button onClick={save} disabled={!dirty || saving}>

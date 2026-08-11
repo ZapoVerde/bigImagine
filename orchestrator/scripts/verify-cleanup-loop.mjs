@@ -186,6 +186,12 @@ function createFakePool() {
             const sess = chatSessions.get(params[0]);
             return { rows: sess ? [{ kind: sess.kind, cleanup_enabled_at: sess.cleanup_enabled_at, archived_at: sess.archived_at }] : [] };
           }
+
+          // loadLocationBlock (location.md §5.5 / segway.md §2.6, added by 0083's cleanup-coupled
+          // scraping) — the suite's chats have no scenes/locations rows, so an empty read is the
+          // faithful answer: no <locations> block, identical to the fail-open path.
+          if (sql.includes('join scenes s on s.scene_id = cs.scene_id')) return { rows: [] };
+          if (sql.includes('select name from locations') && sql.includes('parent_location_id is null')) return { rows: [] };
           if (sql.includes('select count(*) from chat_messages')) {
             const [chatId] = params;
             const sess = chatSessions.get(chatId);
@@ -420,14 +426,15 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
 }
 
 // ---------------------------------------------------------------------------
-// 5. 'remove' slop rule: deterministic rewrite, no LLM call
+// 5. 'remove' slop rule: deterministic rewrite, no LLM call (reply fully conforming — header AND
+//    footer present, so the only thing to fix is the slop phrase)
 // ---------------------------------------------------------------------------
 {
   const pool = createFakePool();
   addUser(pool, 'u1');
   const chatId = addChat(pool, { userId: 'u1' });
   addSlopRule(pool, { pattern: '\\bas an AI language model\\b' });
-  const message = addMessage(pool, { chatId, userId: 'u1', content: `${VALID_HEADER}As an AI language model, I comply.\n` });
+  const message = addMessage(pool, { chatId, userId: 'u1', content: `${VALID_HEADER}As an AI language model, I comply.${VALID_FOOTER}\n` });
   const llm = createFakeLlm();
   const chats = createFakeChats(pool);
   const db = createPostgresClient(pool);
@@ -437,20 +444,23 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
   assert(!current.content.includes('As an AI language model'), 'remove rule stripped the slop phrase');
   assert(current.content.startsWith(VALID_HEADER), 'the header survives the slop rewrite');
+  assert(current.content.includes(VALID_FOOTER.trim()), 'the conforming footer survives the slop rewrite');
   assert(llm.calls.length === 0, 'a remove-only cleanup makes no LLM call');
   const job = pool.jobs.find((j) => j.message_id === message.message_id);
   assert(job && job.status === 'done' && job.changed === true, 'the rewrite job is done+changed');
 }
 
 // ---------------------------------------------------------------------------
-// 6. Header repair: missing header fires the prompt with {{history, 2}} resolved; reply rewritten
+// 6. Header repair: missing header fires the prompt with {{history, 2}} resolved; reply rewritten.
+//    The reply has no footer either, so a footer repair fires second (0066 rule 3 reversed
+//    2026-08-11) — the header prompt is calls[0], the footer prompt calls[1].
 // ---------------------------------------------------------------------------
 {
   const pool = createFakePool();
   addUser(pool, 'u1');
   const chatId = addChat(pool, { userId: 'u1' });
   addMessage(pool, { chatId, userId: 'u1', role: 'user', content: 'Where are we?' });
-  addMessage(pool, { chatId, userId: 'u1', role: 'assistant', content: `${VALID_HEADER}Prior reply.\n` });
+  addMessage(pool, { chatId, userId: 'u1', role: 'assistant', content: `${VALID_HEADER}Prior reply.${VALID_FOOTER}\n` });
   addMessage(pool, { chatId, userId: 'u1', role: 'user', content: 'Lead us.' });
   const message = addMessage(pool, { chatId, userId: 'u1', content: 'She refused to flinch.\n' });
   const llm = createFakeLlm((messages) => VALID_HEADER.trimEnd());
@@ -458,7 +468,7 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
 
   await runCleanupTick({ db, llm, settings: createFakeSettings(), chats: createFakeChats(pool) });
 
-  assert(llm.calls.length === 1, 'a missing header fires exactly one repair prompt');
+  assert(llm.calls.length === 2, 'a missing header fires exactly one repair prompt (header first, then the footer build)');
   const prompt = llm.calls[0][0].content;
   assert(prompt.includes('{{history, 2}}') === false, 'the {{history, N}} macro was expanded, not left literal');
   assert(prompt.includes('User: Where are we?'), '{{history, 2}} includes the oldest of the last two turn pairs');
@@ -466,6 +476,7 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(prompt.includes('Prior reply.'), '{{history, 2}} includes the full text of the prior assistant reply');
   assert(prompt.includes('User: Lead us.'), '{{history, 2}} includes the newest user turn');
   assert(prompt.includes('She refused to flinch.'), '{{message}} embeds the raw reply being repaired');
+  assert(llm.calls[1][0].content.includes('footer'), 'the second repair prompt is the footer build');
   const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
   assert(current.content.startsWith(VALID_HEADER), 'the header repair prompt output replaced the missing header');
   const job = pool.jobs.find((j) => j.message_id === message.message_id);
@@ -521,21 +532,25 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
 }
 
 // ---------------------------------------------------------------------------
-// 7. Footer rule: a clean reply with no inner thoughts must not gain one (0066 rule 3)
+// 7. Footer rule: a reply with no inner thoughts gains a fresh footer (0066 rule 3 reversed
+//    2026-08-11 — every eligible reply gets a footer, not just ones that already attempted one)
 // ---------------------------------------------------------------------------
 {
   const pool = createFakePool();
   addUser(pool, 'u1');
   const chatId = addChat(pool, { userId: 'u1' });
   const message = addMessage(pool, { chatId, userId: 'u1', content: `${VALID_HEADER}She refused to flinch.\n` });
-  const llm = createFakeLlm();
+  const llm = createFakeLlm(() => VALID_FOOTER.trimEnd());
   const db = createPostgresClient(pool);
 
   await runCleanupTick({ db, llm, settings: createFakeSettings(), chats: createFakeChats(pool) });
 
-  assert(llm.calls.length === 0, 'no footer repair fires for a reply with no inner-thought evidence');
+  assert(llm.calls.length === 1, 'a reply with no inner-thought evidence fires exactly one footer repair');
+  const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
+  assert(current.content.includes('<details><summary>▸</summary>'), 'the fresh footer block is appended to the reply');
+  assert(current.content.startsWith(VALID_HEADER), 'the header survives the footer build');
   const job = pool.jobs.find((j) => j.message_id === message.message_id);
-  assert(job && job.status === 'done' && job.changed === false, 'no-evidence reply is done+unchanged');
+  assert(job && job.status === 'done' && job.changed === true, 'the footer-build reply is done+changed');
 }
 
 // ---------------------------------------------------------------------------

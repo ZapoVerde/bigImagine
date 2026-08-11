@@ -375,7 +375,7 @@ const server = startHttpServer({
   adminApiKey: 'unused',
   credentials: { async list() { return []; } },
   settings: { async get() { return undefined; }, async set() {} },
-  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; } },
+  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; }, async resolveActive() { return undefined; } },
   modelName: 'bigbrain',
   port: 0,
 });
@@ -516,7 +516,7 @@ const server2 = startHttpServer({
   adminApiKey: 'unused',
   credentials: { async list() { return []; } },
   settings: { async get() { return undefined; }, async set() {} },
-  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; } },
+  llmConnections: { async resolveByName() { return undefined; }, async list() { return []; }, async resolveActive() { return undefined; } },
   modelName: 'bigbrain',
   port: 0,
 });

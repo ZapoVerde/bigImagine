@@ -352,6 +352,43 @@ await withMockedFetch(
   },
 );
 
+// Prompt-cache accounting (docs/plans/prompt-inspector-usage-cost.md): DeepSeek's responses carry
+// prompt_cache_hit_tokens; prompt_tokens already includes the cached portion, so promptTokens is
+// unchanged and the hit count lands on cacheReadTokens.
+await withMockedFetch(
+  [
+    {
+      choices: [{ message: { content: 'ok' } }],
+      usage: { prompt_tokens: 9, completion_tokens: 7, total_tokens: 16, prompt_cache_hit_tokens: 4 },
+    },
+  ],
+  async () => {
+    const llm = createOpenAiCompatibleLlmProvider({ apiKey: 'test-key', model: 'test-model', baseUrl: 'https://example.invalid/v1' });
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(
+      turn.usage?.promptTokens === 9 &&
+        turn.usage?.cacheReadTokens === 4 &&
+        turn.usage?.completionTokens === 7 &&
+        turn.usage?.totalTokens === 16,
+      'OpenAI-compatible: prompt_cache_hit_tokens relays onto cacheReadTokens, promptTokens unchanged (already includes it)',
+    );
+  },
+);
+
+// A provider that reports no cache accounting at all (most OpenRouter-routed models): cacheReadTokens
+// stays undefined, never zero — "no cache accounting", not "zero cache hit".
+await withMockedFetch(
+  [{ choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 } }],
+  async () => {
+    const llm = createOpenAiCompatibleLlmProvider({ apiKey: 'test-key', model: 'test-model', baseUrl: 'https://example.invalid/v1' });
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(
+      turn.usage?.promptTokens === 5 && turn.usage?.cacheReadTokens === undefined,
+      'OpenAI-compatible: cacheReadTokens is undefined (not 0) when the response has no cache fields',
+    );
+  },
+);
+
 await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async () => {
   const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
   const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
