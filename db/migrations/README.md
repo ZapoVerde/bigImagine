@@ -515,3 +515,16 @@ Already applied by hand, not run automatically (see the file for the exact comma
   and widens the key CHECK in one transaction (0048's warning: DROP/ADD without a wrapping
   transaction can leave the column unconstrained on failure). `canon_facts.category` values are
   untouched — only the curator's name changed, not the data. Hand-applied to the live DB.
+- `0088_lorebook_runtime.sql` — the Lorebook runtime schema (docs/lorebook-plan.md §3, build order
+  step 1), built on 0051's storage-only tables without renaming or reshaping them: scoping tables
+  `lorebook_character_links`/`lorebook_chat_overrides`/`lorebook_entry_overrides` + `global_scope`
+  (scene_presence shape, denormalized user_id for RLS); activation-mechanics columns on
+  `lorebook_entries` (`use_probability`, `group_weight`, `group_override`, `sticky`, `cooldown`,
+  `delay`, plus `vector_embed vector(2048)` for vector discovery — defaults all preserve today's
+  behavior until an author opts in); `lorebook_activation_log` as both the audit trail and the
+  sticky/cooldown/delay state (cascade FKs, unlike 0054's set-null — a log may disappear with its
+  chat/message/entry); and the four `lorebook_settings` keys (`lorebook_mode`,
+  `lorebook_token_budget`, `lorebook_recall_top_k`, `lorebook_recursion_enabled`) via the usual
+  orchestrator_settings CHECK re-list (67 keys, superset per 0048's warning, in one transaction —
+  same pattern 0087 used). No prompt-stack wiring here — that's plan steps 2-4. Hand-applied to the
+  live DB.

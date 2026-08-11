@@ -263,6 +263,10 @@ export const SETTING_NAMES = [
   'location_split_enabled',
   'location_injection_enabled',
   'location_injection_prompt',
+  'lorebook_mode',
+  'lorebook_token_budget',
+  'lorebook_recall_top_k',
+  'lorebook_recursion_enabled',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 
