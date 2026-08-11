@@ -29,7 +29,8 @@
  * @api-declaration
  * recallLorebookEntries(session, embeddings, userId, characterId, chatId, queryText, topK?) ->
  *   Promise<LorebookEntryCandidate[]> — scoped candidates, constants first then top-K by
- *   similarity. topK defaults to DEFAULT_LOREBOOK_RECALL_TOP_K and is clamped to
+ *   similarity. characterId may be null (no active character — the character-link scope simply
+ *   never matches). topK defaults to DEFAULT_LOREBOOK_RECALL_TOP_K and is clamped to
  *   MAX_LOREBOOK_RECALL_TOP_K so a corrupt `lorebook_recall_top_k` value can't balloon the set.
  *
  * @contract
@@ -86,7 +87,7 @@ export async function recallLorebookEntries(
   session: DbSession,
   embeddings: EmbeddingProvider,
   userId: string,
-  characterId: string,
+  characterId: string | null,
   chatId: string,
   queryText: string,
   topK = DEFAULT_LOREBOOK_RECALL_TOP_K,
@@ -99,6 +100,10 @@ export async function recallLorebookEntries(
     if (!vector) return [];
 
     const k = Math.min(Math.max(1, Math.floor(topK)), MAX_LOREBOOK_RECALL_TOP_K);
+    // A null characterId (a chat with no active character) must not short-circuit the character
+    // link into an invalid uuid comparison — the all-zero uuid is a legal literal that no
+    // character row can ever match, so the clause stays in the query and simply never fires.
+    const scopedCharacterId = characterId ?? '00000000-0000-0000-0000-000000000000';
 
     const rows = await session.query<LorebookEntryCandidate>(
       `with scoped as (
@@ -143,7 +148,7 @@ export async function recallLorebookEntries(
          from ranked r
        ) t
        order by t._sort, t.vector_embed <-> $4 nulls last, t.order_value`,
-      [userId, characterId, chatId, toPgVectorLiteral(vector), k],
+      [userId, scopedCharacterId, chatId, toPgVectorLiteral(vector), k],
     );
     return rows;
   } catch (err) {

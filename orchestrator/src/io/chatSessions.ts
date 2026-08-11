@@ -353,11 +353,14 @@ export interface ChatSessionStore {
   /** Returns the inserted rows' message_ids (same order as the input) — server/httpServer.ts uses
    *  the user message's id as the anchor it threads into runTurn for point-in-time canon recall
    *  (db/migrations/0053_canon_facts_chat_anchor.sql), so mid-turn tool calls anchor to the message
-   *  that actually triggered them rather than one turn stale. */
+   *  that actually triggered them rather than one turn stale. An optional pre-set message_id is
+   *  honored verbatim (used by the lorebook turn seed — the assistant message_id is generated
+   *  before the LLM call so resolveLorebook's deterministic gate seed can reference the message
+   *  being generated); absent, the column's gen_random_uuid() default applies. */
   appendMessages(
     userId: string,
     chatId: string,
-    messages: { role: 'user' | 'assistant'; content: string }[],
+    messages: { role: 'user' | 'assistant'; content: string; messageId?: string }[],
   ): Promise<{ messageId: string; role: 'user' | 'assistant' }[]>;
   /** Removes exactly one message, wherever it falls in the conversation — safe because only
    *  clean user/assistant turns are ever persisted (tool_use/tool_result blocks live only inside
@@ -827,8 +830,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           // every row the identical created_at and leave ordering to an arbitrary UUID tiebreak.
           // clock_timestamp() actually advances between statements, keeping messages in order.
           const [row] = await session.query<{ message_id: string }>(
-            'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp()) returning message_id',
-            [chatId, userId, message.role, message.content],
+            'insert into chat_messages (chat_id, user_id, role, content, message_id, created_at) values ($1, $2, $3, $4, coalesce($5, gen_random_uuid()), clock_timestamp()) returning message_id',
+            [chatId, userId, message.role, message.content, message.messageId ?? null],
           );
           inserted.push({ messageId: row!.message_id, role: message.role });
         }

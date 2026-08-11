@@ -176,7 +176,9 @@ import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
 import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
-import { buildAutoRecallParts, formatAutoRecallBlock } from '../io/chatMemory/recallForPrompt.js';
+import { buildAutoRecallParts, formatAutoRecallBlock, buildAutoRecallQuery, AUTO_RECALL_PAIRS } from '../io/chatMemory/recallForPrompt.js';
+import { resolveLorebook } from '../orchestrator/resolveLorebook.js';
+import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
 import {
   renderBridge,
   renderPlotThreads,
@@ -659,14 +661,16 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 async function buildNarratorStackItems(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
+  embeddings: EmbeddingProvider,
   userId: string,
   chatId: string,
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
-): Promise<PromptPreviewItem[]> {
-  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate, locationBlock] = await Promise.all([
+  lorebookSeedMessageId?: string,
+): Promise<{ items: PromptPreviewItem[]; lorebookActivatedEntryIds: string[] }> {
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate, locationBlock, lorebookBlock] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -686,10 +690,27 @@ async function buildNarratorStackItems(
     // '' when disabled/empty, so an enabled slot with nothing to say emits nothing (the
     // assembler's non-empty filter drops it) — never an empty <locations> block in the prompt.
     loadLocationBlock({ db, settings }, userId, chatId),
+    // docs/lorebook-plan.md §4/§7 — the lorebook slot text, resolved per-turn (recall → timed
+    // state → gate → format, all fail-open inside resolveLorebook). Seeded deterministically by
+    // the assistant message_id being generated, which only exists when the caller is actually
+    // producing a turn — the inspector (no message being generated) passes the last assistant
+    // message's id, or nothing for a chat that has never had one (slot simply omitted).
+    lorebookSeedMessageId && recentHistoryMessages
+      ? resolveLorebook({
+          db,
+          settings,
+          embeddings,
+          userId,
+          chatId,
+          characterId,
+          queryText: buildAutoRecallQuery(recentHistoryMessages, AUTO_RECALL_PAIRS),
+          assistantMessageId: lorebookSeedMessageId,
+        })
+      : Promise.resolve(undefined),
   ]);
   // The preset was deleted, or has no slots, since Apply — nothing to assemble against. Caller
   // falls back to formatCurrentDateContext alone rather than crashing the turn over stale config.
-  if (slots.length === 0) return [];
+  if (slots.length === 0) return { items: [], lorebookActivatedEntryIds: [] };
 
   const character = characterRows[0];
   const personaText = persona.description
@@ -734,6 +755,10 @@ async function buildNarratorStackItems(
     location: locationBlock.block || undefined,
     // Deprecated fused alias — presets that still carry a memory_recall slot get the legacy block.
     memory_recall: memoryContext.fused || undefined,
+    // docs/lorebook-plan.md §7 — the dedicated lorebook slot, filled by resolveLorebook above.
+    // undefined when mode is off, nothing activated, or the resolution failed (fail-open) — the
+    // assembler's non-empty filter then drops the slot exactly as if it weren't in the preset.
+    lorebook: lorebookBlock?.text || undefined,
   };
 
   const snapshot: MacroSnapshot = {
@@ -778,7 +803,7 @@ async function buildNarratorStackItems(
       content: `${open ? `${open}\n` : ''}${items[m]!.content}${close ? `\n${close}` : ''}`,
     };
   }
-  return items;
+  return { items, lorebookActivatedEntryIds: lorebookBlock?.activatedEntryIds ?? [] };
 }
 
 // Returns the joined system text plus whether the recent_history slot actually rendered this turn
@@ -788,17 +813,20 @@ async function buildNarratorStackItems(
 async function assembleNarratorSystemText(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
+  embeddings: EmbeddingProvider,
   userId: string,
   chatId: string,
   characterId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
-): Promise<{ text: string; recentHistoryRendered: boolean }> {
-  const items = await buildNarratorStackItems(db, settings, userId, chatId, characterId, presetId, memoryContext, recentHistoryMessages);
+  lorebookSeedMessageId?: string,
+): Promise<{ text: string; recentHistoryRendered: boolean; lorebookActivatedEntryIds: string[] }> {
+  const { items, lorebookActivatedEntryIds } = await buildNarratorStackItems(db, settings, embeddings, userId, chatId, characterId, presetId, memoryContext, recentHistoryMessages, lorebookSeedMessageId);
   return {
     text: items.map((i) => i.content).join('\n\n'),
     recentHistoryRendered: items.some((i) => i.markerKey === 'recent_history'),
+    lorebookActivatedEntryIds,
   };
 }
 
@@ -1001,7 +1029,8 @@ async function assembleSessionTurnContext(
   sessionPromptStackPresetId: string | null,
   sessionParams: ChatParams,
   messagesForLlm: LlmMessage[],
-  timezone: string,
+  lorebookSeedMessageId?: string,
+): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[]; lorebookActivatedEntryIds: string[] }> {
 ): Promise<{ systemPrompt: string; messagesForLlm: LlmMessage[] }> {
   const [memoryContext, trimmed] = await Promise.all([
     buildChatMemorySystemPrompt(db, settings, embeddings, userId, chatId, sessionKind, messagesForLlm),
@@ -1042,10 +1071,14 @@ async function assembleSessionTurnContext(
     // appended at the end"). When the slot rendered, the messages array is emptied — the stack
     // alone carries the context; the LLM adapters emit a single empty user message so providers
     // don't reject the request shape (the user's "send it as it is").
-    const narrator = await assembleNarratorSystemText(db, settings, userId, chatId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed);
+    const narrator = await assembleNarratorSystemText(db, settings, embeddings, userId, chatId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed, lorebookSeedMessageId);
     return {
       systemPrompt: narrator.text,
       messagesForLlm: narrator.recentHistoryRendered ? [] : resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
+      // The activated entry ids ride up to the turn handler so it can append the
+      // lorebook_activation_log rows after the turn completes (docs/lorebook-plan.md §3e/§4) —
+      // the "write after, not during" shape that keeps sticky/cooldown resolvable next turn.
+      lorebookActivatedEntryIds: narrator.lorebookActivatedEntryIds,
     };
   }
 
@@ -1063,6 +1096,8 @@ async function assembleSessionTurnContext(
   return {
     systemPrompt: [dateContext, system, memoryText].filter(Boolean).join('\n\n'),
     messagesForLlm: resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
+    // No lorebook slot in the legacy path — resolveLorebook only runs through the preset branch.
+    lorebookActivatedEntryIds: [],
   };
 }
 
@@ -1228,8 +1263,12 @@ async function buildPromptPreview(  deps: HttpServerDeps,
       : undefined;
 
     if (session.kind === 'rp' && session.promptStackPresetId) {
+      // Lorebook preview seed: no assistant message is being generated here, so the gate uses
+      // the last assistant message's id (stable per chat head — the preview shows what the last
+      // resolved turn saw); a chat that has never had an assistant message omits the slot.
+      const lastAssistantMessageId = [...detail.messages].reverse().find((m) => m.role === 'assistant')?.messageId;
       systemStack.push(
-        ...(await buildNarratorStackItems(deps.db, deps.settings, userId, chatId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed)),
+        ...(await buildNarratorStackItems(deps.db, deps.settings, deps.embeddings, userId, chatId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed, lastAssistantMessageId)).items,
       );
     } else {
       let system = session.params.system;
@@ -1365,6 +1404,9 @@ async function regenerateSwipe(
     session.params,
     messagesForLlm,
     timezone,
+    // The assistant message being regenerated IS this message — its id is the deterministic
+    // lorebook gate seed (docs/lorebook-plan.md §4), stable across re-swipes of the same message.
+    messageId,
   );
 
   // Same Prompt Inspector capture as handleChatCompletions (io/promptTrace.ts, kind 'main') — a
@@ -1583,7 +1625,16 @@ async function handleChatCompletions(
   // and memory injection — a stateless caller (Open WebUI) gets exactly what it sent, unchanged,
   // same as before this feature existed.
   let systemPrompt: string;
+  // The assistant message this turn will persist is pre-generated before prompt assembly so
+  // the lorebook gate can seed its deterministic per-turn probability roll from the message
+  // being generated (docs/lorebook-plan.md §4) — never Math.random, so a retry or re-assembly
+  // reproduces the same bytes and the byte-prefix cache survives. Only set for persisted turns
+  // (body.chat_id); threaded to appendMessages below so the activation-log row's message_id
+  // matches the seed exactly.
+  let assistantMessageId: string | undefined;
+  let lorebookActivatedEntryIds: string[] = [];
   if (body.chat_id) {
+    assistantMessageId = randomUUID();
     const assembled = await assembleSessionTurnContext(
       db,
       deps.settings,
@@ -1596,9 +1647,11 @@ async function handleChatCompletions(
       sessionParams,
       messagesForLlm,
       timezone,
+      assistantMessageId,
     );
     systemPrompt = assembled.systemPrompt;
     messagesForLlm = assembled.messagesForLlm;
+    lorebookActivatedEntryIds = assembled.lorebookActivatedEntryIds;
   } else {
     systemPrompt = [formatCurrentDateContext(timezone), sessionParams.system].filter(Boolean).join('\n\n');
   }
@@ -1700,7 +1753,18 @@ async function handleChatCompletions(
     // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
     // scrapes the turn's header block into trusted scene state, anchored to the new message's
     // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
-    const [assistantMessage] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply }]);
+    const [assistantMessage] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
+    // docs/lorebook-plan.md §3e/§4 — the activation log is written after the turn completes
+    // ("write after, not during"): one row per entry this turn injected, the source sticky/
+    // cooldown resolve from next turn. writeLorebookActivationLog fails open inside itself, so a
+    // log hiccup can never fail a turn that already succeeded. Deliberately NOT wired into the
+    // swipe-regenerate path — regenerating a message re-rolls the gate with the same message id
+    // (same seed), and the message's original rows stay the audit trail for that message.
+    if (lorebookActivatedEntryIds.length > 0 && assistantMessageId) {
+      await deps.db.withUserScope(userId, (session) =>
+        writeLorebookActivationLog(session, userId, body.chat_id!, assistantMessageId, lorebookActivatedEntryIds),
+      );
+    }
     if (assistantMessage) {
       // 'extend': a genuinely new turn — a location change advances previous_scene_id
       // (endpoint.md §5.1.8's last-turn location state), so the background can revert to the
