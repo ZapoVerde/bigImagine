@@ -90,7 +90,7 @@ chat, in one transaction:
      analogue of Canonize's own bridge-summary horizon — see Settings below for why it can default
      smaller than Canonize's.
    - An 'rp' chat instead runs the bridge (`io/chatMemory/bridgeChatMemory.ts`) plus the two
-     periodic curators (`io/chatMemory/curateLorebook.ts`, `curatePeople.ts`) — see "The Bridge (RP
+     periodic curators (`io/chatMemory/curateWorldMemory.ts`, `curatePeople.ts`) — see "The Bridge (RP
      Lane)" and "The Curators (RP Lane)" below. None of the three read `chat_chunks` summaries; all
      three read the RAW `toArchive` transcript from step 1 directly, the same messages step 2
      chunked, before they were compressed — one shared `transcriptText`, three separate LLM calls.
@@ -157,7 +157,7 @@ household_memory is never injected for an 'rp' chat, unchanged from before this 
 
 The bridge covers Canonize's *plot* lorebook (hookseeker); it never touches Canonize's other
 lorebook — the general one, place/thing/concept, plus the dedicated person cards. Those are two more
-periodic curator calls, `io/chatMemory/curateLorebook.ts` and `io/chatMemory/curatePeople.ts`,
+periodic curator calls, `io/chatMemory/curateWorldMemory.ts` and `io/chatMemory/curatePeople.ts`,
 running every sync tick alongside the bridge for 'rp'-kind chats, over the exact same
 `transcriptText`. Both are near-verbatim ports of Canonize's own hand-tuned
 `lorebookSyncPrompt`/`peopleSyncPrompt` (same source file as the hookseeker prompt), same "preserve
@@ -327,7 +327,7 @@ section exposes:
   injection templates (bridge, plot threads, auto-recall wrapper, auto-recall chunk — the
   2026-08-13 component split, `io/chatMemory/memoryInjection.ts`). Every prompt ships a sensible
   built-in (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`, `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`,
-  `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_LOREBOOK_CURATOR_PROMPT`,
+  `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_WORLD_MEMORY_CURATOR_PROMPT`,
   `DEFAULT_PEOPLE_CURATOR_PROMPT`, `DEFAULT_INJECT_BRIDGE_PROMPT`, `DEFAULT_INJECT_PLOT_PROMPT`,
   `DEFAULT_INJECT_AUTO_RECALL_PROMPT`, `DEFAULT_AUTO_RECALL_CHUNK_PROMPT`, each exported from its
   own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
@@ -342,7 +342,7 @@ section exposes:
 All fourteen settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
 `chat_memory_sync_every_pairs`, `chat_memory_digest_horizon_pairs`, `chat_memory_chunk_summary_prompt`,
 `chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`, `chat_memory_bridge_prompt`,
-`chat_memory_lorebook_curator_prompt`, `chat_memory_people_curator_prompt`,
+`chat_memory_world_curator_prompt`, `chat_memory_people_curator_prompt`,
 `chat_memory_inject_bridge_prompt`, `chat_memory_inject_plot_prompt`,
 `chat_memory_inject_auto_recall_prompt`, `chat_memory_auto_recall_chunk_prompt`) are read live — the
 ten sync-side keys on every sync tick and the four injection templates on every RP prompt assembly
@@ -354,7 +354,8 @@ actually be saved: the first six were added to application code in `0036`-`0041`
 itself was never widened to match until `0043` closed that gap alongside adding
 `chat_memory_digest_horizon_pairs` fresh (see `db/migrations/README.md`'s `0043` entry);
 `chat_memory_bridge_prompt` followed the same pattern in `0063`, and
-`chat_memory_lorebook_curator_prompt`/`chat_memory_people_curator_prompt` in `0065`.
+`chat_memory_world_curator_prompt`/`chat_memory_people_curator_prompt` in `0065` (the world-memory
+key itself renamed from `chat_memory_lorebook_curator_prompt` by `0087`).
 
 ## Tables
 
@@ -380,7 +381,7 @@ place/thing/concept — different kinds of identity that happen to want the same
 
 | Canonize | Chat Memory | Why |
 |---|---|---|
-| General lorebook (place/thing/concept, free-text world model) | The lorebook curator (`curateLorebook.ts`), 'rp' lane only — a near-verbatim port, see "The Curators (RP Lane)" above | Same call as the plot lorebook below: this is a real feature Canonize was built for, not a redundant shadow of the relational store — `canon_facts` (via `entity_key`) is the one canonical home for it, not a second un-reconciled copy |
+| General lorebook (place/thing/concept, free-text world model) | The world-memory curator (`curateWorldMemory.ts`), 'rp' lane only — a near-verbatim port, see "The Curators (RP Lane)" above | Same call as the plot lorebook below: this is a real feature Canonize was built for, not a redundant shadow of the relational store — `canon_facts` (via `entity_key`) is the one canonical home for it, not a second un-reconciled copy |
 | Person lorebook (living character cards: appearance/personality/connections/goals) | The people curator (`curatePeople.ts`), 'rp' lane only — a near-verbatim port, see "The Curators (RP Lane)" above | Same reasoning as the general lorebook row; kept as its own curator/prompt because Canonize itself keeps it as a dedicated pass, not folded into the general one |
 | Keyword-triggered lorebook activation ("Keys:" per entry) | Dropped — not ported | `docs/spec.md`'s vector recall (`recall_canon_facts`) replaces keyword-lorebook matching outright; there is no keyword-match fallback anywhere in this schema for a generated key to ever reach |
 | Targeted on-demand entry refresh/creation (`targetedUpdatePrompt`/`targetedNewPrompt`) | Not ported | Explicit scoping call: periodic batch curation only for now: the two curators above already keep every entry current every sync tick |

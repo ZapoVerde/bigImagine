@@ -411,8 +411,8 @@ export interface ChatMemorySettings {
   householdMemoryPromptIsDefault: boolean;
   bridgePrompt: string;
   bridgePromptIsDefault: boolean;
-  lorebookCuratorPrompt: string;
-  lorebookCuratorPromptIsDefault: boolean;
+  worldCuratorPrompt: string;
+  worldCuratorPromptIsDefault: boolean;
   peopleCuratorPrompt: string;
   peopleCuratorPromptIsDefault: boolean;
   injectBridgePrompt: string;

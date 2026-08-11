@@ -136,7 +136,7 @@ import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChat
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../io/chatMemory/distillChatMemory.js';
 import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../io/chatMemory/classifyHouseholdMemory.js';
 import { DEFAULT_BRIDGE_PROMPT } from '../io/chatMemory/bridgeChatMemory.js';
-import { DEFAULT_LOREBOOK_CURATOR_PROMPT } from '../io/chatMemory/curateLorebook.js';
+import { DEFAULT_WORLD_MEMORY_CURATOR_PROMPT } from '../io/chatMemory/curateWorldMemory.js';
 import { DEFAULT_PEOPLE_CURATOR_PROMPT } from '../io/chatMemory/curatePeople.js';
 import {
   DEFAULT_INJECT_BRIDGE_PROMPT,
@@ -1101,8 +1101,8 @@ export interface ChatMemorySettings {
   householdMemoryPromptIsDefault: boolean;
   bridgePrompt: string;
   bridgePromptIsDefault: boolean;
-  lorebookCuratorPrompt: string;
-  lorebookCuratorPromptIsDefault: boolean;
+  worldCuratorPrompt: string;
+  worldCuratorPromptIsDefault: boolean;
   peopleCuratorPrompt: string;
   peopleCuratorPromptIsDefault: boolean;
   // RP read-path injection templates (2026-08-13 component split, io/chatMemory/memoryInjection.ts)
@@ -1136,7 +1136,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     distillPrompt,
     householdMemoryPrompt,
     bridgePrompt,
-    lorebookCuratorPrompt,
+    worldCuratorPrompt,
     peopleCuratorPrompt,
     autoRecallEnabledRaw,
     autoRecallPairsRaw,
@@ -1155,7 +1155,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_distill_prompt'),
     store.get('chat_memory_household_memory_prompt'),
     store.get('chat_memory_bridge_prompt'),
-    store.get('chat_memory_lorebook_curator_prompt'),
+    store.get('chat_memory_world_curator_prompt'),
     store.get('chat_memory_people_curator_prompt'),
     store.get('chat_memory_auto_recall_enabled'),
     store.get('chat_memory_auto_recall_pairs'),
@@ -1179,8 +1179,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     householdMemoryPromptIsDefault: !householdMemoryPrompt,
     bridgePrompt: bridgePrompt || DEFAULT_BRIDGE_PROMPT,
     bridgePromptIsDefault: !bridgePrompt,
-    lorebookCuratorPrompt: lorebookCuratorPrompt || DEFAULT_LOREBOOK_CURATOR_PROMPT,
-    lorebookCuratorPromptIsDefault: !lorebookCuratorPrompt,
+    worldCuratorPrompt: worldCuratorPrompt || DEFAULT_WORLD_MEMORY_CURATOR_PROMPT,
+    worldCuratorPromptIsDefault: !worldCuratorPrompt,
     peopleCuratorPrompt: peopleCuratorPrompt || DEFAULT_PEOPLE_CURATOR_PROMPT,
     peopleCuratorPromptIsDefault: !peopleCuratorPrompt,
     // autoRecallEnabled: default true when unset — only the literal string 'false' turns the
@@ -1210,7 +1210,7 @@ export interface SetChatMemorySettingsBody {
   distillPrompt?: string;
   householdMemoryPrompt?: string;
   bridgePrompt?: string;
-  lorebookCuratorPrompt?: string;
+  worldCuratorPrompt?: string;
   peopleCuratorPrompt?: string;
   autoRecallEnabled?: boolean;
   autoRecallPairs?: number;
@@ -1237,7 +1237,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     distill_prompt,
     household_memory_prompt,
     bridge_prompt,
-    lorebook_curator_prompt,
+    world_curator_prompt,
     people_curator_prompt,
     auto_recall_enabled,
     auto_recall_pairs,
@@ -1257,7 +1257,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     distill_prompt === undefined &&
     household_memory_prompt === undefined &&
     bridge_prompt === undefined &&
-    lorebook_curator_prompt === undefined &&
+    world_curator_prompt === undefined &&
     people_curator_prompt === undefined &&
     auto_recall_enabled === undefined &&
     auto_recall_pairs === undefined &&
@@ -1278,7 +1278,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (distill_prompt !== undefined && typeof distill_prompt !== 'string') return undefined;
   if (household_memory_prompt !== undefined && typeof household_memory_prompt !== 'string') return undefined;
   if (bridge_prompt !== undefined && typeof bridge_prompt !== 'string') return undefined;
-  if (lorebook_curator_prompt !== undefined && typeof lorebook_curator_prompt !== 'string') return undefined;
+  if (world_curator_prompt !== undefined && typeof world_curator_prompt !== 'string') return undefined;
   if (people_curator_prompt !== undefined && typeof people_curator_prompt !== 'string') return undefined;
   if (auto_recall_enabled !== undefined && typeof auto_recall_enabled !== 'boolean') return undefined;
   if (auto_recall_pairs !== undefined && (typeof auto_recall_pairs !== 'number' || auto_recall_pairs <= 0)) return undefined;
@@ -1297,7 +1297,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     distillPrompt: distill_prompt as string | undefined,
     householdMemoryPrompt: household_memory_prompt as string | undefined,
     bridgePrompt: bridge_prompt as string | undefined,
-    lorebookCuratorPrompt: lorebook_curator_prompt as string | undefined,
+    worldCuratorPrompt: world_curator_prompt as string | undefined,
     peopleCuratorPrompt: people_curator_prompt as string | undefined,
     autoRecallEnabled: auto_recall_enabled as boolean | undefined,
     autoRecallPairs: auto_recall_pairs as number | undefined,
@@ -1319,7 +1319,7 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
   if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);
   if (body.bridgePrompt !== undefined) await store.set('chat_memory_bridge_prompt', body.bridgePrompt);
-  if (body.lorebookCuratorPrompt !== undefined) await store.set('chat_memory_lorebook_curator_prompt', body.lorebookCuratorPrompt);
+  if (body.worldCuratorPrompt !== undefined) await store.set('chat_memory_world_curator_prompt', body.worldCuratorPrompt);
   if (body.peopleCuratorPrompt !== undefined) await store.set('chat_memory_people_curator_prompt', body.peopleCuratorPrompt);
   if (body.autoRecallEnabled !== undefined) await store.set('chat_memory_auto_recall_enabled', body.autoRecallEnabled ? 'true' : 'false');
   if (body.autoRecallPairs !== undefined) await store.set('chat_memory_auto_recall_pairs', String(body.autoRecallPairs));

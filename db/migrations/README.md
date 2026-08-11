@@ -507,3 +507,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   gives each group a stable name-derived color from a palette that excludes red — red is reserved
   for the coverage warning (enabled slot with no enclosing tags). Hand-applied to the live DB
   (2026-08-14).
+- `0087_world_memory_curator_settings.sql` — renames the world-memory (place/thing/concept)
+  curator's settings key `chat_memory_lorebook_curator_prompt` → `chat_memory_world_curator_prompt`
+  (docs/lorebook-plan.md §0), matching the code rename `curateLorebook.ts` → `curateWorldMemory.ts`.
+  A live-data migration, not just a code change: an `orchestrator_settings` row written under the
+  old key must not silently stop being read (bi_principles.md §13), so the migration UPDATEs the row
+  and widens the key CHECK in one transaction (0048's warning: DROP/ADD without a wrapping
+  transaction can leave the column unconstrained on failure). `canon_facts.category` values are
+  untouched — only the curator's name changed, not the data. Hand-applied to the live DB.

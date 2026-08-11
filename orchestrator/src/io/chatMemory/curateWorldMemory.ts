@@ -1,5 +1,5 @@
 /**
- * @file orchestrator/src/io/chatMemory/curateLorebook.ts
+ * @file orchestrator/src/io/chatMemory/curateWorldMemory.ts
  * @stamp 2026-08-07
  * @architectural-role IO Wrapper — forced-schema LLM call
  * @description
@@ -28,9 +28,9 @@
  * split CNZ itself enforces via its own two dedicated prompts.
  *
  * @api-declaration
- * DEFAULT_LOREBOOK_CURATOR_PROMPT
- * LorebookCuratorEntryDraft
- * curateLorebook(llm, transcript, existingEntries, promptOverride?)
+ * DEFAULT_WORLD_MEMORY_CURATOR_PROMPT
+ * WorldMemoryCuratorEntryDraft
+ * curateWorldMemory(llm, transcript, existingEntries, promptOverride?)
  *
  * @contract
  *   assertions:
@@ -41,7 +41,7 @@
 
 import type { LlmProvider, ToolDefinition } from '../llm/types.js';
 
-export const DEFAULT_LOREBOOK_CURATOR_PROMPT = `**[SYSTEM: TASK — LOREBOOK CURATOR]**
+export const DEFAULT_WORLD_MEMORY_CURATOR_PROMPT = `**[SYSTEM: TASK — LOREBOOK CURATOR]**
 You are reviewing a session transcript and the current lorebook entries for a character.
 Your job is to suggest targeted updates to existing entries and identify new concepts that warrant a lorebook entry. A lorebook entry should be free of narrative and temporal association. It is the description of a place, thing, or concept that is unique to this world — what it looks like, how it works, its place in the world.
 
@@ -78,7 +78,7 @@ INSTRUCTIONS:
 - Keep entries concise (3–6 sentences). Write in third-person present tense.
 - If no changes are needed, propose no entries at all.`;
 
-const curateLorebookTool: ToolDefinition = {
+const curateWorldMemoryTool: ToolDefinition = {
   name: 'curate_lorebook',
   description:
     "Record this sync window's place/thing/concept lorebook updates, new entries, and duplicate flags, per the curator task above. " +
@@ -126,7 +126,7 @@ const curateLorebookTool: ToolDefinition = {
   },
 };
 
-export interface LorebookCuratorEntryDraft {
+export interface WorldMemoryCuratorEntryDraft {
   action: 'update' | 'new' | 'duplicate';
   name: string;
   category?: 'place' | 'thing' | 'concept';
@@ -134,7 +134,7 @@ export interface LorebookCuratorEntryDraft {
   duplicateOf?: string;
 }
 
-interface LorebookCuratorToolResponse {
+interface WorldMemoryCuratorToolResponse {
   entries: {
     action: 'update' | 'new' | 'duplicate';
     name: string;
@@ -144,7 +144,7 @@ interface LorebookCuratorToolResponse {
   }[];
 }
 
-function isLorebookCuratorResponse(value: unknown): value is LorebookCuratorToolResponse {
+function isWorldMemoryCuratorResponse(value: unknown): value is WorldMemoryCuratorToolResponse {
   if (typeof value !== 'object' || value === null) return false;
   const v = value as Record<string, unknown>;
   if (!Array.isArray(v.entries)) return false;
@@ -157,13 +157,13 @@ function isLorebookCuratorResponse(value: unknown): value is LorebookCuratorTool
   });
 }
 
-export async function curateLorebook(
+export async function curateWorldMemory(
   llm: LlmProvider,
   transcript: string,
   existingEntries: string,
   promptOverride?: string,
-): Promise<LorebookCuratorEntryDraft[]> {
-  const instructions = promptOverride || DEFAULT_LOREBOOK_CURATOR_PROMPT;
+): Promise<WorldMemoryCuratorEntryDraft[]> {
+  const instructions = promptOverride || DEFAULT_WORLD_MEMORY_CURATOR_PROMPT;
 
   const userMessage =
     `CURRENT LOREBOOK ENTRIES:\n${existingEntries || '(none yet)'}\n\n` +
@@ -175,16 +175,16 @@ export async function curateLorebook(
       { role: 'system', content: instructions },
       { role: 'user', content: userMessage },
     ],
-    [curateLorebookTool],
+    [curateWorldMemoryTool],
     { forceTool: 'curate_lorebook' },
   );
 
   const call = turn.toolCalls.find((c) => c.name === 'curate_lorebook');
   if (!call) {
-    throw new Error('curateLorebook: model did not call curate_lorebook despite forceTool');
+    throw new Error('curateWorldMemory: model did not call curate_lorebook despite forceTool');
   }
-  if (!isLorebookCuratorResponse(call.arguments)) {
-    throw new Error(`curateLorebook: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
+  if (!isWorldMemoryCuratorResponse(call.arguments)) {
+    throw new Error(`curateWorldMemory: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
   }
   return call.arguments.entries.map((e) => ({
     action: e.action,

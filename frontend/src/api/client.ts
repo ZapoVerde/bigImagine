@@ -930,7 +930,7 @@ export async function adminSetChatMemorySettings(
     distill_prompt?: string;
     household_memory_prompt?: string;
     bridge_prompt?: string;
-    lorebook_curator_prompt?: string;
+    world_curator_prompt?: string;
     people_curator_prompt?: string;
     auto_recall_enabled?: boolean;
     auto_recall_pairs?: number;

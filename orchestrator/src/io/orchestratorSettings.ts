@@ -70,7 +70,7 @@
  * chat, selected once by chat_sessions.kind. Added to 0010's CHECK constraint by a later migration
  * — see db/migrations/README.md's corresponding entry.
  *
- * chat_memory_lorebook_curator_prompt (io/chatMemory/curateLorebook.ts) and
+ * chat_memory_world_curator_prompt (io/chatMemory/curateWorldMemory.ts) and
  * chat_memory_people_curator_prompt (io/chatMemory/curatePeople.ts) are the 'rp'-kind sync lane's
  * other two periodic curators — place/thing/concept and person respectively — same "default +
  * bespoke" override shape, run every tick alongside chat_memory_bridge_prompt, not in place of it.
@@ -218,7 +218,7 @@ export const SETTING_NAMES = [
   'chat_memory_distill_prompt',
   'chat_memory_household_memory_prompt',
   'chat_memory_bridge_prompt',
-  'chat_memory_lorebook_curator_prompt',
+  'chat_memory_world_curator_prompt',
   'chat_memory_people_curator_prompt',
   'chat_memory_auto_recall_enabled',
   'chat_memory_auto_recall_pairs',

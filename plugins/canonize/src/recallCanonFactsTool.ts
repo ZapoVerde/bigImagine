@@ -24,7 +24,7 @@
  * superseded plot beat would sit in the prompt stack alongside its own replacement.
  * person/place/thing/concept facts have the same shape for the same reason, but a different group
  * key: entity_key (db/migrations/0064_canon_facts_entity_key.sql), populated by the periodic
- * lorebook/people curators (io/chatMemory/curateLorebook.ts, curatePeople.ts) — a continuing
+ * lorebook/people curators (io/chatMemory/curateWorldMemory.ts, curatePeople.ts) — a continuing
  * dictionary entry's every UPDATE is its own row too, most-recent-approved wins. arc_tag and
  * entity_key are deliberately separate columns (one is plot-arc identity, the other is
  * dictionary-entry identity) that happen to want the same dedup shape, so

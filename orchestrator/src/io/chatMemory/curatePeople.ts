@@ -8,10 +8,10 @@
  * SillyTavern-Canonize's own hand-tuned peopleSyncPrompt (stacks/sillytavern/st-data/default-user/
  * settings.json, extension_settings.cnz.activeState.peopleSyncPrompt), same "preserve exact
  * wording" direction as bridgeChatMemory.ts's own port. The sole category this curator ever writes
- * is 'person' — curateLorebook.ts explicitly refuses to touch it, same split CNZ enforces via its
+ * is 'person' — curateWorldMemory.ts explicitly refuses to touch it, same split CNZ enforces via its
  * own two dedicated prompts.
  *
- * Two adaptations from the CNZ source, both intentional and both matching curateLorebook.ts's own:
+ * Two adaptations from the CNZ source, both intentional and both matching curateWorldMemory.ts's own:
  *  - The "Keys:" keyword-list instruction is dropped — docs/spec.md's vector recall replaces
  *    keyword-lorebook matching outright, so there is nothing that would ever read a generated key.
  *  - The raw-markdown "### OUTPUT FORMAT" section is replaced by a forced tool call
@@ -20,7 +20,7 @@
  *    fields (same "flat text block now, structure later if ever needed" precedent
  *    bridgeChatMemory.ts's own SCENE/EVENTS blocks set). CNZ's own `**dup** — duplicate of [Primary
  *    Name]` free-text convention becomes a first-class 'duplicate' action with a duplicate_of
- *    field, same structural swap curateLorebook.ts makes.
+ *    field, same structural swap curateWorldMemory.ts makes.
  *
  * {{user}} is resolved via util/interpolateMacros.ts (the household's persona_name), same live-macro
  * shape bridgeChatMemory.ts already uses — kept literal in the ported prompt text below.

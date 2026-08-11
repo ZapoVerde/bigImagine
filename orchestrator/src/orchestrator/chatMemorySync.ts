@@ -31,14 +31,14 @@
  * (bridgeChatMemory.ts) against the RAW toArchive transcript (never a summary-of-summary), writing
  * an evolving SCENE + EVENTS text block to chat_memory_entries (topic_key 'scene'/'events') and
  * arc-tagged plot developments as 'proposed' canon_facts rows. An 'rp' chat also runs two more
- * periodic curators every tick, over the same raw transcript: curateLorebook.ts (place/thing/
+ * periodic curators every tick, over the same raw transcript: curateWorldMemory.ts (place/thing/
  * concept) and curatePeople.ts (person) — both ported from CNZ the same way the bridge was, both
  * proposing entity_key-tagged canon_facts rows (db/migrations/0064_canon_facts_entity_key.sql).
  * Either branch then writes one new chat_sync_points row plus the chat_chunks rows tied to it. A
  * mid-pipeline failure rolls the whole transaction back, canon-fact promotion included — the
  * previous sync point is untouched, and the next poll tick just retries from there (self-healing,
  * same "advance state, don't double-count" caution agentRoutineDispatch.ts's own doc explains, just
- * via ROLLBACK instead of an explicit ordering trick). Plot/lorebook/people facts proposed this
+ * via ROLLBACK instead of an explicit ordering trick). Plot/world/people facts proposed this
  * tick get no special-cased approval — they settle through the exact same promote_canon_facts step,
  * on the chat's next tick, as every other canon fact.
  *
@@ -62,7 +62,7 @@
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
  * chat_memory_distill_prompt/chat_memory_household_memory_prompt/chat_memory_bridge_prompt/
- * chat_memory_lorebook_curator_prompt/chat_memory_people_curator_prompt) — a Settings-tab change
+ * chat_memory_world_curator_prompt/chat_memory_people_curator_prompt) — a Settings-tab change
  * takes effect on the very next tick, no restart, mirroring server/httpServer.ts's own per-chat
  * profile-override construction (createLlmProviderForProfile + createGatedLlmProvider) for the
  * "which connection" half. persona_name is also read live here, purely to resolve the bridge and
@@ -107,7 +107,7 @@ import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
 import { distillChatMemory, type ChatMemoryEntryDraft } from '../io/chatMemory/distillChatMemory.js';
 import { classifyHouseholdMemory } from '../io/chatMemory/classifyHouseholdMemory.js';
 import { bridgeChatMemory } from '../io/chatMemory/bridgeChatMemory.js';
-import { curateLorebook } from '../io/chatMemory/curateLorebook.js';
+import { curateWorldMemory } from '../io/chatMemory/curateWorldMemory.js';
 import { curatePeople } from '../io/chatMemory/curatePeople.js';
 
 const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation urgency — minutes-scale is fine
@@ -217,7 +217,7 @@ interface SyncSettings {
   distillPrompt: string | undefined;
   householdMemoryPrompt: string | undefined;
   bridgePrompt: string | undefined;
-  lorebookCuratorPrompt: string | undefined;
+  worldCuratorPrompt: string | undefined;
   peopleCuratorPrompt: string | undefined;
   personaName: string | undefined;
   liveWindowMessages: number;
@@ -240,7 +240,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     distillPrompt,
     householdMemoryPrompt,
     bridgePrompt,
-    lorebookCuratorPrompt,
+    worldCuratorPrompt,
     peopleCuratorPrompt,
     personaName,
   ] = await Promise.all([
@@ -252,7 +252,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     deps.settings.get('chat_memory_distill_prompt'),
     deps.settings.get('chat_memory_household_memory_prompt'),
     deps.settings.get('chat_memory_bridge_prompt'),
-    deps.settings.get('chat_memory_lorebook_curator_prompt'),
+    deps.settings.get('chat_memory_world_curator_prompt'),
     deps.settings.get('chat_memory_people_curator_prompt'),
     deps.settings.get('persona_name'),
   ]);
@@ -278,7 +278,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     distillPrompt: distillPrompt || undefined,
     householdMemoryPrompt: householdMemoryPrompt || undefined,
     bridgePrompt: bridgePrompt || undefined,
-    lorebookCuratorPrompt: lorebookCuratorPrompt || undefined,
+    worldCuratorPrompt: worldCuratorPrompt || undefined,
     peopleCuratorPrompt: peopleCuratorPrompt || undefined,
     personaName: personaName || undefined,
     liveWindowMessages: livePairs * 2,
@@ -344,7 +344,7 @@ interface ExistingEntryRow {
 // canon_facts.entity_key for a curator-produced person/place/thing/concept entry — category-
 // prefixed so a person and a thing that happen to share a name (or a curator-hallucinated name
 // collision) never fold into the same dedup group; recallCanonFactsTool.ts's dedup is otherwise
-// purely name-keyed. Not exported: only curateLorebook/curatePeople's inserts below need it.
+// purely name-keyed. Not exported: only curateWorldMemory/curatePeople's inserts below need it.
 function entityKeyFor(category: string, name: string): string {
   const slug = name
     .toLowerCase()
@@ -617,7 +617,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         // Both propose 'proposed' canon_facts rows keyed by entity_key (db/migrations/
         // 0064_canon_facts_entity_key.sql), settling through this function's own promote_canon_facts
         // step next tick, zero special-casing, same as the bridge's plot entries above.
-        const lorebookResult = await step('curate_lorebook', async () => {
+        const worldMemoryResult = await step('curate_world_memory', async () => {
           const existingRows = await session.query<{ category: string; detail: string; summary: string }>(
             `select distinct on (entity_key) category, detail, summary
              from canon_facts
@@ -626,19 +626,19 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             [chatId],
           );
           const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}\n#${r.category}`).join('\n\n');
-          const entries = await curateLorebook(sync.llm, transcriptText, existingBlock, sync.lorebookCuratorPrompt);
+          const entries = await curateWorldMemory(sync.llm, transcriptText, existingBlock, sync.worldCuratorPrompt);
           return { entries, existingRows };
         });
 
-        await step('upsert_lorebook', async () => {
+        await step('upsert_world_memory', async () => {
           // A 'duplicate' action carries no category of its own — it's flagging an *existing* entry
           // (one of existingRows) as redundant, so its category comes from that row, not the model.
-          const categoryByName = new Map(lorebookResult.existingRows.map((r) => [r.detail.trim().toLowerCase(), r.category]));
-          for (const entry of lorebookResult.entries) {
+          const categoryByName = new Map(worldMemoryResult.existingRows.map((r) => [r.detail.trim().toLowerCase(), r.category]));
+          for (const entry of worldMemoryResult.entries) {
             const category = entry.action === 'duplicate' ? categoryByName.get(entry.name.trim().toLowerCase()) : entry.category;
             const content = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
             if (!category || !content) {
-              log.error('chat-memory sync: lorebook curator entry missing category/content, skipping', { chatId, entry });
+              log.error('chat-memory sync: world-memory curator entry missing category/content, skipping', { chatId, entry });
               continue;
             }
             const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
@@ -678,12 +678,12 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           }
         });
 
-        const entriesUpdated = 2 + bridgeResult.plotEntries.length + lorebookResult.entries.length + peopleResult.length;
+        const entriesUpdated = 2 + bridgeResult.plotEntries.length + worldMemoryResult.entries.length + peopleResult.length;
         log.info('chat-memory sync: bridged rp chat', {
           chatId,
           chunksAdded: chunks.length,
           plotEntries: bridgeResult.plotEntries.length,
-          lorebookEntries: lorebookResult.entries.length,
+          worldMemoryEntries: worldMemoryResult.entries.length,
           peopleEntries: peopleResult.length,
         });
         return { status: 'ok', chunksAdded: chunks.length, entriesUpdated };

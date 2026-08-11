@@ -40,7 +40,7 @@ export default function RagView() {
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
   const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
   const [selectedBridgePrompt, setSelectedBridgePrompt] = useState('');
-  const [selectedLorebookCuratorPrompt, setSelectedLorebookCuratorPrompt] = useState('');
+  const [selectedWorldCuratorPrompt, setSelectedWorldCuratorPrompt] = useState('');
   const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
   // RP read-path injection templates (io/chatMemory/memoryInjection.ts, 2026-08-13 component
   // split) — the bridge / plot_threads / auto_recall / recent_history marker wrappers rendered
@@ -77,7 +77,7 @@ export default function RagView() {
     setSelectedDistillPrompt(settings.distillPrompt);
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
     setSelectedBridgePrompt(settings.bridgePrompt);
-    setSelectedLorebookCuratorPrompt(settings.lorebookCuratorPrompt);
+    setSelectedWorldCuratorPrompt(settings.worldCuratorPrompt);
     setSelectedPeopleCuratorPrompt(settings.peopleCuratorPrompt);
     setSelectedInjectBridgePrompt(settings.injectBridgePrompt);
     setSelectedInjectPlotPrompt(settings.injectPlotPrompt);
@@ -138,8 +138,8 @@ export default function RagView() {
       patch.household_memory_prompt = selectedHouseholdMemoryPrompt;
     }
     if (selectedBridgePrompt !== chatMemorySettings.bridgePrompt) patch.bridge_prompt = selectedBridgePrompt;
-    if (selectedLorebookCuratorPrompt !== chatMemorySettings.lorebookCuratorPrompt) {
-      patch.lorebook_curator_prompt = selectedLorebookCuratorPrompt;
+    if (selectedWorldCuratorPrompt !== chatMemorySettings.worldCuratorPrompt) {
+      patch.world_curator_prompt = selectedWorldCuratorPrompt;
     }
     if (selectedPeopleCuratorPrompt !== chatMemorySettings.peopleCuratorPrompt) {
       patch.people_curator_prompt = selectedPeopleCuratorPrompt;
@@ -163,7 +163,7 @@ export default function RagView() {
       | 'distillPrompt'
       | 'householdMemoryPrompt'
       | 'bridgePrompt'
-      | 'lorebookCuratorPrompt'
+      | 'worldCuratorPrompt'
       | 'peopleCuratorPrompt'
       | 'injectBridgePrompt'
       | 'injectPlotPrompt'
@@ -175,7 +175,7 @@ export default function RagView() {
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
     if (field === 'householdMemoryPrompt') setSelectedHouseholdMemoryPrompt('');
     if (field === 'bridgePrompt') setSelectedBridgePrompt('');
-    if (field === 'lorebookCuratorPrompt') setSelectedLorebookCuratorPrompt('');
+    if (field === 'worldCuratorPrompt') setSelectedWorldCuratorPrompt('');
     if (field === 'peopleCuratorPrompt') setSelectedPeopleCuratorPrompt('');
     if (field === 'injectBridgePrompt') setSelectedInjectBridgePrompt('');
     if (field === 'injectPlotPrompt') setSelectedInjectPlotPrompt('');
@@ -384,21 +384,21 @@ export default function RagView() {
         </button>
         <br />
         <label>
-          Lorebook curator prompt (place / thing / concept) {chatMemorySettings?.lorebookCuratorPromptIsDefault && <em>(default)</em>}
+          World memory curator prompt (place / thing / concept) {chatMemorySettings?.worldCuratorPromptIsDefault && <em>(default)</em>}
           <br />
           <textarea
-            value={selectedLorebookCuratorPrompt}
-            onChange={(e) => setSelectedLorebookCuratorPrompt(e.target.value)}
+            value={selectedWorldCuratorPrompt}
+            onChange={(e) => setSelectedWorldCuratorPrompt(e.target.value)}
             rows={20}
           />
         </label>
         <div className="status">
           Runs every sync tick alongside the RP bridge prompt above, for 'rp'-kind chats only: reviews the transcript
           against every existing approved place/thing/concept entry and proposes updates, new entries, and duplicate
-          flags — CNZ's periodic lorebook curator.
+          flags — CNZ's periodic world-memory curator.
         </div>
         <br />
-        <button type="button" onClick={() => resetChatMemoryPrompt('lorebookCuratorPrompt')}>
+        <button type="button" onClick={() => resetChatMemoryPrompt('worldCuratorPrompt')}>
           Reset to default
         </button>
         <br />
