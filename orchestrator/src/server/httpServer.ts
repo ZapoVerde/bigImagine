@@ -412,6 +412,7 @@ const STATIC_CONTENT_TYPES: Record<string, string> = {
   '.json': 'application/json; charset=utf-8',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
+  '.png': 'image/png',
 };
 
 // GET /v1/chats/:id/prompt-preview (buildPromptPreview, below the turn-context assembly this
@@ -3702,6 +3703,26 @@ async function handleRequest(
       return;
     }
     await serveStaticFile(res, `${FRONTEND_DIST_DIR}/assets/${relativePath}`);
+    return;
+  }
+  // PWA installability: web app manifest + its icons (frontend/public/*, copied to dist/ root
+  // verbatim by Vite — unlike /assets/, these keep their source filenames, so each needs its own
+  // route rather than a single prefix match).
+  if (req.method === 'GET' && req.url === '/manifest.json') {
+    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/manifest.json`);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/apple-touch-icon.png') {
+    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/apple-touch-icon.png`);
+    return;
+  }
+  if (req.method === 'GET' && req.url?.startsWith('/icons/')) {
+    const relativePath = decodeURIComponent(req.url.slice('/icons/'.length));
+    if (relativePath.includes('..')) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/icons/${relativePath}`);
     return;
   }
   if (req.method === 'GET' && req.url === '/healthz') {
