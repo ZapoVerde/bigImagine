@@ -188,6 +188,7 @@ assert(extractChubFullPath('botmaster/sabrina-abc') === 'botmaster/sabrina-abc',
   assert(fetchCalls.length === 2, 'import_character_card_from_url fetches the character detail, then the card PNG, both through pia-proxy');
   assert(result.characterId === 'char-chub-1' && result.name === 'Sabrina', 'import_character_card_from_url returns the inserted character');
   assert(result.hasAvatar === true, 'a chub import always has an avatar (the PNG it decoded the card from)');
+  assert(result.lorebookEntriesImported === 0, 'a chub card with no embedded lorebook imports zero lorebook entries');
   assert(inserted.length === 1 && inserted[0][0] === 'user-1', 'the insert is scoped to the calling user');
   assert(JSON.parse(inserted[0][8]).data.name === 'Sabrina', 'the exact card JSON decoded from chub\'s PNG is stored as source_json');
 }

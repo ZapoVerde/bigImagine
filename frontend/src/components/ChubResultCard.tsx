@@ -3,7 +3,11 @@ import type { ChubCharacterSummary } from '../api/types';
 import { formatRelativeDate } from '../lib/formatRelativeDate';
 import ChubAvatarThumb from './ChubAvatarThumb';
 
-export type ImportState = { status: 'idle' } | { status: 'importing' } | { status: 'imported' } | { status: 'error'; message: string };
+export type ImportState =
+  | { status: 'idle' }
+  | { status: 'importing' }
+  | { status: 'imported'; lorebookEntriesImported?: number }
+  | { status: 'error'; message: string };
 
 interface ChubResultCardProps {
   card: ChubCharacterSummary;
@@ -67,7 +71,10 @@ export default function ChubResultCard({ card, apiKey, importState, onImport, on
         }}
       >
         {importState.status === 'importing' && 'Importing…'}
-        {importState.status === 'imported' && 'Imported ✓'}
+        {importState.status === 'imported' &&
+          (importState.lorebookEntriesImported
+            ? `Imported ✓ (${importState.lorebookEntriesImported} lorebook entries)`
+            : 'Imported ✓')}
         {(importState.status === 'idle' || importState.status === 'error') && 'Import'}
       </button>
       {importState.status === 'error' && <div className="browse-chub-card-error">{importState.message}</div>}

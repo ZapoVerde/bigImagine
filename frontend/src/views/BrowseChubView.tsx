@@ -211,8 +211,11 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
   async function importCharacter(fullPath: string) {
     setImportStates((prev) => ({ ...prev, [fullPath]: { status: 'importing' } }));
     try {
-      await callTool<ImportedChubCharacter>('import_character_card_from_url', { url: fullPath }, apiKey);
-      setImportStates((prev) => ({ ...prev, [fullPath]: { status: 'imported' } }));
+      const imported = await callTool<ImportedChubCharacter>('import_character_card_from_url', { url: fullPath }, apiKey);
+      setImportStates((prev) => ({
+        ...prev,
+        [fullPath]: { status: 'imported', lorebookEntriesImported: imported.lorebookEntriesImported },
+      }));
     } catch (err) {
       setImportStates((prev) => ({
         ...prev,
@@ -298,7 +301,15 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         onRecencyBucketChange={(recencyBucket) => setFilters((f) => ({ ...f, recencyBucket }))}
       />
 
-      {openCard && <ChubCardModal card={openCard} apiKey={apiKey} onClose={() => setOpenCard(null)} />}
+      {openCard && (
+        <ChubCardModal
+          card={openCard}
+          apiKey={apiKey}
+          importState={importStates[openCard.fullPath] ?? { status: 'idle' }}
+          onImport={() => void importCharacter(openCard.fullPath)}
+          onClose={() => setOpenCard(null)}
+        />
+      )}
     </div>
   );
 }

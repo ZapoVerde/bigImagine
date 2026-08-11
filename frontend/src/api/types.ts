@@ -935,6 +935,8 @@ export interface ImportedCharacter {
   name: string;
   specVersion: 'v2' | 'v3';
   hasAvatar: boolean;
+  /** Number of lorebook entries imported from the card's embedded `character_book` (0 when none). */
+  lorebookEntriesImported: number;
 }
 
 // plugins/characters/src/searchChubCharactersTool.ts

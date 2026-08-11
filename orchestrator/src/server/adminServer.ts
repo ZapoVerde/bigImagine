@@ -148,6 +148,7 @@ import {
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
+import type { LorebookEntryDraft } from '../util/parseCharacterBookEntries.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
 import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../orchestrator/describeLocation.js';
 import { DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../util/renderLocationBlock.js';
@@ -1936,33 +1937,14 @@ export async function deleteLorebookEntryAdmin(db: PostgresClient, userId: strin
 // (whose source_json is '{}') reconstruct an ST-shaped object from the modeled columns so the
 // export is still a valid ST import.
 
-interface WorldInfoImportEntry {
-  uid: number;
-  key: string[];
-  keysecondary: string[];
-  comment: string;
-  content: string;
-  constant: boolean;
-  selective: boolean;
-  disable: boolean;
-  orderValue: number;
-  position: number;
-  probability: number;
-  depth: number | null;
-  groupName: string;
-  useProbability: boolean;
-  groupWeight: number;
-  groupOverride: boolean;
-  sticky: number;
-  cooldown: number;
-  delay: number;
-  sourceJson: unknown;
-}
+// The draft shape is shared with the chub character_book parser
+// (util/parseCharacterBookEntries.ts) — both produce lorebook_entries column values, from
+// differently-sourced input.
 
 /** Parses one ST entryObject into the column values. Unknown fields are deliberately ignored —
  *  they live on in source_json. Non-numeric/invalid fields fall back to the column defaults so a
  *  hand-edited export can't poison the row. */
-function parseWorldInfoEntry(raw: unknown): WorldInfoImportEntry | undefined {
+function parseWorldInfoEntry(raw: unknown): LorebookEntryDraft | undefined {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return undefined;
   const e = raw as Record<string, unknown>;
   const str = (v: unknown, fallback: string) => (typeof v === 'string' ? v : fallback);
@@ -2014,7 +1996,7 @@ export async function importLorebookWorldInfo(
   if (!trimmed) return undefined;
   if (typeof rawEntries !== 'object' || rawEntries === null || Array.isArray(rawEntries)) return undefined;
 
-  const entries: { uid: number; parsed: WorldInfoImportEntry }[] = [];
+  const entries: { uid: number; parsed: LorebookEntryDraft }[] = [];
   for (const [key, value] of Object.entries(rawEntries as Record<string, unknown>)) {
     const uid = Number(key);
     if (!Number.isInteger(uid) || uid < 0) return undefined;

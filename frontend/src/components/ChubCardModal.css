@@ -182,6 +182,33 @@
   border-top: 1px solid var(--color-border-subtle);
 }
 
+/* Same secondary-action Import button as the grid cell (ChubResultCard.tsx) — the modal and the
+   grid read as the same action, not two different features. */
+.chub-card-modal-import {
+  padding: 0.45rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.chub-card-modal-import:hover:not(:disabled) {
+  background: var(--color-secondary-hover);
+}
+
+.chub-card-modal-import:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.chub-card-modal-import-error {
+  color: var(--color-danger);
+  font-size: var(--font-size-xs);
+}
+
 .chub-card-modal-download {
   padding: 0.45rem 1rem;
   border-radius: var(--radius-sm);

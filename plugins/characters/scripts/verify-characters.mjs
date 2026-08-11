@@ -474,6 +474,63 @@ const importedJson = await db.withUserScope(userId, (session) =>
   ),
 );
 assert(importedJson.hasAvatar === false, 'importing a raw JSON card (no PNG bytes) has no avatar');
+assert(importedJson.lorebookEntriesImported === 0, 'a card with no character_book imports zero lorebook entries');
+assert(pool.lorebooks.length === 0 && pool.lorebookLinks.length === 0, 'a card with no character_book writes no lorebook rows at all');
+
+// --- import_character_card: embedded lorebook (§A of chub-lorebook-import-plan.md) ---
+const lorebookCardJson = JSON.stringify({
+  spec: 'chara_card_v2',
+  spec_version: '2.0',
+  data: {
+    name: 'Hollow',
+    description: 'A knight of the ash.',
+    character_book: {
+      name: "Hollow's Oath",
+      description: 'The oath and its broken pieces.',
+      scan_depth: 3,
+      token_budget: 1024,
+      recursive_scanning: true,
+      entries: [
+        {
+          id: 7,
+          keys: ['oath', 'ash'],
+          secondary_keys: ['vow'],
+          comment: 'The oath',
+          content: 'An oath sworn in ash.',
+          constant: false,
+          selective: true,
+          enabled: true,
+          insertion_order: 5,
+          position: 'before_char',
+          case_sensitive: true,
+        },
+        { keys: ['Hollow'], content: 'A silent knight.', enabled: false, position: 'after_char' },
+      ],
+    },
+  },
+});
+const importedBook = await db.withUserScope(userId, (session) =>
+  importTool.handler(
+    { filename: 'hollow.json', fileBase64: Buffer.from(lorebookCardJson).toString('base64') },
+    { userId, db: session },
+  ),
+);
+assert(importedBook.lorebookEntriesImported === 2, 'a card with a character_book reports its imported entry count');
+assert(pool.lorebooks.length === 1, 'the embedded book becomes exactly one lorebooks row');
+assert(pool.lorebooks[0].name === "Hollow's Oath" && pool.lorebooks[0].global_scope === false, 'the book takes character_book.name and is character-scoped, not global');
+const entryParams = pool.lorebookEntries.flatMap((e) => e.params);
+assert(pool.lorebookEntries.length === 1 && entryParams.length === 44, 'both drafts land in one bulk insert (22 columns × 2 entries)');
+assert(entryParams[2] === 7 && entryParams[24] === 0, 'entry ids map to uid; missing ids synthesize sequentially (0 here)');
+assert(entryParams[3].join() === 'oath,ash' && entryParams[25].join() === 'Hollow', 'keys map to the key column');
+assert(entryParams[5] === 'The oath' && entryParams[27] === '', 'comment maps through (blank comment for the entry without one)');
+assert(entryParams[9] === false && entryParams[31] === true, '!enabled → disable (first entry enabled, second disabled)');
+assert(entryParams[10] === 5 && entryParams[32] === 100, 'insertion_order maps to order_value; default 100 when absent');
+assert(entryParams[11] === 0 && entryParams[33] === 1, "position maps 'before_char'→0 and 'after_char'→1");
+const firstEntrySource = JSON.parse(entryParams[21]);
+assert(firstEntrySource.case_sensitive === true, 'the verbatim entry (incl. case_sensitive) survives in source_json');
+assert(firstEntrySource.scan_depth === undefined && firstEntrySource.token_budget === undefined, 'book-level settings are not folded into entry source_json (they stay book-level, source_json-only)');
+assert(pool.lorebookLinks.length === 1, 'the new book is linked to the new character');
+assert(pool.lorebookLinks[0].character_id === importedBook.characterId, 'the character link points at the just-inserted character');
 
 let importThrew = false;
 try {

@@ -3,11 +3,15 @@ import { ApiError, fetchChubCardDetail, fetchChubCardPng } from '../api/client';
 import type { ChubCardDetail, ChubCharacterSummary } from '../api/types';
 import { formatRelativeDate } from '../lib/formatRelativeDate';
 import ChubAvatarThumb from './ChubAvatarThumb';
+import type { ImportState } from './ChubResultCard';
 import './ChubCardModal.css';
 
 interface ChubCardModalProps {
   card: ChubCharacterSummary;
   apiKey: string | null;
+  /** Same per-card ImportState machine the grid cell uses — no second copy to keep in sync. */
+  importState: ImportState;
+  onImport: () => void;
   onClose: () => void;
 }
 
@@ -59,10 +63,11 @@ function FieldBox({ label, text }: { label: string; text: string }) {
 
 // The embiggened chub card: clicking a Browse Chub grid cell opens this overlay, which lazily
 // fetches the full detail (description + bespoke definition) through /v1/characters/chub-detail
-// and renders it as labeled text boxes, with a Download button for the card PNG itself (fetched
-// through the same allowlisted chub-avatar proxy). Header/stats render instantly from the grid
-// card; only the body waits on the detail fetch.
-export default function ChubCardModal({ card, apiKey, onClose }: ChubCardModalProps) {
+// and renders it as labeled text boxes, with an Import button (same per-card ImportState machine
+// as the grid cell — threading the same props, not a second state) and a Download button for the
+// card PNG itself (fetched through the same allowlisted chub-avatar proxy). Header/stats render
+// instantly from the grid card; only the body waits on the detail fetch.
+export default function ChubCardModal({ card, apiKey, importState, onImport, onClose }: ChubCardModalProps) {
   const [detail, setDetail] = useState<ChubCardDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'error'>('idle');
@@ -257,6 +262,20 @@ export default function ChubCardModal({ card, apiKey, onClose }: ChubCardModalPr
         </div>
 
         <footer className="chub-card-modal-footer">
+          <button
+            type="button"
+            className="chub-card-modal-import"
+            disabled={importState.status === 'importing' || importState.status === 'imported'}
+            onClick={onImport}
+          >
+            {importState.status === 'importing' && 'Importing…'}
+            {importState.status === 'imported' &&
+              (importState.lorebookEntriesImported
+                ? `Imported ✓ (${importState.lorebookEntriesImported} lorebook entries)`
+                : 'Imported ✓')}
+            {(importState.status === 'idle' || importState.status === 'error') && 'Import'}
+          </button>
+          {importState.status === 'error' && <span className="chub-card-modal-import-error">{importState.message}</span>}
           <button
             type="button"
             className="chub-card-modal-download"
