@@ -9,7 +9,7 @@
  * same shape as get_notes — persona/scenario/etc are the static creation fields and aren't needed
  * to pick an id.
  *
- * Applies docs/vistalyze_integration/segway.md §2.6's eligibility filter — same clause as
+ * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter — same clause as
  * get_scenes (plugins/scenes/src/getScenesTool.ts): an inactive character (a demoted alternate
  * timeline) must never be model-visible, or the model could hand its id straight back into
  * add_character_to_scene and undo the sync tick's exclusion. Transient rows surface only when

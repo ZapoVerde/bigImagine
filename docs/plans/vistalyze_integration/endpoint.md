@@ -1,6 +1,8 @@
 # Technical Specification: Vistalyze Image Generation Subsystem (Stateless CDN Architecture)
 
-**Status**: Designed  
+**Status**: Built, verified 2026-08-11 — cited by section throughout `generateLocationImage.ts`,
+`synthesizeImagePrompt.ts`, `imageConnections.ts`, `adminServer.ts`, `ImageConnectionEditor.tsx`,
+and `generateLocationImageTool.ts`.  
 **Scope**: Admin-Managed Image Connections, Stateless Prompt Synthesis, Cache-First Background Generation, Remote CDN Image URL Storage, and Provider Adapters.  
 **Governing Principles**: Project Principles §1 (Relational Store is Canonical), §6 (Replaceable Reasoning & IO Layer), §8 (Four Kinds of Code), §12 (Secrets Write-Only/Encrypted), §13 (Runtime Config in DB), §18 (Surfaced Prompts in Settings).
 

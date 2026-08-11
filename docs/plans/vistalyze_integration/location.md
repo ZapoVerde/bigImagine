@@ -1,6 +1,8 @@
 # Integrated Specification: The Location Tracker (v2)
 
-**Status**: Designed (v2 — restructured around the cleanup-coupled pipeline)
+**Status**: Built, verified 2026-08-11 (v2 — restructured around the cleanup-coupled pipeline) —
+cited by section throughout `renderLocationBlock.ts`, `httpServer.ts`, `adminServer.ts`, and
+`LocationsView.tsx` (migration 0083).
 **Scope**: Four coupled additions to BigImagine's location handling, modeled on Triggeryze's
 Location Tracker ruleset (`stacks/sillytavern/st-extensions/SillyTavern-Triggeryze/docs/examples/location-tracker.json`):
 

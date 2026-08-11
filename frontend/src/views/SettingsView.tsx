@@ -95,7 +95,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedPiaProxyUrl, setSelectedPiaProxyUrl] = useState('');
   const [piaProxyUrlStatus, setPiaProxyUrlStatus] = useState('');
 
-  // The household's own name/description (docs/prompt-macros.md's Stage 1) — folded into a chat's
+  // The household's own name/description (docs/plans/prompt-macros.md's Stage 1) — folded into a chat's
   // prompt stack when a preset enables the 'persona' marker slot, same no-restart shape as timezone.
   const [personaName, setPersonaName] = useState('');
   const [selectedPersonaName, setSelectedPersonaName] = useState('');

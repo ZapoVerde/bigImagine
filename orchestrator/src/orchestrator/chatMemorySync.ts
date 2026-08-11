@@ -20,7 +20,7 @@
  * One sync pass, per chat, does everything in a single withUserScope transaction: promote that
  * chat's 'proposed' canon_facts to 'approved' (the settling-window auto-approve — see
  * plugins/canonize/src/proposeCanonFactTool.ts), settle the transient locations/characters the
- * post-cleanup scraper anchored to the archived messages (docs/vistalyze_integration/segway.md
+ * post-cleanup scraper anchored to the archived messages (docs/plans/vistalyze_integration/segway.md
  * §2.5: active-swipe rows promote to 'permanent', alternate-swipe rows demote to 'inactive'),
  * chunk the newly-archived messages
  * (chunkChatTranscript.ts), summarize+embed each chunk (classifyChatChunk.ts + the embeddings
@@ -442,7 +442,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         content: m.content,
       }));
 
-      // docs/vistalyze_integration/segway.md §2.5 (location_status.md §3 Steps 1-2, generalized to
+      // docs/plans/vistalyze_integration/segway.md §2.5 (location_status.md §3 Steps 1-2, generalized to
       // characters): the transient location/character rows the post-cleanup scraper anchored to
       // the messages leaving the live window settle here, in the same tick that already
       // auto-approves canon facts. Continuing play on a swipe is the user's explicit signal that

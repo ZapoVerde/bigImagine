@@ -9,7 +9,7 @@
  * for lossless export per bi_principles.md §7) is never returned verbatim here — it can be large
  * and the editor has no use for it — only whether one is present.
  *
- * Applies docs/vistalyze_integration/segway.md §2.6's eligibility filter, same as get_characters:
+ * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter, same as get_characters:
  * a lookup of an ineligible row (inactive, or transient not provably on the calling chat's active
  * swipe path) reports not-found, so the model can't pull detail on a demoted alternate timeline.
  * The Roster only ever passes ids that the filtered get_characters list returned, so its editor

@@ -3,7 +3,7 @@
  * @stamp 2026-08-07
  * @architectural-role Pure Function — Stage 1 inline `{{...}}` macro substitution
  * @description
- * docs/prompt-macros.md's Stage 1: `{{char}}`, `{{user}}`, `{{persona}}`, `{{description}}`,
+ * docs/plans/prompt-macros.md's Stage 1: `{{char}}`, `{{user}}`, `{{persona}}`, `{{description}}`,
  * `{{scenario}}`, `{{trim}}`, `{{reverse}}`, `{{newline}}`, `{{noop}}` — the deterministic core of
  * SillyTavern's macro system, deliberately not the whole thing (no nesting, no scoped blocks/
  * `{{if}}`, no CST parser — `stacks/sillytavern/st-source/public/scripts/macros/` is the reference
@@ -13,12 +13,12 @@
  * prompt today passes through unchanged rather than silently vanishing — only tokens this file
  * actually knows about get substituted.
  *
- * `MacroSnapshot` is named to match docs/prompt-macros.md §2's "turn-scoped snapshot" vocabulary
+ * `MacroSnapshot` is named to match docs/plans/prompt-macros.md §2's "turn-scoped snapshot" vocabulary
  * on purpose, even though at Stage 1 it's trivial (no clock/RNG/variables read yet) — Stage 2 adds
  * time/random fields to this same shape, Stage 3 adds a variables read, and neither changes this
  * function's signature or its one caller (server/httpServer.ts, resolved fresh every turn).
  *
- * `message` (docs/turn-loop-plan.md §4.1) is the one field so far that isn't a per-turn constant
+ * `message` (docs/plans/turn-loop-plan.md §4.1) is the one field so far that isn't a per-turn constant
  * like the others — it's the raw just-generated turn text, only ever set when resolving a cleanup
  * preset's slots (the caller building the narrator prompt never has a message yet). Added exactly
  * the way this file's own doc comment above anticipated: a new optional field plus a new switch

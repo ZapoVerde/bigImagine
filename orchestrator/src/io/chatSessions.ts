@@ -81,7 +81,7 @@
  *     this file's preamble already documents for chat_memory_entries; only the active content
  *     comes along (each copied assistant message does get its own canonical swipe row, mirroring
  *     the parent's active swipe, so the branch's transient location/character records can be
- *     resurrected against it — docs/vistalyze_integration/segway.md §2.7).
+ *     resurrected against it — docs/plans/vistalyze_integration/segway.md §2.7).
  *   .getChatSyncStatus(userId, chatId, dueAfterMessages) — this chat's slice of the rolling
  *     sync loop's status record (chat_memory_sync_status, bi_principles.md §11): last
  *     attempt/status/error, last success, chunks/entries added, canon counts, and
@@ -146,7 +146,7 @@ export interface ChatSessionRow {
    *  the settings panel can show the current selection on reload. Null until first applied. */
   promptStackPresetId: string | null;
   /** Which context_stack_presets row (if any) server/httpServer.ts's post-runTurn cleanup pass
-   *  runs for this chat (docs/turn-loop-plan.md §4, migration 0057) — resolved via {{message}}
+   *  runs for this chat (docs/plans/turn-loop-plan.md §4, migration 0057) — resolved via {{message}}
    *  (util/interpolateMacros.ts), not the narrator's own field set. Null (the default) means
    *  cleanup is off; nothing sets this yet (no dedicated tool/UI in this pass — settable today
    *  only via updateChat's patch, same as any other session field).
@@ -161,7 +161,7 @@ export interface ChatSessionRow {
    *  Null = cleanup off. Set by CharactersView's startRp for every new RP chat, and by the
    *  ChatView Chat Settings toggle. */
   cleanupEnabledAt: string | null;
-  /** Cache pointer to the chat's current scene (db/migrations/0067, docs/vistalyze_integration/
+  /** Cache pointer to the chat's current scene (db/migrations/0067, docs/plans/vistalyze_integration/
    *  segway.md §2.2) — kept stamped by the post-cleanup scraper (orchestrator/
    *  locationAndPresenceScraper.ts). A *cache*, not the source of truth: the real scene identity
    *  is the (chat_id, active_location_id) pair on scenes itself. Null until the first turn whose
@@ -183,7 +183,7 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
-  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1), attached by
+  /** Display-only macro-resolved copy of `content` (docs/plans/prompt-macros.md's Stage 1), attached by
    *  server/httpServer.ts's GET /v1/chats/:id (and the swipe routes) for 'rp' chats whose stored
    *  text contains `{{...}}` tokens — chiefly a character's seeded greeting, which
    *  apply_character_to_chat/apply_prompt_stack_to_chat insert verbatim. The canonical `content`
@@ -408,7 +408,7 @@ export interface ChatSessionStore {
   cycleSwipe(userId: string, chatId: string, messageId: string, direction: 'prev' | 'next'): Promise<CycleSwipeResult>;
   /** Returns the message's active swipe id, creating the message's own swipe row (containing its
    *  current content) and making it active when the message has none yet — the invariant the
-   *  post-cleanup scraper (docs/vistalyze_integration/segway.md §4) anchors its transient
+   *  post-cleanup scraper (docs/plans/vistalyze_integration/segway.md §4) anchors its transient
    *  location/character rows to: every persisted assistant message it processes must have an
    *  attributable active swipe for the sync tick to promote/demote against (§2.5). recordSwipe's
    *  regenerations always have one already, so this is a no-op there. Undefined when messageId
@@ -1189,7 +1189,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           );
         }
 
-        // docs/vistalyze_integration/segway.md §2.7 / location_status.md §3 Step 3: resurrect the
+        // docs/plans/vistalyze_integration/segway.md §2.7 / location_status.md §3 Step 3: resurrect the
         // fork's transient-or-inactive locations/characters into the new branch. Locations: every
         // row anchored to a *copied* active swipe comes along (the fork's own swipe plus every
         // earlier turn's — that's what makes "all the bgs up until the fork transfer over, the
@@ -1230,7 +1230,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           // PK — the parent's rows can't be reused).
           const branchLocationIdMap = new Map<string, string>();
           for (const loc of resurrectionLocations) {
-            // docs/vistalyze_integration/endpoint.md §6.2: carry seed/image_url/image_generated_at
+            // docs/plans/vistalyze_integration/endpoint.md §6.2: carry seed/image_url/image_generated_at
             // forward too — without them every fork forces a fresh render for a resurrected
             // location even when nothing about it visually changed, silently defeating §1.3's
             // cache-first commitment on the one path that most needs it (forking is exactly when

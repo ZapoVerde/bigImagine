@@ -14,7 +14,7 @@ import type { ImageConnectionSummary, ImageConnectionTestResult } from '../../ap
 // (a local comfyui endpoint) on create. Every other kind — including pollinations, which has
 // not been keyless since 2025 (io/imageGen/pollinations.ts throws without a key) — shows the
 // field. New connections default to fal.ai's Z-Image-Turbo
-// (docs/vistalyze_integration/endpoint.md §2.1) — the 8-step turbo model the upstream VLZ
+// (docs/plans/vistalyze_integration/endpoint.md §2.1) — the 8-step turbo model the upstream VLZ
 // extension uses for its falai source/previews.
 interface Draft {
   name: string;
@@ -97,7 +97,7 @@ function parseWorkflowParameters(raw: string): Record<string, unknown> | undefin
 }
 
 // The image-generation half of the Connections tab's unified master-detail pane
-// (docs/vistalyze_integration/endpoint.md §3) — editor CRUD for admin-managed image backends
+// (docs/plans/vistalyze_integration/endpoint.md §3) — editor CRUD for admin-managed image backends
 // (runware/fal-ai/pollinations/comfyui/openai-images). Owns its draft + save/test/activate/delete;
 // the parent ConnectionsView owns the combined list, the text/image toggle, and both per-type
 // selections. apiKey stays write-only (hasApiKey is reported, never the value); activation is a

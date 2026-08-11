@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — DB-backed, admin-managed image generation connection registry
  * @description
  * Backs the Vistalyze image-generation subsystem's Connections Tab section
- * (docs/vistalyze_integration/endpoint.md §3, db/migrations/0068_image_connections.sql). The
+ * (docs/plans/vistalyze_integration/endpoint.md §3, db/migrations/0068_image_connections.sql). The
  * image-generation counterpart to io/llmConnections.ts: real admin-managed rows — created,
  * renamed, deleted from the Connections tab, never a static env map — for image backends
  * (runware/fal-ai/pollinations/comfyui/openai-images), consumed per-generation by

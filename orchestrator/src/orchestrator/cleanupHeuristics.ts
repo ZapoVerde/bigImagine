@@ -3,7 +3,7 @@
  * @stamp 2026-08-07
  * @architectural-role Pure Function — the async cleanup subloop's decision engine (migration 0072)
  * @description
- * The monolithic cleanup LLM preset (docs/vistalyze_integration/cleanup_prompt.md, migrations
+ * The monolithic cleanup LLM preset (docs/plans/vistalyze_integration/cleanup_prompt.md, migrations
  * 0057/0066/0070/0071) is retired (plan v2): cleanup now runs as a background subloop
  * (orchestrator/cleanupLoop.ts, Phase 3) that cleans a reply AFTER it lands. This module is the
  * subloop's pure core — regex triggers decide what needs doing, and the CleanupPlan it produces

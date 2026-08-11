@@ -110,7 +110,7 @@
  * ntfy_server_url: a plain internal container URL (http://pia-proxy:8080), not a secret, read live
  * on every call rather than baked in at boot.
  *
- * persona_name/persona_description (migration 0053, docs/prompt-macros.md's Stage 1) are the
+ * persona_name/persona_description (migration 0053, docs/plans/prompt-macros.md's Stage 1) are the
  * household's own name and self-description — BigImagine's analogue of SillyTavern's user
  * persona. Deliberately the simplified single-persona shape the ST port settled on: no positions,
  * no multiple saved personas, just a name and a description read live by
@@ -119,7 +119,7 @@
  * screen_lock_password.
  *
  * llm_gate_max_concurrent/llm_gate_max_concurrent_agent_routine/llm_gate_max_retries/
- * llm_gate_retry_base_ms/llm_gate_retry_max_ms (migration 0056, docs/llm-gate-plan.md) tune the
+ * llm_gate_retry_base_ms/llm_gate_retry_max_ms (migration 0056, docs/plans/llm-gate-plan.md) tune the
  * gate's retry/queueing behavior (io/llm/llmGate.ts, llmQueue.ts, llmBackoff.ts) — read live on
  * every complete() call, same no-restart shape as everything else in this file. The two
  * max_concurrent keys are separate per-lane caps (interactive chat/system calls vs. background
@@ -128,7 +128,7 @@
  * built-in default" (llmGate.ts's own DEFAULT_* constants), not "unlimited"/"no retry" — same
  * fallback shape as the agent_routine caps above.
  *
- * chat_background_parallax (docs/vistalyze_integration/parallax_fade_teststep.md §2.2, migration
+ * chat_background_parallax (docs/plans/vistalyze_integration/parallax_fade_teststep.md §2.2, migration
  * 0069) is the toggle for the ChatView location-background's parallax pan (frontend module
  * components/chat/backgroundParallax.ts): stored as text 'true'/'false', default false when
  * unset — matching SillyTavern-Vistalyze's own parallaxEnabled=false default. Read live by the
@@ -174,7 +174,7 @@
  * cleanup-settings endpoint, read live by the subloop, no restart.
  *
  * location_describer_prompt/location_describer_history_pairs (migration 0078,
- * docs/vistalyze_integration/describer.md) are the room-description LLM pass's two keys — the
+ * docs/plans/vistalyze_integration/describer.md) are the room-description LLM pass's two keys — the
  * pass that turns a freshly-minted location's name-seeded visual_description into a real room
  * description (BigImagine's analogue of SillyTavern-Vistalyze's Step 3 Describer), fired in the
  * same decoupled chain as the image render and awaited before it. describer_prompt is the full

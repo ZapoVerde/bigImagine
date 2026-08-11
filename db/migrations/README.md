@@ -200,7 +200,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   secret, just a plain internal container URL, read live on every call.
 - `0053_persona_settings.sql` — widens `orchestrator_settings.key` with `persona_name` and
   `persona_description`: the household's own name and self-description, BigImagine's analogue of
-  SillyTavern's user persona (`{{user}}`/`{{persona}}`). Stage 1 of `docs/prompt-macros.md`'s
+  SillyTavern's user persona (`{{user}}`/`{{persona}}`). Stage 1 of `docs/plans/prompt-macros.md`'s
   staged macro-port plan — deliberately the simplified single-persona shape (a name, a description,
   and reuse of the existing marker-slot `enabled` toggle to push it into the prompt stack) rather
   than ST's full multi-persona/position system. Consumed by
@@ -220,7 +220,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `GET /v1/admin/chat-memory-sync-status`) — confirmation that each pipeline stage is actually
   working, per `bi_principles.md` §11, not an editing surface (canon-fact approve/reject stays on
   `CanonQueueView`, untouched by this migration).
-- `0056_llm_gate_retry.sql` — widens `llm_calls` with `request_id`/`attempt` (docs/llm-gate-plan.md,
+- `0056_llm_gate_retry.sql` — widens `llm_calls` with `request_id`/`attempt` (docs/plans/llm-gate-plan.md,
   `io/llm/llmGate.ts`'s new internal retry/queueing: a retryable failure — 429/5xx, or a bare
   thrown transport error — is retried with bounded exponential backoff, admitted through a
   per-lane concurrency slot, invisible to every caller). Every attempt of one logical `complete()`
@@ -234,7 +234,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `'refused'` row (a preflight rejection that never reached the provider at all).
 - `0057_cleanup_preset.sql` — adds `chat_sessions.cleanup_preset_id`, `on delete set null` (same
   shape as `prompt_stack_preset_id`'s own addition in `0049`). The turn loop's optional step 5
-  cleanup pass (docs/turn-loop-plan.md §4): a second LLM call that post-processes a turn's raw
+  cleanup pass (docs/plans/turn-loop-plan.md §4): a second LLM call that post-processes a turn's raw
   reply before persistence — banned constructions/names/words, header reconstruction,
   internal-thoughts-suffix fixups, the same job the user's real-world Triggeryze `sideCall` does
   today. Per the user's explicit direction this is exposed as its own `context_stack_presets` row
@@ -311,7 +311,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   keyword-lorebook matching entirely, so there's nothing that would ever read a generated key.
 - `0066_cleanup_preset_seed.sql` — seeds the builtin **"Cleanup Pass"** context_stack_presets row
   (`is_builtin = true`, system user) plus its one custom-system slot carrying the actual cleanup
-  prompt text (docs/vistalyze_integration/cleanup_prompt.md §2.3): the banned-construction/AI-cliché
+  prompt text (docs/plans/vistalyze_integration/cleanup_prompt.md §2.3): the banned-construction/AI-cliché
   slop list, the location/date/time header-reconstruction rule, and the `<details>` inner-thoughts
   formatting rule, with `{{message}}` embedded where the raw turn goes. The builtin is the
   read-only default on the Prompt Stacks page; per bi_principles.md §18 the user duplicates it to
@@ -319,7 +319,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Companion to 0057's `chat_sessions.cleanup_preset_id` column; null (unset) chat references keep
   cleanup off. Guarded on the preset name so re-runs can't double-seed after a duplicate.
 
-- `0067_transient_location_and_people.sql` — the schema half of docs/vistalyze_integration/segway.md
+- `0067_transient_location_and_people.sql` — the schema half of docs/plans/vistalyze_integration/segway.md
   (transient → permanent/inactive lifecycle for `locations` and `characters`, plus the scene
   identity everything depends on). `scenes.chat_id` (`on delete cascade`) with a unique
   `(chat_id, active_location_id)` index makes a scene a per-chat visit record keyed by location
@@ -333,7 +333,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   'permanent'` — a user manually creating a location is the explicit canon signal
   (bi_principles.md §3) — and the migration backfills pre-existing unanchored rows the same way.
 
-- `0068_image_connections.sql` — the schema half of docs/vistalyze_integration/endpoint.md (the
+- `0068_image_connections.sql` — the schema half of docs/plans/vistalyze_integration/endpoint.md (the
   Vistalyze image-generation subsystem). A new `image_connections` table mirrors
   `llm_connections` (0062): household-wide, no RLS, admin-managed rows for image backends
   (runware/fal-ai/pollinations/comfyui/openai-images) with `api_key_ciphertext` (nullable —
@@ -354,7 +354,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `orchestrator_settings.key`'s CHECK with `image_prompt_template` (the master prompt template
   synthesizeImagePrompt.ts expands, `''` = built-in default per bi_principles.md §18).
 - `0069_chat_background_settings.sql` — widens `orchestrator_settings.key`'s CHECK with
-  `chat_background_parallax` (docs/vistalyze_integration/parallax_fade_teststep.md §2.2): the
+  `chat_background_parallax` (docs/plans/vistalyze_integration/parallax_fade_teststep.md §2.2): the
   toggle for the ChatView location-background's parallax pan, read live by the frontend via
   `GET /v1/chat-background-settings` (same no-restart shape as `household_timezone`), written by
   the admin-gated SettingsView toggle. Stored as text `'true'`/`'false'`, default false when
@@ -414,7 +414,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   constants (same fail-open shape as every numeric setting). The key list is the *complete*
   current vocabulary (all of 0010–0076), not the diff — the CHECK is rebuilt wholesale, so a
   fresh volume must land on the same constraint the live DB has. Idempotent hand-apply one-shot.
-- `0078_location_describer.sql` — the room-description pass (docs/vistalyze_integration/describer.md,
+- `0078_location_describer.sql` — the room-description pass (docs/plans/vistalyze_integration/describer.md,
   VLZ's Step 3 Describer ported into BigImagine's bg pipeline): adds `locations.definition`
   (nullable — the describer's "Definition:" output, the logical half; the "Visuals:" half lands in
   the existing `visual_description`), plus two orchestrator_settings keys:
@@ -463,7 +463,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   let it execute the comfy 2 stack, with no funny business"). Normalizes existing rp chats'
   `tool_names` to `'{}'` (new ones already default via `DEFAULT_RP_TOOLS`), so the RP turn never
   creates characters/locations on its own.
-- `0083_location_tracking.sql` — the Location Tracker (docs/vistalyze_integration/location.md), the
+- `0083_location_tracking.sql` — the Location Tracker (docs/plans/vistalyze_integration/location.md), the
   parent/sub "places ↔ locations" model + tracker settings keys, modeled on Triggeryze's
   location-tracker pattern. Adds `locations.parent_location_id` (self-FK, `on delete set null`):
   a "place" ("The Tavern") is a parent row, a "location" ("The Tavern - Kitchen") is a sub row;

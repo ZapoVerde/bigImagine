@@ -815,7 +815,7 @@ export async function adminSetPiaProxyUrl(url: string, adminKey: string | null):
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
-/** persona_name/persona_description (docs/prompt-macros.md's Stage 1) — the household's own name
+/** persona_name/persona_description (docs/plans/prompt-macros.md's Stage 1) — the household's own name
  *  and self-description, folded into a chat's prompt stack when a preset enables the 'persona'
  *  marker slot. Same no-restart, admin-authed shape as pia_proxy_url. */
 export async function adminGetPersonaSettings(adminKey: string | null): Promise<PersonaSettings> {

@@ -3,7 +3,7 @@
  * @stamp 2026-08-06
  * @architectural-role Pure Function — exponential backoff-with-jitter math
  * @description
- * docs/llm-gate-plan.md §4.2: bounded exponential backoff between retry attempts, base ×2 per
+ * docs/plans/llm-gate-plan.md §4.2: bounded exponential backoff between retry attempts, base ×2 per
  * attempt, capped, ±20% jitter so a burst of queued calls retrying after a provider-wide blip
  * doesn't retry in lockstep. Split out from llmGate.ts (which owns the impure sleep/retry loop)
  * purely so the arithmetic is independently testable.

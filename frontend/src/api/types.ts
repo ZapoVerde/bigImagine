@@ -678,7 +678,7 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
-  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1) — attached
+  /** Display-only macro-resolved copy of `content` (docs/plans/prompt-macros.md's Stage 1) — attached
    *  server-side for 'rp' chats whose stored text contains {{...}} tokens (chiefly a character's
    *  seeded greeting). Render this when present; always re-send `content` (verbatim) so the
    *  per-turn resolution pass keeps resolving against the live persona. */
@@ -830,7 +830,7 @@ export interface PromptPreviewGroup {
    *  the cleaned text replaces the raw reply in the message, so this is its only home). Rendered
    *  as its own collapsible block; kept out of `items` so the group's totals stay prompt-side. */
   reply?: PromptPreviewItem;
-  /** Cache-coverage report for the Main Prompt tag tree (docs/prompt-inspector-tag-tree.md §3.2):
+  /** Cache-coverage report for the Main Prompt tag tree (docs/plans/prompt-inspector-tag-tree.md §3.2):
    *  when this is a 'main' group with ≥2 recorded turns, the length in chars (UTF-16 code units,
    *  the same unit as the tag-tree's section offsets) of the longest prefix this turn's joined
    *  items text shares with the previous turn's — the run the provider's prefix cache would
@@ -840,7 +840,7 @@ export interface PromptPreviewGroup {
   /** When stablePrefixChars is set: epoch ms of the previous 'main' call the diff is against. */
   previousCallAt?: number;
   /** Per-subsection identity stability over the last x calls on record
-   *  (docs/prompt-inspector-tag-tree.md §3.3): the server replays the trace's main entries as
+   *  (docs/plans/prompt-inspector-tag-tree.md §3.3): the server replays the trace's main entries as
    *  consecutive pairs; each section (keyed by canonical tag name + occurrence index) counts one
    *  observation per call it existed in, identical when its full span is byte-identical to the
    *  previous call's same section. The percentage shown per section is identical / seen. Absent

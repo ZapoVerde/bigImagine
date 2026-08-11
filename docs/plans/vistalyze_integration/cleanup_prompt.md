@@ -13,7 +13,7 @@
 > including §2.4's canonical header wire format, which the new header regex/prompt default still
 > encodes (`DEFAULT_CLEANUP_CONFIG` in `cleanupHeuristics.ts`).
 
-**Status**: Designed  
+**Status**: Superseded — see banner above; kept as the historical design record.  
 **Scope**: Addition and handling of the secondary LLM Cleanup Pass prompt in the turn loop.  
 **Governing Principles**: `bi_principles.md` §2 (LLM Reasons), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts/Presets).
 
@@ -92,7 +92,7 @@ It is surfaced the same way every other prompt in this system already is: as a *
 
 ### 2.4 Header Wire Format (Canonical)
 
-This is the exact, load-bearing format the builtin preset's rule 2 enforces — anything downstream that parses a cleaned reply (the post-cleanup heuristic extraction pass, `docs/vistalyze_integration/segway.md`) must match this precisely, not a paraphrase of it:
+This is the exact, load-bearing format the builtin preset's rule 2 enforces — anything downstream that parses a cleaned reply (the post-cleanup heuristic extraction pass, `docs/plans/vistalyze_integration/segway.md`) must match this precisely, not a paraphrase of it:
 
 ```
 [ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]

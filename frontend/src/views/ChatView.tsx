@@ -126,7 +126,7 @@ interface DisplayMessage {
   messageId?: string;
   role: 'user' | 'assistant';
   content: string;
-  /** Display-only macro-resolved copy of `content` (docs/prompt-macros.md's Stage 1) — served by
+  /** Display-only macro-resolved copy of `content` (docs/plans/prompt-macros.md's Stage 1) — served by
    *  GET /v1/chats/:id as resolvedContent for 'rp' chats whose stored text contains {{...}} tokens
    *  (chiefly a character's seeded greeting). Render this when present; `content` stays verbatim
    *  and is what gets re-sent, so the server's per-turn resolution stays fresh against the live

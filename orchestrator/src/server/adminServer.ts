@@ -336,7 +336,7 @@ export async function testConnection(connections: LlmConnectionStore, id: string
   }
 }
 
-// --- Image generation connections (docs/vistalyze_integration/endpoint.md §3) ---
+// --- Image generation connections (docs/plans/vistalyze_integration/endpoint.md §3) ---
 // The Connections tab's image section CRUD (GET/POST/PATCH/DELETE /v1/admin/image-connections,
 // io/imageConnections.ts), plus the image-settings GET/POST and the per-connection Test button.
 // Same shapes as the LLM-connection functions above, with two differences that fall out of the
@@ -751,7 +751,7 @@ export async function setImageSettings(
   for (const [key, value] of writes) await store.set(key, value);
 }
 
-// --- Location Tracker settings (docs/vistalyze_integration/location.md §6.3) ---
+// --- Location Tracker settings (docs/plans/vistalyze_integration/location.md §6.3) ---
 // The Locations page's unified settings surface: the tracker's three keys plus the room
 // describer's two (moved entirely from the Backgrounds page — the image-settings endpoint above
 // keeps accepting the describer_* patch keys for back-compat, but the page no longer sends them).
@@ -1017,7 +1017,7 @@ export async function setScreenLockSettings(store: OrchestratorSettingsStore, bo
   if (body.timeoutMinutes !== undefined) await store.set('screen_lock_timeout_minutes', String(body.timeoutMinutes));
 }
 
-// --- Persona settings (migration 0053, docs/prompt-macros.md's Stage 1) ---
+// --- Persona settings (migration 0053, docs/plans/prompt-macros.md's Stage 1) ---
 // The household's own name and self-description — read back and displayed in full, same shape as
 // screen lock/notifications above, not write-only like a provider credential. Empty (the default)
 // means the 'persona' prompt-stack marker slot has nothing to inject even if a preset enables it

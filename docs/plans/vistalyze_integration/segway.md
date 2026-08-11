@@ -1,7 +1,10 @@
 # Integrated Specification: Cleanup Pass & Post-Cleanup Heuristic Extraction
 
-**Status**: Designed
-**Scope**: Secondary LLM Cleanup Pass (built last round, already shipped), Post-Cleanup Heuristic Extraction for both Locations and People/Presence, and the full transient → permanent/inactive lifecycle those records go through — `docs/vistalyze_integration/location_status.md`'s design, generalized to characters per the explicit direction that it applies to people too.
+**Status**: Built, verified 2026-08-11 — cited by section throughout `generateLocationImage.ts`,
+`chatSessions.ts`, `chatMemorySync.ts`, `httpServer.ts`, and the `locations`/`characters`/`scenes`
+plugin tool files. (The cleanup-pass portion this doc describes is itself superseded — see
+`cleanup_prompt.md`'s banner and `turn-loop-plan.md`'s.)
+**Scope**: Secondary LLM Cleanup Pass (built last round, already shipped), Post-Cleanup Heuristic Extraction for both Locations and People/Presence, and the full transient → permanent/inactive lifecycle those records go through — `docs/plans/vistalyze_integration/location_status.md`'s design, generalized to characters per the explicit direction that it applies to people too.
 **Governing Principles**: `bi_principles.md` §1 (Relational Record), §2 (LLM Reasons), §3 (Explicit User Signal Outranks Inferred Signal), §4 (Scene Scoping), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts).
 
 ---
@@ -10,7 +13,7 @@
 
 This specification defines a two-stage post-processing pipeline that runs immediately after the main LLM completes its conversational turn and before the final assistant message is persisted to database storage, plus the ongoing lifecycle the records it creates go through as the story continues.
 
-1. **Stage 1: The Cleanup Pass (LLM Call)** — already implemented (`docs/vistalyze_integration/cleanup_prompt.md`). An optional secondary LLM call that enforces anti-slop rules, formats thought suffixes, and guarantees the two-line header block defined in `cleanup_prompt.md` §2.4.
+1. **Stage 1: The Cleanup Pass (LLM Call)** — already implemented (`docs/plans/vistalyze_integration/cleanup_prompt.md`). An optional secondary LLM call that enforces anti-slop rules, formats thought suffixes, and guarantees the two-line header block defined in `cleanup_prompt.md` §2.4.
 
 2. **Stage 2: The Post-Cleanup Heuristic Scraper (Zero-Token Processing)** — new in this spec. A deterministic pattern matcher that reads the guaranteed header block Stage 1 produces and extracts the location and the present-character roster, creating or updating transient records and the active scene's state accordingly.
 
@@ -82,7 +85,7 @@ The clone carries the full visual cache record (`image_url`/`image_generated_at`
 
 ## 3. Prompt Construction & Input Assembly (Stage 1 — already shipped, unchanged)
 
-See `docs/vistalyze_integration/cleanup_prompt.md` §3. No changes from this spec. The header format it enforces is now the canonical reference for Stage 2's parser — `cleanup_prompt.md` §2.4:
+See `docs/plans/vistalyze_integration/cleanup_prompt.md` §3. No changes from this spec. The header format it enforces is now the canonical reference for Stage 2's parser — `cleanup_prompt.md` §2.4:
 
 ```
 [ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]

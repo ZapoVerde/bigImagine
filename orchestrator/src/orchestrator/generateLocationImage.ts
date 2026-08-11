@@ -3,7 +3,7 @@
  * @stamp 2026-08-13
  * @architectural-role Orchestrator — the Vistalyze location-image generation pass (endpoint.md §5)
  * @description
- * The single implementation of docs/vistalyze_integration/endpoint.md §5.1's execution flow: the
+ * The single implementation of docs/plans/vistalyze_integration/endpoint.md §5.1's execution flow: the
  * cache-first, on-demand location-image generator. Given a location id, it checks the cache
  * contract (§5.1.2) and on a miss resolves the active image connection, synthesizes the prompt
  * (util/synthesizeImagePrompt.ts, the pure function), dispatches through io/imageGen/index.ts's
@@ -46,7 +46,7 @@
  * structured result, never throws. A generation failure is a missing image, not a broken turn:
  * the cache row keeps its old URL (or stays null) and the next trigger re-attempts.
  *
- * Applies docs/vistalyze_integration/segway.md §2.6's eligibility filter to the location lookup —
+ * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter to the location lookup —
  * the same clause as httpServer.ts's resolveChatLocationImage — extended with the
  * location_swipe_images association (an active swipe's recorded location is eligible even when
  * the row itself was since re-anchored). An inactive (demoted alternate-timeline) or

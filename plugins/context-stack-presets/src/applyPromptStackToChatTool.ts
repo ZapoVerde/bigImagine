@@ -21,7 +21,7 @@
  * greeting under the identical zero-messages guard that tool uses, so calling this on a chat that
  * already has messages (re-applying a different stack later) never re-seeds.
  *
- * fields.persona (docs/prompt-macros.md's Stage 1) comes from the household-wide
+ * fields.persona (docs/plans/prompt-macros.md's Stage 1) comes from the household-wide
  * persona_name/persona_description settings (migration 0053), not from the character row — it's
  * the human's own self-description, orthogonal to whichever character the chat is linked to, so
  * it's read once here via the injected settings store rather than joined off `characters`. Read

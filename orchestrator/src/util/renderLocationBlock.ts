@@ -2,7 +2,7 @@
  * @file orchestrator/src/util/renderLocationBlock.ts
  * @stamp 2026-08-14
  * @architectural-role Pure Function — the known-locations `<locations>` block renderer
- *   (docs/vistalyze_integration/location.md §5.1)
+ *   (docs/plans/vistalyze_integration/location.md §5.1)
  * @description
  * Renders the editable known-locations block template (orchestrator_settings
  * `location_injection_prompt`) against the machine-generated location lists. The block is

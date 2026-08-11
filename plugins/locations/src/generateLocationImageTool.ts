@@ -3,7 +3,7 @@
  * @stamp 2026-08-13
  * @architectural-role IO Wrapper — manual/model-triggered location image regeneration
  * @description
- * docs/vistalyze_integration/endpoint.md §6.3: the thin RegisteredTool wrapper around
+ * docs/plans/vistalyze_integration/endpoint.md §6.3: the thin RegisteredTool wrapper around
  * orchestrator/generateLocationImage.ts for *manual* regeneration only — a location edit, an
  * explicit model request, or the CanvasPanel's re-render trigger. The automatic post-cleanup-pass
  * trigger (server/httpServer.ts's fireLocationImageGeneration) calls generateLocationImage.ts

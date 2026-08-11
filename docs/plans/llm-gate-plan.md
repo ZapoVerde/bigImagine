@@ -1,7 +1,9 @@
 # LLM Gate — Queueing & Retry Plan
 
-*Status: designed, not yet built. Extends the existing `orchestrator/src/io/llm/llmGate.ts` seam
-(`bi_principles.md` §14) rather than replacing it.*
+*Status: built, verified 2026-08-11 — `llmGate.ts`, `llmQueue.ts`, `llmBackoff.ts`, and
+`llmRetryClassify.ts` all exist and implement this plan (cited by section throughout). Extends the
+existing `orchestrator/src/io/llm/llmGate.ts` seam (`bi_principles.md` §14) rather than replacing
+it. `bi_principles.md` §14 itself was never given the follow-up line §7 asked for — still open.*
 
 ## 1. Purpose
 
@@ -129,16 +131,16 @@ Rough sequencing, to be broken down further once scheduled:
 
 ## 6. Open questions for the user
 
-- **Concurrency lanes.** One global max-in-flight, or separate lanes for `agent_routine` vs a live
-  turn's calls, so a background sync/canon-extraction burst can never delay an interactive turn?
-  Leaning toward separate lanes — `llmGate.ts`'s own existing comment ("an unattended routine's
-  budget should never be able to interrupt the household's own chat") already sets this precedent
-  for caps, and the same reasoning plausibly extends to concurrency.
-- **Do retries count against `agent_routine` caps?** A retried call is still real provider spend.
-  Leaning toward yes — every attempt counts, not just the final one.
-- **Backoff numbers.** 500ms/×2/8s-cap/3-attempts above is a starting guess, not pulled from CNZ's
-  actual values — if you remember CNZ's real numbers, those should replace mine directly rather than
-  guessing again.
+- **Concurrency lanes**: **resolved (built)** — separate lanes, exactly as leaned. `llmGate.ts`
+  admits `'interactive'`, `'agent_routine'`, and `'background'` independently through `llmQueue.ts`,
+  each with its own `llm_gate_max_concurrent_*` setting.
+- **Do retries count against `agent_routine` caps?**: **resolved (built)** — yes. Every attempt
+  (success or error) gets its own `logCall` row with its own `attempt` number, so the daily tally
+  counts each retry, not just the final outcome.
+- **Backoff numbers**: **resolved (built)** — 500ms base, ×2 per attempt, 8s cap, matching the
+  guess exactly (`DEFAULT_RETRY_BASE_MS`/`DEFAULT_RETRY_MAX_MS` in `llmGate.ts`,
+  `computeBackoffMs` in `llmBackoff.ts`). `DEFAULT_MAX_RETRIES` shipped as **2** attempts, not the
+  3 guessed here.
 
 ## 7. Follow-up doc updates (once this plan is approved — not part of this document)
 

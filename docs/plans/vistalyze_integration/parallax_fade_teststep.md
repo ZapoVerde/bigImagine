@@ -1,6 +1,7 @@
 # Technical Specification: Chat Background FX & Image Connection Test-Step
 
-**Status**: Designed
+**Status**: Built, verified 2026-08-11 — cited by `orchestratorSettings.ts` §2.2
+(`chat_background_parallax`, migration).
 **Scope**: Parallax Background Pan, Background Fade-In Transition, and a Test-Step that
 guarantees every image connection genuinely generates a test image on Test.
 **Personal build**: This system is built for a single user. Only the three features below are in

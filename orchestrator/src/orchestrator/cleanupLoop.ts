@@ -4,7 +4,7 @@
  * @architectural-role Orchestrator — the async heuristic cleanup poll loop (migration 0072)
  * @description
  * The TRG-style async cleanup subloop that replaced the inline post-runTurn cleanup LLM preset
- * (docs/vistalyze_integration/cleanup_prompt.md, migrations 0057/0066/0070/0071 — the inline
+ * (docs/plans/vistalyze_integration/cleanup_prompt.md, migrations 0057/0066/0070/0071 — the inline
  * runCleanupPass call sites are gone). A reply now lands raw and instantly; this poll loop
  * rewrites it AFTER the fact, driven entirely by orchestrator/cleanupHeuristics.ts's pure engine:
  * regex triggers decide what needs doing, and only then a small user-defined repair prompt

@@ -4,9 +4,9 @@
  * @architectural-role Orchestrator — Stage 2 of the post-turn pipeline (segway.md §4), with the
  *   pure parsing split out per bi_principles.md §8
  * @description
- * docs/vistalyze_integration/segway.md §4: the post-cleanup heuristic scraper. Stage 1 (the async
+ * docs/plans/vistalyze_integration/segway.md §4: the post-cleanup heuristic scraper. Stage 1 (the async
  * cleanup subloop, orchestrator/cleanupLoop.ts) may rewrite a turn's text
- * to open with the two-line header block defined in docs/vistalyze_integration/cleanup_prompt.md
+ * to open with the two-line header block defined in docs/plans/vistalyze_integration/cleanup_prompt.md
  * §2.4:
  *
  *   [ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]
@@ -63,7 +63,7 @@ import { toImageGenSeed } from '../util/synthesizeImagePrompt.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { renderLocationBlock, type LocationBlockLists } from '../util/renderLocationBlock.js';
 
-/** The two-line header block (docs/vistalyze_integration/cleanup_prompt.md §2.4), parsed. */
+/** The two-line header block (docs/plans/vistalyze_integration/cleanup_prompt.md §2.4), parsed. */
 export interface StoryHeader {
   timeOfDay: string;
   dateLine: string;

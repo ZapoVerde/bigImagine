@@ -3,7 +3,7 @@
  * @stamp 2026-08-06
  * @architectural-role Stateful Owner — in-process FIFO admission with a per-lane concurrency cap
  * @description
- * docs/llm-gate-plan.md §4.1/§4.4: bounds how many complete() calls run against the provider at
+ * docs/plans/llm-gate-plan.md §4.1/§4.4: bounds how many complete() calls run against the provider at
  * once, so a burst (a multi-character turn's several calls, a sync tick, a canon-extraction pass
  * all landing together) can't saturate a rate limit. Three lanes, per §6's resolved open question —
  * separate concurrency for 'agent_routine' and for 'system'-kind background work ('cleanup'/'chat

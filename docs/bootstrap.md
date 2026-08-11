@@ -33,7 +33,7 @@ bigBrain's fork-origin. A `git push` here lands on BigImagine's own history.
 
 ## The workspace/stacks split (not written down anywhere else — read this carefully)
 
-BigImagine has its own dedicated stack as of 2026-08-04 (`docs/dedicated-infra-plan.md` has the
+BigImagine has its own dedicated stack as of 2026-08-04 (`docs/plans/dedicated-infra-plan.md` has the
 full design/build history — read that for *why*, this is just the current-state map). What exists:
 
 - **`/config/workspace/BigImagine/`** — this repo, source of truth for BigImagine. Edit and verify
@@ -43,7 +43,7 @@ full design/build history — read that for *why*, this is just the current-stat
   don't edit it expecting it to affect this project.
 - **`/config/workspace/stacks/bigbrain/`** — bigBrain's own deployed stack. No longer shares
   anything live with BigImagine (see below) — a BigImagine migration touching a table bigBrain also
-  owns rows in used to be a real shared-fate risk (`docs/dedicated-infra-plan.md` §1.1 has the
+  owns rows in used to be a real shared-fate risk (`docs/plans/dedicated-infra-plan.md` §1.1 has the
   incident); that risk is closed now that the two run against separate Postgres instances.
 - **`/config/workspace/stacks/bigimagine/`** — BigImagine's own deployed stack: `bigimagine-postgres`
   (db `bigimagine`, roles `bigimagine_admin`/`bigimagine_app` — not bigBrain's `bigbrain_admin`/

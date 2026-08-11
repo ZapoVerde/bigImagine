@@ -12,7 +12,7 @@
  *
  * status is written as 'permanent', never left at the migration default ('transient') — a user
  * manually creating a location is the explicit canon signal (bi_principles.md §3,
- * docs/vistalyze_integration/segway.md §2.6), so the row stays eligible for the post-cleanup
+ * docs/plans/vistalyze_integration/segway.md §2.6), so the row stays eligible for the post-cleanup
  * scraper's name-lookup and for prompt injection. Transient status is reserved for rows the story
  * auto-registers, which are anchored to a turn's swipe and settle through the sync tick.
  *

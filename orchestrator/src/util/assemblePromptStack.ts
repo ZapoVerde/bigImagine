@@ -22,7 +22,7 @@
  * said. Only a 'custom' slot's role is caller-chosen (validated at the create/update tool
  * boundary, matching context_stack_slots' own custom_role check constraint).
  *
- * Moved here from plugins/context-stack-presets/src/ (2026-08-06, docs/turn-loop-plan.md §3.2):
+ * Moved here from plugins/context-stack-presets/src/ (2026-08-06, docs/plans/turn-loop-plan.md §3.2):
  * server/httpServer.ts needs to call this directly for per-turn narrator assembly, and
  * plugins/document-ingestion's own doc already establishes the rule this file was violating by
  * living in a plugin — "plugins depend on @bigbrain/orchestrator, never the reverse." A pure

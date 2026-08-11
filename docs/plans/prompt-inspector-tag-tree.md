@@ -1,6 +1,7 @@
 # Technical Specification: Loss-Tolerant Prompt Tag Tree (Prompt Inspector)
 
-**Status**: Designed — pending approval
+**Status**: Built, verified 2026-08-11 — `promptTagTree.ts` and `PromptInspectorPanel.tsx` (incl.
+§3.2/§3.3's companion changes) are live and cite this doc by section.
 **Scope**: A pure, loss-tolerant parser that groups the main prompt's subsections by the author's
 own HTML-style tags, rendered as nested collapsible sections with per-section token counts in the
 Prompt Inspector. Plus the (separately-approved) cache-coverage mapping onto the existing

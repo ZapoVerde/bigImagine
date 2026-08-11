@@ -1,3 +1,10 @@
+# Location Lifecycle: The 4-Status Model
+
+**Status**: Built, verified 2026-08-11 — cited by `chatSessions.ts` and `chatMemorySync.ts` §2.5
+as the resurrection/status-transition design. Kept in its original informal, unedited form (an
+unpolished chat excerpt, unlike its siblings' formal spec structure) — content is accurate and
+actively cited; a formatting cleanup pass is optional, not urgent.
+
 **Yes, absolutely. This is a much better narrative model, and it aligns even more deeply with BigImagine’s core principles.**
 
 By keeping non-active swipe locations alive as **`inactive`** rather than purging them, we preserve **full timeline provenance**. Nothing is destroyed unless you explicitly delete the originating turn itself. If you fork 40 turns back onto an old swipe, every location (and item/fact) created during that alternate swipe is still sitting in the database, ready to wake up and solidify on the new branch.

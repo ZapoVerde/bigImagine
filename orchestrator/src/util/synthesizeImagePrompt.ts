@@ -4,7 +4,7 @@
  * @architectural-role Pure Function — image prompt synthesis (endpoint.md §4)
  * @description
  * The prompt-synthesis engine for the Vistalyze image-generation subsystem
- * (docs/vistalyze_integration/endpoint.md §4): a pure macro-expansion module that combines a
+ * (docs/plans/vistalyze_integration/endpoint.md §4): a pure macro-expansion module that combines a
  * location's visual description, its environment object (time of day, weather, mood, lighting),
  * the active connection's master positive style prefix, and the admin's Master Image Prompt
  * Template (the `image_prompt_template` orchestrator setting, bi_principles.md §18 — empty means

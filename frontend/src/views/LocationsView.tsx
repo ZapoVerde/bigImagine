@@ -10,7 +10,7 @@ import type { LocationAdminRow, LocationSettings } from '../api/types';
 import './LocationsView.css';
 
 // The Locations management page — the location tracker's settings and its known-locations
-// browser in one place (docs/vistalyze_integration/location.md, migration 0083). Three sections:
+// browser in one place (docs/plans/vistalyze_integration/location.md, migration 0083). Three sections:
 //   1. Tracker settings: the header split toggle (places ↔ rooms via parent_location_id), the
 //      marker-slot gate for the known-locations block, and the block's prompt text. The block
 //      itself is always available as the "Active Location" marker slot in Prompt Stacks (same
@@ -136,7 +136,7 @@ export default function LocationsView() {
         <code>{'📍 Parent - Sub'}</code> is split into a place and its rooms, each new room gets
         described and rendered as a background, and the known-locations list is offered back to
         the narrator every turn so it reuses exact names (the location-tracker plan,
-        docs/vistalyze_integration/location.md). This page is every knob for that pipeline.
+        docs/plans/vistalyze_integration/location.md). This page is every knob for that pipeline.
       </div>
 
       <fieldset>

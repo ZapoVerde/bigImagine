@@ -8,7 +8,7 @@
  * scoping and any future Director Pass read scene state from (bi_principles.md §4) — a scene row's
  * presence comes from a LEFT JOIN over scene_presence, not from parsing anything.
  *
- * Since this is a model-facing lookup surface, it applies docs/vistalyze_integration/segway.md
+ * Since this is a model-facing lookup surface, it applies docs/plans/vistalyze_integration/segway.md
  * §2.6's eligibility filter to the rows it surfaces: an inactive location/character (a demoted
  * alternate timeline) must recall as absent, never leak into the model's view of the world.
  * Presence characters are eligible iff user-authored (status null), permanent, or transient with

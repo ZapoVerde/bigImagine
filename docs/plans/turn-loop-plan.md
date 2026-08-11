@@ -14,8 +14,11 @@
 > header pill (`components/cleanup/CleanupStatusPill.tsx`) shows TRG-style status.
 > The rest of this plan (steps 1–3, 5's sync rework, 6–7) is historical and stands as written.
 
-*Status: designed, not yet built. Phase 1 = one main LLM call handling narrator + all present
-characters, plus an optional unconditional cleanup pass. Character-stamped per-character calls are
+*Status: built, verified 2026-08-11 — steps 1–3/5–7 are the live shape of
+`httpServer.ts`'s `handleChatCompletions`/`runTurn`, cited by section throughout. (Step 5's
+original cleanup pass is superseded — see the banner above.) Phase 1 = one main LLM call handling
+narrator + all present characters, plus an optional unconditional cleanup pass. Character-stamped
+per-character calls are
 explicitly shelved (see Non-Goals) — this plan builds the loop shape so that expansion doesn't
 require a rewrite, without building the expansion itself.*
 
@@ -135,7 +138,7 @@ message being persisted (`httpServer.ts:625`):
    `runWithCallContext({ taskId: body.chat_id, kind: 'chat', userId }, ...)` — `kind: 'chat'`
    because this is part of the turn the user is waiting on, not a background job; it should never
    be throttled by `agent_routine` caps, and it's not a one-off standalone call like
-   `generateChatTitle`'s `kind: 'system'`. Retry/backoff behavior comes from `docs/llm-gate-plan.md`
+   `generateChatTitle`'s `kind: 'system'`. Retry/backoff behavior comes from `docs/plans/llm-gate-plan.md`
    once built — not re-described here.
 4. On success: replace `reply` with the cleaned text before persistence.
 5. On exhausted-retry failure: log it, keep the raw `reply`, proceed unchanged. Per your call —
@@ -179,7 +182,7 @@ Already what happens today — `sendJson`/stream response at the end of `handleC
 
 Dependency-ordered, not calendar-estimated:
 
-1. **LLM Gate retry/queueing** (`docs/llm-gate-plan.md`) — step 5's cleanup fallback and step 6's
+1. **LLM Gate retry/queueing** (`docs/plans/llm-gate-plan.md`) — step 5's cleanup fallback and step 6's
    eager-chunk calls both want real retry behavior; build this first so nothing downstream needs a
    placeholder.
 2. **`interpolateMacros` + `message` field** — trivial, unblocks cleanup-preset testing early.
@@ -193,5 +196,5 @@ Dependency-ordered, not calendar-estimated:
 ## 8. Open questions carried into this plan
 
 - `sync_id`-closing mechanism (§5) — blocks step 6 specifically, nothing else.
-- The three open questions already in `docs/llm-gate-plan.md` §6 (concurrency lanes, retry-vs-cap
+- The three open questions already in `docs/plans/llm-gate-plan.md` §6 (concurrency lanes, retry-vs-cap
   accounting, real backoff numbers) — blocks step 1 of the build order above.

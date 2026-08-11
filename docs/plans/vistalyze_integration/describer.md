@@ -1,5 +1,8 @@
 # The Room Describer (Step 1.5: scrape → describe → render)
 
+**Status**: Built, verified 2026-08-11 — cited by `orchestratorSettings.ts` (the room-description
+pass's two settings keys).
+
 The missing major step in BigImagine's background generation: **a room-description LLM call**.
 BigImagine's post-turn scraper (segway.md §4) is deliberately zero-token (bi_principles.md §2) —
 it can only seed a freshly-minted location's `visual_description` from the extracted name itself

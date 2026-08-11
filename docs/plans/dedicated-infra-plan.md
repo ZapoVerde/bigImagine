@@ -5,8 +5,12 @@ assumption (never yet stated, because it was never yet questioned) that BigImagi
 bigBrain's orchestrator process against bigBrain's Postgres. This document is the build plan for
 giving BigImagine its own orchestrator process and its own Postgres instance.*
 
-*Status tags follow spec.md's convention: **(built)**, **(designed)**, **(parked)**. Everything
-below is **(designed)** — nothing in this document is implemented yet.*
+*Status tags follow spec.md's convention: **(built)**, **(designed)**, **(parked)**. **(built,
+verified 2026-08-11)** — `stacks/bigimagine/` is live (own Postgres, own orchestrator, public
+route), and the §4.5 cleanup (dropping BigImagine's tables/keys back out of the shared
+`bigbrain-postgres`) is done. Two items from §8's follow-up list are still open: `db/migrations
+/README.md`'s narrative entries for 0044–0048, and `recallCanonFactsTool.ts`'s `<->`→`<=>` operator
+swap — both explicitly low-priority, not correctness bugs, per §8's own wording.*
 
 ---
 

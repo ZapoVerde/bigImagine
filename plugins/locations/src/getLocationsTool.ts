@@ -8,7 +8,7 @@
  * linked_location_id) can reference them. Summary-only, same shape as get_characters —
  * visual_description/environment aren't needed to pick an id.
  *
- * Applies docs/vistalyze_integration/segway.md §2.6's eligibility filter — same clause as
+ * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter — same clause as
  * get_scenes (plugins/scenes/src/getScenesTool.ts): an inactive location (a demoted alternate
  * timeline) must never be model-visible, or the model could hand its id straight back into
  * set_active_location and undo the sync tick's exclusion. Transient rows surface only when their
