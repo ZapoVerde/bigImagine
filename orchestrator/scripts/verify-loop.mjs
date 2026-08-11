@@ -32,6 +32,9 @@ function assert(cond, message) {
   }
 }
 
+// RunTurnOptions now requires an embeddings provider (loop.ts threads it into every tool ctx).
+const stubEmbeddings = { name: 'stub', dimension: 4, async embed(texts) { return texts.map(() => [0.1, 0.2, 0.3, 0.4]); } };
+
 function createFakePool() {
   const setConfigCalls = [];
   const turnMetricsInserts = [];
@@ -96,6 +99,7 @@ async function runForUser(userId) {
     llm,
     db,
     tools,
+    embeddings: stubEmbeddings,
   });
   return { reply: result.content, setConfigCalls: pool.setConfigCalls, turnMetricsInserts: pool.turnMetricsInserts };
 }
@@ -154,6 +158,7 @@ assert(
     llm,
     db,
     tools,
+    embeddings: stubEmbeddings,
   });
   assert(result.content === 'handled the missing tool', 'an unknown tool name degrades gracefully instead of crashing the loop');
   assert(result.focusedNoteId === undefined, 'no focusHint anywhere means focusedNoteId stays undefined');
@@ -177,7 +182,7 @@ assert(
     },
     { message: { role: 'assistant', content: 'done' }, toolCalls: [] },
   ]);
-  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools, embeddings: stubEmbeddings });
   assert(result.focusedNoteId === 'note-a', 'a tool call\'s focusHint surfaces as runTurn\'s focusedNoteId');
 }
 {
@@ -198,7 +203,7 @@ assert(
     },
     { message: { role: 'assistant', content: 'done anyway' }, toolCalls: [] },
   ]);
-  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  const result = await runTurn({ userId: 'x', taskId: 'task-focus-hint', messages: [{ role: 'user', content: 'hi' }], llm, db, tools, embeddings: stubEmbeddings });
   assert(result.content === 'done anyway', 'a throwing focusHint never breaks the turn\'s reply');
   assert(result.focusedNoteId === undefined, 'a throwing focusHint just leaves focusedNoteId unset');
 }
@@ -226,6 +231,7 @@ assert(
       llm,
       db,
       tools,
+      embeddings: stubEmbeddings,
     });
   } catch {
     threw = true;
@@ -259,6 +265,7 @@ assert(
     llm,
     db,
     tools: createToolRegistry([]),
+    embeddings: stubEmbeddings,
   });
   assert(result.content === 'finally a reply', 'a blank final reply is retried until a non-blank one comes back');
   const m = pool.turnMetricsInserts[0];
@@ -288,6 +295,7 @@ assert(
       llm,
       db,
       tools: createToolRegistry([]),
+      embeddings: stubEmbeddings,
     });
   } catch (err) {
     threw = true;

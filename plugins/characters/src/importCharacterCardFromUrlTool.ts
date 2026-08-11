@@ -114,7 +114,7 @@ export function createImportCharacterCardFromUrlTool(settings: OrchestratorSetti
       const cardJson: unknown = JSON.parse(decodePngCard(bytes));
       const parsed = parseCardJson(cardJson);
 
-      return insertCharacterFromCard(ctx.db, ctx.userId, parsed, cardJson, bytes);
+      return insertCharacterFromCard(ctx.db, ctx.userId, parsed, cardJson, ctx.embeddings, bytes);
     },
   };
 }

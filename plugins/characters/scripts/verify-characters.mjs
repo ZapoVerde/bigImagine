@@ -28,6 +28,9 @@ function createFakePool() {
   const chatSessions = [];
   const chatMessages = [];
   const chatMessageSwipes = [];
+  const lorebooks = [];
+  const lorebookEntries = [];
+  const lorebookLinks = [];
   let counter = 0;
 
   return {
@@ -35,6 +38,9 @@ function createFakePool() {
     chatSessions,
     chatMessages,
     chatMessageSwipes,
+    lorebooks,
+    lorebookEntries,
+    lorebookLinks,
     async connect() {
       let scopedUserId;
       return {
@@ -86,6 +92,26 @@ function createFakePool() {
             };
             characters.push(row);
             return { rows: [{ character_id: row.character_id, name: row.name }] };
+          }
+
+          // --- import_character_card: embedded lorebook (§A of chub-lorebook-import-plan.md) ---
+          if (sql.startsWith('insert into lorebooks')) {
+            const [userId, name] = params;
+            assert(scopedUserId === userId, 'the embedded lorebook insert is scoped to the requesting user');
+            const row = { lorebook_id: `lb-${++counter}`, user_id: userId, name, global_scope: false };
+            lorebooks.push(row);
+            return { rows: [{ lorebook_id: row.lorebook_id }] };
+          }
+          if (sql.startsWith('insert into lorebook_entries')) {
+            assert(scopedUserId === params[1], 'the lorebook entry insert is scoped to the requesting user');
+            lorebookEntries.push({ sql, params });
+            return { rows: [] };
+          }
+          if (sql.startsWith('insert into lorebook_character_links')) {
+            const [lorebookId, characterId, userId] = params;
+            assert(scopedUserId === userId, 'the character-link insert is scoped to the requesting user');
+            lorebookLinks.push({ lorebook_id: lorebookId, character_id: characterId, user_id: userId });
+            return { rows: [] };
           }
 
           // --- get_characters ---
@@ -319,6 +345,19 @@ const db = createPostgresClient(pool);
 const userId = '11111111-1111-1111-1111-111111111111';
 const otherUserId = '22222222-2222-2222-2222-222222222222';
 
+// Embeddings stub (chub-lorebook-embed-repair.md): the import tools read ctx.embeddings now, and
+// the embedded-lorebook test asserts the entries land with non-null vectors. A card without a
+// character_book must never call embed — track that too.
+const embedCalls = [];
+const stubEmbeddings = {
+  name: 'stub',
+  dimension: 4,
+  async embed(texts) {
+    embedCalls.push(texts);
+    return texts.map(() => [0.1, 0.2, 0.3, 0.4]);
+  },
+};
+
 const createTool = registry.get('create_character');
 const getTool = registry.get('get_characters');
 const getOneTool = registry.get('get_character');
@@ -456,7 +495,7 @@ const cardJson = JSON.stringify({
 });
 const bramPng = encodePngCard(BLANK_PNG, cardJson);
 const importedPng = await db.withUserScope(userId, (session) =>
-  importTool.handler({ filename: 'bram.png', fileBase64: bramPng.toString('base64') }, { userId, db: session }),
+  importTool.handler({ filename: 'bram.png', fileBase64: bramPng.toString('base64') }, { userId, db: session, embeddings: stubEmbeddings }),
 );
 assert(importedPng.name === 'Bram' && importedPng.hasAvatar === true, 'import_character_card reads a card embedded in a PNG and flags it as having an avatar');
 
@@ -470,12 +509,13 @@ assert(bramDetail.scenario === 'A forge at dusk.', 'import_character_card parses
 const importedJson = await db.withUserScope(userId, (session) =>
   importTool.handler(
     { filename: 'plain.json', fileBase64: Buffer.from(JSON.stringify({ name: 'Plain', description: 'Just text.' })).toString('base64') },
-    { userId, db: session },
+    { userId, db: session, embeddings: stubEmbeddings },
   ),
 );
 assert(importedJson.hasAvatar === false, 'importing a raw JSON card (no PNG bytes) has no avatar');
 assert(importedJson.lorebookEntriesImported === 0, 'a card with no character_book imports zero lorebook entries');
 assert(pool.lorebooks.length === 0 && pool.lorebookLinks.length === 0, 'a card with no character_book writes no lorebook rows at all');
+assert(embedCalls.length === 0, 'a card with no character_book never calls the embeddings provider (strict no-op)');
 
 // --- import_character_card: embedded lorebook (§A of chub-lorebook-import-plan.md) ---
 const lorebookCardJson = JSON.stringify({
@@ -512,30 +552,65 @@ const lorebookCardJson = JSON.stringify({
 const importedBook = await db.withUserScope(userId, (session) =>
   importTool.handler(
     { filename: 'hollow.json', fileBase64: Buffer.from(lorebookCardJson).toString('base64') },
-    { userId, db: session },
+    { userId, db: session, embeddings: stubEmbeddings },
   ),
 );
 assert(importedBook.lorebookEntriesImported === 2, 'a card with a character_book reports its imported entry count');
+assert(embedCalls.length === 1 && embedCalls[0].length === 2, 'the two entries are embedded in one batched call');
+assert(embedCalls[0][0] === "Hollow's Oath\nAn oath sworn in ash.", 'entries embed as `${bookName}\n${content}` (same convention as quickAddLorebookEntry / the ST importer)');
 assert(pool.lorebooks.length === 1, 'the embedded book becomes exactly one lorebooks row');
 assert(pool.lorebooks[0].name === "Hollow's Oath" && pool.lorebooks[0].global_scope === false, 'the book takes character_book.name and is character-scoped, not global');
 const entryParams = pool.lorebookEntries.flatMap((e) => e.params);
-assert(pool.lorebookEntries.length === 1 && entryParams.length === 44, 'both drafts land in one bulk insert (22 columns × 2 entries)');
-assert(entryParams[2] === 7 && entryParams[24] === 0, 'entry ids map to uid; missing ids synthesize sequentially (0 here)');
-assert(entryParams[3].join() === 'oath,ash' && entryParams[25].join() === 'Hollow', 'keys map to the key column');
-assert(entryParams[5] === 'The oath' && entryParams[27] === '', 'comment maps through (blank comment for the entry without one)');
-assert(entryParams[9] === false && entryParams[31] === true, '!enabled → disable (first entry enabled, second disabled)');
-assert(entryParams[10] === 5 && entryParams[32] === 100, 'insertion_order maps to order_value; default 100 when absent');
-assert(entryParams[11] === 0 && entryParams[33] === 1, "position maps 'before_char'→0 and 'after_char'→1");
+assert(pool.lorebookEntries.length === 1 && entryParams.length === 46, 'both drafts land in one bulk insert (23 columns × 2 entries)');
+assert(entryParams[2] === 7 && entryParams[25] === 0, 'entry ids map to uid; missing ids synthesize sequentially (0 here)');
+assert(entryParams[3].join() === 'oath,ash' && entryParams[26].join() === 'Hollow', 'keys map to the key column');
+assert(entryParams[5] === 'The oath' && entryParams[28] === '', 'comment maps through (blank comment for the entry without one)');
+assert(entryParams[9] === false && entryParams[32] === true, '!enabled → disable (first entry enabled, second disabled)');
+assert(entryParams[10] === 5 && entryParams[33] === 100, 'insertion_order maps to order_value; default 100 when absent');
+assert(entryParams[11] === 0 && entryParams[34] === 1, "position maps 'before_char'→0 and 'after_char'→1");
 const firstEntrySource = JSON.parse(entryParams[21]);
 assert(firstEntrySource.case_sensitive === true, 'the verbatim entry (incl. case_sensitive) survives in source_json');
 assert(firstEntrySource.scan_depth === undefined && firstEntrySource.token_budget === undefined, 'book-level settings are not folded into entry source_json (they stay book-level, source_json-only)');
+assert(entryParams[22].startsWith('[') && entryParams[45].startsWith('['), 'each entry lands with a non-null vector_embed (recallable, not permanently undiscoverable)');
 assert(pool.lorebookLinks.length === 1, 'the new book is linked to the new character');
 assert(pool.lorebookLinks[0].character_id === importedBook.characterId, 'the character link points at the just-inserted character');
+
+// --- import_character_card: fail-open when the embeddings provider throws ---
+// (chub-lorebook-embed-repair.md): a card must still import — character, lorebook rows, and link —
+// with all entries at vector_embed = null, never hard-fail over an embedding hiccup.
+const throwingEmbeddings = {
+  name: 'throwing',
+  dimension: 4,
+  async embed() {
+    throw new Error('embedding service down');
+  },
+};
+const failOpenCardJson = JSON.stringify({
+  spec: 'chara_card_v2',
+  spec_version: '2.0',
+  data: {
+    name: 'Failopen',
+    description: 'A card whose embed call fails.',
+    character_book: { name: 'Failopen Book', entries: [{ keys: ['x'], content: 'X.' }] },
+  },
+});
+const preBooks = pool.lorebooks.length;
+const preLinks = pool.lorebookLinks.length;
+const failOpenBook = await db.withUserScope(userId, (session) =>
+  importTool.handler(
+    { filename: 'failopen.json', fileBase64: Buffer.from(failOpenCardJson).toString('base64') },
+    { userId, db: session, embeddings: throwingEmbeddings },
+  ),
+);
+assert(failOpenBook.lorebookEntriesImported === 1, 'a card whose embed throws still reports its imported entry count');
+assert(pool.lorebooks.length === preBooks + 1 && pool.lorebookLinks.length === preLinks + 1, 'the book and its character link still land when embedding fails');
+const failOpenParams = pool.lorebookEntries[pool.lorebookEntries.length - 1].params;
+assert(failOpenParams[22] === null, 'a failed embed call leaves vector_embed = null (fail-open, never a thrown import)');
 
 let importThrew = false;
 try {
   await db.withUserScope(userId, (session) =>
-    importTool.handler({ filename: 'garbage.json', fileBase64: Buffer.from('not json').toString('base64') }, { userId, db: session }),
+    importTool.handler({ filename: 'garbage.json', fileBase64: Buffer.from('not json').toString('base64') }, { userId, db: session, embeddings: stubEmbeddings }),
   );
 } catch {
   importThrew = true;

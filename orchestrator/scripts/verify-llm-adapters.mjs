@@ -61,6 +61,9 @@ async function withMockedFetch(responses, fn) {
   }
 }
 
+// RunTurnOptions now requires an embeddings provider (loop.ts threads it into every tool ctx).
+const stubEmbeddings = { name: 'stub', dimension: 4, async embed(texts) { return texts.map(() => [0.1, 0.2, 0.3, 0.4]); } };
+
 // --- Anthropic adapter ---
 await withMockedFetch(
   [
@@ -78,8 +81,9 @@ await withMockedFetch(
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
       db,
-      tools,
-    });
+    tools,
+    embeddings: stubEmbeddings,
+  });
 
     assert(result.content === 'final reply', 'Anthropic: runTurn returns the final reply after a real tool round-trip');
     assert(requests.length === 2, 'Anthropic: exactly two API calls were made (one per round)');
@@ -138,8 +142,9 @@ await withMockedFetch(
       messages: [{ role: 'user', content: 'say hi' }],
       llm,
       db,
-      tools,
-    });
+    tools,
+    embeddings: stubEmbeddings,
+  });
 
     assert(result.content === 'final reply', 'OpenAI-compatible: runTurn returns the final reply after a real tool round-trip');
     assert(requests.length === 2, 'OpenAI-compatible: exactly two API calls were made (one per round)');
@@ -174,6 +179,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
     llm,
     db,
     tools,
+    embeddings: stubEmbeddings,
   });
 
   const body = requests[0].body;
@@ -187,7 +193,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
   const db = createPostgresClient(createFakePool());
   const tools = createToolRegistry([]);
 
-  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools, embeddings: stubEmbeddings })
 
   const body = requests[0].body;
   assert(!('temperature' in body), 'Anthropic: temperature is omitted, not sent as null/undefined, when unset');
@@ -212,6 +218,7 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
     llm,
     db,
     tools,
+    embeddings: stubEmbeddings,
   });
 
   const body = requests[0].body;
@@ -229,7 +236,7 @@ await withMockedFetch([{ choices: [{ message: { content: 'ok' } }] }], async (re
   const db = createPostgresClient(createFakePool());
   const tools = createToolRegistry([]);
 
-  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools });
+  await runTurn({ userId: 'u1', taskId: 'task-no-sampling', messages: [{ role: 'user', content: 'hi' }], llm, db, tools, embeddings: stubEmbeddings })
 
   const body = requests[0].body;
   assert(!('temperature' in body), 'OpenAI-compatible: temperature is omitted when unset');

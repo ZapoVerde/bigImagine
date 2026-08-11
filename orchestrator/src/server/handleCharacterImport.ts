@@ -30,6 +30,7 @@ import type { IncomingMessage } from 'node:http';
 import Busboy from 'busboy';
 import { log } from '../io/logger.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { ToolRegistry } from '../orchestrator/toolRegistry.js';
 import { invokeTool } from './toolInvoke.js';
 
@@ -88,7 +89,7 @@ function parseMultipartUpload(req: IncomingMessage): Promise<ParsedUpload> {
 
 export async function importCharacterCard(
   req: IncomingMessage,
-  deps: { db: PostgresClient; tools: ToolRegistry },
+  deps: { db: PostgresClient; tools: ToolRegistry; embeddings: EmbeddingProvider },
   userId: string,
 ): Promise<{ status: number; body: unknown }> {
   let upload: ParsedUpload;
@@ -105,7 +106,7 @@ export async function importCharacterCard(
     return { status: 400, body: { error: 'expected a multipart/form-data body with a single file field' } };
   }
 
-  return invokeTool(deps.db, deps.tools, userId, 'import_character_card', {
+  return invokeTool(deps.db, deps.tools, deps.embeddings, userId, 'import_character_card', {
     filename: upload.filename,
     fileBase64: upload.bytes.toString('base64'),
   });

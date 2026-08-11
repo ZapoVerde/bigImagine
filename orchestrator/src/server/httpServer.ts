@@ -1455,6 +1455,7 @@ async function regenerateSwipe(
       db,
       tools: sessionTools,
       anchorMessageId,
+      embeddings: deps.embeddings,
     }));
   } catch (err) {
     if (isAbortError(err)) {
@@ -1731,6 +1732,7 @@ async function handleChatCompletions(
       db,
       tools: sessionTools,
       anchorMessageId,
+      embeddings: deps.embeddings,
     }));
   } catch (err) {
     // Surfaced to the client rather than falling through to startHttpServer's generic top-level
@@ -1897,7 +1899,7 @@ async function handleToolInvoke(
     return;
   }
 
-  const { status, body } = await invokeTool(deps.db, deps.tools, userId, toolName, args);
+  const { status, body } = await invokeTool(deps.db, deps.tools, deps.embeddings, userId, toolName, args);
   sendJson(res, status, body);
 }
 

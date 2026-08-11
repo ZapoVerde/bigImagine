@@ -182,8 +182,9 @@ assert(extractChubFullPath('botmaster/sabrina-abc') === 'botmaster/sabrina-abc',
     },
   };
 
+  const stubEmbeddings = { name: 'stub', dimension: 4, async embed(texts) { return texts.map(() => [0.1, 0.2, 0.3, 0.4]); } };
   const tool = createImportCharacterCardFromUrlTool(fakeSettings('http://pia-proxy:8080'));
-  const result = await tool.handler({ url: 'https://chub.ai/characters/botmaster/sabrina' }, { db: fakeDb, userId: 'user-1' });
+  const result = await tool.handler({ url: 'https://chub.ai/characters/botmaster/sabrina' }, { db: fakeDb, userId: 'user-1', embeddings: stubEmbeddings });
 
   assert(fetchCalls.length === 2, 'import_character_card_from_url fetches the character detail, then the card PNG, both through pia-proxy');
   assert(result.characterId === 'char-chub-1' && result.name === 'Sabrina', 'import_character_card_from_url returns the inserted character');

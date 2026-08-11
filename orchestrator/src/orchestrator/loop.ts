@@ -46,6 +46,7 @@ import { log, runWithRequestId } from '../io/logger.js';
 import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import { createMetricsAccumulator, recordTurnMetrics, type TurnMetricsAccumulator } from '../io/turnMetrics.js';
 import type { ToolRegistry } from './toolRegistry.js';
 import { describeToolCall } from './describeToolCall.js';
@@ -82,6 +83,10 @@ export interface RunTurnOptions {
   llm: LlmProvider;
   db: PostgresClient;
   tools: ToolRegistry;
+  /** The embeddings provider every tool handler this turn invokes gets on its ToolHandlerContext —
+   *  required so no tool can silently skip embedding (chub-lorebook-embed-repair.md). Callers all
+   *  already hold one (a PluginDeps member wherever plugins are constructed). */
+  embeddings: EmbeddingProvider;
   maxToolRounds?: number;
   /** The chat_messages row this turn's tools should anchor derived writes to (e.g.
    *  propose_canon_fact) — server/httpServer.ts persists the triggering user message before
@@ -231,7 +236,7 @@ async function runTurnInner(opts: RunTurnOptions, metrics: TurnMetricsAccumulato
       const resultPayload = await db.withUserScope(userId, async (session) => {
         if (!tool) return { error: `unknown tool: ${call.name}` };
         try {
-          return await tool.handler(call.arguments, { userId, db: session, chatId, anchorMessageId: opts.anchorMessageId });
+          return await tool.handler(call.arguments, { userId, db: session, chatId, anchorMessageId: opts.anchorMessageId, embeddings: opts.embeddings });
         } catch (err) {
           log.error(`tool ${call.name} threw`, err);
           return { error: err instanceof Error ? err.message : String(err) };

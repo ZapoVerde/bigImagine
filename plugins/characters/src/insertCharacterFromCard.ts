@@ -19,22 +19,27 @@
  * tier, same as importing `description`.
  *
  * @api-declaration
- * insertCharacterFromCard(db, userId, parsed, cardJson, avatarBytes?) — inserts the row, writes
- *   avatarBytes via avatarStorage.ts's writeAvatar if given, inserts the embedded lorebook
- *   (if any) and its character link, and returns
+ * insertCharacterFromCard(db, userId, parsed, cardJson, embeddings, avatarBytes?) — inserts the
+ *   row, writes avatarBytes via avatarStorage.ts's writeAvatar if given, inserts the embedded
+ *   lorebook (if any, embedding its entries as `${bookName}\n${content}` — fail-open, null
+ *   vectors when the provider errors) and its character link, and returns
  *   {characterId, name, specVersion, hasAvatar, lorebookEntriesImported}
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO via the given DbSession, filesystem via avatarStorage)
+ *     purity:          impure (Postgres IO via the given DbSession, filesystem via avatarStorage,
+ *                      embeddings via the given provider)
  *     state_ownership: []
- *     external_io:     [Postgres, filesystem]
+ *     external_io:     [Postgres, filesystem, embeddings provider]
  */
 
 import type { DbSession } from '@bigbrain/orchestrator/postgres';
+import type { EmbeddingProvider } from '@bigbrain/orchestrator/embeddings';
 import { parseCharacterBookEntries, characterBookName, type LorebookEntryDraft } from '@bigbrain/orchestrator/parse-character-book-entries';
 import { writeAvatar } from './avatarStorage.js';
 import type { ParsedCard } from './cardCodec.js';
+import { log } from '@bigbrain/orchestrator/logger';
+import { toPgVectorLiteral } from '@bigbrain/orchestrator/pgvector';
 
 interface CharacterRow {
   character_id: string;
@@ -55,6 +60,7 @@ export async function insertCharacterFromCard(
   userId: string,
   parsed: ParsedCard,
   cardJson: unknown,
+  embeddings: EmbeddingProvider,
   avatarBytes?: Buffer,
 ): Promise<InsertedCharacter> {
   const hasAvatar = avatarBytes !== undefined;
@@ -97,7 +103,7 @@ export async function insertCharacterFromCard(
       [userId, bookName],
     );
     const lorebookId = bookRows[0]!.lorebook_id;
-    await insertLorebookEntries(db, userId, lorebookId, drafts);
+    await insertLorebookEntries(db, userId, lorebookId, bookName, drafts, embeddings);
     await db.query(
       `insert into lorebook_character_links (lorebook_id, character_id, user_id)
        values ($1, $2, $3)`,
@@ -115,21 +121,38 @@ export async function insertCharacterFromCard(
   };
 }
 
-function insertLorebookEntries(
+async function insertLorebookEntries(
   db: DbSession,
   userId: string,
   lorebookId: string,
+  bookName: string,
   drafts: LorebookEntryDraft[],
+  embeddings: EmbeddingProvider,
 ): Promise<unknown[]> {
-  // Same column list the ST-world-info importer uses (adminServer.ts), minus vector_embed — this
-  // plan only writes rows, it doesn't embed or recall them (lorebook-plan.md §3c stays dormant
-  // for imported character books until the recall engine is turned on).
+  // Same column list the ST-world-info importer uses (adminServer.ts), vector_embed included —
+  // the entries are embedded here so an imported character_book is recallable the moment
+  // lorebook-plan.md §2's lorebook_mode is turned on, instead of landing permanently
+  // undiscoverable until a manual re-save (chub-lorebook-embed-repair.md).
   const columns = [
     'lorebook_id', 'user_id', 'uid', 'key', 'keysecondary', 'comment', 'content', 'constant',
     'selective', 'disable', 'order_value', 'position', 'probability', 'depth', 'group_name',
-    'use_probability', 'group_weight', 'group_override', 'sticky', 'cooldown', 'delay', 'source_json',
+    'use_probability', 'group_weight', 'group_override', 'sticky', 'cooldown', 'delay', 'source_json', 'vector_embed',
   ];
-  const casts: Record<string, string> = { source_json: '::jsonb' };
+  const casts: Record<string, string> = { source_json: '::jsonb', vector_embed: '::vector' };
+
+  // One batched embed call for the whole book, mirroring the ST-importer route's batch call
+  // (adminServer.ts importLorebookWorldInfo) — the same `${bookName}\n${content}` convention
+  // quickAddLorebookEntry and the ST-importer route already use. Fail-open, matching every other
+  // embed call in this codebase: a provider hiccup must never fail the card import — entries just
+  // land with null vectors (undiscoverable until a re-save) instead.
+  let vectors: (string | null)[] | null = null;
+  try {
+    const embedded = await embeddings.embed(drafts.map((d) => `${bookName}\n${d.content}`));
+    vectors = embedded.map((v) => (v && v.length > 0 ? toPgVectorLiteral(v) : null));
+  } catch (err) {
+    log.warn('insertCharacterFromCard: lorebook embed failed, importing without vectors', { userId, lorebookId, bookName, err });
+  }
+
   const params: unknown[] = [];
   const valueRows = drafts.map((d, i) => {
     const base = i * columns.length;
@@ -156,6 +179,7 @@ function insertLorebookEntries(
       d.cooldown,
       d.delay,
       JSON.stringify(d.sourceJson),
+      vectors?.[i] ?? null,
     );
     const placeholders = columns.map((c, col) => `$${base + col + 1}${casts[c] ?? ''}`).join(', ');
     return `(${placeholders})`;

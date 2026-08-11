@@ -183,7 +183,7 @@ async function main(): Promise<void> {
   // explains why: it needs the full tool registry and runTurn, neither reachable from inside
   // pluginLoader.ts's plugin-scoped deps) — started directly here, the same composition-root tier
   // startHttpServer is, once every piece it needs (the gated llm above, tools, chats) exists.
-  startAgentRoutineDispatchLoop({ db, llm, tools, chats, settings });
+  startAgentRoutineDispatchLoop({ db, llm, tools, chats, settings, embeddings });
 
   // Rolling chat summarization/RAG (docs/chat-memory.md) — same composition-root tier as the
   // dispatch loop above and for the same reason (needs io/llm/callContext.ts's runWithCallContext,

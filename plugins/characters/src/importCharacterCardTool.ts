@@ -78,7 +78,7 @@ export function createImportCharacterCardTool(): RegisteredTool {
 
       const parsed = parseCardJson(cardJson);
 
-      return insertCharacterFromCard(ctx.db, ctx.userId, parsed, cardJson, isPng ? bytes : undefined);
+      return insertCharacterFromCard(ctx.db, ctx.userId, parsed, cardJson, ctx.embeddings, isPng ? bytes : undefined);
     },
   };
 }

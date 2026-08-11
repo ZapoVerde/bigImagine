@@ -14,7 +14,8 @@
  * dispatch does — RLS scoping is identical regardless of which front door a call came through.
  *
  * @api-declaration
- * invokeTool(db, tools, userId, name, args) — looks up the tool, runs it scoped to userId, and
+ * invokeTool(db, tools, embeddings, userId, name, args) — looks up the tool, runs it scoped to
+ *   userId with the embeddings provider every tool handler gets on its ToolHandlerContext, and
  *   never throws — failures (unknown tool, a thrown handler) come back as a {status, body} pair
  *   for the caller to translate into an HTTP response
  *
@@ -29,6 +30,7 @@
 
 import { log } from '../io/logger.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { ToolRegistry } from '../orchestrator/toolRegistry.js';
 
 export interface ToolInvocationResult {
@@ -39,6 +41,7 @@ export interface ToolInvocationResult {
 export async function invokeTool(
   db: PostgresClient,
   tools: ToolRegistry,
+  embeddings: EmbeddingProvider,
   userId: string,
   name: string,
   args: unknown,
@@ -49,7 +52,7 @@ export async function invokeTool(
   }
 
   try {
-    const result = await db.withUserScope(userId, (session) => tool.handler(args, { userId, db: session }));
+    const result = await db.withUserScope(userId, (session) => tool.handler(args, { userId, db: session, embeddings }));
     return { status: 200, body: result ?? {} };
   } catch (err) {
     log.error(`tool invocation failed for "${name}" (user ${userId})`, err);

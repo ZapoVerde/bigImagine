@@ -27,6 +27,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PostgresClient } from '../io/postgres.js';
 import type { ToolRegistry } from '../orchestrator/toolRegistry.js';
 import { invokeTool } from './toolInvoke.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -37,7 +38,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export async function handleCharacterExportRoutes(
   _req: IncomingMessage,
   res: ServerResponse,
-  deps: { db: PostgresClient; tools: ToolRegistry },
+  deps: { db: PostgresClient; tools: ToolRegistry; embeddings: EmbeddingProvider },
   userId: string,
   url: URL,
 ): Promise<void> {
@@ -50,7 +51,7 @@ export async function handleCharacterExportRoutes(
   const action = segments[1]!;
 
   if (action === 'avatar') {
-    const result = await invokeTool(deps.db, deps.tools, userId, 'get_character_avatar', { characterId });
+    const result = await invokeTool(deps.db, deps.tools, deps.embeddings, userId, 'get_character_avatar', { characterId });
     const body = result.body as { found: boolean; mimeType?: string; base64?: string };
     if (result.status !== 200 || !body.found || !body.base64 || !body.mimeType) {
       sendJson(res, 404, { error: 'not found' });
@@ -64,7 +65,7 @@ export async function handleCharacterExportRoutes(
 
   if (action === 'export.png' || action === 'export.json') {
     const format = action === 'export.png' ? 'png' : 'json';
-    const result = await invokeTool(deps.db, deps.tools, userId, 'export_character_card', { characterId, format });
+    const result = await invokeTool(deps.db, deps.tools, deps.embeddings, userId, 'export_character_card', { characterId, format });
     const body = result.body as {
       found: boolean;
       filename?: string;

@@ -56,6 +56,7 @@ import type { ChatSessionStore } from '../io/chatSessions.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { nextDailyOccurrence } from '../util/nextOccurrence.js';
 import { runTurn } from './loop.js';
@@ -69,6 +70,10 @@ export interface AgentRoutineDispatchDeps {
   tools: ToolRegistry;
   chats: ChatSessionStore;
   settings: OrchestratorSettingsStore;
+  /** Forwarded to every runTurn this dispatch makes so its tool handlers get an embeddings
+   *  provider on ToolHandlerContext (chub-lorebook-embed-repair.md) — composition root already
+   *  holds one, index.ts passes it through. */
+  embeddings: EmbeddingProvider;
 }
 
 interface UserRow {
@@ -152,6 +157,7 @@ async function runAgentRoutine(deps: AgentRoutineDispatchDeps, userId: string, j
       llm: deps.llm,
       db: deps.db,
       tools: sessionTools,
+      embeddings: deps.embeddings,
     }));
   } catch (err) {
     log.error('agent_routine dispatch: run failed or was refused', { jobId: job.job_id, err });

@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/toolRegistry.ts
- * @stamp 2026-07-25
+ * @stamp 2026-08-11
  * @architectural-role Stateful Owner — the one place registered tools live
  * @description
  * Plugins register a ToolDefinition (what the LLM sees) paired with a ToolHandler (what
@@ -25,10 +25,17 @@
 
 import type { DbSession } from '../io/postgres.js';
 import type { ToolDefinition } from '../io/llm/types.js';
+import type { EmbeddingProvider } from '../io/embeddings/types.js';
 
 export interface ToolHandlerContext {
   userId: string;
   db: DbSession;
+  /** Required, not optional — every tool handler already runs inside a request that has an
+   *  EmbeddingProvider available in scope (it's a PluginDeps member everywhere plugins get
+   *  constructed), so there's no legitimate call site that can't supply one. Making it optional
+   *  would just relocate a silent embed gap into every other tool instead of closing it
+   *  (chub-lorebook-embed-repair.md). */
+  embeddings: EmbeddingProvider;
   /** The live conversation this turn belongs to (RunTurnOptions.taskId when taskKind is 'chat') —
    *  undefined for a non-chat task (e.g. an agent_routine dispatch has no chat to anchor to).
    *  plugins/canonize's propose_canon_fact uses this to scope a proposed fact to its chat. */
