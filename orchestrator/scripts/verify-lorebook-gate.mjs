@@ -133,8 +133,21 @@ const skippedOf = (result, reason) => result.skipped.filter((s) => s.reason === 
   assert(!ids(blocked).includes('a') && skippedOf(blocked, 'cooldown').includes('a'), 'cooldown=3 blocks an entry activated last turn');
   const expired = gateLorebookCandidates([entry({ entry_id: 'a', cooldown: 3 })], [{ ...state[0], turns_since_activation: 4 }], opts());
   assert(ids(expired).includes('a'), 'cooldown expires once turns_since exceeds N');
+  const atBoundary = gateLorebookCandidates([entry({ entry_id: 'a', cooldown: 3 })], [{ ...state[0], turns_since_activation: 3 }], opts());
+  assert(ids(atBoundary).includes('a'), 'cooldown=3 blocks exactly 3 turns (turns_since 0,1,2) — turns_since=3 is already expired, not a 4th blocked turn');
   const noCool = gateLorebookCandidates([entry({ entry_id: 'a', cooldown: 0 })], state, opts());
   assert(ids(noCool).includes('a'), 'cooldown=0 never blocks');
+}
+{
+  // Sticky's own boundary, mirroring the cooldown one above: sticky=1 means active for exactly 1
+  // further turn (turns_since=0), not 2 — a regression test for the off-by-one where
+  // turns_since_activation <= sticky kept an entry active one turn longer than configured.
+  const stillActive = [{ entry_id: 'a', message_id: 'm', activated_at: 't', turns_since_activation: 0 }];
+  const expiredState = [{ entry_id: 'a', message_id: 'm', activated_at: 't', turns_since_activation: 1 }];
+  const active = gateLorebookCandidates([entry({ entry_id: 'a', probability: 0, use_probability: true, sticky: 1 })], stillActive, opts());
+  assert(ids(active).includes('a') && skippedOf(active, 'probability').length === 0, 'sticky=1 is still active (skips the re-roll) on its one further turn (turns_since=0)');
+  const expired = gateLorebookCandidates([entry({ entry_id: 'a', probability: 0, use_probability: true, sticky: 1 })], expiredState, opts());
+  assert(!ids(expired).includes('a'), 'sticky=1 has expired by turns_since=1 and re-rolls (probability=0 fails), not stays active a 2nd turn');
 }
 {
   const state = [{ entry_id: 'a', message_id: 'm', activated_at: 't', turns_since_activation: 1 }];

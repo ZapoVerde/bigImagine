@@ -17,10 +17,12 @@
  *   1. delay — `delay` (N): can't activate until the chat has ≥N messages (§5).
  *   2. sticky — `sticky` (N): once activated, stays active for N further turns without needing to
  *      be rediscovered, and skips the probability re-roll (ST's `entry.sticky ? skip : roll`).
- *      Resolved from lorebook_activation_log via fetchLorebookTimedEffectState: turns_since ≤ N.
+ *      Resolved from lorebook_activation_log via fetchLorebookTimedEffectState: turns_since < N
+ *      (turns_since_activation counts 0 on the first further turn, so "N further turns" is the
+ *      window turns_since ∈ [0, N)).
  *   3. cooldown — `cooldown` (N): once deactivated, can't reactivate for N turns even if
  *      rediscovered. A sticky-active entry is not deactivated yet, so cooldown never applies to
- *      it. turns_since ≤ N blocks.
+ *      it. turns_since < N blocks, same window as sticky.
  *   4. probability — `use_probability` + a seeded per-turn roll within `probability`% (ST:
  *      `use_probability && roll*100 > probability` skips). Deterministic per §4: `turnSeed` is
  *      derived from the assistant message_id being generated (deriveTurnSeed), never random.
@@ -134,14 +136,14 @@ export function gateLorebookCandidates(
     }
 
     const isStickyActive =
-      entry.sticky >= 1 && state !== undefined && state.turns_since_activation <= entry.sticky;
+      entry.sticky >= 1 && state !== undefined && state.turns_since_activation < entry.sticky;
     if (isStickyActive) {
       stickyActive.add(entry.entry_id);
       passing.push(entry);
       continue; // ST: `entry.sticky ? skip : roll` — no re-roll, no cooldown (still active).
     }
 
-    if (entry.cooldown >= 1 && state !== undefined && state.turns_since_activation <= entry.cooldown) {
+    if (entry.cooldown >= 1 && state !== undefined && state.turns_since_activation < entry.cooldown) {
       skipped.push({ entry_id: entry.entry_id, reason: 'cooldown' });
       continue;
     }
