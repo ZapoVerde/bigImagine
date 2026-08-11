@@ -32,16 +32,19 @@ import { useEffect, useRef } from 'react';
 //   subscribed once and the callbacks are refreshed via refs every render, so callers can pass
 //   inline closures without re-subscribing.
 //
-// Last intentional change: 2026-08-17 (initial — replaces the removed useEdgeSwipe.ts).
+// Last intentional change: 2026-08-11 (initial — replaces the removed useEdgeSwipe.ts).
 
 const ZONE_BOTTOM_FRACTION = 2 / 3; // drags must start in the bottom third of the screen
 const SWIPE_TRAVEL_PX = 50; // horizontal travel before the gesture counts as a navigation
 const MOBILE_QUERY = '(max-width: 768px)'; // same breakpoint as the .mobile-only CSS
 // Drags starting on these are never claimed — text selection, form controls, the tab bars,
-// the drawer grips (a grab on a grip must stay a grab, not a variant swipe), and the
-// attachment staging rows in the bottom overlay (their chips are tap targets, not swipe
-// surfaces).
-const SKIP_SELECTOR = '.edge-grip, .chat-input, .chat-select-box, .staging-bar, .image-staging-bar, input, textarea, .app-top-bars';
+// the drawer grips (a grab on a grip must stay a grab, not a variant swipe), the attachment
+// staging rows in the bottom overlay (their chips are tap targets, not swipe surfaces), and
+// the mobile fixed-overlay panels (settings rail incl. embedded Lorebook, Branch Map, Canvas,
+// the restart-chat dialog) — each of these covers the bottom third of the viewport on mobile
+// (ChatView.css/BranchMapPanel.css), so without this a drag on THEIR content would silently
+// swipe the last message's variant underneath instead of doing anything in the panel itself.
+const SKIP_SELECTOR = '.edge-grip, .chat-input, .chat-select-box, .staging-bar, .image-staging-bar, input, textarea, .app-top-bars, .chat-settings-rail, .branch-map-panel, .canvas-panel, .chat-restart-dialog';
 
 interface BottomThirdSwipeOptions {
   /** When false the listeners aren't attached at all (e.g. this tab is hidden). Default true. */
