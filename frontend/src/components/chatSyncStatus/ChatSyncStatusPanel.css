@@ -13,10 +13,30 @@
   min-width: 0;
 }
 
+/* Embedded in the chat settings rail's Sync status set (ChatView.tsx's ChatSyncSet): no
+   standalone chrome — static flow, no width/border, and no fixed-overlay treatment on mobile
+   (the settings rail is already the drawer there). The set's summary is the title; the header
+   keeps only a right-aligned refresh button. */
+.chat-sync-status-panel.embedded {
+  width: auto;
+  flex-shrink: 1;
+  border-left: none;
+}
+
+.chat-sync-status-panel.embedded .chat-sync-status-header {
+  justify-content: flex-end;
+  border-bottom: none;
+  padding: 0 0 0.3rem;
+}
+
+.chat-sync-status-panel.embedded .chat-sync-status-content {
+  padding: 0;
+}
+
 /* Mobile (bi_principles.md §19): same fixed-overlay-drawer treatment ChatView.css's
    .chat-settings-rail uses on the right — floats above the conversation rather than squeezing it. */
 @media (max-width: 768px) {
-  .chat-sync-status-panel {
+  .chat-sync-status-panel:not(.embedded) {
     position: fixed;
     top: var(--topbar-height);
     right: 0;

@@ -8,7 +8,6 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import {
   ApiError,
-  adminListConnectionModels,
   adminListConnections,
   abortTurn,
   archiveChat,
@@ -33,7 +32,6 @@ import {
   uploadAttachment,
 } from '../api/client';
 import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
-import { formatPricePerMillion } from '../api/pricing';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
   ApplyPromptStackToChatResult,
@@ -45,7 +43,6 @@ import type {
   ContextStackPreset,
   Folder,
   LlmConnectionSummary,
-  ProfileModelsResult,
   PromptPreset,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
@@ -439,10 +436,6 @@ export default function ChatView({
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
   const [chatMenuOpen, setChatMenuOpen] = useState(false);
-  // Sync Status panel (RP chat ⋯ menu → "Sync status"): this chat's slice of the rolling memory
-  // sync loop's status record — when the last attempt/success landed, what it did, and when the
-  // next one is due. Mounted only while open, same conditional-render shape as the other panels.
-  const [syncStatusOpen, setSyncStatusOpen] = useState(false);
   // Selection-mode bulk delete (⋯ menu → "Delete messages"): a tickbox on every message, and
   // ticking any entry selects everything below it, so the selected set is always a trailing
   // suffix — exactly what the server's truncateMessagesFrom removes in one call. RP-chat only,
@@ -542,7 +535,7 @@ export default function ChatView({
       setLorebookOpen(false);
       setBranchMapOpen(false);
       setChatMenuOpen(false);
-      setSyncStatusOpen(false);
+      setPendingSettings(null);
       setSelectionMode(false);
       setSelectionStart(null);
       setError(null);
@@ -555,7 +548,7 @@ export default function ChatView({
     setLorebookOpen(false);
     setBranchMapOpen(false);
     setChatMenuOpen(false);
-    setSyncStatusOpen(false);
+    setPendingSettings(null);
     setSelectionMode(false);
     setSelectionStart(null);
     stopBgPoll();
@@ -1245,9 +1238,9 @@ export default function ChatView({
     }
   }
 
-  // Shared between the desktop header ⋯ and the mobile input-row ⋯ — the same four items, two
-  // mounts (ChatView.css hides the header copy on mobile and the row copy on desktop). One
-  // chatMenuOpen state serves both.
+  // Shared between the desktop header ⋯ and the mobile input-row ⋯ — the same items, two mounts
+  // (ChatView.css hides the header copy on mobile and the row copy on desktop). One chatMenuOpen
+  // state serves both.
   const chatMenuItems = (
     <>
       <button
@@ -1260,21 +1253,6 @@ export default function ChatView({
         }}
       >
         <GitBranchIcon /> {branchMapOpen ? 'Hide branch map' : 'Branch map'}
-      </button>
-      <button
-        type="button"
-        role="menuitem"
-        title={
-          syncStatusOpen
-            ? 'Hide sync status'
-            : 'When the background memory sync last ran for this chat, and when the next one is due'
-        }
-        onClick={() => {
-          setSyncStatusOpen((v) => !v);
-          setChatMenuOpen(false);
-        }}
-      >
-        🔄 {syncStatusOpen ? 'Hide sync status' : 'Sync status'}
       </button>
       <button
         type="button"
@@ -1809,15 +1787,6 @@ export default function ChatView({
         />
       )}
 
-      {syncStatusOpen && activeChat?.kind === 'rp' && (
-        <ChatSyncStatusPanel
-          apiKey={apiKey}
-          chatId={activeChat.chatId}
-          archived={!!activeChat.archivedAt}
-          onClose={() => setSyncStatusOpen(false)}
-        />
-      )}
-
       {restartOpen && activeChat?.characterId && (
         <div
           className="chat-restart-dialog"
@@ -1879,7 +1848,14 @@ export default function ChatView({
         {!settingsCollapsed && (
           <div className="chat-settings-rail-content">
             <LegibilityMenu settings={legSettings} onChange={setLegSettings} />
-            <ChatSettings apiKey={apiKey} session={activeChat} folders={folders} allToolNames={allToolNames} onSave={saveSettings} />
+            <ChatSettings
+              key={activeChat?.chatId}
+              apiKey={apiKey}
+              session={activeChat}
+              folders={folders}
+              allToolNames={allToolNames}
+              onSave={saveSettings}
+            />
           </div>
         )}
       </div>
@@ -1922,7 +1898,6 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   const [system, setSystem] = useState(session?.params.system ?? '');
   const [temperature, setTemperature] = useState(session?.params.temperature?.toString() ?? '');
   const [maxTokens, setMaxTokens] = useState(session?.params.max_tokens?.toString() ?? '');
-  const [model, setModel] = useState(session?.params.model ?? '');
   const [folderId, setFolderId] = useState(session?.folderId ?? '');
   // null toolNames = all tools allowed (chat-kind only: the RP lane never carries tools — the
   // checklist below is hidden for rp chats and save() omits tool_names for them)
@@ -1941,7 +1916,6 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   // httpServer.ts builds a throwaway provider for this chat's turns instead of the boot-time one.
   const [connections, setConnections] = useState<LlmConnectionSummary[]>([]);
   const [profile, setProfile] = useState(session?.params.profile ?? '');
-  const [modelOptions, setModelOptions] = useState<ProfileModelsResult['models']>([]);
   const [modelsError, setModelsError] = useState('');
 
   useEffect(() => {
@@ -1954,28 +1928,10 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
   const activeConnection = connections.find((c) => c.isActive);
   const effectiveConnection = connections.find((c) => c.name === profile) ?? activeConnection;
 
-  // Refetches the model catalog whenever a different connection is picked (or the household
-  // default resolves), so the model dropdown always reflects whichever connection this chat would
-  // actually use — same dependent-select shape as ConnectionsView's own connection/model pair.
-  useEffect(() => {
-    if (!effectiveConnection) return;
-    let cancelled = false;
-    const adminKey = localStorage.getItem(ADMIN_API_KEY_STORAGE_KEY);
-    adminListConnectionModels(effectiveConnection.id, adminKey)
-      .then((result) => {
-        if (!cancelled) setModelOptions(result.models);
-      })
-      .catch((err) => {
-        if (!cancelled) setModelsError(err instanceof ApiError ? err.message : 'failed to load models');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [effectiveConnection]);
-
   // Instruction sets: a personal library of reusable named system-prompt snippets. Picking one
-  // only copies its content into the textarea below — still freely hand-editable, and not saved
-  // until the usual "Save settings" button below is clicked.
+  // copies its content into the System prompt field (chat-kind chats — RP chats have no field, the
+  // prompt stack owns the system prompt) — still freely hand-editable there, and not saved until
+  // the usual "Save settings" button below is clicked.
   const [presets, setPresets] = useState<PromptPreset[]>([]);
 
   async function reloadPresets() {
@@ -2065,10 +2021,12 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
 
   async function save() {
     const params: ChatParams = {};
-    if (system.trim()) params.system = system.trim();
+    // RP chats: the prompt stack owns the system prompt (apply_prompt_stack_to_chat persists it
+    // server-side) — the drawer never writes params.system for them, same invariant as tool_names
+    // below. Chat-kind chats still carry their hand-edited system prompt.
+    if (session?.kind !== 'rp' && system.trim()) params.system = system.trim();
     if (temperature.trim() && !Number.isNaN(Number(temperature))) params.temperature = Number(temperature);
     if (maxTokens.trim() && !Number.isNaN(Number(maxTokens))) params.max_tokens = Number(maxTokens);
-    if (model.trim()) params.model = model.trim();
     if (profile.trim()) params.profile = profile.trim();
     const allSelected = allToolNames.length > 0 && allToolNames.every((t) => selectedTools.has(t));
     await onSave({
@@ -2077,13 +2035,19 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
       // RP chats run with no tools at all (server-enforced per turn) — never send a manifest.
       ...(session?.kind === 'rp' ? {} : { tool_names: allSelected ? null : [...selectedTools] }),
       folder_id: folderId || null,
-      // The toggle is the only cleanup switch now: enabled stamps the loop's window at now()
-      // (so only messages that land from here on are cleaned — never a retro pass over old
-      // history); disabled clears it. The legacy preset id is always cleared alongside — the
-      // preset-based inline pass is retired, so a saved toggle migrates the chat off it in
-      // whichever direction.
-      cleanup_enabled_at: cleanupEnabled ? new Date().toISOString() : null,
-      cleanup_preset_id: null,
+      // The toggle is the only cleanup switch now (RP lane only — the loop scans kind='rp',
+      // cleanupLoop.ts): enabled stamps the loop's window at now() (so only messages that land
+      // from here on are cleaned — never a retro pass over old history); disabled clears it. The
+      // legacy preset id is always cleared alongside — the preset-based inline pass is retired,
+      // so a saved toggle migrates the chat off it in whichever direction. Never sent for
+      // chat-kind chats — the toggle is disabled there and a Save must not stamp or clear the
+      // fields behind its back.
+      ...(session?.kind === 'rp'
+        ? {
+            cleanup_enabled_at: cleanupEnabled ? new Date().toISOString() : null,
+            cleanup_preset_id: null,
+          }
+        : {}),
     });
     setSaved(true);
     window.setTimeout(() => setSaved(false), 2000);
@@ -2091,152 +2055,164 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
 
   return (
     <div className="chat-settings">
-      <label>
-        Title
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </label>
+      <details className="chat-settings-set" open>
+        <summary className="chat-settings-set-summary">Title</summary>
+        <div className="chat-settings-set-body">
+          <input aria-label="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
+        </div>
+      </details>
 
-      <fieldset className="preset-list">
-        <legend>Instruction sets</legend>
-        {presets.length === 0 && <div className="empty-state small">No saved instruction sets yet.</div>}
-        {presets.map((preset) => (
-          <div key={preset.presetId} className="preset-row" onClick={() => setSystem(preset.content)}>
-            <span className="preset-row-name">{preset.name}</span>
-            <button
-              className="preset-row-delete"
-              title="Delete instruction set"
-              onClick={(e) => {
-                e.stopPropagation();
-                removePreset(preset.presetId);
-              }}
-            >
-              &times;
+      {session?.kind !== 'rp' && (
+        <details className="chat-settings-set">
+          <summary className="chat-settings-set-summary">Instruction sets</summary>
+          <div className="chat-settings-set-body">
+            {presets.length === 0 && <div className="empty-state small">No saved instruction sets yet.</div>}
+            {presets.map((preset) => (
+              <div key={preset.presetId} className="preset-row" onClick={() => setSystem(preset.content)}>
+                <span className="preset-row-name">{preset.name}</span>
+                <button
+                  className="preset-row-delete"
+                  title="Delete instruction set"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removePreset(preset.presetId);
+                  }}
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+            <button type="button" className="save-preset-btn" onClick={saveCurrentAsPreset}>
+              + Save current as preset
             </button>
           </div>
-        ))}
-        <button type="button" className="save-preset-btn" onClick={saveCurrentAsPreset}>
-          + Save current as preset
-        </button>
-      </fieldset>
+        </details>
+      )}
 
-      <label>
-        System prompt
-        <textarea value={system} onChange={(e) => setSystem(e.target.value)} rows={5} placeholder="(none)" />
-      </label>
+      {session?.kind === 'rp' ? (
+        // RP chats: the model just executes its prompt stack, which owns the system prompt — no
+        // hand-edited field. In its place: the collapsible sync status readout.
+        <ChatSyncSet apiKey={apiKey} session={session} />
+      ) : (
+        <details className="chat-settings-set" open>
+          <summary className="chat-settings-set-summary">System prompt</summary>
+          <div className="chat-settings-set-body">
+            <textarea aria-label="System prompt" value={system} onChange={(e) => setSystem(e.target.value)} rows={5} placeholder="(none)" />
+          </div>
+        </details>
+      )}
 
-      <label>
-        Connection
-        <select value={profile} onChange={(e) => setProfile(e.target.value)}>
-          <option value="">
-            (household default{activeConnection ? ` — ${activeConnection.name}` : ''})
-          </option>
-          {connections.map((c) => (
-            <option key={c.name} value={c.name}>
-              {c.name}
+      <details className="chat-settings-set" open>
+        <summary className="chat-settings-set-summary">Connection</summary>
+        <div className="chat-settings-set-body">
+          <select aria-label="Connection" value={profile} onChange={(e) => setProfile(e.target.value)}>
+            <option value="">
+              (household default{activeConnection ? ` — ${activeConnection.name}` : ''})
             </option>
-          ))}
-        </select>
-        <span className="model-connection-note">Household default set in the Connections tab; this only affects this chat.</span>
-      </label>
-
-      <label>
-        Model
-        <select value={model} onChange={(e) => setModel(e.target.value)}>
-          <option value="">(connection default)</option>
-          {[model, ...modelOptions.map((m) => m.id)]
-            .filter(Boolean)
-            .filter((id, i, ids) => ids.indexOf(id) === i)
-            .map((id) => {
-              const opt = modelOptions.find((m) => m.id === id);
-              return (
-                <option key={id} value={id}>
-                  {id}
-                  {opt?.pricing
-                    ? ` — ${formatPricePerMillion(opt.pricing.prompt)} in / ${formatPricePerMillion(opt.pricing.completion)} out per 1M tok`
-                    : ''}
-                </option>
-              );
-            })}
-        </select>
-        {modelsError && <div className="error-banner">{modelsError}</div>}
-      </label>
-
-      {session?.kind === 'rp' && (
-        <label>
-          Prompt stack
-          <select value={selectedStackId} onChange={(e) => setSelectedStackId(e.target.value)}>
-            <option value="">(none)</option>
-            {stacks.map((s) => (
-              <option key={s.presetId} value={s.presetId}>
-                {s.name}
+            {connections.map((c) => (
+              <option key={c.name} value={c.name}>
+                {c.name}
               </option>
             ))}
           </select>
-          <div className="settings-actions">
-            <button type="button" onClick={applyStack} disabled={!selectedStackId || applyingStack}>
-              {applyingStack ? 'Applying…' : 'Apply'}
-            </button>
+          <span className="model-connection-note">Household default set in the Connections tab; this only affects this chat.</span>
+          <span className="model-connection-note">
+            {effectiveConnection
+              ? `This connection runs on ${effectiveConnection.model} — change it in the Connections tab.`
+              : 'No connections configured yet.'}
+          </span>
+          {modelsError && <div className="error-banner">{modelsError}</div>}
+        </div>
+      </details>
+
+      {session?.kind === 'rp' && (
+        <details className="chat-settings-set">
+          <summary className="chat-settings-set-summary">Prompt stack</summary>
+          <div className="chat-settings-set-body">
+            <select aria-label="Prompt stack" value={selectedStackId} onChange={(e) => setSelectedStackId(e.target.value)}>
+              <option value="">(none)</option>
+              {stacks.map((s) => (
+                <option key={s.presetId} value={s.presetId}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            <div className="settings-actions">
+              <button type="button" onClick={applyStack} disabled={!selectedStackId || applyingStack}>
+                {applyingStack ? 'Applying…' : 'Apply'}
+              </button>
+            </div>
+            {stackError && <div className="error-banner">{stackError}</div>}
           </div>
-          {stackError && <div className="error-banner">{stackError}</div>}
-        </label>
+        </details>
       )}
 
-      <label className="settings-toggle">
-        <input
-          type="checkbox"
-          checked={cleanupEnabled}
-          onChange={(e) => setCleanupEnabled(e.target.checked)}
-          disabled={session?.kind !== 'rp'}
-        />
-        Async cleanup pass
-        {session?.kind !== 'rp' && <span className="model-connection-note"> RP chats only.</span>}
-        <span className="model-connection-note">
-          Strips antislop and repairs the header/footer shapes in the background after each reply
-          lands — the original stays available as a swipe. Rules and prompts are configured on the
-          Cleanup page.
-        </span>
-      </label>
+      <details className="chat-settings-set">
+        <summary className="chat-settings-set-summary">Async cleanup pass</summary>
+        <div className="chat-settings-set-body">
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={cleanupEnabled}
+              onChange={(e) => setCleanupEnabled(e.target.checked)}
+              disabled={session?.kind !== 'rp'}
+            />
+            <span>Enabled{session?.kind !== 'rp' ? ' (RP chats only)' : ''}</span>
+          </label>
+          <span className="model-connection-note">
+            Strips antislop and repairs the header/footer shapes in the background after each reply
+            lands — the original stays available as a swipe. Rules and prompts are configured on the
+            Cleanup page.
+          </span>
+        </div>
+      </details>
 
-      <div className="settings-row">
-        <label>
-          Temperature
-          <input value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="default" />
-        </label>
-        <label>
-          Max tokens
-          <input value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="default" />
-        </label>
-      </div>
+      <details className="chat-settings-set">
+        <summary className="chat-settings-set-summary">Advanced</summary>
+        <div className="chat-settings-set-body">
+          <div className="settings-row">
+            <label>
+              Temperature
+              <input value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="default" />
+            </label>
+            <label>
+              Max tokens
+              <input value={maxTokens} onChange={(e) => setMaxTokens(e.target.value)} placeholder="default" />
+            </label>
+          </div>
+          <label>
+            Folder
+            <select value={folderId} onChange={(e) => setFolderId(e.target.value)}>
+              <option value="">(none)</option>
+              {folders.map((f) => (
+                <option key={f.folderId} value={f.folderId}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </details>
 
-      <label>
-        Folder
-        <select value={folderId} onChange={(e) => setFolderId(e.target.value)}>
-          <option value="">(none)</option>
-          {folders.map((f) => (
-            <option key={f.folderId} value={f.folderId}>
-              {f.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {session?.kind === 'rp' ? (
-        <p className="model-connection-note">
-          RP chats run with no tools — the model just executes the prompt stack (server-enforced
-          per turn). Auto-recall still injects into the stack server-side.
-        </p>
-      ) : (
-        allToolNames.length > 0 && (
-          <fieldset className="tool-checklist">
-            <legend>Tools available in this chat</legend>
+      {session?.kind !== 'rp' && allToolNames.length > 0 && (
+        <details className="chat-settings-set">
+          <summary className="chat-settings-set-summary">Tools available in this chat</summary>
+          <div className="chat-settings-set-body">
             {allToolNames.map((name) => (
               <label key={name} className="tool-item">
                 <input type="checkbox" checked={selectedTools.has(name)} onChange={() => toggleTool(name)} />
                 {name}
               </label>
             ))}
-          </fieldset>
-        )
+          </div>
+        </details>
+      )}
+
+      {session?.kind === 'rp' && (
+        <p className="model-connection-note">
+          RP chats run with no tools — the model just executes the prompt stack (server-enforced
+          per turn). Auto-recall still injects into the stack server-side.
+        </p>
       )}
 
       <div className="settings-actions">
@@ -2244,5 +2220,27 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         {saved && <span className="saved-note">Saved.</span>}
       </div>
     </div>
+  );
+}
+
+// The drawer's collapsible sync display (RP chats only) — the readout that used to open from the
+// ⋯ menu as a floating panel, now embedded as a set in the chat settings rail. The panel body is
+// mounted lazily, only while the set is open, so a collapsed set never keeps the 30s poll
+// running; expanding it remounts and refetches fresh.
+function ChatSyncSet({ apiKey, session }: { apiKey: string | null; session: ChatSessionRow }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <details
+      className="chat-settings-set"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="chat-settings-set-summary">Sync status</summary>
+      {open && (
+        <div className="chat-settings-set-body">
+          <ChatSyncStatusPanel apiKey={apiKey} chatId={session.chatId} archived={!!session.archivedAt} />
+        </div>
+      )}
+    </details>
   );
 }

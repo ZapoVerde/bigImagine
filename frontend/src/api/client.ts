@@ -312,9 +312,10 @@ export async function getChatLineage(chatId: string, apiKey: string | null): Pro
 }
 
 /** GET /v1/chats/:id/sync-status — this chat's slice of the rolling sync loop's status record
- *  (io/chatSessions.ts getChatSyncStatus): the RP chat header menu's "Sync status" panel data.
- *  Unlike the admin-gated /v1/admin/chat-memory-sync-status, this one is user-scoped — no admin
- *  key needed to look at your own chat's sync history. */
+ *  (io/chatSessions.ts getChatSyncStatus): the data behind the chat settings rail's collapsible
+ *  Sync status set (ChatView.tsx's ChatSyncSet). Unlike the admin-gated
+ *  /v1/admin/chat-memory-sync-status, this one is user-scoped — no admin key needed to look at
+ *  your own chat's sync history. */
 export async function getChatSyncStatus(chatId: string, apiKey: string | null): Promise<ChatSyncStatus> {
   const body = await jsonRequest<{ sync: ChatSyncStatus }>(`/v1/chats/${encodeURIComponent(chatId)}/sync-status`, apiKey);
   return body.sync;

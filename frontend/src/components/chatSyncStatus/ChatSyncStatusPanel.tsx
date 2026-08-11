@@ -17,15 +17,21 @@ interface ChatSyncStatusPanelProps {
    *  archived_at is null) — passed in so the panel can say "archived — rolling sync stopped"
    *  instead of "due now" for one. */
   archived: boolean;
-  onClose: () => void;
+  /** When provided, renders the standalone floating panel with a header (title, refresh, close).
+   *  Omit to embed the readout inside another surface — e.g. the chat settings rail's collapsible
+   *  Sync status set (ChatView.tsx's ChatSyncSet) — where the surface's own title/collapse
+   *  replace the header and the panel drops to a plain static flow. */
+  onClose?: () => void;
 }
 
-// The RP chat header menu's "Sync status" panel (ChatView.tsx) — the per-chat, user-scoped slice
-// of the admin Review Panel's sync record (bi_principles.md §11's read surface, narrowed to this
-// chat via GET /v1/chats/:id/sync-status, no admin key). Shows the last sync attempt's outcome,
-// the last successful run's chunk/entry counts, the canon-fact proposals this chat's bridge/
-// lorebook/people curators have produced, and — the "is a sync actually happening" part — how
-// many more unsynced messages the loop is waiting for before its next tick does anything.
+// The per-chat, user-scoped slice of the admin Review Panel's sync record (bi_principles.md §11's
+// read surface, narrowed to this chat via GET /v1/chats/:id/sync-status, no admin key). Shows the
+// last sync attempt's outcome, the last successful run's chunk/entry counts, the canon-fact
+// proposals this chat's bridge/lorebook/people curators have produced, and — the "is a sync
+// actually happening" part — how many more unsynced messages the loop is waiting for before its
+// next tick does anything. Lives in the RP chat settings rail's collapsible "Sync status" set
+// (ChatView.tsx's ChatSyncSet) — it used to open from the ⋯ menu as a standalone panel, which the
+// optional onClose still supports for any future standalone mount.
 export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose }: ChatSyncStatusPanelProps) {
   const [status, setStatus] = useState<ChatSyncStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -47,9 +53,9 @@ export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose 
   }, [load]);
 
   return (
-    <div className="chat-sync-status-panel">
+    <div className={`chat-sync-status-panel${onClose ? '' : ' embedded'}`}>
       <div className="chat-sync-status-header">
-        <span className="chat-sync-status-title">Sync Status</span>
+        {onClose && <span className="chat-sync-status-title">Sync Status</span>}
         <div className="chat-sync-status-header-actions">
           <button
             type="button"
@@ -60,9 +66,11 @@ export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose 
           >
             ↻
           </button>
-          <button type="button" className="chat-sync-status-close" title="Close sync status" onClick={onClose}>
-            &times;
-          </button>
+          {onClose && (
+            <button type="button" className="chat-sync-status-close" title="Close sync status" onClick={onClose}>
+              &times;
+            </button>
+          )}
         </div>
       </div>
       <div className="chat-sync-status-content">
