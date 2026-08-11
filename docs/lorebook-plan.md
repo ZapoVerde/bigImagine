@@ -182,7 +182,7 @@ out of sync with the log.
   looks at message text.
 - **IO Wrapper** `writeLorebookActivationLog(chatId, messageId, activatedEntryIds)` — called after
   the turn completes, same "write after, not during" shape `chatMemorySync.ts` already uses.
-- **Orchestrator** — a new `resolveLorebook()` step in the turn loop (`turn-loop-plan.md`'s step 2,
+- **Orchestrator** — a new `resolveLorebook()` step in the turn loop (`plans/turn-loop-plan.md`'s step 2,
   alongside the existing canon-facts/memory-recall resolution), sequencing recall → fetch timed-effect
   state → gate → format into a flat string → hand to `assemblePromptStack`. Owns no state, does no IO
   itself, decides nothing about what the data means — only the order these calls happen in.
