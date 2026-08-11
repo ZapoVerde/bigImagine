@@ -415,11 +415,6 @@ export default function ChatView({
   // one of the two is shown at a time — this tracks which. Irrelevant on desktop, where both
   // panes are always visible and this toggle is hidden.
   const [mobileShowCanvas, setMobileShowCanvas] = useState(false);
-  // Lorebook sidebar (docs/lorebook-plan.md §8b): offered on any chat, not just 'rp'. One state
-  // for both viewports — on desktop the panel is a side-by-side pane when open; on mobile it's
-  // the mobile-show-lorebook full-pane swap (mutually exclusive with the canvas swap so the two
-  // single-pane CSS rules never fight).
-  const [lorebookOpen, setLorebookOpen] = useState(false);
   // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
@@ -564,7 +559,6 @@ export default function ChatView({
       setMessages([]);
       setSettingsCollapsed(true);
       setMobileShowCanvas(false);
-      setLorebookOpen(false);
       setBranchMapOpen(false);
       setChatMenuOpen(false);
       setPendingSettings(null);
@@ -577,7 +571,6 @@ export default function ChatView({
     }
     if (activeChat?.chatId === chatId) return;
     setMobileShowCanvas(false);
-    setLorebookOpen(false);
     setBranchMapOpen(false);
     setChatMenuOpen(false);
     setPendingSettings(null);
@@ -1345,7 +1338,7 @@ export default function ChatView({
 
   return (
     <div
-      className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}${lorebookOpen ? ' mobile-show-lorebook' : ''}`}
+      className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}
       style={{ ...chatBgStyle, ...legStyle }}
       data-legibility={legibilityFlags}
     >
@@ -1444,19 +1437,6 @@ export default function ChatView({
                 onClick={() => setMobileShowCanvas((v) => !v)}
               >
                 {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
-              </button>
-            )}
-            {activeChat && (
-              <button
-                type="button"
-                className="chat-lorebook-switch"
-                title={lorebookOpen ? 'Hide the lorebook sidebar' : 'Show this chat\'s lorebook sidebar'}
-                onClick={() => {
-                  setLorebookOpen((v) => !v);
-                  setMobileShowCanvas(false);
-                }}
-              >
-                {lorebookOpen ? '💬' : '📖'}
               </button>
             )}
           </div>
@@ -1781,16 +1761,6 @@ export default function ChatView({
         />
       )}
 
-      {lorebookOpen && activeChat && (
-        <LorebookPanel
-          apiKey={apiKey}
-          chatId={activeChat.chatId}
-          refreshToken={messages.length}
-          onOpenLorebooks={onOpenLorebooks}
-          onClose={() => setLorebookOpen(false)}
-        />
-      )}
-
       {branchMapOpen && activeChat && (
         <BranchMapPanel
           apiKey={apiKey}
@@ -1867,6 +1837,8 @@ export default function ChatView({
               session={activeChat}
               folders={folders}
               allToolNames={allToolNames}
+              onOpenLorebooks={onOpenLorebooks}
+              refreshToken={messages.length}
               onSave={saveSettings}
             />
           </div>
@@ -1895,6 +1867,11 @@ interface ChatSettingsProps {
   session: ChatSessionRow | null;
   folders: Folder[];
   allToolNames: string[];
+  /** The lorebook panel's mode-off one-liner link target (App wires this to the Lorebooks tab). */
+  onOpenLorebooks?: () => void;
+  /** Bumped once per completed chat turn (ChatView's messages.length) — refreshes the lorebook
+   *  panel's live activation badges while its set is open. */
+  refreshToken: number;
   onSave: (patch: {
     params?: ChatParams;
     tool_names?: string[] | null;
@@ -1908,7 +1885,7 @@ interface ChatSettingsProps {
 // session is null until the chat's first message is sent (it's created lazily) — every field
 // below just falls back to an empty/default draft in that case. Saving while null hands the
 // draft patch back up to ChatView, which applies it right after the chat is actually created.
-function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSettingsProps) {
+function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks, refreshToken, onSave }: ChatSettingsProps) {
   const [title, setTitle] = useState(session?.title ?? 'New chat');
   const [system, setSystem] = useState(session?.params.system ?? '');
   const [temperature, setTemperature] = useState(session?.params.temperature?.toString() ?? '');
@@ -2104,6 +2081,15 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         </details>
       )}
 
+      {session && (
+        <LorebookSet
+          apiKey={apiKey}
+          session={session}
+          refreshToken={refreshToken}
+          onOpenLorebooks={onOpenLorebooks}
+        />
+      )}
+
       {session?.kind === 'rp' ? (
         // RP chats: the model just executes its prompt stack, which owns the system prompt — no
         // hand-edited field. In its place: the collapsible sync status readout.
@@ -2235,6 +2221,45 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onSave }: ChatSe
         {saved && <span className="saved-note">Saved.</span>}
       </div>
     </div>
+  );
+}
+
+// The drawer's collapsible lorebook panel (docs/lorebook-plan.md §8b) — the chat-header 📖
+// shortcut used to toggle a standalone sidebar; now the panel is a set in the chat settings
+// rail, offered on any chat, not just 'rp'. The panel body is mounted lazily, only while the
+// set is open, so a collapsed set never fetches panel data.
+function LorebookSet({
+  apiKey,
+  session,
+  refreshToken,
+  onOpenLorebooks,
+}: {
+  apiKey: string | null;
+  session: ChatSessionRow;
+  refreshToken: number;
+  onOpenLorebooks?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details
+      className="chat-settings-set"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="chat-settings-set-summary">Lorebook</summary>
+      {open && (
+        <div className="chat-settings-set-body">
+          <LorebookPanel
+            apiKey={apiKey}
+            chatId={session.chatId}
+            refreshToken={refreshToken}
+            onOpenLorebooks={onOpenLorebooks}
+            onClose={() => setOpen(false)}
+            embedded
+          />
+        </div>
+      )}
+    </details>
   );
 }
 

@@ -1,11 +1,13 @@
-// docs/lorebook-plan.md §8b — the chat-sidebar Lorebook panel, wired into ChatView.tsx the same
-// way CanvasPanel is (same mobile-full-pane-swap class pattern, `mobile-show-lorebook`; side-by-
-// side pane on desktop). Offered on any chat, not just 'rp' chats. Reads the user-scoped
-// /v1/chats/:chatId/lorebook-panel data: the resolved mode, the §3b in-scope books with all
-// their entries, the §8b live activation badge (lorebook_activation_log's latest message), and
-// the quick toggles/quick-add that write lorebook_chat_overrides / lorebook_entry_overrides /
-// a lazily-created chat-scoped book. When mode resolves to off, the whole panel collapses to a
-// one-line status + a link to the RAG view — never a blank or half-populated panel.
+// docs/lorebook-plan.md §8b — the chat-sidebar Lorebook panel. Wired into ChatView.tsx's
+// settings rail as a collapsible set (LorebookSet): embedded, static flow — the set's summary is
+// the title and a collapsed set never mounts the panel. The standalone chrome (title + ✕ header,
+// side-by-side pane) still exists via the `embedded` prop for any future standalone mount. Reads
+// the user-scoped /v1/chats/:chatId/lorebook-panel data: the resolved mode, the §3b in-scope
+// books with all their entries, the §8b live activation badge (lorebook_activation_log's latest
+// message), and the quick toggles/quick-add that write lorebook_chat_overrides /
+// lorebook_entry_overrides / a lazily-created chat-scoped book. When mode resolves to off, the
+// whole panel collapses to a one-line status + a link to the RAG view — never a blank or
+// half-populated panel.
 import { useEffect, useState } from 'react';
 import {
   getLorebookPanel,
@@ -25,9 +27,13 @@ interface LorebookPanelProps {
   /** The mode-off one-liner's link target (App wires this to summon the Lorebooks tab). */
   onOpenLorebooks?: () => void;
   onClose: () => void;
+  /** Render as a static embedded flow (no standalone header chrome — title, mode tag, ✕) for
+   *  hosting inside the chat settings rail's collapsible Lorebook set, whose summary is the
+   *  title. Defaults to the standalone side-pane treatment. */
+  embedded?: boolean;
 }
 
-export default function LorebookPanel({ apiKey, chatId, refreshToken, onOpenLorebooks, onClose }: LorebookPanelProps) {
+export default function LorebookPanel({ apiKey, chatId, refreshToken, onOpenLorebooks, onClose, embedded = false }: LorebookPanelProps) {
   const [data, setData] = useState<LorebookPanelData | null>(null);
   const [loadError, setLoadError] = useState('');
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -94,16 +100,18 @@ export default function LorebookPanel({ apiKey, chatId, refreshToken, onOpenLore
   const modeOff = data !== null && data.mode === 'off';
 
   return (
-    <div className="lorebook-panel">
-      <div className="lorebook-panel-header">
-        <span className="lorebook-panel-title">📖 Lorebook</span>
-        <span className="lorebook-panel-header-actions">
-          {modeOff && data?.modeIsDefault && <span className="lorebook-panel-mode-tag">(default)</span>}
-          <button type="button" className="lorebook-panel-close" onClick={onClose} title="Close">
-            ✕
-          </button>
-        </span>
-      </div>
+    <div className={`lorebook-panel${embedded ? ' embedded' : ''}`}>
+      {!embedded && (
+        <div className="lorebook-panel-header">
+          <span className="lorebook-panel-title">📖 Lorebook</span>
+          <span className="lorebook-panel-header-actions">
+            {modeOff && data?.modeIsDefault && <span className="lorebook-panel-mode-tag">(default)</span>}
+            <button type="button" className="lorebook-panel-close" onClick={onClose} title="Close">
+              ✕
+            </button>
+          </span>
+        </div>
+      )}
 
       {loadError && <div className="lorebook-panel-content status">{loadError}</div>}
 

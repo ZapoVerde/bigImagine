@@ -7,12 +7,21 @@
   border-left: 1px solid var(--color-border-subtle);
 }
 
-/* Full width, no divider needed, once it's the only pane showing (ChatView.css's
-   mobile-show-lorebook toggle) instead of sharing the screen with chat-main. */
-@media (max-width: 768px) {
-  .lorebook-panel {
-    border-left: none;
-  }
+/* Embedded in the chat settings rail's Lorebook set (ChatView.tsx's LorebookSet): no standalone
+   chrome — static flow, no flex-grow/border, no padding on the content (the set body provides
+   the spacing). The set's summary is the title; the panel's own header is not rendered at all
+   (LorebookPanel.tsx drops it in embedded mode). The mobile border-left reset is unnecessary
+   here — the settings rail is already the overlay drawer on phones, and .embedded clears the
+   border anyway. */
+.lorebook-panel.embedded {
+  flex: none;
+  border-left: none;
+}
+
+.lorebook-panel.embedded .lorebook-panel-content {
+  flex: none;
+  overflow: visible;
+  padding: 0;
 }
 
 .lorebook-panel-header {
