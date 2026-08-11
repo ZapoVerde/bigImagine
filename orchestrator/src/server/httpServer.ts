@@ -209,6 +209,10 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { createToolRegistry, filterToolRegistry, type ToolRegistry } from '../orchestrator/toolRegistry.js';
 import type { ApiKeyStore } from './apiKeyStore.js';
 import {
+  createLorebookAdmin,
+  createLorebookEntryAdmin,
+  deleteLorebookAdmin,
+  deleteLorebookEntryAdmin,
   getCanonSettings,
   getChatMemorySettings,
   getChatMemorySyncStatus,
@@ -220,6 +224,8 @@ import {
   getLocationRenderStatus,
   getLocationsAdmin,
   getLocationSettings,
+  getLorebookSettings,
+  getLorebooksAdmin,
   getNotificationSettings,
   getPersonaSettings,
   getPiaProxyUrl,
@@ -237,6 +243,7 @@ import {
   parseSetCredentialBody,
   parseSetImageSettingsBody,
   parseSetLocationSettingsBody,
+  parseSetLorebookSettingsBody,
   parseSetNotificationSettingsBody,
   parseSetPersonaSettingsBody,
   parseSetPiaProxyUrlBody,
@@ -253,13 +260,17 @@ import {
   setHouseholdTimezone,
   setImageSettings,
   setLocationSettings,
+  setLorebookSettings,
   setNotificationSettings,
   setPersonaSettings,
   setPiaProxyUrl,
   setScreenLockSettings,
   testConnection,
   testImageConnection,
+  updateLorebookAdmin,
+  updateLorebookEntryAdmin,
 } from './adminServer.js';
+import type { LorebookEntryInput, LorebookEntryPatch } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
 import {
   buildChatCompletion,
@@ -2429,10 +2440,306 @@ async function handleCanonSettingsSet(req: IncomingMessage, res: ServerResponse,
     });
     return;
   }
-
   await setCanonSettings(deps.settings, parsed);
   // No restart needed — recall_canon_facts reads canon_recall_top_k live on every call.
   sendJson(res, 200, await getCanonSettings(deps.settings));
+}
+
+// docs/lorebook-plan.md §3d/§8a — the Lorebooks page's settings panel. Like canon settings,
+// resolveLorebook reads the §3d keys live every turn, so a save here takes effect immediately.
+async function handleLorebookSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getLorebookSettings(deps.settings));
+}
+
+async function handleLorebookSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+
+  const parsed = parseSetLorebookSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error:
+        'expected at least one of { lorebook_mode?: "on" | "off", lorebook_token_budget?: positive number | null, ' +
+        'lorebook_recall_top_k?: positive integer, lorebook_recursion_enabled?: boolean }',
+    });
+    return;
+  }
+  await setLorebookSettings(deps.settings, parsed);
+  sendJson(res, 200, await getLorebookSettings(deps.settings));
+}
+
+// docs/lorebook-plan.md §8a — the Lorebooks page's library list + entry editor. Books/entries are
+// user-scoped RLS tables, so every write body carries the owning user_id (from the list response);
+// the admin key grants the cross-user read, and each write runs under that user's scope.
+async function handleAdminLorebookRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
+  const segments = url.pathname.split('/').filter(Boolean); // ['v1','admin','lorebooks', ...]
+  const intField = (v: unknown, min = 0, max = Infinity) =>
+    typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max ? v : undefined;
+
+  if (segments[2] === 'lorebooks') {
+    const rest = segments.slice(3);
+    if (rest.length === 0 && req.method === 'GET') {
+      sendJson(res, 200, { lorebooks: await getLorebooksAdmin(deps.db) });
+      return;
+    }
+    if (rest.length === 0 && req.method === 'POST') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const body = raw as Record<string, unknown> | null;
+      if (!body || typeof body.user_id !== 'string' || !body.user_id || typeof body.name !== 'string' || !body.name.trim()) {
+        sendJson(res, 400, { error: 'expected { user_id: string, name: non-empty string }' });
+        return;
+      }
+      const created = await createLorebookAdmin(deps.db, body.user_id, body.name.trim());
+      if (!created) {
+        sendJson(res, 404, { error: 'user not found' });
+        return;
+      }
+      sendJson(res, 201, created);
+      return;
+    }
+    if (rest.length === 1) {
+      const lorebookId = decodeURIComponent(rest[0]!);
+      if (req.method === 'PATCH') {
+        let raw: unknown;
+        try {
+          raw = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'expected a JSON request body' });
+          return;
+        }
+        const body = raw as Record<string, unknown> | null;
+        if (!body || typeof body.user_id !== 'string' || !body.user_id) {
+          sendJson(res, 400, { error: 'expected { user_id: string, ... }' });
+          return;
+        }
+        const patch: { name?: string; globalScope?: boolean; characterIds?: string[] } = {};
+        if (body.name !== undefined) {
+          if (typeof body.name !== 'string' || !body.name.trim()) {
+            sendJson(res, 400, { error: 'name must be a non-empty string' });
+            return;
+          }
+          patch.name = body.name.trim();
+        }
+        if (body.global_scope !== undefined) {
+          if (typeof body.global_scope !== 'boolean') {
+            sendJson(res, 400, { error: 'global_scope must be a boolean' });
+            return;
+          }
+          patch.globalScope = body.global_scope;
+        }
+        if (body.character_ids !== undefined) {
+          if (!Array.isArray(body.character_ids) || body.character_ids.some((c) => typeof c !== 'string')) {
+            sendJson(res, 400, { error: 'character_ids must be an array of strings' });
+            return;
+          }
+          patch.characterIds = body.character_ids as string[];
+        }
+        const updated = await updateLorebookAdmin(deps.db, body.user_id, lorebookId, patch);
+        if (!updated) {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        sendJson(res, 200, { updated: true });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const userId = url.searchParams.get('userId');
+        if (!userId) {
+          sendJson(res, 400, { error: 'expected ?userId= query param' });
+          return;
+        }
+        const deleted = await deleteLorebookAdmin(deps.db, userId, lorebookId);
+        if (!deleted) {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        sendJson(res, 200, { deleted: true });
+        return;
+      }
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  if (segments[2] === 'lorebook-entries') {
+    const rest = segments.slice(3);
+    if (rest.length === 0 && req.method === 'POST') {
+      let raw: unknown;
+      try {
+        raw = await readJsonBody(req);
+      } catch {
+        sendJson(res, 400, { error: 'expected a JSON request body' });
+        return;
+      }
+      const body = raw as Record<string, unknown> | null;
+      if (!body || typeof body.user_id !== 'string' || !body.user_id || typeof body.lorebook_id !== 'string' || typeof body.content !== 'string') {
+        sendJson(res, 400, { error: 'expected { user_id: string, lorebook_id: string, content: string, ... }' });
+        return;
+      }
+      const input: LorebookEntryInput = {
+        lorebookId: body.lorebook_id,
+        content: body.content,
+      };
+      if (body.key !== undefined) {
+        if (!Array.isArray(body.key) || body.key.some((k) => typeof k !== 'string')) {
+          sendJson(res, 400, { error: 'key must be an array of strings' });
+          return;
+        }
+        input.key = body.key as string[];
+      }
+      if (body.comment !== undefined) {
+        if (typeof body.comment !== 'string') {
+          sendJson(res, 400, { error: 'comment must be a string' });
+          return;
+        }
+        input.comment = body.comment;
+      }
+      for (const [name, target] of [
+        ['constant', 'constant'],
+        ['disable', 'disable'],
+        ['use_probability', 'useProbability'],
+        ['group_override', 'groupOverride'],
+      ] as const) {
+        if (body[name] !== undefined) {
+          if (typeof body[name] !== 'boolean') {
+            sendJson(res, 400, { error: `${name} must be a boolean` });
+            return;
+          }
+          (input as unknown as Record<string, unknown>)[target] = body[name];
+        }
+      }
+      for (const [name, target] of [
+        ['order_value', 'orderValue'],
+        ['probability', 'probability'],
+        ['group_weight', 'groupWeight'],
+        ['sticky', 'sticky'],
+        ['cooldown', 'cooldown'],
+        ['delay', 'delay'],
+      ] as const) {
+        if (body[name] !== undefined) {
+          const v = intField(body[name]);
+          if (v === undefined) {
+            sendJson(res, 400, { error: `${name} must be a non-negative integer` });
+            return;
+          }
+          (input as unknown as Record<string, unknown>)[target] = v;
+        }
+      }
+      const created = await createLorebookEntryAdmin(deps.db, deps.embeddings, body.user_id, input);
+      if (!created) {
+        sendJson(res, 404, { error: 'book not found' });
+        return;
+      }
+      sendJson(res, 201, created);
+      return;
+    }
+    if (rest.length === 1) {
+      const entryId = decodeURIComponent(rest[0]!);
+      if (req.method === 'PATCH') {
+        let raw: unknown;
+        try {
+          raw = await readJsonBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'expected a JSON request body' });
+          return;
+        }
+        const body = raw as Record<string, unknown> | null;
+        if (!body || typeof body.user_id !== 'string' || !body.user_id) {
+          sendJson(res, 400, { error: 'expected { user_id: string, ... }' });
+          return;
+        }
+        const patch: LorebookEntryPatch = {};
+        if (body.key !== undefined) {
+          if (!Array.isArray(body.key) || body.key.some((k) => typeof k !== 'string')) {
+            sendJson(res, 400, { error: 'key must be an array of strings' });
+            return;
+          }
+          patch.key = body.key as string[];
+        }
+        if (body.comment !== undefined) {
+          if (typeof body.comment !== 'string') {
+            sendJson(res, 400, { error: 'comment must be a string' });
+            return;
+          }
+          patch.comment = body.comment;
+        }
+        if (body.content !== undefined) {
+          if (typeof body.content !== 'string') {
+            sendJson(res, 400, { error: 'content must be a string' });
+            return;
+          }
+          patch.content = body.content;
+        }
+        for (const [name, target] of [
+          ['constant', 'constant'],
+          ['disable', 'disable'],
+          ['use_probability', 'useProbability'],
+          ['group_override', 'groupOverride'],
+        ] as const) {
+          if (body[name] !== undefined) {
+            if (typeof body[name] !== 'boolean') {
+              sendJson(res, 400, { error: `${name} must be a boolean` });
+              return;
+            }
+            (patch as unknown as Record<string, unknown>)[target] = body[name];
+          }
+        }
+        for (const [name, target] of [
+          ['order_value', 'orderValue'],
+          ['probability', 'probability'],
+          ['group_weight', 'groupWeight'],
+          ['sticky', 'sticky'],
+          ['cooldown', 'cooldown'],
+          ['delay', 'delay'],
+        ] as const) {
+          if (body[name] !== undefined) {
+            const v = intField(body[name]);
+            if (v === undefined) {
+              sendJson(res, 400, { error: `${name} must be a non-negative integer` });
+              return;
+            }
+            (patch as unknown as Record<string, unknown>)[target] = v;
+          }
+        }
+        const updated = await updateLorebookEntryAdmin(deps.db, deps.embeddings, body.user_id, entryId, patch);
+        if (!updated) {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        sendJson(res, 200, { updated: true });
+        return;
+      }
+      if (req.method === 'DELETE') {
+        const userId = url.searchParams.get('userId');
+        if (!userId) {
+          sendJson(res, 400, { error: 'expected ?userId= query param' });
+          return;
+        }
+        const deleted = await deleteLorebookEntryAdmin(deps.db, userId, entryId);
+        if (!deleted) {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        sendJson(res, 200, { deleted: true });
+        return;
+      }
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  sendJson(res, 404, { error: 'not found' });
 }
 
 async function handleNotificationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
@@ -3656,6 +3963,37 @@ async function handleRequest(
       return;
     }
     await handleCleanupSettingsSet(req, res, deps);
+    return;
+  }
+  if (req.method === 'GET' && req.url === '/v1/admin/lorebook-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLorebookSettingsGet(res, deps);
+    return;
+  }
+  if (req.method === 'POST' && req.url === '/v1/admin/lorebook-settings') {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleLorebookSettingsSet(req, res, deps);
+    return;
+  }
+  if (
+    req.url === '/v1/admin/lorebooks' ||
+    req.url?.startsWith('/v1/admin/lorebooks/') ||
+    req.url?.startsWith('/v1/admin/lorebooks?') ||
+    req.url === '/v1/admin/lorebook-entries' ||
+    req.url?.startsWith('/v1/admin/lorebook-entries/') ||
+    req.url?.startsWith('/v1/admin/lorebook-entries?')
+  ) {
+    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+      sendJson(res, 401, { error: 'missing or incorrect admin key' });
+      return;
+    }
+    await handleAdminLorebookRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
     return;
   }
   sendJson(res, 404, { error: 'not found' });

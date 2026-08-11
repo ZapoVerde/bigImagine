@@ -1501,6 +1501,429 @@ export async function setCanonSettings(store: OrchestratorSettingsStore, body: S
   if (body.extractionPrompt !== undefined) await store.set('canon_extraction_prompt', body.extractionPrompt);
 }
 
+// --- Lorebook settings (docs/lorebook-plan.md §3d/§8a, step 5) ---
+// The §3d keys were registered in orchestratorSettings.ts at the same commit that widened the
+// CHECK (0088); this trio is the admin read/write surface the Lorebooks page's settings panel
+// drives. Defaults mirror what resolveLorebook.ts reads when a key is unset: mode off (§2),
+// recall top-K 8 (canon_recall_top_k's default), token budget unlimited, recursion off (its row
+// exists but is deliberately unread — §9).
+export interface LorebookSettings {
+  lorebookMode: 'on' | 'off';
+  lorebookModeIsDefault: boolean;
+  /** null = unlimited (the unset/infinite default). */
+  lorebookTokenBudget: number | null;
+  lorebookTokenBudgetIsDefault: boolean;
+  lorebookRecallTopK: number;
+  lorebookRecallTopKIsDefault: boolean;
+  lorebookRecursionEnabled: boolean;
+  lorebookRecursionEnabledIsDefault: boolean;
+}
+
+export async function getLorebookSettings(store: OrchestratorSettingsStore): Promise<LorebookSettings> {
+  const [modeRaw, budgetRaw, topKRaw, recursionRaw] = await Promise.all([
+    store.get('lorebook_mode'),
+    store.get('lorebook_token_budget'),
+    store.get('lorebook_recall_top_k'),
+    store.get('lorebook_recursion_enabled'),
+  ]);
+  const parsedBudget = budgetRaw ? Number(budgetRaw) : NaN;
+  const parsedTopK = topKRaw ? Number(topKRaw) : NaN;
+  return {
+    lorebookMode: modeRaw === 'on' ? 'on' : 'off',
+    lorebookModeIsDefault: modeRaw === undefined,
+    // 'Infinity' is the canonical stored spelling for "no budget" (setLorebookSettings writes it
+    // when the panel clears the field); both it and an unset row map to null.
+    lorebookTokenBudget:
+      budgetRaw === undefined || budgetRaw === 'Infinity' || !Number.isFinite(parsedBudget) || parsedBudget <= 0 ? null : parsedBudget,
+    lorebookTokenBudgetIsDefault: budgetRaw === undefined,
+    lorebookRecallTopK: Number.isInteger(parsedTopK) && parsedTopK > 0 ? parsedTopK : 8,
+    lorebookRecallTopKIsDefault: topKRaw === undefined,
+    lorebookRecursionEnabled: recursionRaw === 'true',
+    lorebookRecursionEnabledIsDefault: recursionRaw === undefined,
+  };
+}
+
+export interface SetLorebookSettingsBody {
+  lorebookMode?: 'on' | 'off';
+  /** null clears the budget back to unlimited. */
+  lorebookTokenBudget?: number | null;
+  lorebookRecallTopK?: number;
+  lorebookRecursionEnabled?: boolean;
+}
+
+// All four fields optional and independently settable; wire keys are snake_case, same convention
+// as every other parseSet*Body in this file. An explicit null on lorebook_token_budget clears the
+// override back to unlimited (the "reset to default" gesture for that field).
+export function parseSetLorebookSettingsBody(raw: unknown): SetLorebookSettingsBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { lorebook_mode, lorebook_token_budget, lorebook_recall_top_k, lorebook_recursion_enabled } = raw as Record<string, unknown>;
+  if (
+    lorebook_mode === undefined &&
+    lorebook_token_budget === undefined &&
+    lorebook_recall_top_k === undefined &&
+    lorebook_recursion_enabled === undefined
+  ) {
+    return undefined;
+  }
+  if (lorebook_mode !== undefined && lorebook_mode !== 'on' && lorebook_mode !== 'off') return undefined;
+  if (
+    lorebook_token_budget !== undefined &&
+    lorebook_token_budget !== null &&
+    (typeof lorebook_token_budget !== 'number' || !Number.isFinite(lorebook_token_budget) || lorebook_token_budget <= 0)
+  ) {
+    return undefined;
+  }
+  if (lorebook_recall_top_k !== undefined && (typeof lorebook_recall_top_k !== 'number' || !Number.isInteger(lorebook_recall_top_k) || lorebook_recall_top_k <= 0)) {
+    return undefined;
+  }
+  if (lorebook_recursion_enabled !== undefined && typeof lorebook_recursion_enabled !== 'boolean') return undefined;
+  return {
+    lorebookMode: lorebook_mode as 'on' | 'off' | undefined,
+    lorebookTokenBudget: lorebook_token_budget as number | null | undefined,
+    lorebookRecallTopK: lorebook_recall_top_k as number | undefined,
+    lorebookRecursionEnabled: lorebook_recursion_enabled as boolean | undefined,
+  };
+}
+
+export async function setLorebookSettings(store: OrchestratorSettingsStore, body: SetLorebookSettingsBody): Promise<void> {
+  if (body.lorebookMode !== undefined) await store.set('lorebook_mode', body.lorebookMode);
+  if (body.lorebookTokenBudget !== undefined) {
+    await store.set('lorebook_token_budget', body.lorebookTokenBudget === null ? 'Infinity' : String(body.lorebookTokenBudget));
+  }
+  if (body.lorebookRecallTopK !== undefined) await store.set('lorebook_recall_top_k', String(body.lorebookRecallTopK));
+  if (body.lorebookRecursionEnabled !== undefined) await store.set('lorebook_recursion_enabled', String(body.lorebookRecursionEnabled));
+}
+
+// --- Lorebook management CRUD (docs/lorebook-plan.md §8a, step 5) ---
+// The Lorebooks page's library list + entry editor. Books/entries are user-scoped, RLS-forced
+// tables (0051), so every write takes the owning userId explicitly and runs under that user's
+// scope — the admin key grants cross-user *reads* (roster + per-user scan, same shape as
+// getLocationsAdmin), but Postgres still refuses a system-scope write into a forced-RLS table.
+// All FKs cascade (0051/0088), so deletes are single-statement. vector_embed is populated at
+// create/update time by embedding `${bookName}\n${content}` (the §3c/chatMemorySync shape); an
+// embedding failure fails open to a null vector — the entry still works, it just can't be ranked.
+export interface LorebookEntryAdminRow {
+  entryId: string;
+  uid: number;
+  key: string[];
+  comment: string;
+  content: string;
+  constant: boolean;
+  disable: boolean;
+  orderValue: number;
+  probability: number;
+  useProbability: boolean;
+  groupName: string;
+  groupWeight: number;
+  groupOverride: boolean;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  updatedAt: string;
+}
+
+export interface LorebookAdminRow {
+  lorebookId: string;
+  userId: string;
+  name: string;
+  globalScope: boolean;
+  createdAt: string;
+  updatedAt: string;
+  characterIds: string[];
+  chatOverrideCount: number;
+  entries: LorebookEntryAdminRow[];
+}
+
+export interface LorebookEntryInput {
+  lorebookId: string;
+  content: string;
+  key?: string[];
+  comment?: string;
+  constant?: boolean;
+  disable?: boolean;
+  orderValue?: number;
+  probability?: number;
+  useProbability?: boolean;
+  groupName?: string;
+  groupWeight?: number;
+  groupOverride?: boolean;
+  sticky?: number;
+  cooldown?: number;
+  delay?: number;
+}
+
+export type LorebookEntryPatch = Omit<LorebookEntryInput, 'lorebookId' | 'content'> & { content?: string };
+
+interface LorebookEntryRowShape {
+  entry_id: string;
+  uid: number;
+  key: string[];
+  comment: string;
+  content: string;
+  constant: boolean;
+  disable: boolean;
+  order_value: number;
+  probability: number;
+  use_probability: boolean;
+  group_name: string;
+  group_weight: number;
+  group_override: boolean;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  updated_at: string;
+}
+
+function toLorebookEntryAdminRow(r: LorebookEntryRowShape): LorebookEntryAdminRow {
+  return {
+    entryId: r.entry_id,
+    uid: r.uid,
+    key: r.key,
+    comment: r.comment,
+    content: r.content,
+    constant: r.constant,
+    disable: r.disable,
+    orderValue: r.order_value,
+    probability: r.probability,
+    useProbability: r.use_probability,
+    groupName: r.group_name,
+    groupWeight: r.group_weight,
+    groupOverride: r.group_override,
+    sticky: r.sticky,
+    cooldown: r.cooldown,
+    delay: r.delay,
+    updatedAt: r.updated_at,
+  };
+}
+
+export async function getLorebooksAdmin(db: PostgresClient): Promise<LorebookAdminRow[]> {
+  const users = await db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
+  const rows: LorebookAdminRow[] = [];
+  for (const { user_id: userId } of users) {
+    const books = await db.withUserScope(userId, (session) =>
+      session.query<{
+        lorebook_id: string;
+        name: string;
+        global_scope: boolean;
+        created_at: string;
+        updated_at: string;
+        chat_override_count: number;
+        character_ids: string[] | null;
+      }>(
+        `select b.lorebook_id, b.name, b.global_scope, b.created_at, b.updated_at,
+                (select count(*)::int from lorebook_chat_overrides co where co.lorebook_id = b.lorebook_id) as chat_override_count,
+                (select coalesce(array_agg(cl.character_id order by cl.joined_at), '{}'::uuid[]) from lorebook_character_links cl
+                 where cl.lorebook_id = b.lorebook_id) as character_ids
+         from lorebooks b
+         order by b.name`,
+      ),
+    );
+    for (const b of books) {
+      const entries = await db.withUserScope(userId, (session) =>
+        session.query<LorebookEntryRowShape>(
+          `select entry_id, uid, key, comment, content, constant, disable, order_value, probability,
+                  use_probability, group_name, group_weight, group_override, sticky, cooldown, delay, updated_at
+           from lorebook_entries where lorebook_id = $1
+           order by order_value, uid`,
+          [b.lorebook_id],
+        ),
+      );
+      rows.push({
+        lorebookId: b.lorebook_id,
+        userId,
+        name: b.name,
+        globalScope: b.global_scope,
+        createdAt: b.created_at,
+        updatedAt: b.updated_at,
+        characterIds: b.character_ids ?? [],
+        chatOverrideCount: b.chat_override_count,
+        entries: entries.map(toLorebookEntryAdminRow),
+      });
+    }
+  }
+  return rows;
+}
+
+export async function createLorebookAdmin(db: PostgresClient, userId: string, name: string): Promise<LorebookAdminRow | undefined> {
+  return db.withUserScope(userId, async (session) => {
+    const [row] = await session.query<{ lorebook_id: string; name: string; global_scope: boolean; created_at: string; updated_at: string }>(
+      'insert into lorebooks (user_id, name) values ($1, $2) returning lorebook_id, name, global_scope, created_at, updated_at',
+      [userId, name],
+    );
+    if (!row) return undefined;
+    return {
+      lorebookId: row.lorebook_id,
+      userId,
+      name: row.name,
+      globalScope: row.global_scope,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      characterIds: [],
+      chatOverrideCount: 0,
+      entries: [],
+    };
+  });
+}
+
+export interface UpdateLorebookPatch {
+  name?: string;
+  globalScope?: boolean;
+  /** Replaces the book's character-link set wholesale; omitted = leave links untouched. */
+  characterIds?: string[];
+}
+
+export async function updateLorebookAdmin(
+  db: PostgresClient,
+  userId: string,
+  lorebookId: string,
+  patch: UpdateLorebookPatch,
+): Promise<boolean> {
+  return db.withUserScope(userId, async (session) => {
+    if (patch.name !== undefined || patch.globalScope !== undefined) {
+      const sets: string[] = [];
+      const params: unknown[] = [lorebookId, userId];
+      if (patch.name !== undefined) {
+        params.push(patch.name);
+        sets.push(`name = $${params.length}`);
+      }
+      if (patch.globalScope !== undefined) {
+        params.push(patch.globalScope);
+        sets.push(`global_scope = $${params.length}`);
+      }
+      await session.query(`update lorebooks set ${sets.join(', ')} where lorebook_id = $1 and user_id = $2`, params);
+    }
+    if (patch.characterIds !== undefined) {
+      await session.query('delete from lorebook_character_links where lorebook_id = $1', [lorebookId]);
+      for (const characterId of patch.characterIds) {
+        await session.query(
+          'insert into lorebook_character_links (lorebook_id, character_id, user_id) values ($1, $2, $3) on conflict do nothing',
+          [lorebookId, characterId, userId],
+        );
+      }
+    }
+    // The book's user_id check above is what makes a foreign row a no-op: RLS hides it entirely.
+    const [exists] = await session.query<{ n: number }>('select 1 as n from lorebooks where lorebook_id = $1', [lorebookId]);
+    return exists !== undefined;
+  });
+}
+
+export async function deleteLorebookAdmin(db: PostgresClient, userId: string, lorebookId: string): Promise<boolean> {
+  return db.withUserScope(userId, async (session) => {
+    await session.query('delete from lorebooks where lorebook_id = $1 and user_id = $2', [lorebookId, userId]);
+    // session.query returns rows, not a pg result — detect "was there a row" with an exists probe.
+    const [exists] = await session.query<{ n: number }>('select 1 as n from lorebooks where lorebook_id = $1', [lorebookId]);
+    return exists === undefined;
+  });
+}
+
+async function embedEntryText(embeddings: EmbeddingProvider, bookName: string, content: string): Promise<string | null> {
+  try {
+    const [vector] = await embeddings.embed([`${bookName}\n${content}`]);
+    return vector ? toPgVectorLiteral(vector) : null;
+  } catch {
+    return null; // fail-open, same posture as every other embed path
+  }
+}
+
+export async function createLorebookEntryAdmin(
+  db: PostgresClient,
+  embeddings: EmbeddingProvider,
+  userId: string,
+  input: LorebookEntryInput,
+): Promise<LorebookEntryAdminRow | undefined> {
+  return db.withUserScope(userId, async (session) => {
+    const [book] = await session.query<{ name: string }>('select name from lorebooks where lorebook_id = $1', [input.lorebookId]);
+    if (!book) return undefined; // book not found under this user's scope
+    const vectorLiteral = await embedEntryText(embeddings, book.name, input.content);
+    const [row] = await session.query<LorebookEntryRowShape>(
+      `insert into lorebook_entries
+         (lorebook_id, user_id, uid, key, comment, content, constant, disable, order_value, probability,
+          use_probability, group_name, group_weight, group_override, sticky, cooldown, delay, source_json, vector_embed)
+       values
+         ($1, $2, (select coalesce(max(uid), 0) + 1 from lorebook_entries where lorebook_id = $1),
+          $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, '{}'::jsonb, $17::vector)
+       returning entry_id, uid, key, comment, content, constant, disable, order_value, probability,
+                 use_probability, group_name, group_weight, group_override, sticky, cooldown, delay, updated_at`,
+      [
+        input.lorebookId,
+        userId,
+        input.key ?? [],
+        input.comment ?? '',
+        input.content,
+        input.constant ?? false,
+        input.disable ?? false,
+        input.orderValue ?? 100,
+        input.probability ?? 100,
+        input.useProbability ?? false,
+        input.groupName ?? '',
+        input.groupWeight ?? 1,
+        input.groupOverride ?? false,
+        input.sticky ?? 0,
+        input.cooldown ?? 0,
+        input.delay ?? 0,
+        vectorLiteral,
+      ],
+    );
+    return row ? toLorebookEntryAdminRow(row) : undefined;
+  });
+}
+
+export async function updateLorebookEntryAdmin(
+  db: PostgresClient,
+  embeddings: EmbeddingProvider,
+  userId: string,
+  entryId: string,
+  patch: LorebookEntryPatch,
+): Promise<boolean> {
+  return db.withUserScope(userId, async (session) => {
+    const [existing] = await session.query<{ lorebook_id: string; content: string }>(
+      'select lorebook_id, content from lorebook_entries where entry_id = $1',
+      [entryId],
+    );
+    if (!existing) return false;
+    const content = patch.content ?? existing.content;
+    const [book] = await session.query<{ name: string }>('select name from lorebooks where lorebook_id = $1', [existing.lorebook_id]);
+    const vectorLiteral = await embedEntryText(embeddings, book?.name ?? '', content);
+
+    const sets: string[] = [];
+    const params: unknown[] = [entryId, userId];
+    const push = (column: string, value: unknown) => {
+      params.push(value);
+      sets.push(`${column} = $${params.length}`);
+    };
+    if (patch.key !== undefined) push('key', patch.key);
+    if (patch.comment !== undefined) push('comment', patch.comment);
+    if (patch.content !== undefined) push('content', patch.content);
+    if (patch.constant !== undefined) push('constant', patch.constant);
+    if (patch.disable !== undefined) push('disable', patch.disable);
+    if (patch.orderValue !== undefined) push('order_value', patch.orderValue);
+    if (patch.probability !== undefined) push('probability', patch.probability);
+    if (patch.useProbability !== undefined) push('use_probability', patch.useProbability);
+    if (patch.groupName !== undefined) push('group_name', patch.groupName);
+    if (patch.groupWeight !== undefined) push('group_weight', patch.groupWeight);
+    if (patch.groupOverride !== undefined) push('group_override', patch.groupOverride);
+    if (patch.sticky !== undefined) push('sticky', patch.sticky);
+    if (patch.cooldown !== undefined) push('cooldown', patch.cooldown);
+    if (patch.delay !== undefined) push('delay', patch.delay);
+    if (patch.content !== undefined || patch.key !== undefined) push('vector_embed', vectorLiteral ? `${vectorLiteral}::vector` : null);
+    if (sets.length === 0) return true;
+    await session.query(`update lorebook_entries set ${sets.join(', ')} where entry_id = $1 and user_id = $2`, params);
+    // The update touched whatever row exists in this user's scope; the probe tells the caller
+    // whether that row was really there (a foreign row is invisible under RLS, so the update
+    // would have silently no-op'd — this is the honest "was anything updated" signal).
+    const [exists] = await session.query<{ n: number }>('select 1 as n from lorebook_entries where entry_id = $1', [entryId]);
+    return exists !== undefined;
+  });
+}
+
+export async function deleteLorebookEntryAdmin(db: PostgresClient, userId: string, entryId: string): Promise<boolean> {
+  return db.withUserScope(userId, async (session) => {
+    await session.query('delete from lorebook_entries where entry_id = $1 and user_id = $2', [entryId, userId]);
+    const [exists] = await session.query<{ n: number }>('select 1 as n from lorebook_entries where entry_id = $1', [entryId]);
+    return exists === undefined;
+  });
+}
+
 // --- Chat-memory sync status (bi_principles.md §11) ---
 // The read side of orchestrator/chatMemorySync.ts's chat_memory_sync_status table (migration
 // 0055) — the review panel's actual purpose per the user: confirmation that each background

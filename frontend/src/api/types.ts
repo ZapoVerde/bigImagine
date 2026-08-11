@@ -440,6 +440,56 @@ export interface CanonSettings {
   extractionPromptIsDefault: boolean;
 }
 
+// orchestrator/src/server/adminServer.ts getLorebookSettings() — the Lorebook plan's §3d knobs
+// (docs/lorebook-plan.md). lorebookTokenBudget null = unlimited; lorebookMode default off (§2);
+// lorebookRecursionEnabled's row exists but is deliberately unread (§9). resolveLorebook reads
+// these live every turn, so saves take effect immediately.
+export interface LorebookSettings {
+  lorebookMode: 'on' | 'off';
+  lorebookModeIsDefault: boolean;
+  lorebookTokenBudget: number | null;
+  lorebookTokenBudgetIsDefault: boolean;
+  lorebookRecallTopK: number;
+  lorebookRecallTopKIsDefault: boolean;
+  lorebookRecursionEnabled: boolean;
+  lorebookRecursionEnabledIsDefault: boolean;
+}
+
+// orchestrator/src/server/adminServer.ts getLorebooksAdmin() — the Lorebooks page's library rows.
+// Books are user-scoped; the admin list is cross-user (each row carries its owning userId, which
+// the write endpoints echo back so the update/delete runs under that user's RLS scope).
+export interface LorebookEntryAdminRow {
+  entryId: string;
+  uid: number;
+  key: string[];
+  comment: string;
+  content: string;
+  constant: boolean;
+  disable: boolean;
+  orderValue: number;
+  probability: number;
+  useProbability: boolean;
+  groupName: string;
+  groupWeight: number;
+  groupOverride: boolean;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  updatedAt: string;
+}
+
+export interface LorebookAdminRow {
+  lorebookId: string;
+  userId: string;
+  name: string;
+  globalScope: boolean;
+  createdAt: string;
+  updatedAt: string;
+  characterIds: string[];
+  chatOverrideCount: number;
+  entries: LorebookEntryAdminRow[];
+}
+
 // orchestrator/src/server/adminServer.ts getChatMemorySyncStatus() — one row per chat, the
 // review panel's confirmation that the background sync loop (chunk/embed/distill) actually ran,
 // not an editing surface (that's CanonQueueView, for canon facts specifically).

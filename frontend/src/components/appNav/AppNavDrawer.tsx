@@ -21,6 +21,7 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'connections', label: 'Connections', icon: '🔌' },
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
   { type: 'locations', label: 'Locations', icon: '📍' },
+  { type: 'lorebooks', label: 'Lorebooks', icon: '📖' },
 ];
 
 interface AppNavDrawerProps {

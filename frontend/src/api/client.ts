@@ -8,6 +8,9 @@ import type {
   LocationSettings,
   LocationAdminRow,
   CanonSettings,
+  LorebookAdminRow,
+  LorebookEntryAdminRow,
+  LorebookSettings,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -918,6 +921,148 @@ export async function adminSetCanonSettings(
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<CanonSettings>;
+}
+
+// --- Lorebooks (docs/lorebook-plan.md §8a) ---
+// Settings panel + library/editor CRUD, all admin-gated. Write bodies carry user_id (the owning
+// user from the list rows) because books/entries are user-scoped RLS tables and the admin key
+// only grants the cross-user read.
+
+export async function adminGetLorebookSettings(adminKey: string | null): Promise<LorebookSettings> {
+  const res = await fetch('/v1/admin/lorebook-settings', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<LorebookSettings>;
+}
+
+export async function adminSetLorebookSettings(
+  patch: {
+    lorebook_mode?: 'on' | 'off';
+    lorebook_token_budget?: number | null;
+    lorebook_recall_top_k?: number;
+    lorebook_recursion_enabled?: boolean;
+  },
+  adminKey: string | null,
+): Promise<LorebookSettings> {
+  const res = await fetch('/v1/admin/lorebook-settings', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<LorebookSettings>;
+}
+
+export async function adminListLorebooks(adminKey: string | null): Promise<LorebookAdminRow[]> {
+  const res = await fetch('/v1/admin/lorebooks', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { lorebooks: LorebookAdminRow[] };
+  return body.lorebooks;
+}
+
+export async function adminCreateLorebook(
+  body: { user_id: string; name: string },
+  adminKey: string | null,
+): Promise<LorebookAdminRow> {
+  const res = await fetch('/v1/admin/lorebooks', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<LorebookAdminRow>;
+}
+
+export async function adminUpdateLorebook(
+  lorebookId: string,
+  body: {
+    user_id: string;
+    name?: string;
+    global_scope?: boolean;
+    character_ids?: string[];
+  },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch(`/v1/admin/lorebooks/${encodeURIComponent(lorebookId)}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+export async function adminDeleteLorebook(lorebookId: string, userId: string, adminKey: string | null): Promise<void> {
+  const res = await fetch(`/v1/admin/lorebooks/${encodeURIComponent(lorebookId)}?userId=${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: authHeaders(adminKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+export async function adminCreateLorebookEntry(
+  body: {
+    user_id: string;
+    lorebook_id: string;
+    content: string;
+    key?: string[];
+    comment?: string;
+    constant?: boolean;
+    disable?: boolean;
+    order_value?: number;
+    probability?: number;
+    use_probability?: boolean;
+    group_name?: string;
+    group_weight?: number;
+    group_override?: boolean;
+    sticky?: number;
+    cooldown?: number;
+    delay?: number;
+  },
+  adminKey: string | null,
+): Promise<LorebookEntryAdminRow> {
+  const res = await fetch('/v1/admin/lorebook-entries', {
+    method: 'POST',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<LorebookEntryAdminRow>;
+}
+
+export async function adminUpdateLorebookEntry(
+  entryId: string,
+  body: {
+    user_id: string;
+    key?: string[];
+    comment?: string;
+    content?: string;
+    constant?: boolean;
+    disable?: boolean;
+    order_value?: number;
+    probability?: number;
+    use_probability?: boolean;
+    group_name?: string;
+    group_weight?: number;
+    group_override?: boolean;
+    sticky?: number;
+    cooldown?: number;
+    delay?: number;
+  },
+  adminKey: string | null,
+): Promise<void> {
+  const res = await fetch(`/v1/admin/lorebook-entries/${encodeURIComponent(entryId)}`, {
+    method: 'PATCH',
+    headers: { ...authHeaders(adminKey), 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+export async function adminDeleteLorebookEntry(entryId: string, userId: string, adminKey: string | null): Promise<void> {
+  const res = await fetch(`/v1/admin/lorebook-entries/${encodeURIComponent(entryId)}?userId=${encodeURIComponent(userId)}`, {
+    method: 'DELETE',
+    headers: authHeaders(adminKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
 }
 
 export async function adminSetChatMemorySettings(

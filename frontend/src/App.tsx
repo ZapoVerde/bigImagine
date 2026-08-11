@@ -27,6 +27,7 @@ import NotesView from './views/NotesView';
 import PromptStacksView from './views/PromptStacksView';
 import ReviewPanelView from './views/ReviewPanelView';
 import RagView from './views/RagView';
+import LorebooksView from './views/LorebooksView';
 import SettingsView from './views/SettingsView';
 
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
@@ -291,6 +292,7 @@ export default function App() {
             {tab.type === 'canon' && <CanonQueueView apiKey={apiKey} />}
             {tab.type === 'reviewpanel' && <ReviewPanelView />}
             {tab.type === 'rag' && <RagView />}
+            {tab.type === 'lorebooks' && <LorebooksView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
             {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} />}
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
