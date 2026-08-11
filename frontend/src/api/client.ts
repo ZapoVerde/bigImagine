@@ -11,6 +11,7 @@ import type {
   LorebookAdminRow,
   LorebookEntryAdminRow,
   LorebookSettings,
+  LorebookPanelData,
   ChatMessage,
   ChatParams,
   ChatSessionRow,
@@ -1063,6 +1064,40 @@ export async function adminDeleteLorebookEntry(entryId: string, userId: string, 
     headers: authHeaders(adminKey),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+// --- Chat-sidebar Lorebook panel (docs/lorebook-plan.md §8b) — user-scoped chat routes, the
+// regular authenticated key (no admin key needed). ---
+
+export async function getLorebookPanel(chatId: string, apiKey: string | null): Promise<LorebookPanelData> {
+  return jsonRequest<LorebookPanelData>(`/v1/chats/${encodeURIComponent(chatId)}/lorebook-panel`, apiKey);
+}
+
+export async function setLorebookChatOverride(
+  chatId: string,
+  body: { lorebook_id: string; enabled: boolean },
+  apiKey: string | null,
+): Promise<void> {
+  await jsonRequest(`/v1/chats/${encodeURIComponent(chatId)}/lorebook-book-override`, apiKey, { method: 'PUT', body });
+}
+
+export async function setLorebookEntryOverride(
+  chatId: string,
+  body: { entry_id: string; enabled: boolean },
+  apiKey: string | null,
+): Promise<void> {
+  await jsonRequest(`/v1/chats/${encodeURIComponent(chatId)}/lorebook-entry-override`, apiKey, { method: 'PUT', body });
+}
+
+export async function quickAddLorebookEntry(
+  chatId: string,
+  content: string,
+  apiKey: string | null,
+): Promise<{ bookId: string; entryId: string }> {
+  return jsonRequest<{ bookId: string; entryId: string }>(`/v1/chats/${encodeURIComponent(chatId)}/lorebook-quick-add`, apiKey, {
+    method: 'POST',
+    body: { content },
+  });
 }
 
 export async function adminSetChatMemorySettings(

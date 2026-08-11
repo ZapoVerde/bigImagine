@@ -180,6 +180,12 @@ import { buildAutoRecallParts, formatAutoRecallBlock, buildAutoRecallQuery, AUTO
 import { resolveLorebook } from '../orchestrator/resolveLorebook.js';
 import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
 import {
+  getLorebookPanelData,
+  quickAddLorebookEntry,
+  setLorebookChatOverride,
+  setLorebookEntryOverride,
+} from '../io/lorebook/panelData.js';
+import {
   renderBridge,
   renderPlotThreads,
   renderAutoRecall,
@@ -3150,6 +3156,82 @@ async function handleChatRoutes(
       return;
     }
     sendJson(res, 200, { sync: inspection });
+    return;
+  }
+
+  // Lorebook chat-sidebar panel (io/lorebook/panelData.ts, plan §8b) — user-scoped like every
+  // other chat route: a user's own chat's lorebook state is no more sensitive than the chat
+  // itself, so it rides the regular authenticated key, not the admin key. Returns the resolved
+  // mode, the §3b in-scope books (with all entries, override state, and the §8b live-activation
+  // badge from lorebook_activation_log's latest message), or an empty mode-correct panel on
+  // failure — never an error the chat view has to survive.
+  if (segments[1] === 'lorebook-panel' && segments.length === 2 && req.method === 'GET') {
+    const detail = await deps.chats.getChat(userId, chatId);
+    if (!detail) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    const latestAssistantMessageId = [...detail.messages].reverse().find((m) => m.role === 'assistant')?.messageId ?? null;
+    sendJson(
+      res,
+      200,
+      await getLorebookPanelData(deps.db, deps.settings, {
+        userId,
+        chatId,
+        characterId: detail.session.characterId,
+        latestAssistantMessageId,
+      }),
+    );
+    return;
+  }
+
+  if (segments[1] === 'lorebook-book-override' && segments.length === 2 && req.method === 'PUT') {
+    const body = (await readJsonBody(req)) as { lorebook_id?: unknown; enabled?: unknown };
+    if (typeof body.lorebook_id !== 'string' || typeof body.enabled !== 'boolean') {
+      sendJson(res, 400, { error: 'lorebook_id (string) and enabled (boolean) are required' });
+      return;
+    }
+    const ok = await setLorebookChatOverride(deps.db, userId, chatId, body.lorebook_id, body.enabled);
+    if (!ok) {
+      sendJson(res, 404, { error: 'book not found' });
+      return;
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (segments[1] === 'lorebook-entry-override' && segments.length === 2 && req.method === 'PUT') {
+    const body = (await readJsonBody(req)) as { entry_id?: unknown; enabled?: unknown };
+    if (typeof body.entry_id !== 'string' || typeof body.enabled !== 'boolean') {
+      sendJson(res, 400, { error: 'entry_id (string) and enabled (boolean) are required' });
+      return;
+    }
+    const ok = await setLorebookEntryOverride(deps.db, userId, chatId, body.entry_id, body.enabled);
+    if (!ok) {
+      sendJson(res, 404, { error: 'entry not found' });
+      return;
+    }
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (segments[1] === 'lorebook-quick-add' && segments.length === 2 && req.method === 'POST') {
+    const body = (await readJsonBody(req)) as { content?: unknown };
+    if (typeof body.content !== 'string') {
+      sendJson(res, 400, { error: 'content (string) is required' });
+      return;
+    }
+    const detail = await deps.chats.getChat(userId, chatId);
+    if (!detail) {
+      sendJson(res, 404, { error: 'not found' });
+      return;
+    }
+    const result = await quickAddLorebookEntry(deps.db, deps.embeddings, userId, chatId, detail.session.title, body.content);
+    if (!result) {
+      sendJson(res, 400, { error: 'content must be non-empty' });
+      return;
+    }
+    sendJson(res, 200, result);
     return;
   }
 

@@ -490,6 +490,49 @@ export interface LorebookAdminRow {
   entries: LorebookEntryAdminRow[];
 }
 
+// orchestrator/src/io/lorebook/panelData.ts — the chat-sidebar Lorebook panel (plan §8b),
+// user-scoped. Books in scope for the chat (§3b: global_scope, character links, or an enabled
+// chat override; an explicit enabled=false override beats every path), each with all its
+// entries — not the top-K recall set, the panel browses whole books. entryOverrideEnabled null =
+// no per-entry chat override. activatedInLatestTurn = present in lorebook_activation_log for the
+// chat's latest assistant message (§8b's live activation badge). mode is the resolved global
+// §3d setting (modeIsDefault = unset) — the panel swaps to its mode-off one-liner when off.
+export interface LorebookPanelEntry {
+  entryId: string;
+  uid: number;
+  key: string[];
+  comment: string;
+  content: string;
+  constant: boolean;
+  disable: boolean;
+  orderValue: number;
+  probability: number;
+  useProbability: boolean;
+  groupName: string;
+  groupWeight: number;
+  groupOverride: boolean;
+  sticky: number;
+  cooldown: number;
+  delay: number;
+  entryOverrideEnabled: boolean | null;
+  activatedInLatestTurn: boolean;
+}
+
+export interface LorebookPanelBook {
+  lorebookId: string;
+  name: string;
+  globalScope: boolean;
+  characterLinked: boolean;
+  chatOverrideEnabled: boolean | null;
+  entries: LorebookPanelEntry[];
+}
+
+export interface LorebookPanelData {
+  mode: 'on' | 'off';
+  modeIsDefault: boolean;
+  books: LorebookPanelBook[];
+}
+
 // orchestrator/src/server/adminServer.ts getChatMemorySyncStatus() — one row per chat, the
 // review panel's confirmation that the background sync loop (chunk/embed/distill) actually ran,
 // not an editing surface (that's CanonQueueView, for canon facts specifically).

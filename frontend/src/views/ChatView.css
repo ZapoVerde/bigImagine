@@ -15,6 +15,17 @@
   .chat-view:not(.mobile-canvas) .canvas-panel {
     display: none;
   }
+
+  /* Lorebook sidebar (plan §8b): same single-pane swap as canvas — default chat, .mobile-show-
+     lorebook flips to the panel. Mutually exclusive in ChatView's state, so these can never
+     fight over .chat-main. */
+  .chat-view.mobile-show-lorebook .chat-main {
+    display: none;
+  }
+
+  .chat-view:not(.mobile-show-lorebook) .lorebook-panel {
+    display: none;
+  }
 }
 
 /* --- Main pane --- */

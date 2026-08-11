@@ -49,6 +49,7 @@ import type {
   PromptPreset,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
+import LorebookPanel from '../components/lorebook/LorebookPanel';
 import BranchMapPanel from '../components/branchMap/BranchMapPanel';
 import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPanel';
 import CleanupStatusPill from '../components/cleanup/CleanupStatusPill';
@@ -97,6 +98,9 @@ interface ChatViewProps {
   /** Fires when this chat was hard-deleted server-side, so App can close its tab and drop it
    *  from the history browsers (same contract CharactersView's onChatsDeleted uses). */
   onChatsDeleted?: (chatIds: string[]) => void;
+  /** The Lorebook panel's mode-off one-liner link target (App wires it to summon the Lorebooks
+   *  tab, where the §3d settings live). */
+  onOpenLorebooks?: () => void;
   /** Mobile-only: whether the app-level top bars (TabStrip + TimerStrip + this chat's header) are
    *  currently collapsed away — owned by App.tsx, which applies .app.top-bars-hidden. ChatView
    *  both drives it (scroll-down on the history collapses, scroll-up / pull-down-at-top restores)
@@ -179,6 +183,7 @@ export default function ChatView({
   onOpenChat,
   onOpenRp,
   onChatsDeleted,
+  onOpenLorebooks,
   topBarsHidden,
   onTopBarsHiddenChange,
   onPromptRefresh,
@@ -425,6 +430,11 @@ export default function ChatView({
   // one of the two is shown at a time — this tracks which. Irrelevant on desktop, where both
   // panes are always visible and this toggle is hidden.
   const [mobileShowCanvas, setMobileShowCanvas] = useState(false);
+  // Lorebook sidebar (docs/lorebook-plan.md §8b): offered on any chat, not just 'rp'. One state
+  // for both viewports — on desktop the panel is a side-by-side pane when open; on mobile it's
+  // the mobile-show-lorebook full-pane swap (mutually exclusive with the canvas swap so the two
+  // single-pane CSS rules never fight).
+  const [lorebookOpen, setLorebookOpen] = useState(false);
   // Branch Map: read-only tree of this chat's fork family (docs/chat-memory.md) — opt-in per
   // bi_principles.md §5, same as Canvas/Prompt Inspector. Offered for any chat, not just 'rp'.
   const [branchMapOpen, setBranchMapOpen] = useState(false);
@@ -625,6 +635,7 @@ export default function ChatView({
       setMessages([]);
       setSettingsCollapsed(true);
       setMobileShowCanvas(false);
+      setLorebookOpen(false);
       setBranchMapOpen(false);
       setChatMenuOpen(false);
       setSyncStatusOpen(false);
@@ -637,6 +648,7 @@ export default function ChatView({
     }
     if (activeChat?.chatId === chatId) return;
     setMobileShowCanvas(false);
+    setLorebookOpen(false);
     setBranchMapOpen(false);
     setChatMenuOpen(false);
     setSyncStatusOpen(false);
@@ -1407,7 +1419,11 @@ export default function ChatView({
   );
 
   return (
-    <div className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`} style={{ ...chatBgStyle, ...legStyle }} data-legibility={legibilityFlags}>
+    <div
+      className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}${lorebookOpen ? ' mobile-show-lorebook' : ''}`}
+      style={{ ...chatBgStyle, ...legStyle }}
+      data-legibility={legibilityFlags}
+    >
       <div className="chat-main" ref={chatMainRef}>
         {error && <div className="error-banner">{error}</div>}
 
@@ -1503,6 +1519,19 @@ export default function ChatView({
                 onClick={() => setMobileShowCanvas((v) => !v)}
               >
                 {mobileShowCanvas ? '💬 Chat' : '📄 Canvas'}
+              </button>
+            )}
+            {activeChat && (
+              <button
+                type="button"
+                className="chat-lorebook-switch"
+                title={lorebookOpen ? 'Hide the lorebook sidebar' : 'Show this chat\'s lorebook sidebar'}
+                onClick={() => {
+                  setLorebookOpen((v) => !v);
+                  setMobileShowCanvas(false);
+                }}
+              >
+                {lorebookOpen ? '💬' : '📖'}
               </button>
             )}
           </div>
@@ -1860,6 +1889,16 @@ export default function ChatView({
           locationImage={locationImage}
           onLocationImageChanged={() => refreshLocationImage(activeChat.chatId)}
           onClose={closeCanvas}
+        />
+      )}
+
+      {lorebookOpen && activeChat && (
+        <LorebookPanel
+          apiKey={apiKey}
+          chatId={activeChat.chatId}
+          refreshToken={messages.length}
+          onOpenLorebooks={onOpenLorebooks}
+          onClose={() => setLorebookOpen(false)}
         />
       )}
 

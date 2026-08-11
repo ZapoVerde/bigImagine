@@ -262,6 +262,7 @@ export default function App() {
                 onOpenChat={openChat}
                 onOpenRp={openRp}
                 onChatsDeleted={handleChatsDeleted}
+                onOpenLorebooks={() => summon('lorebooks')}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
               />
@@ -276,6 +277,7 @@ export default function App() {
                 onOpenChat={openChat}
                 onOpenRp={openRp}
                 onChatsDeleted={handleChatsDeleted}
+                onOpenLorebooks={() => summon('lorebooks')}
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
                 onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
