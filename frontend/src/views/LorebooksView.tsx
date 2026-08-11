@@ -83,6 +83,8 @@ export default function LorebooksView() {
   const [drafts, setDrafts] = useState<Record<string, EntryDraft>>({});
   const [savingEntryId, setSavingEntryId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [importStatus, setImportStatus] = useState('');
+  const [exportingId, setExportingId] = useState<string | null>(null);
 
   function applySettings(s: LorebookSettings) {
     setSettingsState(s);
