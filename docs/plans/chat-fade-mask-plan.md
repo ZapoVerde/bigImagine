@@ -1,7 +1,9 @@
 # Chat History — Alpha Mask Fade (replacing the per-bubble blur-clone system)
 
-*Status: proposed, not started. Written against `frontend/src/views/ChatView.tsx` and
-`ChatView.css` as they stand 2026-08-11.*
+*Status: implemented (line numbers below refer to the 2026-08-11 snapshot; the code has since
+drifted). Replaces the blur-clone system with the `.chat-history` alpha mask; JS side is just
+the `--chat-fade-px` write inside the existing overlay ResizeObserver. Verified with
+`tsc --noEmit` and `vite build`; the §7 browser checks remain manual.*
 
 ## 1. Purpose
 
