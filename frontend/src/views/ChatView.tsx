@@ -391,6 +391,11 @@ export default function ChatView({
   // same flag `sending` uses, since a swipe replaces one message's content in place and shouldn't
   // render the "new turn incoming" pending bubble the way send/rerun's own full turns do.
   const [swipingId, setSwipingId] = useState<string | null>(null);
+  // Whether that in-flight swipe is a regeneration ('next' past the last stored variant) — the
+  // only swipe kind the server registers as an abortable task (regenerateSwipe runs runTurn with
+  // taskId = chatId), so this is what arms the Stop button. Plain prev/next cycling between stored
+  // variants is a fast DB read with nothing to abort and must not arm it.
+  const [swipeRegenerating, setSwipeRegenerating] = useState(false);
 
   // Settings rail state — collapsed by default, but (unlike the old gear-icon toggle) available
   // even before a chat exists, so a system prompt/model/tools can be set up before the first
@@ -1032,6 +1037,7 @@ export default function ChatView({
     const msg = messages.find((m) => m.messageId === messageId);
     const hasMoreSwipesAhead = !!msg?.swipes && msg.swipes.index < msg.swipes.count - 1;
     const willRegenerate = direction === 'next' && !hasMoreSwipesAhead;
+    setSwipeRegenerating(willRegenerate);
     const swipedFrom = locationImage;
     const prevImage = bgPreviousRef.current;
     const reverted =
@@ -1059,11 +1065,22 @@ export default function ChatView({
       }
       // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to swipe');
-      // The swipe failed — the turn is unchanged, so restore the swiped-from background.
-      if (reverted) setLocationImage(swipedFrom);
+      if (err instanceof ApiError && err.status === 499) {
+        // The user hit Stop mid-regeneration — the server aborted the turn (POST
+        // /v1/chat/abort) and the swipe route answers 499 for it, same contract as the main
+        // turn's aborted response. Nothing was written (recordSwipe never ran), so the turn is
+        // unchanged: refresh to its true state and restore the swiped-from background, since the
+        // replacement never settled. No error banner — this is the expected outcome.
+        if (activeChat) await refreshActiveMessages(activeChat.chatId).catch(() => {});
+        if (reverted) setLocationImage(swipedFrom);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'failed to swipe');
+        // The swipe failed — the turn is unchanged, so restore the swiped-from background.
+        if (reverted) setLocationImage(swipedFrom);
+      }
     } finally {
       setSwipingId(null);
+      setSwipeRegenerating(false);
     }
   }
 
@@ -1727,16 +1744,17 @@ export default function ChatView({
             </button>
             <button
               type="button"
-              className={`chat-send-button${sending ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
+              className={`chat-send-button${sending || swipeRegenerating ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
               disabled={
                 !sending &&
+                !swipeRegenerating &&
                 (selectionMode ||
                   (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
               }
-              title={sending ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
-              onClick={() => (sending ? void stopTurn() : void send())}
+              title={sending || swipeRegenerating ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
+              onClick={() => (sending || swipeRegenerating ? void stopTurn() : void send())}
             >
-              {sending ? (
+              {sending || swipeRegenerating ? (
                 <>
                   <span className="chat-send-label">Stop</span>
                   <span className="chat-send-icon" aria-hidden="true">■</span>
