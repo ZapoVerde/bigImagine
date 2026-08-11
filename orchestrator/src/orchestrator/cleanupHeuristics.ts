@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/cleanupHeuristics.ts
- * @stamp 2026-08-07
+ * @stamp 2026-08-11
  * @architectural-role Pure Function — the async cleanup subloop's decision engine (migration 0072)
  * @description
  * The monolithic cleanup LLM preset (docs/plans/vistalyze_integration/cleanup_prompt.md, migrations
@@ -35,10 +35,13 @@
  * when a key is unset. The header's canonical shape is locationAndPresenceScraper.ts's
  * `[ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]` + `Present: …`
  * (two lines, nothing before them); the footer is 0066's
- * `<details><summary>▸</summary>…</details>` inner-thoughts block. "A turn with no inner thoughts
- * must not gain one" (0066 rule 3) is preserved by gating: a footer repair fires only on
- * 'malformed' (details-tag family present but not conforming) or 'suspected' (whole-line italic
- * narration), never on a clean 'missing'.
+ * `<details><summary>▸</summary>…</details>` inner-thoughts block. Footer repair fires on any
+ * non-'ok' status: 'malformed' (details-tag family present but not conforming) and 'suspected'
+ * (whole-line italic narration) reformat what's already there; 'missing' (no inner-thought
+ * evidence at all) builds a fresh footer from the reply's own content. This reverses 0066's
+ * original "a turn with no inner thoughts must not gain one" rule at the user's request
+ * (2026-08-11) — every eligible reply now gets a footer, not just the ones that already attempted
+ * one.
  *
  * @api-declaration
  * extractParagraph(text, matchIndex)                 — { text, start, end } of the newline-bounded paragraph at matchIndex (TRG port)
@@ -314,9 +317,11 @@ export function inspectHeader(text: string, cfg: RegionConfig): { status: Region
   return { status: malformedHeaderEvidence(text) ? 'malformed' : 'missing' };
 }
 
-/** Footer status against the editable regex. Evidence-gated so a clean reply without inner
- *  thoughts stays 'missing' (0066 rule 3: a turn with no inner thoughts must not gain one). A
- *  non-matching regex config degrades to 'missing' like the header. */
+/** Footer status against the editable regex: 'ok' when a conforming block is present, 'malformed'/
+ *  'suspected' when there's evidence of an attempt that didn't land right, 'missing' when the reply
+ *  has no inner-thoughts evidence at all. A non-matching regex config degrades to 'missing' like the
+ *  header. All three non-'ok' statuses now drive a footer repair (planCleanup) — 'missing' builds a
+ *  fresh footer rather than being left untouched. */
 export function inspectFooter(text: string, cfg: RegionConfig): { status: RegionStatus } {
   const re = compileRegionRegex(cfg);
   if (!re) return { status: 'missing' };
@@ -415,8 +420,10 @@ export function planCleanup(
   if (h.status !== 'ok') {
     steps.push({ kind: 'repair-header', span: headerRepairSpan(slop.text, h.status), prompt: buildRepairPrompt(header.prompt, vars) });
   }
-  // Footer repair is evidence-gated: 'missing' (no inner-thought evidence at all) never fires.
-  if (f.status === 'malformed' || f.status === 'suspected') {
+  // Footer repair fires on any non-'ok' status: 'malformed'/'suspected' reformat an existing
+  // attempt, 'missing' builds a fresh footer from the reply itself (footerRepairSpan appends at
+  // the end for 'missing' the same as it does for 'suspected').
+  if (f.status !== 'ok') {
     steps.push({ kind: 'repair-footer', span: footerRepairSpan(slop.text, f.status), prompt: buildRepairPrompt(footer.prompt, vars) });
   }
 
@@ -504,20 +511,24 @@ export const DEFAULT_CLEANUP_CONFIG = {
     'Reply to fix:\n' +
     '{{message}}\n\n' +
     'Output ONLY the two header lines, nothing else.',
-  /** Canonical footer shape (0066 rule 3): the hidden inner-thoughts details block. */
+  /** Canonical footer shape (0066, gate reversed 2026-08-11): the hidden inner-thoughts details block. */
   footerRegex: '<details><summary>\\s*▸\\s*</summary>[\\s\\S]*?</details>',
   footerFlags: 'i',
   footerPrompt:
-    'The character\'s reply below has stray or malformed inner thoughts. Move them into the standard ' +
-    'hidden footer block, exactly this shape, appended after the reply:\n\n' +
+    'The character\'s reply below is missing its hidden inner-thoughts footer, or has stray or ' +
+    'malformed inner thoughts loose in the text. Produce the standard hidden footer block, exactly ' +
+    'this shape, appended after the reply:\n\n' +
     '<details><summary>▸</summary>\n' +
     '<inner thoughts>\n' +
     '[Character Name]:\n' +
     'What they are feeling beneath what they are showing.\n' +
     '</inner thoughts>\n' +
     '</details>\n\n' +
+    '- If the reply already contains stray or malformed inner thoughts, move them into this shape ' +
+    'rather than inventing new ones.\n' +
+    '- If the reply has no inner thoughts at all, infer them from the reply\'s tone, actions, and ' +
+    'subtext — what the character is feeling beneath what they are showing.\n' +
     '- Only include characters actually present in the reply.\n' +
-    '- If the reply contains NO inner thoughts at all, output nothing.\n' +
     '- Output ONLY the footer block, nothing else — never repeat the reply text.\n\n' +
     'Reply:\n' +
     '{{message}}',

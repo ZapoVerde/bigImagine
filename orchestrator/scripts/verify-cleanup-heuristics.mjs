@@ -6,7 +6,8 @@
 //     replace-paragraph / llm steps captured with fully-resolved prompts, invalid + disabled rules;
 //   - inspectHeader / inspectFooter: the canonical two-line header and <details> inner-thoughts
 //     block recognize, malformed/missing/suspected statuses gate correctly, and a turn with no
-//     inner thoughts stays 'missing' (0066 rule 3: must not gain one);
+//     inner thoughts (footer 'missing') still fires a repair step that builds a fresh footer
+//     (0066 rule 3 reversed 2026-08-11);
 //   - {{history, N}} / {{message}} resolution (mirrors the retired {{prev_turns, N}} contract);
 //   - planCleanup assembly + the pure executor applyRepairSteps (splice, first-rule-wins overlap
 //     skip, llm-message terminal, header insert/replace, footer append/replace, fail-open).
@@ -165,11 +166,17 @@ const SLOP = [
 
 // --- planCleanup -------------------------------------------------------------------------------
 {
-  // Header present but footer missing and no thought evidence: only header survives, no footer step.
+  // Header present but footer missing and no thought evidence: header stays 'ok', footer repair
+  // still fires and builds a fresh footer (0066 rule 3 reversed 2026-08-11).
   const clean = `${CANONICAL_HEADER}\n\nKael set the cup down.`;
   const planMissingFooter = planCleanup(clean, [], HEADER_CFG, FOOTER_CFG, { history: [{ role: 'user', content: 'Where are we?' }] });
   assert(planMissingFooter.header.status === 'ok' && planMissingFooter.footer.status === 'missing', 'plan: ok header + missing footer reported');
-  assert(planMissingFooter.steps.length === 0, 'plan: a missing footer with no thought evidence fires nothing (0066 rule 3)');
+  assert(planMissingFooter.steps.length === 1, 'plan: a missing footer with no thought evidence still fires a repair step');
+  const missingFooterStep = planMissingFooter.steps.find((s) => s.kind === 'repair-footer');
+  assert(
+    missingFooterStep && missingFooterStep.span.start === clean.length && missingFooterStep.span.end === clean.length,
+    'plan: missing-footer repair appends at the end, same as suspected',
+  );
 
   // Missing header + suspected footer: both repair steps fire, prompts fully resolved.
   const messy = 'Kael entered the hall.\n\n*She hesitated, her heart racing.*';
