@@ -126,7 +126,7 @@
   letter-spacing: normal;
 }
 
-/* Per-call usage/cost receipt under the section title (docs/plans/prompt-inspector-usage-cost.md):
+/* Per-call usage/cost receipt under the section title (docs/plans/completed/prompt-inspector-usage-cost.md):
    a wrapping row of token counts (+ $ when every price tier the arithmetic needs is configured).
    flex-wrap + gap, never a fixed multi-column grid — stacks top-to-bottom at phone width per
    bi_principles.md §19, same as every other row in this panel. */

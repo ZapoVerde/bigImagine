@@ -24,6 +24,14 @@ When review finds a problem, the size of the fix decides who makes it:
 
 In practice, deep repairs haven't been needed yet — review has stayed within small-patch territory so far. If that stops being true, revisit whether plans need to be more detailed going in, rather than treating repair docs as the default.
 
+**Naming a repair doc**: file it as `docs/plans/<name>-repair.md`, not `-plan.md` — the suffix is
+load-bearing, not cosmetic. A repair doc fixes one narrow, already-built thing; unlike a plan, it
+has no lasting explanatory value once Reasonix implements it (the code + its commit is the record),
+so once it's done it should be deleted rather than kept around. A `-plan.md` documents an
+architectural decision and is worth keeping as reference even after it ships — don't delete those,
+even once **implemented**. The `-repair.md` suffix is what makes a doc's disposable-once-done
+status obvious at a glance instead of requiring a read.
+
 ---
 
 ## Why Reasonix Doesn't Implement Unsupervised

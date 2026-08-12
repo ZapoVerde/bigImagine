@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — the admin credentials + connections CRUD surface from httpServer.ts
  * @description
  * Three related admin surfaces, all gated by the dispatcher's isAdminAuthorized before this
- * module runs (docs/plans/httpserver-breakdown-plan.md step 4):
+ * module runs (docs/plans/completed/httpserver-breakdown-plan.md step 4):
  *
  * - Provider credentials (io/providerCredentials.ts): GET/POST /v1/admin/credentials. A
  *   successful POST writes the new value then exits the process (triggerRestart) so restart:

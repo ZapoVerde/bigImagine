@@ -8,7 +8,7 @@
  * open and close tags match; every unmatched tag (missing close, dangling close, crossed pair,
  * self-closing, unknown) is inert text that stays at the enclosing level — nothing is ever
  * dropped, reordered, or hidden, so a broken tag only changes which level its text displays at.
- * This is the "rolls back up to the next level up" contract from docs/plans/prompt-inspector-tag-tree.md
+ * This is the "rolls back up to the next level up" contract from docs/plans/completed/prompt-inspector-tag-tree.md
  * §2. Display-only: the tree is computed from text that was already sent to the model and never
  * feeds back into any assembly path (bi_principles.md §17).
  *
@@ -84,7 +84,7 @@ function canonicalName(raw: string): string | null {
 }
 
 /**
- * Loss-tolerant tag-tree parse. See the file preamble and docs/plans/prompt-inspector-tag-tree.md §2
+ * Loss-tolerant tag-tree parse. See the file preamble and docs/plans/completed/prompt-inspector-tag-tree.md §2
  * for the contract; the losslessness invariant (walking the tree in document order reproduces
  * the input byte-for-byte) is asserted by orchestrator/scripts/verify-prompt-tag-tree.mjs.
  */

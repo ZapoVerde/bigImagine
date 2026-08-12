@@ -1,5 +1,5 @@
 -- Widens orchestrator_settings.key's CHECK constraint with the RAG dynamic-cutoff's three knobs
--- (docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port, shipped with
+-- (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port, shipped with
 -- io/chatMemory/recallCutoff.ts):
 --   chat_memory_auto_recall_chunk_min      integer-as-text (default '2') — the Min floor for the
 --                                           dynamic chunk cutoff: how many archived full-turn

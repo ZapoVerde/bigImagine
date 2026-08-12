@@ -23,7 +23,7 @@ interface PromptInspectorPanelProps {
 // read-only window onto them — one collapsible section per prompt the chat fired, in order: Main
 // Prompt (the exact text the last turn sent — captured at send time server-side, io/promptTrace.ts
 // kind 'main' — shown as a tag tree: grouped into collapsible sections by the author's own
-// HTML-style tags via util/promptTagTree.ts, see docs/plans/prompt-inspector-tag-tree.md), then each
+// HTML-style tags via util/promptTagTree.ts, see docs/plans/completed/prompt-inspector-tag-tree.md), then each
 // captured background prompt (cleanup pass, chat title generation, …) with its full actual text —
 // and, when the trace captured one, the model's reply to that prompt (cleanup repair outputs are
 // discarded the moment the cleaned text replaces them; the inspector is where they survive). Every
@@ -107,7 +107,7 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
 }
 
 // The receipt's $ figure — raw counts × raw per-million rates, USD. A pure function so the
-// frontend is the single place this arithmetic lives (docs/plans/prompt-inspector-usage-cost.md):
+// frontend is the single place this arithmetic lives (docs/plans/completed/prompt-inspector-usage-cost.md):
 // the tokens are exactly what the server relayed, the rates exactly what the admin typed, and the
 // derived figure can never drift from either. Returns undefined when any tier the calculation
 // needs is unconfigured — the caller then omits the $ figure entirely rather than computing a
@@ -151,7 +151,7 @@ function itemLabel(item: PromptPreviewItem): string {
 // same style (labeled "Reply", role assistant). The Main Prompt — the full system stack plus the
 // entire trimmed conversation history — is rendered as a TAG TREE: its sub-sections grouped by
 // the author's own HTML-style tags, each a collapsible row with a token budget (the user's
-// approved spec, docs/plans/prompt-inspector-tag-tree.md). Matching is loss-tolerant: broken or
+// approved spec, docs/plans/completed/prompt-inspector-tag-tree.md). Matching is loss-tolerant: broken or
 // unmatched tags are inert, and their text rolls up to the enclosing level — so the tree view is
 // exactly the text the model saw, never a rearrangement. When no tags match at all, it degrades
 // to a single collapsed "Complete prompt text" block, exactly as before the tree existed.
@@ -163,7 +163,7 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
   // would over-report by up to one token per item).
   const totalChars = group.items.reduce((sum, i) => sum + i.chars, 0);
   const sectionTokens = Math.ceil(totalChars / 4);
-  // The receipt's $ figure (docs/plans/prompt-inspector-usage-cost.md) — undefined when there's
+  // The receipt's $ figure (docs/plans/completed/prompt-inspector-usage-cost.md) — undefined when there's
   // no usage (no receipt at all), or when any tier the arithmetic needs is unconfigured (a
   // partial price omits the $ rather than pricing a tier at another tier's rate — silently
   // pricing cache-hit tokens at the miss rate would understate savings, not just omit them).
@@ -252,7 +252,7 @@ function PromptGroupSection({ group }: { group: PromptPreviewGroup }) {
 }
 
 // ---------------------------------------------------------------------------
-// Main Prompt tag tree (docs/plans/prompt-inspector-tag-tree.md)
+// Main Prompt tag tree (docs/plans/completed/prompt-inspector-tag-tree.md)
 // ---------------------------------------------------------------------------
 
 // The main prompt's items joined in send order — exactly the text the model saw — parsed into a
@@ -333,7 +333,7 @@ function sectionChars(section: PromptTagSection): number {
   return section.end - section.start;
 }
 
-// Per-section stability lookup (docs/plans/prompt-inspector-tag-tree.md §3.3): matches the server's
+// Per-section stability lookup (docs/plans/completed/prompt-inspector-tag-tree.md §3.3): matches the server's
 // key rule exactly — canonical tag name, plus #occ when the name repeats, in preorder (a section
 // before its children, matching flattenSections' walk). Rendering walks the same order, so a
 // shared tracker yields the same keys; each rendered row looks up its stat once.
@@ -461,7 +461,7 @@ function PromptTagSectionView({
   );
 }
 
-// Cache-coverage badge (docs/plans/prompt-inspector-tag-tree.md §3.2): ⚡ when the section ends at or
+// Cache-coverage badge (docs/plans/completed/prompt-inspector-tag-tree.md §3.2): ⚡ when the section ends at or
 // before the stable prefix of the last call vs the one before it — byte-identical upstream of the
 // change, so the provider's prefix cache replays it — ✎ when it ends past the prefix (the section
 // itself, or something upstream of it, changed: the cache cannot replay past the first differing
@@ -485,7 +485,7 @@ function CacheBadge({ end, stablePrefixChars }: { end: number; stablePrefixChars
   );
 }
 
-// Per-section stability badge (docs/plans/prompt-inspector-tag-tree.md §3.3): the percentage of the
+// Per-section stability badge (docs/plans/completed/prompt-inspector-tag-tree.md §3.3): the percentage of the
 // trace window's comparisons in which this section was byte-identical to the previous call's
 // same section (identical / seen over comparisons pairs). Renders nothing when stability is
 // absent (fewer than two 'main' calls on record) or when this rendered section had no

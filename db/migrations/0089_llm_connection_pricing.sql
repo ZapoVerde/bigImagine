@@ -1,5 +1,5 @@
 -- Per-connection LLM pricing for the Prompt Inspector's usage receipt
--- (docs/plans/prompt-inspector-usage-cost.md). Three nullable numeric columns on
+-- (docs/plans/completed/prompt-inspector-usage-cost.md). Three nullable numeric columns on
 -- llm_connections: USD per 1M tokens for input, output, and cache-hit tokens.
 --
 -- NULL means "not configured", not zero — a connection with no price set shows token counts

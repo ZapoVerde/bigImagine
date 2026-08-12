@@ -4,7 +4,7 @@
  * @architectural-role Pure util — section-identity stability across a fixed window of calls
  * @description
  * The Prompt Inspector's per-subsection "identical to the previous call" percentage
- * (docs/plans/prompt-inspector-tag-tree.md §3.3). The window is the last x calls on record in
+ * (docs/plans/completed/prompt-inspector-tag-tree.md §3.3). The window is the last x calls on record in
  * io/promptTrace.ts (≤ MAX_ENTRIES_PER_CHAT = 12) — data the trace already holds, no new state,
  * no reset-on-edit bookkeeping. Each consecutive pair (prev, curr) inside the window contributes
  * one observation per section: a section present in curr "saw" a comparison, and counts as

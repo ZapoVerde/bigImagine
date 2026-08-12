@@ -364,7 +364,7 @@ function createFakeStreamingBase(scripts) {
   );
 }
 
-// --- Streaming (completeStream, docs/plans/rp-streaming-plan.md) ---
+// --- Streaming (completeStream, docs/plans/completed/rp-streaming-plan.md) ---
 
 // A completeStream failure before any delta is relayed retries per the existing backoff config;
 // the caller sees one resolved promise with all deltas from the successful attempt.

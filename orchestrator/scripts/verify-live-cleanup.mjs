@@ -3,7 +3,7 @@
 // gate (verify-cleanup-heuristics.mjs) covers the decision functions; this suite drives the live
 // engine exactly the way runStreamingRpTurn does (a scripted delta sequence through onLiveDelta,
 // then finishStream with the caller-provided baseText), asserting the plan's trigger timing and
-// event ordering per region (docs/plans/in-stream-cleanup-plan.md Tests):
+// event ordering per region (docs/plans/completed/in-stream-cleanup-plan.md Tests):
 //   - the header check fires exactly once, at the two-newline boundary or the 400-char cap, and
 //     never before; the cap with one newline fires only on 'missing' (waits on 'malformed')
 //   - a malformed header produces in-flux then deployed + a patch frame with the header's span

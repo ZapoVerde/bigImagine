@@ -138,7 +138,7 @@ assert(
   'no cross-request leakage between two different users\' scoping',
 );
 
-// The Prompt Inspector's usage receipt (docs/plans/prompt-inspector-usage-cost.md): a tool-free
+// The Prompt Inspector's usage receipt (docs/plans/completed/prompt-inspector-usage-cost.md): a tool-free
 // turn's RunTurnResult.usage is the first (only) round's vendor-reported usage — round 0 is the
 // only round for any RP turn, which is the only kind the inspector renders.
 {

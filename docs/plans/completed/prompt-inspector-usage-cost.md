@@ -1,6 +1,7 @@
 # Prompt Inspector — Usage & Cost Receipt
 
-*Status: planned, not yet implemented.*
+*Status: implemented — commit `c88d1ea` ("Prompt Inspector usage cost receipt: per-call
+token/$ receipt on the captured Main Prompt group (0089)") shipped this.*
 
 ## Goal
 

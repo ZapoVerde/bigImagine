@@ -66,7 +66,7 @@ export interface LlmUsage {
   /** Prompt tokens served from the provider's prompt cache (DeepSeek's
    *  `prompt_cache_hit_tokens`) — undefined, not zero, when the vendor's response reports no
    *  cache accounting (some OpenRouter-routed models don't): "unknown", not "zero cache hit".
-   *  Only set on the OpenAI-compatible adapter path; see docs/plans/prompt-inspector-usage-cost.md. */
+   *  Only set on the OpenAI-compatible adapter path; see docs/plans/completed/prompt-inspector-usage-cost.md. */
   cacheReadTokens?: number;
 }
 

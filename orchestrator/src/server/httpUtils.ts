@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — shared HTTP plumbing for the orchestrator's server surface
  * @description
  * The generic request/response helpers that used to live at the top of httpServer.ts and are
- * shared by every handler module extracted from it (docs/plans/httpserver-breakdown-plan.md):
+ * shared by every handler module extracted from it (docs/plans/completed/httpserver-breakdown-plan.md):
  * body reading with the size cap, the two auth paths (Cloudflare Access identity first, then the
  * Bearer API key / static admin key — see httpServer.ts's own preamble for the reasoning),
  * JSON responses, SSE framing, and static-file serving for the built frontend SPA.
@@ -122,7 +122,7 @@ export function writeStreamHeaders(res: ServerResponse): void {
   });
 }
 
-// The SSE abort/error terminal frame (docs/plans/rp-streaming-plan.md Contracts) — one extra
+// The SSE abort/error terminal frame (docs/plans/completed/rp-streaming-plan.md Contracts) — one extra
 // data: line before [DONE], usable only once streaming has begun (headers committed, so an HTTP
 // status code is no longer an option). Emitted identically by both streaming routes. A success
 // completion never emits this: it keeps today's stop-finish chunk + [DONE], so an OpenAI-

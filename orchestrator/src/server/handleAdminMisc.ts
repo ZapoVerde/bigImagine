@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — the leftover small admin route handlers from httpServer.ts
  * @description
  * The admin routes that didn't fit a settings-panel module
- * (docs/plans/httpserver-breakdown-plan.md step 1): notifications, the admin read/write side of
+ * (docs/plans/completed/httpserver-breakdown-plan.md step 1): notifications, the admin read/write side of
  * screen-lock settings (the household read side lives in httpServer.ts's handleMisc block), the
  * chub avatar image proxy (the one place a chub CDN URL crosses straight from the browser, gated
  * by an explicit host allowlist before fetchThroughPiaProxy — an unguarded `url` param would be

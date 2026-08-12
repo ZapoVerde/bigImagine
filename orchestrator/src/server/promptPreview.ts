@@ -97,7 +97,7 @@ export interface PromptPreviewGroup {
   /** The prompt's items in send order — system-stack/header items first, then conversation
    *  messages, each with a rough token estimate. */
   items: PromptPreviewItem[];
-  /** Cache-coverage diff against the previous fired main (docs/plans/prompt-inspector-tag-tree.md
+  /** Cache-coverage diff against the previous fired main (docs/plans/completed/prompt-inspector-tag-tree.md
    *  §3.2, revised): stablePrefixChars = length of the longest common prefix (UTF-16 code units)
    *  of this group's joined items text and the previous 'main' trace entry's; previousCallAt =
    *  when that previous main fired. A section of this group's tag tree is cache-covered iff
@@ -124,7 +124,7 @@ export interface PromptPreviewGroup {
    *  the captured 'main' entry — present only when a turn has fired and resolved successfully
    *  against a connection that reports usage, undefined on the live-reconstruction fallback (no
    *  real call to report) or a turn that failed. Powers the receipt row under the group title
-   *  (docs/plans/prompt-inspector-usage-cost.md). */
+   *  (docs/plans/completed/prompt-inspector-usage-cost.md). */
   usage?: LlmUsage;
   /** The acting connection's USD-per-1M-token rates at that turn's send time — undefined end to
    *  end when no price was configured ("tokens only, never a fabricated $0.00"); a partially-set

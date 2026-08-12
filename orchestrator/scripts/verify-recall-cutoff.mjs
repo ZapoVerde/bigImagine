@@ -1,5 +1,5 @@
 // Proves io/chatMemory/recallCutoff.ts — the CNZ rag/cutoff.js pool-statistics stage ported onto
-// BigImagine's chunk lanes (docs/plans/rag-dynamic-cutoff-plan.md, Stages 1-5 of the CNZ
+// BigImagine's chunk lanes (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stages 1-5 of the CNZ
 // retrieval port). Pure arithmetic: no IO, no settings access. poolSize sizes the SQL LIMIT the
 // IO wrapper issues; applyCutoff decides how many of the already-fetched, best-first rows are
 // worth injecting; decayFactor (Stage 3) is Canonize's temporal-decay multiplier the chunk query

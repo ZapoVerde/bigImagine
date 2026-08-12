@@ -52,7 +52,7 @@
  * still make one more call that pushes it over before the next one is refused. Call-count caps
  * are exact by contrast, since the count of calls made so far is always precisely known.
  *
- * Retry/queueing (docs/plans/llm-gate-plan.md, added 2026-08-06): base.complete() is retried internally
+ * Retry/queueing (docs/plans/completed/llm-gate-plan.md, added 2026-08-06): base.complete() is retried internally
  * on a retryable failure (llmRetryClassify.ts) with bounded exponential backoff (llmBackoff.ts),
  * bounded by llm_gate_max_retries — invisible to the caller, who still just gets one promise that
  * resolves or rejects once. Every attempt is admitted through a per-lane concurrency slot
@@ -144,7 +144,7 @@ async function loadJobCaps(db: PostgresClient, jobId: string): Promise<JobCapRow
 async function tallySince(db: PostgresClient, where: string, params: unknown[]): Promise<TallyRow> {
   const rows = await db.withSystemScope((session) =>
     // outcome in ('ok', 'error'), not just 'ok': a retried attempt that ultimately failed is
-    // still real provider spend (docs/plans/llm-gate-plan.md §6). 'refused' rows are deliberately
+    // still real provider spend (docs/plans/completed/llm-gate-plan.md §6). 'refused' rows are deliberately
     // excluded — a preflight rejection never reached the provider at all.
     session.query<{ calls: string; tokens: string }>(
       `select count(*)::text as calls, coalesce(sum(total_tokens), 0)::text as tokens
@@ -398,7 +398,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
     },
     // Streaming passthrough — present only when the base provider can actually stream, the same
     // "undefined means no capability, not broken" convention as listModels above (bb_principles.md
-    // §6; docs/plans/rp-streaming-plan.md). Retry semantics are deliberately narrower than
+    // §6; docs/plans/completed/rp-streaming-plan.md). Retry semantics are deliberately narrower than
     // complete()'s: once even one delta has been relayed to the caller, a subsequent failure is
     // NOT retried — the user has already seen (and may be reading) that text, and a second
     // overlapping generation would duplicate or garble it. Retry only applies to a failure that

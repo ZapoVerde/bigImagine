@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * Thin bootstrap + route table only. As of the 2026-08-12 breakdown
- * (docs/plans/httpserver-breakdown-plan.md), every request handler this module wires lives in its
+ * (docs/plans/completed/httpserver-breakdown-plan.md), every request handler this module wires lives in its
  * own server/handle*.ts module (handleChats.ts, handleChatCompletions.ts, handleAdmin*.ts,
  * promptAssembly.ts/promptPreview.ts/locationImages.ts/turnExecution.ts, ...); this file keeps
  * HttpServerDeps, the [method, path, handler] route table below (with the withUser/withAdmin auth

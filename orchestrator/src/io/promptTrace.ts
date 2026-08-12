@@ -33,7 +33,7 @@
  *
  * A 'main' entry additionally picks up `usage`/`price` after the call resolves — the vendor's
  * token accounting and the acting connection's per-token rates — so the Prompt Inspector can
- * render a per-call cost receipt (docs/plans/prompt-inspector-usage-cost.md). Same "absent until
+ * render a per-call cost receipt (docs/plans/completed/prompt-inspector-usage-cost.md). Same "absent until
  * the call returns, absent forever if it failed" contract as `reply`: set only once runTurn has
  * resolved successfully, never on a thrown/aborted turn.
  *
@@ -75,7 +75,7 @@ export interface PromptTraceEntry {
   /** The LLM call's vendor-reported token accounting, attached after the call resolves on a
    *  successful turn — absent until then, absent forever if the turn threw or was aborted (the
    *  same "absent if the call failed" contract as `reply`). Structurally available to any kind,
-   *  but only ever populated on the 'main' entry today (docs/plans/prompt-inspector-usage-cost.md). */
+   *  but only ever populated on the 'main' entry today (docs/plans/completed/prompt-inspector-usage-cost.md). */
   usage?: LlmUsage;
   /** The acting connection's USD-per-1M-token rates at the time the call fired — attached
    *  alongside `usage`, and undefined end to end when the connection had no price configured

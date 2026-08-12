@@ -1,6 +1,7 @@
 # RP Streaming — Real Token Streaming for the RP Lane
 
-*Status: planned, not yet implemented.*
+*Status: implemented — commit `b59113d` ("rp streaming: live SSE turns for RP chats end to end")
+shipped this in full.*
 
 ## Goal
 

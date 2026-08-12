@@ -23,7 +23,7 @@
  *
  *  1. recallChunkLane.ts — chat_chunks, this chat's archived full-turn texts (the CNZ "chat
  *     lane"). Owns the content + header vector fetch, temporal decay, the keyword blend, and the
- *     dynamic cutoff for this lane (Stages 1/3/4/5 of docs/plans/rag-dynamic-cutoff-plan.md).
+ *     dynamic cutoff for this lane (Stages 1/3/4/5 of docs/plans/completed/rag-dynamic-cutoff-plan.md).
  *  2. recallFactLane.ts — canon_facts, approved rows only, deduped to most-recent-approved per
  *     arc_tag/entity_key, with the same dynamic cutoff (Stage 2 of the same plan).
  *

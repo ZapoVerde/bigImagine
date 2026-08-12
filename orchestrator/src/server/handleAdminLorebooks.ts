@@ -8,7 +8,7 @@
  * are user-scoped RLS tables, so every write body carries the owning user_id (from the list
  * response); the admin key grants the cross-user read, and each write runs under that user's
  * scope. One dispatcher function routes both path prefixes by segment, mirroring the other
- * admin route modules (docs/plans/httpserver-breakdown-plan.md step 2). The dispatcher in
+ * admin route modules (docs/plans/completed/httpserver-breakdown-plan.md step 2). The dispatcher in
  * httpServer.ts applies the admin gate before this handler runs.
  *
  * @api-declaration

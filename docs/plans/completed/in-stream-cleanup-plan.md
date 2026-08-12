@@ -1,6 +1,7 @@
 # In-Stream Cleanup — Per-Region Live Repair + Three-Pill Status
 
-*Status: planned, not yet implemented.*
+*Status: implemented — commits `95714a0` ("in-stream cleanup: live header/body/footer repair
+during streaming") and `deb88a5` ("in-stream cleanup validation fixes") shipped this.*
 
 ## Goal
 

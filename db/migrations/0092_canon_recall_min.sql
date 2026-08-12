@@ -1,5 +1,5 @@
 -- Widens orchestrator_settings.key's CHECK constraint with the canon_facts lane's Min floor for
--- the RAG dynamic cutoff (docs/plans/rag-dynamic-cutoff-plan.md, Stage 2 of the CNZ retrieval
+-- the RAG dynamic cutoff (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 2 of the CNZ retrieval
 -- port, applied on top of Stage 1's io/chatMemory/recallCutoff.ts):
 --   canon_recall_min  integer-as-text (default '2') — the Min floor for the dynamic cutoff on
 --                      the canon_facts lane of buildAutoRecallParts: how many approved facts are

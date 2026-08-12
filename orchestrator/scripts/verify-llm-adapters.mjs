@@ -366,7 +366,7 @@ await withMockedFetch(
   },
 );
 
-// Prompt-cache accounting (docs/plans/prompt-inspector-usage-cost.md): DeepSeek's responses carry
+// Prompt-cache accounting (docs/plans/completed/prompt-inspector-usage-cost.md): DeepSeek's responses carry
 // prompt_cache_hit_tokens; prompt_tokens already includes the cached portion, so promptTokens is
 // unchanged and the hit count lands on cacheReadTokens.
 await withMockedFetch(
@@ -439,7 +439,7 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
   );
 });
 
-// --- Streaming (completeStream, docs/plans/rp-streaming-plan.md) ---
+// --- Streaming (completeStream, docs/plans/completed/rp-streaming-plan.md) ---
 // Anthropic: text_delta events drive onDelta in order; usage is merged from message_start's
 // input_tokens and the terminal message_delta's output_tokens.
 await withMockedFetch(

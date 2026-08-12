@@ -1,6 +1,7 @@
 # httpServer.ts Breakdown Plan
 
-*Status: planned, not started — refreshed 2026-08-12 (post rp-streaming; file now 4,470 lines).*
+*Status: implemented — all eight breakdown steps shipped, the last being commit `d18400c`
+("dispatcher if-chain -> route table (final step)").*
 
 ## 1. Purpose
 

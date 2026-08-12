@@ -3,7 +3,7 @@
  * @stamp 2026-08-17
  * @architectural-role IO Wrapper — the chat_chunks half of buildAutoRecallParts's CNZ-style
  * silent auto-recall (recallForPrompt.ts), split out per bi_principles.md §10's 300-line budget
- * once Stages 3-5 of docs/plans/rag-dynamic-cutoff-plan.md grew this lane substantially.
+ * once Stages 3-5 of docs/plans/completed/rag-dynamic-cutoff-plan.md grew this lane substantially.
  * @description
  * Everything specific to the archived full-turn "chat lane": the content-vector query (Stage 1,
  * migration 0077/0091, temporal decay Stage 3), the header/summary-vector query (Stage 5,

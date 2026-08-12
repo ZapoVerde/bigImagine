@@ -5,7 +5,7 @@
  * silent auto-recall (recallForPrompt.ts), split out per bi_principles.md §10's 300-line budget
  * alongside recallChunkLane.ts.
  * @description
- * The Stage 2 counterpart of recallChunkLane.ts (docs/plans/rag-dynamic-cutoff-plan.md, Stage 2
+ * The Stage 2 counterpart of recallChunkLane.ts (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 2
  * addendum): fetches this chat's approved canon facts (deduped to most-recent-approved per
  * arc_tag/entity_key — the same CTE recallCanonFactsTool.ts runs, scoped to "now" rather than an
  * as_of point in time), sized by the shared Pool Multiple against the fact lane's own Max

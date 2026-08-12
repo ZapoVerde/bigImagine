@@ -1,4 +1,4 @@
--- Stage 4 of the CNZ retrieval port (docs/plans/rag-dynamic-cutoff-plan.md): the keyword/FTS
+-- Stage 4 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the keyword/FTS
 -- lane over chat_chunks.content. recallForPrompt.ts's chunk query scores each fetched row with
 -- ts_rank(content_tsv, ...) and recallCutoff.ts's blendKeyword re-ranks the window by blended
 -- distance before the pool is sliced and measured (Canonize's RAG_strategy_v4.md §3 Step 3,

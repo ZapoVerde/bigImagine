@@ -4,7 +4,7 @@
  * @architectural-role Pure Function — CNZ-style distribution-aware retrieval cutoff, ported to raw distance
  * @description
  * The ported pool-statistics/threshold stage of SillyTavern-Canonize's rag/cutoff.js
- * (docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port): given the pool of
+ * (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port): given the pool of
  * candidate distances the caller already fetched, decide how many of them are actually worth
  * injecting — the "is anything here worth recalling?" mechanism the fixed-LIMIT read path never
  * had. Pure Function per bi_principles.md §8: no IO, no settings access — recallForPrompt.ts

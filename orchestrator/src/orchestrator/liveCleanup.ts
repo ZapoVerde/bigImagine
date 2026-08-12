@@ -3,7 +3,7 @@
  * @stamp 2026-08-14
  * @architectural-role Orchestrator — the incremental in-stream cleanup engine
  * @description
- * The live half of docs/plans/in-stream-cleanup-plan.md: the per-delta header/body checks that
+ * The live half of docs/plans/completed/in-stream-cleanup-plan.md: the per-delta header/body checks that
  * run inside runStreamingRpTurn while a reply streams, plus finishStream's end-of-stream tail
  * body pass, footer inspection, and the deferred 'llm'-action slop pass. Pure decisions come
  * from cleanupHeuristics.ts (inspectHeader / inspectFooter / nextCompletedParagraph /

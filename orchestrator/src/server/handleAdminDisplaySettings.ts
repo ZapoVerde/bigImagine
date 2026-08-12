@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — admin Settings-tab display/settings GET+SET route handlers
  * @description
  * The standalone admin settings pairs extracted from httpServer.ts
- * (docs/plans/httpserver-breakdown-plan.md step 1): image settings, location settings + the
+ * (docs/plans/completed/httpserver-breakdown-plan.md step 1): image settings, location settings + the
  * read-only known-locations browser, household timezone, chat background / text legibility
  * (write side only — the household read sides of those two still live in httpServer.ts's
  * handleMisc block and serve both the household and admin GET routes), chat-memory settings +

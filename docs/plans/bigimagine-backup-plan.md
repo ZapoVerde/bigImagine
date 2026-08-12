@@ -4,7 +4,7 @@
 and §3 flag "Single-user backup strategy — bigBrain's offsite backup pipeline was pruned wholesale
 (§3); whether BigImagine wants a simpler equivalent is an open, not-yet-raised question." This
 document is the build plan for giving BigImagine its own offsite backup, riding on the pipeline
-already built and verified for bigBrain (`bigBrain/backup/`, `docs/plans/dedicated-infra-plan.md`'s
+already built and verified for bigBrain (`bigBrain/backup/`, `docs/plans/completed/dedicated-infra-plan.md`'s
 sibling stack).*
 
 *Status tags follow spec.md's convention: **(built)**, **(designed)**, **(parked)**. Everything

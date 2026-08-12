@@ -1,4 +1,4 @@
--- Per-region cleanup job tracking (docs/plans/in-stream-cleanup-plan.md).
+-- Per-region cleanup job tracking (docs/plans/completed/in-stream-cleanup-plan.md).
 --
 -- Cleanup work now splits into three regions — header / body / footer — each evaluated and
 -- recorded independently, so a message can be "covered" for one region while another is still

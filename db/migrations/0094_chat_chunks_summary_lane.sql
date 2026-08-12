@@ -1,4 +1,4 @@
--- Stage 5 of the CNZ retrieval port (docs/plans/rag-dynamic-cutoff-plan.md): the header/second
+-- Stage 5 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the header/second
 -- vector lane over chat_chunks.summary. recallForPrompt.ts now queries both lanes (content
 -- vector_embed and summary_vector_embed), merges them with best-of scoring (the closer of the
 -- two decayed distances), and applies Canonize's 1.08× dual-confirmation bonus to chunks that

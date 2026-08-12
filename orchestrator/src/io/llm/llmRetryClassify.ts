@@ -3,7 +3,7 @@
  * @stamp 2026-08-06
  * @architectural-role Pure Function — retryable-vs-not decision for a failed LLM call
  * @description
- * llmGate.ts (docs/plans/llm-gate-plan.md §4.2) needs to decide, for a thrown error from
+ * llmGate.ts (docs/plans/completed/llm-gate-plan.md §4.2) needs to decide, for a thrown error from
  * base.complete(), whether retrying the exact same call could plausibly succeed. Split out as its
  * own pure module (docs/conventions.md's four-kinds-of-code split) so the decision is
  * independently testable without a fake LlmProvider or Postgres.

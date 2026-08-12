@@ -3,7 +3,7 @@
  * @stamp 2026-08-12
  * @architectural-role Stateful Owner — ambient per-chat, per-region live cleanup state
  * @description
- * The in-memory side of the live cleanup path (docs/plans/in-stream-cleanup-plan.md): while a
+ * The in-memory side of the live cleanup path (docs/plans/completed/in-stream-cleanup-plan.md): while a
  * turn streams, the live engine writes the three regions' current pill states here and emits
  * them to the client as `bigimagine_cleanup` SSE frames. The polled read surface
  * (cleanupLoop.ts's getCleanupStatus) overlays this map on top of the settled job rows so a
