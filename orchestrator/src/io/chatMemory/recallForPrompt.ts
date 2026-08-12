@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/recallForPrompt.ts
- * @stamp 2026-08-16
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — CNZ-style silent per-turn recall, injected at prompt assembly
  * @description
  * The read-path twin of the recall_chat_history / recall_canon_facts tools, but CNZ-shaped:
@@ -63,6 +63,15 @@
  * (default '2', migration 0092) — the same per-channel Min/Max + shared Pool/Cutoff split
  * Canonize's own settings use, exactly as the Stage-1 naming anticipated. Facts are deduped per
  * arc/entity by the existing CTE before the cutoff measures their pool.
+ *
+ * Since 2026-08-17 (Stage 3 of the same plan) the chunk lane adds Canonize's temporal decay
+ * (RAG_strategy_v4.md §3 Step 2, chat channel only): each chunk's distance is divided by
+ * recallCutoff.ts's `decayFactor(ageChunks)` — a chunk `ageChunks` chunks behind the newest
+ * archived chunk measures farther, so old-but-mediocre matches fall below the cutoff's
+ * threshold. The decay applies BEFORE the pool is formed and measured, exactly Canonize's
+ * pipeline order (decay → pool statistics), and only to chat_chunks — the fact lane keeps its
+ * plain distance (Canonize's decay is chat-channel-only). The factor's constants are Canonize's
+ * own (floor 0.70, coefficient 0.025), kept as plain constants per the plan — no new setting.
  *
  * @api-declaration
  * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
@@ -148,8 +157,11 @@ interface ChunkRow {
   ordinal: number;
   summary: string;
   content: string;
-  /** Raw L2 distance to the query vector (`vector_embed <-> $query`), selected so the cutoff
-   *  can measure the pool's distribution (recallCutoff.ts) before deciding how many to keep. */
+  /** Decayed L2 distance to the query vector — the raw `vector_embed <-> $query` divided by
+   *  Canonize's temporal-decay factor (recallCutoff.ts `decayFactor`, Stage 3) so older chunks
+   *  measure farther. Selected (as `distance`) so the cutoff measures the decayed pool
+   *  distribution before deciding how many to keep — Canonize applies decay BEFORE pool
+   *  statistics, and the SQL ORDER BY uses the same decayed value. */
   distance: number;
 }
 
@@ -326,10 +338,21 @@ export function buildAutoRecallParts(
 
       const [chunkRows, facts] = await Promise.all([
         session.query<ChunkRow>(
-          `select ordinal, summary, content, vector_embed <-> $3 as distance
+          // Stage 3: each row's distance is the raw `vector_embed <-> $query` divided by
+          // Canonize's temporal-decay factor (recallCutoff.ts `decayFactor`) — a chunk
+          // `ageChunks` chunks behind the newest archived chunk gets distance × 1/factor, so
+          // older-but-relevant chunks rank (and are measured by the cutoff) as if farther away.
+          // The expression mirrors decayFactor() verbatim — keep in sync
+          // (verify-recall-for-prompt.mjs asserts the SQL shape). `now` is the newest chunk
+          // ordinal for this chat (scalar subquery, index-assisted by chat_chunks_by_chat), so
+          // the freshest chunk has age 0 → factor 1 → no decay.
+          `select ordinal, summary, content,
+                  (vector_embed <-> $3)
+                    / greatest(0.70, 1.0 - 0.025 * ln(2 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
+                    as distance
            from chat_chunks
            where user_id = $1 and chat_id = $2
-           order by vector_embed <-> $3
+           order by distance
            limit ${pool}`,
           [userId, chatId, toPgVectorLiteral(vector)],
         ),
@@ -368,6 +391,7 @@ export function buildAutoRecallParts(
         min: chunkMin,
         max: chunkTopK,
         keepCount,
+        temporalDecay: true, // Stage 3: distances measured are decayed (recallCutoff.decayFactor)
         ...stats,
       });
 

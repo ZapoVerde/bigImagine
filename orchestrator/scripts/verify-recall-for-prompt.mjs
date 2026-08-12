@@ -14,6 +14,10 @@
 //      chunk_min/chunk_top_k, facts per canon_recall_min/canon_recall_top_k, sharing the 0091
 //      Pool Multiple/Cutoff Mode knobs. The pure math itself is pinned by verify-recall-cutoff.
 //      mjs; this file proves the settings → pool → slice wiring on both lanes.
+//   5. Stage 3 temporal decay (recallCutoff.decayFactor): the chunks query divides each raw
+//      distance by Canonize's factor max(0.70, 1 − 0.025·ln(2·ageChunks + 1)) in SQL, ages each
+//      row against the chat's newest chunk ordinal, and orders/measures the DECAYED distance —
+//      decay before pool formation, Canonize's pipeline order, chat lane only.
 
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
@@ -275,7 +279,17 @@ function fakeSettings(value) {
   );
   assert(
     seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('as distance')),
-    'the chunks query selects the raw distance so the cutoff can measure the pool',
+    'the chunks query selects the (Stage 3 decayed) distance so the cutoff can measure the pool',
+  );
+  assert(
+    seenSql.some(
+      (sql) => sql.includes('from chat_chunks') && sql.includes('greatest(0.70') && sql.includes('ln('),
+    ),
+    'the chunks query mirrors recallCutoff.decayFactor (greatest(0.70, 1 − 0.025·ln(...))) in SQL',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('(select max(ordinal) from chat_chunks')),
+    'the chunks query ages each row against the chat\'s newest chunk ordinal (max(ordinal))',
   );
 }
 {
