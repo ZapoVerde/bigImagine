@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/httpServer.ts
- * @stamp 2026-08-10
+ * @stamp 2026-08-12
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
@@ -154,10 +154,8 @@
  *     external_io:     [inbound HTTP]
  */
 
-import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { extname } from 'node:path';
 import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { runWithCallContext } from '../io/llm/callContext.js';
@@ -205,7 +203,6 @@ import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import { handleChubCardDetail } from './handleChubCardDetail.js';
-import { fetchThroughPiaProxy } from '../io/piaProxyFetch.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
 import type { ChatDetail, ChatParams, ChatSessionRow, ChatSessionStore, StoredChatMessage } from '../io/chatSessions.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
@@ -222,58 +219,24 @@ import {
   exportLorebookWorldInfo,
   importLorebookWorldInfo,
   deleteLorebookEntryAdmin,
-  getCanonSettings,
-  getChatMemorySettings,
-  getChatMemorySyncStatus,
   getChatBackgroundSettings,
   getChatLegibilitySettings,
   getCleanupSettings,
   getHouseholdTimezone,
-  getImageSettings,
-  getLocationRenderStatus,
-  getLocationsAdmin,
-  getLocationSettings,
-  getLorebookSettings,
   getLorebooksAdmin,
-  getNotificationSettings,
   getPersonaSettings,
-  getPiaProxyUrl,
   getScreenLockSettings,
   listCredentials,
   listModelsForConnection,
   listProvidersForConnection,
   parseCreateConnectionBody,
   parseCreateImageConnectionBody,
-  parseSetCanonSettingsBody,
-  parseSetChatMemorySettingsBody,
-  parseSetChatBackgroundSettingsBody,
-  parseSetChatLegibilitySettingsBody,
   parseSetCleanupSettingsBody,
   parseSetCredentialBody,
-  parseSetImageSettingsBody,
-  parseSetLocationSettingsBody,
-  parseSetLorebookSettingsBody,
-  parseSetNotificationSettingsBody,
-  parseSetPersonaSettingsBody,
-  parseSetPiaProxyUrlBody,
-  parseSetScreenLockSettingsBody,
-  parseSetTimezoneBody,
   parseUpdateConnectionBody,
   parseUpdateImageConnectionBody,
-  setCanonSettings,
-  setChatMemorySettings,
-  setChatBackgroundSettings,
-  setChatLegibilitySettings,
   setCleanupSettings,
   setCredential,
-  setHouseholdTimezone,
-  setImageSettings,
-  setLocationSettings,
-  setLorebookSettings,
-  setNotificationSettings,
-  setPersonaSettings,
-  setPiaProxyUrl,
-  setScreenLockSettings,
   testConnection,
   testImageConnection,
   updateLorebookAdmin,
@@ -281,6 +244,47 @@ import {
 } from './adminServer.js';
 import type { LorebookEntryInput, LorebookEntryPatch } from './adminServer.js';
 import { invokeTool } from './toolInvoke.js';
+import {
+  authenticate,
+  FRONTEND_DIST_DIR,
+  isAdminAuthorized,
+  JsonBodyTooLargeError,
+  readJsonBody,
+  sendJson,
+  serveStaticFile,
+  writeStreamErrorTerminalFrame,
+  writeStreamHeaders,
+} from './httpUtils.js';
+import {
+  handleCanonSettingsGet,
+  handleCanonSettingsSet,
+  handleChatBackgroundSettingsSet,
+  handleChatLegibilitySettingsSet,
+  handleChatMemorySettingsGet,
+  handleChatMemorySettingsSet,
+  handleChatMemorySyncStatusGet,
+  handleImageSettingsGet,
+  handleImageSettingsSet,
+  handleLocationRenderStatusGet,
+  handleLocationsGet,
+  handleLocationSettingsGet,
+  handleLocationSettingsSet,
+  handleLorebookSettingsGet,
+  handleLorebookSettingsSet,
+  handleTimezoneGet,
+  handleTimezoneSet,
+} from './handleAdminDisplaySettings.js';
+import {
+  handleAdminScreenLockSettingsGet,
+  handleAdminScreenLockSettingsSet,
+  handleChubAvatarProxy,
+  handleNotificationSettingsGet,
+  handleNotificationSettingsSet,
+  handlePersonaSettingsGet,
+  handlePersonaSettingsSet,
+  handlePiaProxyUrlGet,
+  handlePiaProxyUrlSet,
+} from './handleAdminMisc.js';
 import {
   buildChatCompletion,
   buildChatCompletionChunk,
@@ -328,122 +332,6 @@ const ALLOWED_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
 // images is the first realistic way this could balloon; everything else here is chat text, which
 // never approached a size worth guarding against. Generous enough for MAX_IMAGES_PER_TURN images
 // at openai.ts's own MAX_IMAGE_BYTES ceiling, plus normal chat text/attachments Markdown.
-const MAX_JSON_BODY_BYTES = 40 * 1024 * 1024;
-
-class JsonBodyTooLargeError extends Error {
-  constructor(public readonly maxBytes: number) {
-    super(`request body exceeded ${maxBytes} bytes`);
-  }
-}
-
-async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let totalBytes = 0;
-  for await (const chunk of req) {
-    totalBytes += (chunk as Buffer).length;
-    if (totalBytes > MAX_JSON_BODY_BYTES) throw new JsonBodyTooLargeError(MAX_JSON_BODY_BYTES);
-    chunks.push(chunk as Buffer);
-  }
-  const raw = Buffer.concat(chunks).toString('utf8');
-  return raw ? JSON.parse(raw) : {};
-}
-
-async function authenticate(
-  req: IncomingMessage,
-  apiKeys: ApiKeyStore,
-  accessIdentity: AccessIdentityResolver,
-): Promise<string | undefined> {
-  const accessJwt = req.headers['cf-access-jwt-assertion'];
-  if (typeof accessJwt === 'string') {
-    const userId = await accessIdentity.userIdForAccessJwt(accessJwt);
-    if (userId) return userId;
-  }
-
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return undefined;
-  return apiKeys.userIdForKey(header.slice('Bearer '.length));
-}
-
-// Any household member who already cleared Cloudflare Access to reach this hostname at all is
-// trusted for admin actions too — Access is the real gate; a second static secret behind it was
-// redundant friction for a single-household deployment. The static BIGBRAIN_ADMIN_API_KEY check
-// remains as the only path in for deployments with no Access configured (accessIdentity is then a
-// no-op resolver, see io/accessIdentity.ts) and for any non-browser/API automation.
-//
-// A plain === on the key would leak timing information about how many leading bytes of the
-// presented key matched the real one — this key alone can rotate every other credential in the
-// system, worth the extra care even though apiKeyStore.ts's per-household-member check doesn't
-// bother.
-async function isAdminAuthorized(
-  req: IncomingMessage,
-  adminApiKey: string,
-  accessIdentity: AccessIdentityResolver,
-): Promise<boolean> {
-  const accessJwt = req.headers['cf-access-jwt-assertion'];
-  if (typeof accessJwt === 'string') {
-    const userId = await accessIdentity.userIdForAccessJwt(accessJwt);
-    if (userId) return true;
-  }
-
-  const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return false;
-  const presented = Buffer.from(header.slice('Bearer '.length));
-  const expected = Buffer.from(adminApiKey);
-  return presented.length === expected.length && timingSafeEqual(presented, expected);
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'content-type': 'application/json',
-    'content-length': Buffer.byteLength(payload),
-  });
-  res.end(payload);
-}
-
-// The SSE response headers both streaming routes (handleChatCompletions's RP branch and the
-// swipe route's needs_regenerate stream) write — same framing the existing non-RP fake-stream
-// branch has always used, so any OpenAI-compatible client parses both identically.
-function writeStreamHeaders(res: ServerResponse): void {
-  res.writeHead(200, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-  });
-}
-
-// The SSE abort/error terminal frame (docs/plans/rp-streaming-plan.md Contracts) — one extra
-// data: line before [DONE], usable only once streaming has begun (headers committed, so an HTTP
-// status code is no longer an option). Emitted identically by both streaming routes. A success
-// completion never emits this: it keeps today's stop-finish chunk + [DONE], so an OpenAI-
-// compatible client that has never heard of bigimagine_error simply never sees it.
-function writeStreamErrorTerminalFrame(res: ServerResponse, aborted: boolean, message: string): void {
-  res.write(
-    `data: ${JSON.stringify({ bigimagine_error: true, aborted, message })}\n\n`,
-  );
-  res.write('data: [DONE]\n\n');
-  res.end();
-}
-
-// Where the built frontend/ SPA lands at Docker build time (Dockerfile: npm run build
-// --workspace=@bigbrain/frontend), resolved the same way index.ts resolves pluginsDir.
-const FRONTEND_DIST_DIR = new URL('../../../frontend/dist', import.meta.url).pathname;
-
-const STATIC_CONTENT_TYPES: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.json': 'application/json; charset=utf-8',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.png': 'image/png',
-};
-
-// GET /v1/chats/:id/prompt-preview (buildPromptPreview, below the turn-context assembly this
-// mirrors): one labeled, ordered item per piece of the exact prompt an 'rp' chat's next turn would
-// send — bi_principles.md §11/§18, letting a household member audit or hand-tune what the model
-// actually sees instead of only ever seeing the reply it produced from it.
 export interface PromptPreviewItem {
   /** Raw marker vocabulary key (assemblePromptStack.ts's MarkerKey) when this item came from a
    *  preset's marker slot — undefined for a custom slot, a date-context line, or a conversation
@@ -1634,16 +1522,6 @@ async function regenerateSwipe(
   return { ok: true, message: updated, locationId };
 }
 
-async function serveStaticFile(res: ServerResponse, filePath: string): Promise<void> {
-  try {
-    const content = await readFile(filePath);
-    const contentType = STATIC_CONTENT_TYPES[extname(filePath)] ?? 'application/octet-stream';
-    res.writeHead(200, { 'content-type': contentType, 'content-length': content.length });
-    res.end(content);
-  } catch {
-    sendJson(res, 404, { error: 'not found' });
-  }
-}
 
 async function handleChatCompletions(
   req: IncomingMessage,
@@ -2496,242 +2374,6 @@ async function handleAdminImageConnectionRoutes(req: IncomingMessage, res: Serve
   sendJson(res, 404, { error: 'not found' });
 }
 
-async function handleImageSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getImageSettings(deps.settings));
-}
-
-async function handleImageSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-  const parsed = parseSetImageSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, { error: 'expected { template?: string, describer_prompt?: string, describer_history_pairs?: string }' });
-    return;
-  }
-  await setImageSettings(deps.settings, parsed);
-  sendJson(res, 200, await getImageSettings(deps.settings));
-}
-
-// location.md §6.3 — the Locations page's unified settings surface: the tracker's three keys
-// plus the room describer's two (moved entirely from the Backgrounds page; the image-settings
-// endpoint above still accepts the describer_* keys for back-compat). Same admin gate + live
-// no-restart shape as every other settings pair.
-async function handleLocationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getLocationSettings(deps.settings));
-}
-
-async function handleLocationSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-  const parsed = parseSetLocationSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error: 'expected { split_enabled?, injection_enabled?, injection_prompt?, describer_prompt?, describer_history_pairs? }',
-    });
-    return;
-  }
-  await setLocationSettings(deps.settings, parsed);
-  sendJson(res, 200, await getLocationSettings(deps.settings));
-}
-
-// location.md §6.2.4 — the Locations page's read-only known-locations browser (parent/sub
-// grouping, lifecycle status, image thumbnail). Cross-user admin roster, same as the render-
-// status table; read-only, no POST counterpart.
-async function handleLocationsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, { locations: await getLocationsAdmin(deps.db) });
-}
-
-async function handleTimezoneGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const timezone = await getHouseholdTimezone(deps.settings);
-  sendJson(res, 200, { timezone });
-}
-
-async function handleTimezoneSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const value = parseSetTimezoneBody(raw);
-  if (!value) {
-    sendJson(res, 400, { error: 'expected { value: a valid IANA timezone name, e.g. "America/New_York" }' });
-    return;
-  }
-
-  await setHouseholdTimezone(deps.settings, value);
-  // No restart needed — the very next chat turn reads it live (handleChatCompletions).
-  sendJson(res, 200, { timezone: value });
-}
-
-// parallax_fade_teststep.md §2.2's admin write side — the SettingsView "Chat Background" toggle.
-// Same admin gate and no-restart shape as /v1/admin/timezone: the value is read live by ChatView
-// at chat load, so flipping it takes effect on the next visit without a restart.
-async function handleChatBackgroundSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const value = parseSetChatBackgroundSettingsBody(raw);
-  if (!value) {
-    sendJson(res, 400, {
-      error:
-        'expected a partial { parallaxEnabled?, overlayOpacity?, overlayShade?, bubbleOpacity?, bubbleUserShade?, bubbleAssistantShade? } with at least one field',
-    });
-    return;
-  }
-
-  await setChatBackgroundSettings(deps.settings, value);
-  sendJson(res, 200, await getChatBackgroundSettings(deps.settings));
-}
-
-// migration 0074's admin write side — the ChatView "Text legibility" collapsible menu in the
-// chat settings rail (components/chat/LegibilityMenu.tsx). Same admin gate and no-restart shape
-// as /v1/admin/timezone / the chat-background pair: each toggle POSTs its partial patch
-// immediately (household-wide, applies to all chats), ChatView re-reads the set live at chat
-// load, so there is no restart and no rebuild for a look change.
-async function handleChatLegibilitySettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const value = parseSetChatLegibilitySettingsBody(raw);
-  if (!value) {
-    sendJson(res, 400, {
-      error:
-        'expected a partial { halo?, haloStrength?, outline?, solidCode?, weightBump?, hoverFocus? } with at least one field',
-    });
-    return;
-  }
-
-  await setChatLegibilitySettings(deps.settings, value);
-  sendJson(res, 200, await getChatLegibilitySettings(deps.settings));
-}
-
-// docs/chat-memory.md — profileNames comes from deps.llmConnections.list() (the live, admin-managed
-// set, io/llmConnections.ts), everything else is live-read via adminServer.ts.
-async function handleChatMemorySettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const settings = await getChatMemorySettings(deps.settings);
-  const profileNames = (await deps.llmConnections.list()).map((c) => c.name);
-  sendJson(res, 200, { ...settings, profileNames });
-}
-
-async function handleChatMemorySettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetChatMemorySettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error:
-        'expected at least one of { profile?, live_window_pairs?: positive number, sync_every_pairs?: positive number, ' +
-        'digest_horizon_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
-    });
-    return;
-  }
-
-  await setChatMemorySettings(deps.settings, parsed);
-  // No restart needed — the next sync tick (orchestrator/src/orchestrator/chatMemorySync.ts) reads
-  // every one of these live.
-  const settings = await getChatMemorySettings(deps.settings);
-  const profileNames = (await deps.llmConnections.list()).map((c) => c.name);
-  sendJson(res, 200, { ...settings, profileNames });
-}
-
-// The review panel's actual data (bi_principles.md §11) — read-only, no POST counterpart, since
-// this reports what the background sync loop (orchestrator/chatMemorySync.ts) already did rather
-// than configuring anything.
-async function handleChatMemorySyncStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, { chats: await getChatMemorySyncStatus(deps.db) });
-}
-
-// The Backgrounds tab's proof-it-ran read: which render stages each recent location actually
-// completed (describeLocation.ts's described/defined halves, generateLocationImage.ts's
-// rendered/hash), cross-user like getChatMemorySyncStatus above — admin-gated, read-only.
-async function handleLocationRenderStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, { locations: await getLocationRenderStatus(deps.db) });
-}
-
-// docs/canonize-plan.md §6 — canon settings are live-read (recall_canon_facts reads
-// canon_recall_top_k on every call), so a save here takes effect immediately, no restart, same
-// shape as notification settings above.
-async function handleCanonSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getCanonSettings(deps.settings));
-}
-
-async function handleCanonSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetCanonSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error: 'expected at least one of { recall_top_k?: positive integer, extraction_prompt?: string }',
-    });
-    return;
-  }
-  await setCanonSettings(deps.settings, parsed);
-  // No restart needed — recall_canon_facts reads canon_recall_top_k live on every call.
-  sendJson(res, 200, await getCanonSettings(deps.settings));
-}
-
-// docs/lorebook-plan.md §3d/§8a — the Lorebooks page's settings panel. Like canon settings,
-// resolveLorebook reads the §3d keys live every turn, so a save here takes effect immediately.
-async function handleLorebookSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getLorebookSettings(deps.settings));
-}
-
-async function handleLorebookSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetLorebookSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error:
-        'expected at least one of { lorebook_mode?: "on" | "off", lorebook_token_budget?: positive number | null, ' +
-        'lorebook_recall_top_k?: positive integer, lorebook_recursion_enabled?: boolean }',
-    });
-    return;
-  }
-  await setLorebookSettings(deps.settings, parsed);
-  sendJson(res, 200, await getLorebookSettings(deps.settings));
-}
 
 // docs/lorebook-plan.md §8a — the Lorebooks page's library list + entry editor. Books/entries are
 // user-scoped RLS tables, so every write body carries the owning user_id (from the list response);
@@ -3048,159 +2690,6 @@ async function handleAdminLorebookRoutes(req: IncomingMessage, res: ServerRespon
   }
 
   sendJson(res, 404, { error: 'not found' });
-}
-
-async function handleNotificationSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getNotificationSettings(deps.settings));
-}
-
-async function handleNotificationSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetNotificationSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, { error: 'expected { server_url?: non-empty string, enabled?: boolean }, at least one' });
-    return;
-  }
-
-  await setNotificationSettings(deps.settings, parsed);
-  // No restart needed — the next send_push_notification call reads both fields live.
-  sendJson(res, 200, await getNotificationSettings(deps.settings));
-}
-
-// Admin-gated counterpart to handleScreenLockSettingsGet above — same value, but this is the
-// Settings tab's own read (and the only place the password gets written), so it's behind the
-// admin key like every other Settings-tab field, not the lighter household gate the overlay uses.
-async function handleAdminScreenLockSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getScreenLockSettings(deps.settings));
-}
-
-// GET /v1/characters/chub-avatar?url= — the one place a chub CDN URL crosses straight from the
-// browser (BrowseChubView.tsx's search-result grid) rather than through a tool call, so it needs
-// its own guard beyond fetchThroughPiaProxy: an unrestricted `url` param would make this an open
-// image-fetch relay to anywhere on the internet (an SSRF hole reachable from any authenticated
-// household member's browser, not just an LLM tool call). Restricted to chub's own avatar CDN
-// host, confirmed live (2026-08-05) as the host every avatar_url/max_res_url in chub's search and
-// character-detail responses actually uses.
-const CHUB_AVATAR_ALLOWED_HOSTS = new Set(['avatars.charhub.io']);
-
-async function handleChubAvatarProxy(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const target = new URL(req.url ?? '', 'http://placeholder').searchParams.get('url');
-  if (!target) {
-    sendJson(res, 400, { error: 'missing url query param' });
-    return;
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(target);
-  } catch {
-    sendJson(res, 400, { error: 'invalid url' });
-    return;
-  }
-  if (!CHUB_AVATAR_ALLOWED_HOSTS.has(parsed.hostname)) {
-    sendJson(res, 400, { error: `url must be hosted on one of: ${Array.from(CHUB_AVATAR_ALLOWED_HOSTS).join(', ')}` });
-    return;
-  }
-
-  let upstream: Response;
-  try {
-    upstream = await fetchThroughPiaProxy(deps.settings, target);
-  } catch (err) {
-    sendJson(res, 502, { error: err instanceof Error ? err.message : 'chub-avatar proxy fetch failed' });
-    return;
-  }
-  if (!upstream.ok) {
-    sendJson(res, upstream.status, { error: `chub.ai returned HTTP ${upstream.status}` });
-    return;
-  }
-
-  const bytes = Buffer.from(await upstream.arrayBuffer());
-  res.writeHead(200, {
-    'content-type': upstream.headers.get('content-type') ?? 'application/octet-stream',
-    'content-length': bytes.length,
-  });
-  res.end(bytes);
-}
-
-// GET/POST /v1/admin/pia-proxy-settings — admin-only, no household-authed counterpart (unlike
-// timezone/screen-lock): pia_proxy_url is only ever read server-side, by io/piaProxyFetch.ts, never
-// by the frontend directly.
-async function handlePiaProxyUrlGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, { url: await getPiaProxyUrl(deps.settings) });
-}
-
-async function handlePiaProxyUrlSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const value = parseSetPiaProxyUrlBody(raw);
-  if (!value) {
-    sendJson(res, 400, { error: 'expected { value: a non-empty http(s) URL, e.g. "http://pia-proxy:8080" }' });
-    return;
-  }
-
-  await setPiaProxyUrl(deps.settings, value);
-  sendJson(res, 200, { url: await getPiaProxyUrl(deps.settings) });
-}
-
-// GET/POST /v1/admin/persona-settings — the household's own name/description
-// (docs/plans/prompt-macros.md's Stage 1), read live by
-// plugins/context-stack-presets' applyPromptStackToChatTool.ts. Same admin-authed,
-// read-back-in-full shape as screen-lock/notification settings.
-async function handlePersonaSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getPersonaSettings(deps.settings));
-}
-
-async function handlePersonaSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const body = parseSetPersonaSettingsBody(raw);
-  if (!body) {
-    sendJson(res, 400, { error: 'expected { name?: string, description?: string }, at least one present' });
-    return;
-  }
-
-  await setPersonaSettings(deps.settings, body);
-  // No restart needed — applyPromptStackToChatTool.ts reads both fields live on every apply.
-  sendJson(res, 200, await getPersonaSettings(deps.settings));
-}
-
-async function handleAdminScreenLockSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetScreenLockSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, { error: 'expected { password?: string, timeout_minutes?: positive number }, at least one' });
-    return;
-  }
-
-  await setScreenLockSettings(deps.settings, parsed);
-  // No restart needed — ScreenLockOverlay.tsx polls /v1/screen-lock-settings live.
-  sendJson(res, 200, await getScreenLockSettings(deps.settings));
 }
 
 async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
