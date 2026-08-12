@@ -165,22 +165,15 @@ import { generateLocationImage } from '../orchestrator/generateLocationImage.js'
 import { describeLocationIfNeeded } from '../orchestrator/describeLocation.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
-import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
+import { getPromptTrace, recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { longestCommonPrefixLength } from '../util/commonPrefix.js';
 import { computeSectionStability, type SectionStabilityResult } from '../util/sectionStability.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { runStreamingRpTurn } from '../orchestrator/streamingTurn.js';
 import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
-import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { buildAutoRecallParts, formatAutoRecallBlock, buildAutoRecallQuery, AUTO_RECALL_PAIRS } from '../io/chatMemory/recallForPrompt.js';
 import { resolveLorebook } from '../orchestrator/resolveLorebook.js';
 import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
-import {
-  getLorebookPanelData,
-  quickAddLorebookEntry,
-  setLorebookChatOverride,
-  setLorebookEntryOverride,
-} from '../io/lorebook/panelData.js';
 import {
   renderBridge,
   renderPlotThreads,
@@ -272,6 +265,7 @@ import {
   handleCleanupSettingsSet,
   handleCleanupStatus,
 } from './handleCleanup.js';
+import { handleChatRoutes } from './handleChats.js';
 import {
   handleAdminConnectionRoutes,
   handleAdminCredentialsList,
@@ -467,7 +461,7 @@ async function buildChatMemorySystemPrompt(
 // apply_prompt_stack_to_chat baked in at Apply time, same reasoning as household persona settings
 // below. Callers gate on their text actually containing '{{' so this never runs for a macro-free
 // turn — a wasted round-trip here is a real one (two reads per turn).
-async function buildMacroSnapshot(
+export async function buildMacroSnapshot(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
@@ -814,7 +808,7 @@ export function fireLocationImageGeneration(
 // for "no eligible location at all". The previous location is eligibility-relaxed (a historical
 // pointer, not model-facing — "some background is better than no background even if stale") and
 // only returned when it actually has an image to show.
-async function resolveChatLocationImage(
+export async function resolveChatLocationImage(
   db: PostgresClient,
   userId: string,
   chatId: string,
@@ -904,7 +898,7 @@ async function resolveChatLocationImage(
  *  that left the active location without a rendered image (a dropped or failed pass), fire the
  *  cache-first generation pass so discovery resumes. Cache-first + the renderInFlight guard make
  *  repeat triggers no-ops whenever the image already exists or a render is already running. */
-async function ensureActiveLocationImage(deps: HttpServerDeps, userId: string, chatId: string): Promise<void> {
+export async function ensureActiveLocationImage(deps: HttpServerDeps, userId: string, chatId: string): Promise<void> {
   try {
     const state = await resolveChatLocationImage(deps.db, userId, chatId);
     if (state.current && !state.current.imageUrl) {
@@ -1042,7 +1036,7 @@ function resolveMacrosInMessages(messages: LlmMessage[], needsMacros: boolean, s
 // routes return one StoredChatMessage (a stored alternate greeting, or a regenerated reply) that
 // the client swaps into view in place, so it carries the same derived resolvedContent contract —
 // canonical content untouched, display copy resolved against the live persona.
-async function decorateMessageForDisplay(
+export async function decorateMessageForDisplay(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
@@ -1119,7 +1113,7 @@ export interface PromptPreview {
 // since both paths share that assembly. RP-only (docs/bi_principles.md's household-memory/canon
 // scoping is what makes a 'chat'-kind session's system prompt uninteresting to audit this way —
 // it's just the frozen params.system).
-async function buildPromptPreview(  deps: HttpServerDeps,
+export async function buildPromptPreview(  deps: HttpServerDeps,
   userId: string,
   chatId: string,
 ): Promise<{ ok: true; preview: PromptPreview } | { ok: false; status: number; error: string }> {
@@ -1354,7 +1348,7 @@ async function resolveTurnLlm(
 // entire prompt. Only ever called once the caller (handleChatRoutes below) has confirmed messageId
 // is this chat's current last message; regenerating anything earlier would leave the turns after it
 // stale, since nothing here touches them.
-async function regenerateSwipe(
+export async function regenerateSwipe(
   deps: HttpServerDeps,
   userId: string,
   chatId: string,
@@ -2052,513 +2046,6 @@ async function handleModels(res: ServerResponse, deps: HttpServerDeps): Promise<
     }
   }
   sendJson(res, 200, buildModelsList([deps.modelName]));
-}
-
-function isChatPatchBody(value: unknown): value is {
-  title?: string;
-  folder_id?: string | null;
-  params?: ChatParams;
-  tool_names?: string[] | null;
-  canvas_note_id?: string | null;
-  cleanup_preset_id?: string | null;
-  cleanup_enabled_at?: string | null;
-} {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (v.title !== undefined && typeof v.title !== 'string') return false;
-  if (v.folder_id !== undefined && v.folder_id !== null && typeof v.folder_id !== 'string') return false;
-  if (v.params !== undefined && (typeof v.params !== 'object' || v.params === null)) return false;
-  if (
-    v.tool_names !== undefined &&
-    v.tool_names !== null &&
-    !(Array.isArray(v.tool_names) && v.tool_names.every((t) => typeof t === 'string'))
-  ) {
-    return false;
-  }
-  if (v.canvas_note_id !== undefined && v.canvas_note_id !== null && typeof v.canvas_note_id !== 'string') {
-    return false;
-  }
-  if (v.cleanup_preset_id !== undefined && v.cleanup_preset_id !== null && typeof v.cleanup_preset_id !== 'string') {
-    return false;
-  }
-  // '' is never a valid preset id — rejecting it here (instead of letting it reach Postgres's
-  // uuid cast and 500) keeps a malformed patch a 400 like every other bad field.
-  if (v.cleanup_preset_id === '') return false;
-  if (v.cleanup_enabled_at !== undefined && v.cleanup_enabled_at !== null && typeof v.cleanup_enabled_at !== 'string') {
-    return false;
-  }
-  if (v.cleanup_enabled_at === '') return false;
-  return true;
-}
-
-// chat_memory_live_window_pairs / chat_memory_sync_every_pairs are stored as text and read live
-// every sync tick by chatMemorySync.ts's resolveSyncSettings — this mirrors that parse (same
-// positive-int-or-fallback shape) so the "when is the next sync due" math the UI shows never
-// drifts from the loop's own.
-function pairsSetting(raw: string | undefined, fallback: number): number {
-  const parsed = raw ? Number(raw) : NaN;
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-async function handleChatRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
-  deps: HttpServerDeps,
-  userId: string,
-  url: URL,
-): Promise<void> {
-  // '' -> [] (list/create); '/<id>' -> ['<id>']; '/<id>/messages/<msgId>[/truncate]' -> [...].
-  // Split-on-'/' rather than the old naive rest.slice(1) (which took everything past the first
-  // slash verbatim, so a nested message path would've been misread as one giant, never-matching
-  // chatId) — needed once routes could nest below a chat id at all.
-  const segments = url.pathname.slice('/v1/chats'.length).split('/').filter(Boolean);
-
-  if (segments.length === 0) {
-    if (req.method === 'GET') {
-      const search = url.searchParams.get('search') ?? undefined;
-      const folderId = url.searchParams.get('folder_id') ?? undefined;
-      const kindParam = url.searchParams.get('kind');
-      const kind = kindParam === 'chat' || kindParam === 'rp' ? kindParam : undefined;
-      sendJson(res, 200, { chats: await deps.chats.listChats(userId, { search, folderId, kind }) });
-      return;
-    }
-    if (req.method === 'POST') {
-      const body = (await readJsonBody(req)) as { title?: string; folder_id?: string; kind?: string };
-      const kind = body.kind === 'rp' ? 'rp' : undefined;
-      const session = await deps.chats.createChat(userId, {
-        title: typeof body.title === 'string' ? body.title : undefined,
-        folderId: typeof body.folder_id === 'string' ? body.folder_id : undefined,
-        kind,
-      });
-      sendJson(res, 201, session);
-      return;
-    }
-    sendJson(res, 404, { error: 'not found' });
-    return;
-  }
-
-  const chatId = decodeURIComponent(segments[0]!);
-
-  if (segments.length === 1) {
-    if (req.method === 'GET') {
-      const detail = await deps.chats.getChat(userId, chatId);
-      if (!detail) {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      // Display-side macro resolution (docs/plans/prompt-macros.md's Stage 1, bi_principles.md §1): the
-      // chat UI renders a message's resolvedContent — a per-read derived copy — so a character's
-      // seeded greeting shows "Jeremy, …" instead of the literal {{user}} token, while the
-      // canonical content stays verbatim and the client keeps re-sending it, so the per-turn
-      // resolution pass (assembleSessionTurnContext) keeps re-resolving against the live persona —
-      // a persona edit updates the greeting on the very next read with no re-apply. Gated like
-      // every other macro pass: 'rp' chats only, and only when a message actually contains '{{'.
-      if (detail.session.kind === 'rp' && detail.messages.some((m) => m.content.includes('{{'))) {
-        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.characterId);
-        detail.messages = detail.messages.map((m) =>
-          m.content.includes('{{') ? { ...m, resolvedContent: interpolateMacros(m.content, snapshot) } : m,
-        );
-      }
-      sendJson(res, 200, detail);
-      // endpoint.md §5.1.8's "restart bg discovery on return": a chat (re)open may find its
-      // active location without a rendered image (a pass dropped by a swipe, or a failed
-      // render) — fire the cache-first generation pass so discovery resumes. No-op whenever the
-      // image already exists or a render is already in flight.
-      void ensureActiveLocationImage(deps, userId, chatId);
-      return;
-    }
-    if (req.method === 'POST') {
-      const body = await readJsonBody(req);
-      if (!isChatPatchBody(body)) {
-        sendJson(res, 400, { error: 'expected { title?, folder_id?, params?, tool_names?, canvas_note_id?, cleanup_preset_id?, cleanup_enabled_at? }' });
-        return;
-      }
-      const updated = await deps.chats.updateChat(userId, chatId, {
-        title: body.title,
-        folderId: body.folder_id,
-        params: body.params,
-        toolNames: body.tool_names,
-        canvasNoteId: body.canvas_note_id,
-        cleanupPresetId: body.cleanup_preset_id,
-        cleanupEnabledAt: body.cleanup_enabled_at,
-      });
-      if (!updated) {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      sendJson(res, 200, updated);
-      return;
-    }
-    if (req.method === 'DELETE') {
-      const deleted = await deps.chats.deleteChat(userId, chatId);
-      if (deleted) clearPromptTrace(chatId);
-      sendJson(res, deleted ? 200 : 404, deleted ? { deleted: true } : { error: 'not found' });
-      return;
-    }
-    sendJson(res, 404, { error: 'not found' });
-    return;
-  }
-
-  if (segments[1] === 'fork' && segments.length === 2 && req.method === 'POST') {
-    const body = await readJsonBody(req);
-    const fromMessageId = typeof (body as Record<string, unknown>)?.from_message_id === 'string'
-      ? (body as { from_message_id: string }).from_message_id
-      : undefined;
-    const title = typeof (body as Record<string, unknown>)?.title === 'string' ? (body as { title: string }).title : undefined;
-    if (!fromMessageId) {
-      sendJson(res, 400, { error: 'expected { from_message_id: string, title?: string }' });
-      return;
-    }
-    const forked = await deps.chats.forkChat(userId, chatId, fromMessageId, title);
-    if (!forked) {
-      sendJson(res, 404, { error: 'not found — chatId or from_message_id does not exist in this chat' });
-      return;
-    }
-    sendJson(res, 201, forked);
-    return;
-  }
-
-  if (segments[1] === 'archive' && segments.length === 2 && req.method === 'POST') {
-    const archived = await deps.chats.archiveChat(userId, chatId);
-    if (!archived) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    // Fire-and-forget: the end-of-chat memory judgment call can take a few seconds and the archive
-    // action itself has already fully succeeded (archived_at is stamped) — a failure here is
-    // logged, not surfaced as a failed archive (bb_principles.md §11: a discarded path is logged
-    // with why, not silently swallowed, but it doesn't need to block the caller either). Skipped
-    // entirely for an 'rp' chat — it never wrote to household_memory in its system prompt either
-    // (buildChatMemorySystemPrompt above), so it shouldn't write inferred facts back into it now.
-    if (archived.kind !== 'rp') {
-      archiveChatMemory(
-        { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
-        userId,
-        chatId,
-        archived.title,
-      ).catch((err) => log.error('archive_chat: long-term-memory extraction failed', { chatId, err }));
-    }
-    sendJson(res, 200, archived);
-    return;
-  }
-
-  if (segments[1] === 'prompt-preview' && segments.length === 2 && req.method === 'GET') {
-    const result = await buildPromptPreview(deps, userId, chatId);
-    if (!result.ok) {
-      sendJson(res, result.status, { error: result.error });
-      return;
-    }
-    sendJson(res, 200, result.preview);
-    return;
-  }
-
-  // Branch Map panel's data source — the whole fork family this chat belongs to, root first.
-  if (segments[1] === 'lineage' && segments.length === 2 && req.method === 'GET') {
-    const nodes = await deps.chats.getLineage(userId, chatId);
-    if (!nodes) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    sendJson(res, 200, { nodes });
-    return;
-  }
-
-  // Per-chat slice of the rolling sync loop's status record (io/chatSessions.ts's
-  // getChatSyncStatus) — the RP chat header menu's "Sync status" panel. User-scoped like every
-  // other chat route (a user's own chat's sync history is no more sensitive than the chat
-  // itself), unlike the cross-user Review Panel endpoint /v1/admin/chat-memory-sync-status.
-  // dueAfterMessages is computed from the same DB-backed settings the loop reads live every tick,
-  // falling back to the loop's own defaults when unset.
-  if (segments[1] === 'sync-status' && segments.length === 2 && req.method === 'GET') {
-    const [livePairsRaw, syncEveryPairsRaw] = await Promise.all([
-      deps.settings.get('chat_memory_live_window_pairs'),
-      deps.settings.get('chat_memory_sync_every_pairs'),
-    ]);
-    const livePairs = pairsSetting(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
-    const syncEveryPairs = pairsSetting(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
-    const sync = await deps.chats.getChatSyncStatus(userId, chatId, (livePairs + syncEveryPairs) * 2);
-    if (!sync) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    sendJson(res, 200, { sync });
-    return;
-  }
-
-  // One sync point's full inspection record (io/chatSessions.ts's getChatSyncInspection, 0079) —
-  // what that pass actually produced: the memory entries it created/changed, the canon-fact
-  // proposals it wrote, and the bridge prompt it sent the model. Fetched on demand when the Sync
-  // Status panel expands a sync row, so the 30s status poll above never ships the heavy detail.
-  if (segments[1] === 'syncs' && segments.length === 3 && req.method === 'GET') {
-    const inspection = await deps.chats.getChatSyncInspection(userId, chatId, segments[2]);
-    if (!inspection) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    sendJson(res, 200, { sync: inspection });
-    return;
-  }
-
-  // Lorebook chat-sidebar panel (io/lorebook/panelData.ts, plan §8b) — user-scoped like every
-  // other chat route: a user's own chat's lorebook state is no more sensitive than the chat
-  // itself, so it rides the regular authenticated key, not the admin key. Returns the resolved
-  // mode, the §3b in-scope books (with all entries, override state, and the §8b live-activation
-  // badge from lorebook_activation_log's latest message), or an empty mode-correct panel on
-  // failure — never an error the chat view has to survive.
-  if (segments[1] === 'lorebook-panel' && segments.length === 2 && req.method === 'GET') {
-    const detail = await deps.chats.getChat(userId, chatId);
-    if (!detail) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    const latestAssistantMessageId = [...detail.messages].reverse().find((m) => m.role === 'assistant')?.messageId ?? null;
-    sendJson(
-      res,
-      200,
-      await getLorebookPanelData(deps.db, deps.settings, {
-        userId,
-        chatId,
-        characterId: detail.session.characterId,
-        latestAssistantMessageId,
-      }),
-    );
-    return;
-  }
-
-  if (segments[1] === 'lorebook-book-override' && segments.length === 2 && req.method === 'PUT') {
-    const body = (await readJsonBody(req)) as { lorebook_id?: unknown; enabled?: unknown };
-    if (typeof body.lorebook_id !== 'string' || typeof body.enabled !== 'boolean') {
-      sendJson(res, 400, { error: 'lorebook_id (string) and enabled (boolean) are required' });
-      return;
-    }
-    const ok = await setLorebookChatOverride(deps.db, userId, chatId, body.lorebook_id, body.enabled);
-    if (!ok) {
-      sendJson(res, 404, { error: 'book not found' });
-      return;
-    }
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-
-  if (segments[1] === 'lorebook-entry-override' && segments.length === 2 && req.method === 'PUT') {
-    const body = (await readJsonBody(req)) as { entry_id?: unknown; enabled?: unknown };
-    if (typeof body.entry_id !== 'string' || typeof body.enabled !== 'boolean') {
-      sendJson(res, 400, { error: 'entry_id (string) and enabled (boolean) are required' });
-      return;
-    }
-    const ok = await setLorebookEntryOverride(deps.db, userId, chatId, body.entry_id, body.enabled);
-    if (!ok) {
-      sendJson(res, 404, { error: 'entry not found' });
-      return;
-    }
-    sendJson(res, 200, { ok: true });
-    return;
-  }
-
-  if (segments[1] === 'lorebook-quick-add' && segments.length === 2 && req.method === 'POST') {
-    const body = (await readJsonBody(req)) as { content?: unknown };
-    if (typeof body.content !== 'string') {
-      sendJson(res, 400, { error: 'content (string) is required' });
-      return;
-    }
-    const detail = await deps.chats.getChat(userId, chatId);
-    if (!detail) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    const result = await quickAddLorebookEntry(deps.db, deps.embeddings, userId, chatId, detail.session.title, body.content);
-    if (!result) {
-      sendJson(res, 400, { error: 'content must be non-empty' });
-      return;
-    }
-    sendJson(res, 200, result);
-    return;
-  }
-
-  if (segments[1] === 'location-image' && segments.length === 2 && req.method === 'GET') {
-    // endpoint.md §6.4's chat background layer: resolve the chat's active location image — the
-    // current eligible location (scene_id pointer, active-swipe fallback) plus the last settled
-    // location (previous_scene_id). A current location whose image hasn't rendered yet comes
-    // back with imageUrl: null — the post-turn bg pass (endpoint.md §5) fires after the reply
-    // is sent, so the client keeps the previous background (or its current one) until the
-    // pending render lands, never blanking the layer (§5.1.8).
-    const image = await resolveChatLocationImage(deps.db, userId, chatId);
-    sendJson(res, 200, {
-      current: image.current ?? { locationId: null, name: null, definition: null, imageUrl: null },
-      previous: image.previous ?? { locationId: null, name: null, definition: null, imageUrl: null },
-    });
-    return;
-  }
-
-  if (segments[1] === 'messages' && segments.length >= 3) {
-    const messageId = decodeURIComponent(segments[2]!);
-
-    if (segments.length === 3 && req.method === 'DELETE') {
-      const deleted = await deps.chats.deleteMessage(userId, chatId, messageId);
-      sendJson(res, deleted ? 200 : 404, deleted ? { deleted: true } : { error: 'not found' });
-      return;
-    }
-    if (segments.length === 4 && segments[3] === 'truncate' && req.method === 'POST') {
-      const truncated = await deps.chats.truncateMessagesFrom(userId, chatId, messageId);
-      sendJson(res, truncated ? 200 : 404, truncated ? { truncated: true } : { error: 'not found' });
-      return;
-    }
-    if (segments.length === 4 && segments[3] === 'edit' && req.method === 'POST') {
-      // In-place content rewrite (the Chat tab's "edit an LLM reply") — message keeps its id,
-      // everything chronologically after it is untouched, and the pre-edit text is preserved as
-      // a swipe (recordSwipeIfContent's stash-the-original path). Unlike the truncate+resend
-      // user-edit, there is no "must be the last message" restriction: rewriting an earlier
-      // reply's text is coherent mid-conversation, and swiping never touches earlier messages.
-      const body = await readJsonBody(req);
-      const content = (body as Record<string, unknown>)?.content;
-      if (typeof content !== 'string' || !content.trim()) {
-        sendJson(res, 400, { error: 'expected { content: non-empty string }' });
-        return;
-      }
-      const detail = await deps.chats.getChat(userId, chatId);
-      if (!detail) {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      // No-op guard: identical text must not mint a junk swipe in the canonical record — the
-      // frontend already skips the call, but a raw-API client shouldn't corrupt the swipe list
-      // either (each edit otherwise appends a swipe, exactly like a regeneration would).
-      const existing = detail.messages.find((m) => m.messageId === messageId);
-      if (existing && existing.content === content) {
-        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, existing) });
-        return;
-      }
-      const updated = await deps.chats.editMessageContent(userId, chatId, messageId, content);
-      if (!updated) {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, updated) });
-      // The edit made a new swipe active; if that swipe's location has no rendered image yet
-      // (or the location changed under it), restart bg discovery — cache-first, so this is a
-      // no-op whenever an image already exists or a render is in flight (see ensureActiveLocationImage).
-      void ensureActiveLocationImage(deps, userId, chatId);
-      return;
-    }
-    if (segments.length === 4 && segments[3] === 'swipe' && req.method === 'POST') {
-      const body = await readJsonBody(req);
-      const direction = (body as Record<string, unknown>)?.direction;
-      if (direction !== 'prev' && direction !== 'next') {
-        sendJson(res, 400, { error: 'expected { direction: "prev" | "next" }' });
-        return;
-      }
-      // rp-streaming-plan.md: the swipe route accepts the same optional stream flag the completions
-      // route does (default false — omitted is identical to false, fully backward compatible).
-      // Only an RP chat's needs_regenerate outcome streams; prev/next cycling (pure content swaps,
-      // no LLM call) and non-RP swipes are unaffected and stay plain JSON.
-      const stream = (body as Record<string, unknown>)?.stream === true;
-
-      // Swiping only ever touches the chat's current last message (this module's own preamble) —
-      // enforced here, not left to cycleSwipe/recordSwipe, since an id belonging to an earlier
-      // turn is a client bug (a stale UI) rather than something the store should silently allow.
-      const detail = await deps.chats.getChat(userId, chatId);
-      const last = detail?.messages[detail.messages.length - 1];
-      if (!detail || !last || last.messageId !== messageId || last.role !== 'assistant') {
-        sendJson(res, 404, { error: "not found — messageId must be this chat's current last assistant reply" });
-        return;
-      }
-
-      const cycled = await deps.chats.cycleSwipe(userId, chatId, messageId, direction);
-      if (cycled.status === 'not_found') {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      if (cycled.status === 'switched') {
-        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, cycled.message) });
-        // endpoint.md §5.1.8's "restart bg discovery on return": cycling made a different swipe
-        // active — if its location has no rendered image yet (a pass dropped by the earlier
-        // swipe, or never run), fire the cache-first generation pass; if it has one, the
-        // per-swipe association makes the read a reuse, no provider call. No-op when the image
-        // exists or a render is already in flight.
-        void ensureActiveLocationImage(deps, userId, chatId);
-        return;
-      }
-      if (cycled.status === 'no_earlier_swipe') {
-        sendJson(res, 200, { status: 'no_earlier_swipe' });
-        return;
-      }
-      // needs_regenerate: 'next' past the newest stored variant — this is "Rerun" (this module's
-      // own preamble on the swipe route). Except when this message is the chat's only message: that
-      // means it's the seeded opening greeting (applyCharacterToChatTool.ts only ever seeds one when
-      // the chat has zero prior messages) and its "variants" are a card's pre-written
-      // alternate_greetings, not an earlier LLM turn — there is no prior user message to regenerate a
-      // reply to, and regenerateSwipe would otherwise run the LLM with an empty message history to
-      // fabricate one. Content the platform was handed, not content the LLM reasoned about, so it's
-      // never a Rerun candidate — cycling stops at the last stored greeting instead.
-      if (detail.messages.length === 1) {
-        sendJson(res, 200, { status: 'no_further_swipe' });
-        return;
-      }
-      // Streaming branch, same shape as handleChatCompletions's: SSE headers deferred until the
-      // first delta, deltas relayed live via onDelta, and the failure/abort outcome decided by
-      // whether any bytes were already committed. A dropped client connection cancels the LLM call
-      // (plan Edge Cases) — detached on every exit so a late close can't abort the next turn.
-      const streamingRp = detail.session.kind === 'rp' && stream === true;
-      const sseId = `chatcmpl-${randomUUID()}`;
-      let streamHeadersSent = false;
-      const onClientClose = () => {
-        if (streamingRp) abortTurn(chatId);
-      };
-      if (streamingRp) req.on('close', onClientClose);
-      const onDelta = (delta: string) => {
-        if (!streamHeadersSent) {
-          writeStreamHeaders(res);
-          streamHeadersSent = true;
-        }
-        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
-      };
-      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta);
-      if (!result.ok) {
-        if (streamingRp && streamHeadersSent) {
-          // Streaming had already begun: headers are committed, so surface the failure/abort as
-          // the terminal frame before [DONE] instead of an HTTP status change (plan Contracts).
-          // Nothing was persisted (recordSwipe never ran) — the client that sees this frame knows
-          // the regeneration didn't complete.
-          log.error(`swipe regenerate failed for chat ${chatId} after streaming began`, result.error);
-          writeStreamErrorTerminalFrame(res, result.aborted === true, result.error);
-          req.off('close', onClientClose);
-          return;
-        }
-        // 499 = the user stopped this regeneration (POST /v1/chat/abort) — same contract as the
-        // main turn's aborted response, so the frontend treats both the same way.
-        req.off('close', onClientClose);
-        sendJson(res, result.aborted ? 499 : 500, { error: result.error });
-        return;
-      }
-      if (streamingRp) {
-        // The stream resolved and recordSwipe persisted the regenerated swipe above. The final SSE
-        // frames go out only now — a client that sees [DONE] can trust the swipe is already saved
-        // (plan Logic), the same guarantee the non-streaming response gives.
-        if (!streamHeadersSent) writeStreamHeaders(res);
-        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, {}, 'stop'))}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
-        req.off('close', onClientClose);
-        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-        // sent — a provider round-trip has no place in the request path, so the trigger rides the
-        // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
-        if (result.locationId) {
-          res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
-        }
-        return;
-      }
-      sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
-      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-      // sent — a provider round-trip has no place in the request path, so the trigger rides the
-      // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
-      if (result.locationId) {
-        res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
-      }
-      return;
-    }
-  }
-
-  sendJson(res, 404, { error: 'not found' });
 }
 
 
