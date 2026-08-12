@@ -13,9 +13,10 @@ piece ships and proves itself before the next is built on top of it. See Non-Goa
 four stages and why they wait.
 
 Today, `buildAutoRecallParts` always injects exactly `chat_memory_auto_recall_chunk_top_k` (default
-4) chunks into every 'rp' turn's prompt, whether the chat's archive actually has four relevant
-matches or none at all. On a quiet, generic turn with no real match in the archive, four mediocre
-chunks get injected anyway — there is no concept of "nothing here is worth recalling." Canonize's
+8 — Canonize's own `ragChatMax`, see the Stage-5.1 addendum) chunks into every 'rp' turn's prompt,
+whether the chat's archive actually has eight relevant matches or none at all. On a quiet, generic
+turn with no real match in the archive, eight mediocre chunks get injected anyway — there is no
+concept of "nothing here is worth recalling." Canonize's
 own pool-mean/σ threshold exists specifically to catch this case (see
 `stacks/sillytavern/st-extensions/SillyTavern-Canonize/docs/RAG_strategy_v4.md` §3–4, Scenario 2).
 This plan ports that mechanism onto BigImagine's existing single content-vector lane, unchanged
@@ -24,7 +25,7 @@ otherwise — no schema change to `chat_chunks`, no new vector lane, no keyword 
 ## Background
 
 - `buildAutoRecallParts` (`recallForPrompt.ts`) currently runs two independent flat-`LIMIT` queries
-  per RP turn: `chat_chunks` (top `chunkTopK`, default `AUTO_RECALL_CHUNK_TOP_K` = 4) and
+  per RP turn: `chat_chunks` (top `chunkTopK`, default `AUTO_RECALL_CHUNK_TOP_K` = 8) and
   `canon_facts` (top `factTopK`, default `DEFAULT_FACT_TOP_K` = 8). This plan touches only the
   `chat_chunks` query and its settings — the `canon_facts` query is Stage 2's job (see Non-Goals),
   once this stage has proven the cutoff module against one real call site.
@@ -47,11 +48,12 @@ otherwise — no schema change to `chat_chunks`, no new vector lane, no keyword 
   absolute constant. See Logic.
 - `recallForPrompt.ts`'s existing settings (`chat_memory_auto_recall_chunk_top_k`, migration 0077)
   already function as a ceiling on how many chunks get injected — this plan keeps that key and its
-  default (4) as the new **Max**, adds a **Min** floor (default 2, matching Canonize's own
-  `ragChatMin` default in `state.js`), and two new shared knobs — **Pool Multiple** and **Cutoff
-  Mode** — named without a `chunk_`/`fact_` prefix because Stage 2 reuses them unchanged for the
-  `canon_facts` query, mirroring Canonize's own settings shape (`RAG_strategy_v4.md` §5: Min/Max are
-  per-channel, Pool Multiple/Cutoff Mode are shared).
+  default (8, Canonize's own `ragChatMax` — see the Stage-5.1 addendum) as the new **Max**, adds a
+  **Min** floor (default 2, matching Canonize's own `ragChatMin` default in `state.js`), and two new
+  shared knobs — **Pool Multiple** and **Cutoff Mode** — named without a `chunk_`/`fact_` prefix
+  because Stage 2 reuses them unchanged for the `canon_facts` query, mirroring Canonize's own
+  settings shape (`RAG_strategy_v4.md` §5: Min/Max are per-channel, Pool Multiple/Cutoff Mode are
+  shared).
 
 ## Non-Goals (deferred, staged separately)
 
@@ -446,3 +448,42 @@ user's direction (RP-chat main memory focus; tools and lorebook out of scope).
 **Deploy note.** Migration 0094 must be hand-applied before the header lane query works (it
 references `summary_vector_embed`); unapplied → the chunk query fails open (empty chunks, never
 a broken turn), same contract as 0093. Applied after 0091/0092/0093 in the end-of-work batch.
+
+---
+
+## Stage 5.1 addendum — CNZ settings-default audit (implemented 2026-08-17, commit pending)
+
+User direction: "investigate what the settings that CNZ uses in the sillytavern installation and
+make them the defaults." The authoritative source is the Canonize extension's own
+`state.js` `PROFILE_DEFAULTS` (the live installation defaults; `docs/settings.md` describes each
+control but the exact numbers live in code), cross-checked against `rag-fetch.js`/`cutoff.js`/
+`rrf.js` for how each is consumed. Result: every BigImagine RAG default already matched the CNZ
+installation except one — the chunk Max ceiling:
+
+| BigImagine | Default | CNZ analog | CNZ default | Verdict |
+|---|---|---|---|---|
+| `AUTO_RECALL_PAIRS` (query window) | 3 | `ragClassifierHistory` (the `allPairs.slice(-horizonPairs)` query horizon in rag-fetch.js) | 3 | matched |
+| `AUTO_RECALL_CHUNK_TOP_K` (chunk Max) | **4 → 8** | `ragChatMax` | **8** | **changed** |
+| `DEFAULT_CHUNK_MIN` (chunk Min) | 2 | `ragChatMin` | 2 | matched |
+| `DEFAULT_POOL_MULTIPLE` | 2 | `ragPoolMultiple` | 2 | matched |
+| `DEFAULT_CUTOFF_MODE` | `'mean'` | `ragCutoffMode` | `'mean'` | matched |
+| `KEYWORD_BLEND_ALPHA` (Stage 4) | 0.7 | `ragKwBlend` | 0.7 | matched |
+| `DECAY_FACTOR_FLOOR`/`COEFFICIENT` (Stage 3) | 0.70 / 0.025 | hardcoded in CNZ code (not a setting) | 0.70 / 0.025 | matched |
+| `DUAL_CONFIRM_BONUS` (Stage 5) | 1.08 | `DUAL_BONUS` (rag/rrf.js, not a setting) | 1.08 | matched |
+| `PAIRS_PER_CHUNK` | 2 | `ragChunkSize` | 2 | matched |
+
+Notes from the audit:
+
+- **The 4 → 8 change** is the whole delta. It applies where the setting is unset (the live DB has
+  no value — the migrations 0091/0092 that would persist RAG-page edits are still unapplied), so
+  the code fallback `AUTO_RECALL_CHUNK_TOP_K` IS the default. The RagView field shows empty when
+  unset (its existing behavior) and the code default now matches the CNZ installation.
+- **`ragRetrievalTopK: 5`** in CNZ's `PROFILE_DEFAULTS` is a dead default — grep shows no consumer
+  (the plot lane's Max falls back to `ragPlotRetrievalTopK`, which is 3). Not ported.
+- **The keyword window (`KEYWORD_WINDOW_SIZE` 100) is NOT a CNZ setting** — CNZ scans the full
+  collection for both vector lanes and caps only the FTS query at 100k. The 100-row window is the
+  plan's bounded analog (Stage 4 addendum); left unchanged, since the user's ask was settings
+  defaults.
+- **The fact lane (`canon_facts`) has no CNZ analog** — CNZ's channels are chat/LB/plot; approved
+  canon facts are BigImagine's own concept, so `DEFAULT_FACT_TOP_K` 8 / `DEFAULT_FACT_MIN` 2 stand.
+- `MAX_CHUNK_TOP_K` (12) stays a sanity cap above the new 8 default, same as before.

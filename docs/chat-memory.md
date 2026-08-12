@@ -214,7 +214,8 @@ recallForPrompt.ts`'s `buildAutoRecallParts`, the CNZ-style silent retrieval the
    → `cleanForEmbedding`): the query is the recent transcript itself, not a synthesized question.
 2. **One embedding** of that query text.
 3. **Two parallel searches**, both scoped to this chat_id inside one `withUserScope`:
-   - `chat_chunks` — the chat's archived full-turn texts, top `AUTO_RECALL_CHUNK_TOP_K` (4) by
+   - `chat_chunks` — the chat's archived full-turn texts, top `AUTO_RECALL_CHUNK_TOP_K` (8, the
+     Max ceiling — matching Canonize's own `ragChatMax` default) by
      vector distance, content verbatim (the same rows/columns `recall_chat_history` returns).
    - `canon_facts` — approved rows only, deduped to most-recent-approved per
      `arc_tag`/`entity_key` (the same `distinct on (coalesce(...))` query

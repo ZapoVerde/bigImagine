@@ -354,7 +354,7 @@ function fakeSettings(value) {
   );
   assert(
     seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
-    'a corrupt auto_recall_chunk_top_k falls back to the default Max (4) → window 100, never NaN',
+    'a corrupt auto_recall_chunk_top_k falls back to the default Max (8) → window 100, never NaN',
   );
 }
 {
@@ -819,7 +819,7 @@ function countFactBullets(block) {
 
 // --- Sanity: the exported constants are what the wiring depends on ---
 assert(AUTO_RECALL_PAIRS === 3, 'AUTO_RECALL_PAIRS mirrors Canonize ragClassifierHistory (3)');
-assert(AUTO_RECALL_CHUNK_TOP_K === 4, 'AUTO_RECALL_CHUNK_TOP_K is the default Max for the dynamic cutoff (4)');
+assert(AUTO_RECALL_CHUNK_TOP_K === 8, 'AUTO_RECALL_CHUNK_TOP_K is the default Max for the dynamic cutoff (8 — CNZ ragChatMax)');
 
 console.log('\nrecall-for-prompt verification passed');
 if (process.exitCode) process.exit(process.exitCode);

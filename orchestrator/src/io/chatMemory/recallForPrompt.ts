@@ -127,12 +127,15 @@ import { log } from '../logger.js';
  *  call so a save takes effect on the next turn, no restart. */
 export const AUTO_RECALL_PAIRS = 3;
 
-/** How many full-turn chunks to pull. CNZ's chat lane defaults to 2-8 with a distributional
- *  cutoff; "a number of full turn text" (user) — a fixed handful, content verbatim, is the
- *  basics-shaped version of that. Same default/fallback split as AUTO_RECALL_PAIRS: the live
+/** How many full-turn chunks to pull. Canonize's chat lane default Max is `ragChatMax` = 8
+ *  (their state.js PROFILE_DEFAULTS, "Chat Min / Max" in docs/settings.md) with a
+ *  distributional cutoff; "a number of full turn text" (user) — a fixed handful, content
+ *  verbatim, is the basics-shaped version of that. The 4 this used to default to predated the
+ *  CNZ audit; 8 matches the CNZ installation's own default exactly (the plan's Stage-5.1
+ *  addendum records the audit). Same default/fallback split as AUTO_RECALL_PAIRS: the live
  *  value is chat_memory_auto_recall_chunk_top_k, now understood as the **Max** ceiling the
  *  dynamic cutoff clamps to (migration 0091, recallCutoff.ts). */
-export const AUTO_RECALL_CHUNK_TOP_K = 4;
+export const AUTO_RECALL_CHUNK_TOP_K = 8;
 
 /** The Min floor for the dynamic chunk cutoff (migration 0091) — how many chunks are injected
  *  at minimum even when the distribution says nothing clears the threshold. Canonize's own
