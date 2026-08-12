@@ -14,11 +14,12 @@
 -- serves future keyword-filtered paths (the plan's "later canon_facts text" widening, the
 -- recall tools' FTS). Chat lane only — canon_facts gets its own tsvector when that stage ships.
 --
--- Applied by hand against the dedicated BigImagine database, same as every post-initdb
--- migration:
+-- Idempotent (IF NOT EXISTS on both statements) — safe to re-run if a prior apply attempt is
+-- unconfirmed. Applied by hand against the dedicated BigImagine database, same as every
+-- post-initdb migration:
 --   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0093_chat_chunks_keyword_lane.sql
 
 alter table chat_chunks
-  add column content_tsv tsvector generated always as (to_tsvector('english', content)) stored;
+  add column if not exists content_tsv tsvector generated always as (to_tsvector('english', content)) stored;
 
-create index chat_chunks_content_tsv_gin on chat_chunks using gin (content_tsv);
+create index if not exists chat_chunks_content_tsv_gin on chat_chunks using gin (content_tsv);

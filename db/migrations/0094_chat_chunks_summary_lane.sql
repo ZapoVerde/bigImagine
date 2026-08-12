@@ -16,9 +16,9 @@
 -- No vector index, matching vector_embed's own no-index design (0047's comment: a vector(2048)
 -- column is too wide to index usefully at household scale; recall queries seq-scan).
 --
--- Applied by hand against the dedicated BigImagine database, same as every post-initdb
--- migration:
+-- Idempotent (IF NOT EXISTS) — safe to re-run if a prior apply attempt is unconfirmed. Applied
+-- by hand against the dedicated BigImagine database, same as every post-initdb migration:
 --   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0094_chat_chunks_summary_lane.sql
 
 alter table chat_chunks
-  add column summary_vector_embed vector(2048);
+  add column if not exists summary_vector_embed vector(2048);

@@ -481,7 +481,7 @@ export default function RagView() {
             max="12"
             value={selectedAutoRecallChunkTopK}
             onChange={(e) => setSelectedAutoRecallChunkTopK(e.target.value)}
-            placeholder="4"
+            placeholder="8"
           />
         </label>
         <div className="status">
@@ -550,6 +550,7 @@ export default function RagView() {
             placeholder="8"
           />
         </label>
+        <br />
         <label>
           Canon facts Min
           <br />

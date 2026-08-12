@@ -1,6 +1,8 @@
 # RAG Dynamic Cutoff — Stage 1 of the CNZ Retrieval Port
 
-*Status: planned, not yet implemented.*
+*Status: all five stages implemented (commits 97c49ff/c395239/d962cc3/6692ffb/bc62253) — see the
+Stage 3/4/5 addenda below. Migrations 0091-0094 are written but not yet applied to the live DB
+(see the deploy notes in the Stage 4/5 addenda); until applied, the affected lanes fail open.*
 
 ## Goal
 
@@ -57,10 +59,23 @@ otherwise — no schema change to `chat_chunks`, no new vector lane, no keyword 
 
 ## Non-Goals (deferred, staged separately)
 
-- **Stage 2 — widen to the other three recall surfaces** (`canon_facts` in `recallForPrompt.ts`,
-  `recallCanonFactsTool.ts`, `recallLorebookEntries.ts`, `searchDocumentsTool.ts`). Deliberately
-  waits for this stage to be validated against one real call site first — mechanical once the
-  cutoff module exists and its behavior is trusted, not before.
+*This section is the original Stage-1 planning record and is now superseded by what actually
+shipped — see the addenda below and the corrected Stage-2 scope note. Kept as-is rather than
+rewritten, since the addenda are the accurate record of what each stage actually became.*
+
+- **Stage 2 — originally scoped as widening to the other three recall surfaces** (`canon_facts`
+  in `recallForPrompt.ts`, `recallCanonFactsTool.ts`, `recallLorebookEntries.ts`,
+  `searchDocumentsTool.ts`). What actually shipped (commit `c395239`) is narrower, decided after
+  Stage 1 landed: **`canon_facts` in `recallForPrompt.ts` only.** `recallCanonFactsTool.ts` and
+  `searchDocumentsTool.ts` had by then moved into separate plugin packages
+  (`plugins/canonize/src/`, `plugins/documents/src/`) not exported-into by the orchestrator
+  package, and — per the user's direction — aren't reachable from an RP turn anyway (RP chats run
+  with `tool_names = []`, so the explicit recall tools are silent auto-recall's dead surface);
+  `searchDocumentsTool.ts` was ruled out as household document search, not RP/CNZ-parity memory.
+  The lorebook lane (`recallLorebookEntries.ts`) was deliberately deferred, not folded in, since
+  its constants/ranked CTE split and its settings being resolved in `resolveLorebook.ts` (a
+  different layer than where the chunk/fact lanes resolve theirs) mean it isn't a mechanical
+  widening of this stage's pattern — a candidate for its own future stage.
 - **Stage 3 — temporal decay** on `chat_chunks` scoring (Canonize's `factor = max(0.70, 1 −
   0.025·ln(age+1))`). An additive adjustment to the score feeding into this stage's pool statistics;
   needs this stage's pipeline shape to exist first.
@@ -72,8 +87,9 @@ otherwise — no schema change to `chat_chunks`, no new vector lane, no keyword 
 - **Stage 5 — header/second vector lane**, embedding `chat_chunks.summary` (already stored) as a
   second lane with best-of scoring and Canonize's 1.08× dual-confirmation bonus. Smallest marginal
   value of the five stages per Canonize's own doc — last by design, not by difficulty.
-- **Any change to `canon_facts`, `recallCanonFactsTool.ts`, `recallLorebookEntries.ts`, or
-  `searchDocumentsTool.ts`.** Untouched until Stage 2.
+- **Any change to `recallCanonFactsTool.ts`, `recallLorebookEntries.ts`, or
+  `searchDocumentsTool.ts`.** Still untouched — `canon_facts` in `recallForPrompt.ts` got the
+  cutoff treatment in Stage 2 (see above and the Stage 2 note), but these three surfaces did not.
 - **Any change to what gets fetched for `canon_facts` in this same `buildAutoRecallParts` call.**
   Stays exactly as it is today — flat `LIMIT factTopK` — even though it's fetched in the same
   function as the chunk query this stage changes.
@@ -299,6 +315,37 @@ mediocre matches.
   Function from the start; `recallForPrompt.ts`'s existing preamble gets its `@stamp` bumped since
   this is an intentional architectural change to its retrieval shape, and its `@description` gets a
   short addendum pointing at `recallCutoff.ts` as the new collaborator.
+
+---
+
+## Stage 2 addendum — canon_facts lane cutoff (implemented 2026-08-16, commit c395239)
+
+Status: implemented on top of Stage 1. Scope was narrowed from this doc's original Non-Goals
+description before implementation (see the corrected Stage-2 note above) — the decision, made in
+conversation before Reasonix built it: **`canon_facts` in `recallForPrompt.ts` only.**
+`recallCanonFactsTool.ts` and `searchDocumentsTool.ts` (both plugin packages by this point) and
+`recallLorebookEntries.ts` stayed untouched.
+
+**Reused `recallCutoff.ts` unchanged.** No new pure-function code — the same `applyCutoff` Stage 1
+built runs a second time in `buildAutoRecallParts`, over the fact pool's raw (undecayed —
+temporal decay is chat-channel-only per Canonize's own scope) distances. The shared Pool Multiple
+and Cutoff Mode knobs from migration 0091 apply to both lanes unchanged, exactly as the Stage-1
+naming (no `chunk_`/`fact_` prefix on those two) anticipated.
+
+**New setting: `canon_recall_min`** (migration 0092, default `'2'`), the fact lane's per-channel
+Min floor, paired with the existing `canon_recall_top_k` as that lane's Max. Settings-surface
+placement: it was added to `CanonSettings`/`setCanonSettings` in `adminServer.ts` alongside
+`canon_recall_top_k`, not to `ChatMemorySettings` — a deliberate deviation from this doc's
+original Contracts section (which only described the chunk lane's settings shape), because
+`canon_recall_top_k` already lived in `CanonSettings` and splitting a Min/Max pair across two
+settings interfaces would be worse than the plan's literal text.
+
+**Facts pool fetch.** The `canon_facts` query's `LIMIT $4` changed from the flat `factTopK` to
+`poolSize(factTopK, poolMultiple)` (capped at `MAX_POOL_SIZE`, same cap the chunk lane uses),
+so the cutoff has a real distribution to measure — same shape as Stage 1's chunk-pool change.
+
+**Scope.** RP chat's silent auto-recall only, matching the user's direction (a direct CNZ
+replacement for RP support; the explicit-tool and lorebook surfaces are out of scope for now).
 
 ---
 
