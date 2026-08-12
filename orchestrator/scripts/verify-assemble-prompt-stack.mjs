@@ -5,6 +5,7 @@
 // before the move.
 
 import { assemblePromptStack, groupRuns, groupTagsForRendered } from '../dist/util/assemblePromptStack.js';
+import { formatRecentHistoryTurns } from '../dist/io/chatMemory/memoryInjection.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -176,6 +177,45 @@ assert(
   groupTagsForRendered([{ groupName: 'X' }, { groupName: 'X' }, {}], [0, 1]) instanceof Map,
   'groupTagsForRendered returns the per-rendered-index tag map both assembly sites consume',
 );
+
+// --- reasoning-blocks-plan.md §17 regression: recent_history is built from message *content*
+// only — a reasoning-bearing history assembles byte-identical to the same history without
+// reasoning. The server maps StoredChatMessage -> LlmMessage via { role, content } (ChatView's
+// toWireMessages / promptAssembly's recentHistoryMessages), so the reasoning column can never
+// leak into the stack: this proves the exclusion is real, not accidental, at the pure-function
+// layer the assembler runs on.
+{
+  // Two source histories that differ ONLY in the optional reasoning field (as StoredChatMessage
+  // rows would after a reasoning turn), run through the same content-only mapping the server's
+  // recent_history path uses before formatting.
+  const withReasoning = [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1', reasoning: 'the plan: open the door' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2', reasoning: null },
+  ];
+  const withoutReasoning = [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ];
+  const toLlmMessages = (rows) => rows.map(({ role, content }) => ({ role, content }));
+  const turnsWith = formatRecentHistoryTurns(toLlmMessages(withReasoning), 'Aria', 'You');
+  const turnsWithout = formatRecentHistoryTurns(toLlmMessages(withoutReasoning), 'Aria', 'You');
+  assert(turnsWith === turnsWithout, 'formatRecentHistoryTurns renders the same {{turns}} bytes whether or not the source rows carried reasoning');
+
+  const slots = [
+    { slotType: 'marker', markerKey: 'system', enabled: true },
+    { slotType: 'marker', markerKey: 'recent_history', enabled: true },
+  ];
+  const stackWith = assemblePromptStack({ system: 'S', recent_history: turnsWith }, slots);
+  const stackWithout = assemblePromptStack({ system: 'S', recent_history: turnsWithout }, slots);
+  assert(
+    JSON.stringify(stackWith) === JSON.stringify(stackWithout) && stackWith[1].content === turnsWith,
+    'the assembled stack is byte-identical with and without reasoning history — the tag span never enters recent_history',
+  );
+}
 
 if (process.exitCode) {
   console.error('\nassemblePromptStack verification FAILED');

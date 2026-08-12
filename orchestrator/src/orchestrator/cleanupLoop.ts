@@ -160,6 +160,7 @@ interface UserRow {
 interface DueMessageRow {
   message_id: string;
   content: string;
+  reasoning: string | null;
   created_at: string;
 }
 
@@ -193,7 +194,7 @@ interface LatestMessageRow {
 }
 
 /** One region's pill state — the four-state vocabulary of the in-stream cleanup plan
- *  (docs/plans/in-stream-cleanup-plan.md): grey until a repair was applied (not-called), red
+ *  (docs/plans/completed/in-stream-cleanup-plan.md): grey until a repair was applied (not-called), red
  *  while a repair is in flight or the tick is mid-pass (in-flux), green once a repair actually
  *  changed the text (deployed), ⚠ when a repair was needed but produced nothing (flagged). */
 export type CleanupRegionState = 'not-called' | 'in-flux' | 'deployed' | 'flagged';
@@ -503,7 +504,7 @@ async function processDueMessage(
     }
     // One persistence handoff shared with the live path: writeback (if the text changed) +
     // per-region jobs + the deferred location scrape when a header repair landed.
-    await finalizeCleanupResult(deps, userId, chatId, message.message_id, message.content, cleaned, outcomes);
+    await finalizeCleanupResult(deps, userId, chatId, message.message_id, message.content, cleaned, outcomes, message.reasoning ?? undefined);
   } catch (err) {
     log.error(`cleanup loop: unexpected failure processing message ${message.message_id} in chat ${chatId}`, err);
     const errorOutcomes: CleanupRegionOutcome[] = (['header', 'body', 'footer'] as const).map((region) => ({
@@ -563,7 +564,12 @@ async function recordJobs(
  *  contract), then records one cleanup_jobs row per evaluated region. Also runs the deferred
  *  post-repair location scrape (location.md §4.3) when a header repair landed — the raw reply's
  *  bad header made the call-site scrape skip it, and the repaired text now passes inspection.
- *  Fail-open throughout: never throws to its caller. */
+ *  The message's reasoning (reasoning-blocks-plan.md) is carried forward into the composed swipe
+ *  via `reasoning`: the repair only rewrites the reply text, so the thought that produced it
+ *  belongs to the composed variant too — passing undefined (never called with it by the poll
+ *  tick's stale legacy rows) writes NULL, which is why every caller with real reasoning passes
+ *  it (without this, recordSwipeIfContent's NULL default would wipe the reasoning the turn
+ *  path just persisted). Fail-open throughout: never throws to its caller. */
 export async function finalizeCleanupResult(
   deps: CleanupLoopDeps,
   userId: string,
@@ -572,6 +578,7 @@ export async function finalizeCleanupResult(
   originalContent: string,
   composedContent: string,
   regionOutcomes: CleanupRegionOutcome[],
+  reasoning?: string,
 ): Promise<void> {
   if (composedContent === originalContent) {
     // Nothing to write back — record the per-region rows against the active swipe, but only when
@@ -582,7 +589,7 @@ export async function finalizeCleanupResult(
   // Atomic writeback + mid-flight guard in one transaction (recordSwipeIfContent): if the user
   // regenerated or swiped while the repair LLM ran, the content no longer matches what we planned
   // against and nothing is written — the new content carries no job, so the next tick picks it up.
-  const result = await deps.chats.recordSwipeIfContent(userId, chatId, messageId, originalContent, composedContent);
+  const result = await deps.chats.recordSwipeIfContent(userId, chatId, messageId, originalContent, composedContent, reasoning);
   if (!result) {
     log.warn(`cleanup: message ${messageId} in chat ${chatId} changed mid-flight, skipping writeback`);
     return;
@@ -685,7 +692,7 @@ async function findEnabledChats(db: PostgresClient, userId: string): Promise<Cha
 async function findDueMessages(db: PostgresClient, userId: string, chatId: string, enabledAt: string): Promise<DueMessageRow[]> {
   return db.withUserScope(userId, (session) =>
     session.query<DueMessageRow>(
-      `select m.message_id, m.content, m.created_at
+      `select m.message_id, m.content, m.reasoning, m.created_at
        from chat_messages m
        join chat_sessions s on s.chat_id = m.chat_id
        where m.chat_id = $1

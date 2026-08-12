@@ -220,7 +220,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `GET /v1/admin/chat-memory-sync-status`) — confirmation that each pipeline stage is actually
   working, per `bi_principles.md` §11, not an editing surface (canon-fact approve/reject stays on
   `CanonQueueView`, untouched by this migration).
-- `0056_llm_gate_retry.sql` — widens `llm_calls` with `request_id`/`attempt` (docs/plans/llm-gate-plan.md,
+- `0056_llm_gate_retry.sql` — widens `llm_calls` with `request_id`/`attempt` (docs/plans/completed/llm-gate-plan.md,
   `io/llm/llmGate.ts`'s new internal retry/queueing: a retryable failure — 429/5xx, or a bare
   thrown transport error — is retried with bounded exponential backoff, admitted through a
   per-lane concurrency slot, invisible to every caller). Every attempt of one logical `complete()`
@@ -529,7 +529,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   same pattern 0087 used). No prompt-stack wiring here — that's plan steps 2-4. Hand-applied to the
   live DB.
 - `0091_chat_memory_auto_recall_cutoff.sql` — the RAG dynamic cutoff's three knobs
-  (docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port —
+  (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port —
   `io/chatMemory/recallCutoff.ts`): `chat_memory_auto_recall_chunk_min` (integer-as-text, default
   `'2'` — the Min floor: how many archived full-turn chunks are injected at minimum even when the
   pool distribution says nothing clears the threshold; Canonize's own `ragChatMin` default),
@@ -567,3 +567,13 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Canonize's 1.08× dual-confirmation bonus (recallCutoff.ts's `dualBonus`, chat channel only).
   No index (vector(2048) is too wide to index, same as `vector_embed` per 0047) and no settings
   keys. Idempotent hand-apply one-shot.
+- `0095_reasoning_blocks.sql` — reasoning ("thinking") blocks for RP chat
+  (docs/plans/reasoning-blocks-plan.md): nullable `reasoning text` columns on `chat_messages`
+  and `chat_message_swipes` (the trimmed inner text of a `<think>…</think>` span — separate from
+  `content` by construction, so nothing that builds `recent_history` or any other prompt-stack
+  field ever sees it; the exclusion is structural, no stripping step). The active swipe's
+  reasoning is mirrored onto the row the same way content is (recordSwipe/cycleSwipe). Also
+  widens `orchestrator_settings.key`'s CHECK with `reasoning_open_tag`/`reasoning_close_tag`
+  (defaults `<think>`/`</think>`, read live by `orchestrator/liveReasoning.ts`, editable from
+  the Cleanup page's setup block). Same wholesale CHECK rebuild as 0091/0092 (complete
+  vocabulary, all of 0010–0094, 73 keys). Idempotent hand-apply one-shot.

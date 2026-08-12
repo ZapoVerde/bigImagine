@@ -10,6 +10,16 @@
  * db.withUserScope(userId, ...) so RLS scopes everything — a chat_id belonging to another user is
  * simply invisible, not "forbidden."
  *
+ * Reasoning blocks (docs/plans/reasoning-blocks-plan.md) persist in their own `reasoning` column
+ * (migration 0095), never spliced into content, so the prompt stack's recent_history — built from
+ * content only — structurally never sees them. The row's reasoning mirrors the active swipe's:
+ * appendMessages/recordSwipe/recordSwipeIfContent take an optional reasoning (undefined → NULL),
+ * cycleSwipe/ensureActiveSwipe/forkChat carry it alongside content everywhere content goes, and
+ * editMessageContent clears it (a user-typed edit has no reasoning behind it). Each swipe stores
+ * its own reasoning, so cycling shows that variant's thought (or none) — the plan's swipe edge
+ * case. Because the column is separate, "the LLM's thinking is never re-sent" is free: nothing
+ * in the prompt-assembly path reads it.
+ *
  * Search is plain ILIKE over the session title OR any of its messages' content — the same
  * approach the reference uses (no vectors anywhere in its chat search either), just against
  * normalized rows instead of a JSON blob.
@@ -98,7 +108,6 @@
  */
 
 import type { DbSession, PostgresClient } from './postgres.js';
-import { toImageGenSeed } from '../util/synthesizeImagePrompt.js';
 
 export interface ChatParams {
   system?: string;
@@ -196,6 +205,15 @@ export interface StoredChatMessage {
    *  its own stored variants (0-based); count is how many variants exist. Undefined means the
    *  message has never been swiped — content is its only version. */
   swipes?: { index: number; count: number };
+  /** The reasoning block (docs/plans/reasoning-blocks-plan.md): the trimmed inner text of the
+   *  `<think>…</think>`-style span the LLM emitted before its in-character reply — stored in its
+   *  own column, never spliced into `content`, so the prompt stack's `recent_history` (built from
+   *  `content`) structurally never sees it. Present only when this message's active content has a
+   *  reasoning span (the active swipe's own reasoning, mirrored onto the row exactly like
+   *  content is); absent (never empty-string) otherwise, matching the `resolvedContent?`/
+   *  `swipes?` optional-field convention. A user-typed edit clears it (the text is the user's,
+   *  not the LLM's). */
+  reasoning?: string;
 }
 
 /** Result of ChatSessionStore.cycleSwipe — a discriminated union rather than a single optional
@@ -360,7 +378,7 @@ export interface ChatSessionStore {
   appendMessages(
     userId: string,
     chatId: string,
-    messages: { role: 'user' | 'assistant'; content: string; messageId?: string }[],
+    messages: { role: 'user' | 'assistant'; content: string; messageId?: string; reasoning?: string }[],
   ): Promise<{ messageId: string; role: 'user' | 'assistant' }[]>;
   /** Removes exactly one message, wherever it falls in the conversation — safe because only
    *  clean user/assistant turns are ever persisted (tool_use/tool_result blocks live only inside
@@ -376,8 +394,11 @@ export interface ChatSessionStore {
   /** Regenerates messageId in place — same message_id and created_at, content replaced. The
    *  message's prior content is preserved as a swipe the first time this is ever called for it
    *  (so 'prev' can always return to the original reply), and newContent becomes both the row's
-   *  content and a fresh swipe of its own. Returns undefined if messageId isn't in this chat. */
-  recordSwipe(userId: string, chatId: string, messageId: string, newContent: string): Promise<StoredChatMessage | undefined>;
+   *  content and a fresh swipe of its own. The prior reasoning (if any) rides the stashed swipe;
+   *  the new swipe and row take the passed reasoning (undefined = none, written NULL — a turn
+   *  with no reasoning span, or a user-typed edit via editMessageContent). Returns undefined if
+   *  messageId isn't in this chat. */
+  recordSwipe(userId: string, chatId: string, messageId: string, newContent: string, reasoning?: string): Promise<StoredChatMessage | undefined>;
   /** In-place content rewrite of an already-persisted message — the Chat tab's "edit an LLM
    *  reply" action. Same write path as recordSwipe (the message's prior content is preserved as
    *  a swipe the first time this is ever called, and newContent becomes both the row's content
@@ -402,6 +423,7 @@ export interface ChatSessionStore {
     messageId: string,
     expectedContent: string | undefined,
     newContent: string,
+    reasoning?: string,
   ): Promise<{ message: StoredChatMessage; newSwipeId: string } | undefined>;
   /** Cycles messageId's active content to an existing sibling swipe — a pure content swap, no LLM
    *  call. See CycleSwipeResult's own doc for what each outcome means. */
@@ -567,10 +589,11 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           message_id: string;
           role: 'user' | 'assistant';
           content: string;
+          reasoning: string | null;
           created_at: string;
           active_swipe_id: string | null;
         }>(
-          'select message_id, role, content, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
+          'select message_id, role, content, reasoning, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
           [chatId],
         );
         // Swipe metadata per message (docs/bi_principles.md: swipe capability on the last LLM
@@ -578,15 +601,15 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         // (recordSwipe below), so this is empty for the common case of an unswiped chat. Fetched
         // as one extra query and joined in JS rather than a per-message subquery — chat sizes here
         // are household-scale, not worth a lateral join for.
-        const swipesByMessage = new Map<string, { swipe_id: string }[]>();
+        const swipesByMessage = new Map<string, { swipe_id: string; reasoning: string | null }[]>();
         if (messages.length > 0) {
-          const swipeRows = await session.query<{ message_id: string; swipe_id: string }>(
-            'select message_id, swipe_id from chat_message_swipes where message_id = any($1) order by message_id, created_at',
+          const swipeRows = await session.query<{ message_id: string; swipe_id: string; reasoning: string | null }>(
+            'select message_id, swipe_id, reasoning from chat_message_swipes where message_id = any($1) order by message_id, created_at',
             [messages.map((m) => m.message_id)],
           );
           for (const row of swipeRows) {
             const list = swipesByMessage.get(row.message_id) ?? [];
-            list.push({ swipe_id: row.swipe_id });
+            list.push({ swipe_id: row.swipe_id, reasoning: row.reasoning });
             swipesByMessage.set(row.message_id, list);
           }
         }
@@ -599,6 +622,11 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
               role: m.role,
               content: m.content,
               createdAt: m.created_at,
+              // The row's reasoning mirrors the active swipe's reasoning (recordSwipe/cycleSwipe
+              // keep them in sync the same way they sync content), so reading the row is correct
+              // for swiped and unswiped messages alike. Absent (undefined) when null, matching
+              // the never-empty-string contract.
+              reasoning: m.reasoning ?? undefined,
               swipes: swipeRows
                 ? { index: swipeRows.findIndex((s) => s.swipe_id === m.active_swipe_id), count: swipeRows.length }
                 : undefined,
@@ -830,8 +858,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           // every row the identical created_at and leave ordering to an arbitrary UUID tiebreak.
           // clock_timestamp() actually advances between statements, keeping messages in order.
           const [row] = await session.query<{ message_id: string }>(
-            'insert into chat_messages (chat_id, user_id, role, content, message_id, created_at) values ($1, $2, $3, $4, coalesce($5, gen_random_uuid()), clock_timestamp()) returning message_id',
-            [chatId, userId, message.role, message.content, message.messageId ?? null],
+            'insert into chat_messages (chat_id, user_id, role, content, reasoning, message_id, created_at) values ($1, $2, $3, $4, $5, coalesce($6, gen_random_uuid()), clock_timestamp()) returning message_id',
+            [chatId, userId, message.role, message.content, message.reasoning ?? null, message.messageId ?? null],
           );
           inserted.push({ messageId: row!.message_id, role: message.role });
         }
@@ -869,24 +897,28 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
       });
     },
 
-    async recordSwipe(userId, chatId, messageId, newContent) {
-      const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent);
+    async recordSwipe(userId, chatId, messageId, newContent, reasoning) {
+      const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent, reasoning);
       return result?.message;
     },
 
     async editMessageContent(userId, chatId, messageId, newContent) {
+      // No reasoning is passed: a user-typed edit has no reasoning behind it, so the new content
+      // (row + fresh swipe) gets reasoning NULL — the plan's "clears reasoning for that row"
+      // edge case. The pre-edit text is stashed as a swipe WITH its original reasoning (it's the
+      // LLM's text, and the LLM's reasoning belongs to it — cycling 'prev' shows both together).
       const result = await this.recordSwipeIfContent(userId, chatId, messageId, undefined, newContent);
       return result?.message;
     },
 
-    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent) {
+    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent, reasoning) {
       return db.withUserScope(userId, async (session) => {
-        const rows = await session.query<{ role: 'user' | 'assistant'; content: string; created_at: string; active_swipe_id: string | null }>(
+        const rows = await session.query<{ role: 'user' | 'assistant'; content: string; reasoning: string | null; created_at: string; active_swipe_id: string | null }>(
           // FOR UPDATE: the guard + writeback must be atomic even under READ COMMITTED — without
           // the row lock, a user regeneration committing between this SELECT and the UPDATE below
           // still gets clobbered (this UPDATE would land second and silently replace the fresh
           // reply). Same claim-atomicity pattern as agentRoutineDispatch.ts's job claim.
-          'select role, content, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2 for update',
+          'select role, content, reasoning, created_at, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2 for update',
           [messageId, chatId],
         );
         const current = rows[0];
@@ -900,22 +932,26 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         // First-ever regeneration of this message: stash the original content as swipe #0 before
         // the new reply takes over, so 'prev' can always cycle back to what was there originally.
+        // The original reasoning rides along — that swipe is the LLM's own reply, and its
+        // reasoning belongs to it (each swipe's reasoning is independent, matching content's own
+        // per-swipe independence — the plan's swipe edge case).
         let originalSwipeId = current.active_swipe_id;
         if (!originalSwipeId) {
           const [inserted] = await session.query<{ swipe_id: string }>(
-            'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
-            [messageId, current.content],
+            'insert into chat_message_swipes (message_id, content, reasoning, created_at) values ($1, $2, $3, clock_timestamp()) returning swipe_id',
+            [messageId, current.content, current.reasoning],
           );
           originalSwipeId = inserted!.swipe_id;
         }
 
         const [newSwipe] = await session.query<{ swipe_id: string }>(
-          'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
-          [messageId, newContent],
+          'insert into chat_message_swipes (message_id, content, reasoning, created_at) values ($1, $2, $3, clock_timestamp()) returning swipe_id',
+          [messageId, newContent, reasoning ?? null],
         );
-        await session.query('update chat_messages set content = $1, active_swipe_id = $2 where message_id = $3', [
+        await session.query('update chat_messages set content = $1, active_swipe_id = $2, reasoning = $3 where message_id = $4', [
           newContent,
           newSwipe!.swipe_id,
+          reasoning ?? null,
           messageId,
         ]);
         await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
@@ -931,6 +967,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             role: current.role,
             content: newContent,
             createdAt: current.created_at,
+            reasoning: reasoning ?? undefined,
             swipes: { index: swipeRows.findIndex((s) => s.swipe_id === newSwipe!.swipe_id), count: swipeRows.length },
           },
         };
@@ -946,8 +983,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         const current = rows[0];
         if (!current) return { status: 'not_found' as const };
 
-        const swipeRows = await session.query<{ swipe_id: string; content: string }>(
-          'select swipe_id, content from chat_message_swipes where message_id = $1 order by created_at',
+        const swipeRows = await session.query<{ swipe_id: string; content: string; reasoning: string | null }>(
+          'select swipe_id, content, reasoning from chat_message_swipes where message_id = $1 order by created_at',
           [messageId],
         );
         // Invariant: a message has either zero swipe rows (never regenerated) or two-plus (the
@@ -964,9 +1001,13 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         if (targetIdx >= swipeRows.length) return { status: 'needs_regenerate' as const };
 
         const target = swipeRows[targetIdx]!;
-        await session.query('update chat_messages set content = $1, active_swipe_id = $2 where message_id = $3', [
+        // content AND reasoning swap together: the row's reasoning mirrors the active swipe's,
+        // exactly the way content already mirrors it — cycling to a variant shows that variant's
+        // own reasoning (or none), never the previous swipe's (the plan's swipe edge case).
+        await session.query('update chat_messages set content = $1, active_swipe_id = $2, reasoning = $3 where message_id = $4', [
           target.content,
           target.swipe_id,
+          target.reasoning,
           messageId,
         ]);
         await session.query('update chat_sessions set updated_at = now() where chat_id = $1', [chatId]);
@@ -978,6 +1019,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             role: current.role,
             content: target.content,
             createdAt: current.created_at,
+            reasoning: target.reasoning ?? undefined,
             swipes: { index: targetIdx, count: swipeRows.length },
           },
         };
@@ -986,8 +1028,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
     async ensureActiveSwipe(userId, chatId, messageId) {
       return db.withUserScope(userId, async (session) => {
-        const rows = await session.query<{ content: string; active_swipe_id: string | null }>(
-          'select content, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
+        const rows = await session.query<{ content: string; reasoning: string | null; active_swipe_id: string | null }>(
+          'select content, reasoning, active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
           [messageId, chatId],
         );
         const current = rows[0];
@@ -996,10 +1038,12 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         // A never-regenerated assistant message has no swipe row yet — create its own canonical
         // variant and make it active, so the scraper's transient rows can anchor to it. The
         // swipes metadata stays `{index: 0, count: 1}`, which cycleSwipe's bounds checks and the
-        // frontend's count > 1 gating both treat exactly like the old zero-row state.
+        // frontend's count > 1 gating both treat exactly like the old zero-row state. The
+        // message's own reasoning (if any) rides into the canonical swipe, keeping the row ↔
+        // swipe reasoning mirror getChat/cycleSwipe rely on.
         const [inserted] = await session.query<{ swipe_id: string }>(
-          'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, clock_timestamp()) returning swipe_id',
-          [messageId, current.content],
+          'insert into chat_message_swipes (message_id, content, reasoning, created_at) values ($1, $2, $3, clock_timestamp()) returning swipe_id',
+          [messageId, current.content, current.reasoning],
         );
         await session.query('update chat_messages set active_swipe_id = $1 where message_id = $2', [
           inserted!.swipe_id,
@@ -1022,10 +1066,11 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           message_id: string;
           role: 'user' | 'assistant';
           content: string;
+          reasoning: string | null;
           created_at: string;
           active_swipe_id: string | null;
         }>(
-          'select message_id, role, content, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
+          'select message_id, role, content, reasoning, created_at, active_swipe_id from chat_messages where chat_id = $1 order by created_at, message_id',
           [chatId],
         );
         const forkIdx = messages.findIndex((m) => m.message_id === forkFromMessageId);
@@ -1056,25 +1101,27 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         // Fresh message_ids under the new chat_id (message_id is a global PK — the parent's own
         // rows can't be reused) — original created_at is preserved for provenance/ordering.
-        // Each copied assistant message also gets its own swipe row, mirroring the parent's
-        // active swipe one-for-one (swipe_id is a global PK too): alternates still don't come
-        // along (same accepted-imprecision trade this file's preamble documents), but the
-        // branch's own messages need their own anchorable active swipes — the transient
-        // location/character rows the scraper anchors to one of the parent's swipes are
-        // resurrected against these (§2.7 below).
+        // Reasoning is copied verbatim with its content — the branch inherits the reply AND the
+        // thought that produced it; they stay paired the way they were persisted (docs/plans/
+        // reasoning-blocks-plan.md). Each copied assistant message also gets its own swipe row,
+        // mirroring the parent's active swipe one-for-one (swipe_id is a global PK too):
+        // alternates still don't come along (same accepted-imprecision trade this file's
+        // preamble documents), but the branch's own messages need their own anchorable active
+        // swipes — the transient location/character rows the scraper anchors to one of the
+        // parent's swipes are resurrected against these (§2.7 below).
         const idMap = new Map<string, string>();
         const swipeIdMap = new Map<string, string>();
         for (const m of toCopy) {
           const [inserted] = await session.query<{ message_id: string }>(
-            `insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, $5)
+            `insert into chat_messages (chat_id, user_id, role, content, reasoning, created_at) values ($1, $2, $3, $4, $5, $6)
              returning message_id`,
-            [newChatId, userId, m.role, m.content, m.created_at],
+            [newChatId, userId, m.role, m.content, m.reasoning, m.created_at],
           );
           idMap.set(m.message_id, inserted!.message_id);
           if (m.role === 'assistant' && m.active_swipe_id) {
             const [swipe] = await session.query<{ swipe_id: string }>(
-              'insert into chat_message_swipes (message_id, content, created_at) values ($1, $2, $3) returning swipe_id',
-              [inserted!.message_id, m.content, m.created_at],
+              'insert into chat_message_swipes (message_id, content, reasoning, created_at) values ($1, $2, $3, $4) returning swipe_id',
+              [inserted!.message_id, m.content, m.reasoning, m.created_at],
             );
             await session.query('update chat_messages set active_swipe_id = $1 where message_id = $2', [
               swipe!.swipe_id,
@@ -1189,71 +1236,54 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           );
         }
 
-        // docs/plans/vistalyze_integration/segway.md §2.7 / location_status.md §3 Step 3: resurrect the
-        // fork's transient-or-inactive locations/characters into the new branch. Locations: every
-        // row anchored to a *copied* active swipe comes along (the fork's own swipe plus every
-        // earlier turn's — that's what makes "all the bgs up until the fork transfer over, the
-        // ones after do not" true for prev/next cycling inside the branch), cloned as fresh
-        // transient rows anchored to the branch's corresponding swipe (created in the message
-        // copy loop above), so the branch's own sync ticks promote/demote them independently from
-        // that point on. Alternate swipes never come along (they stay behind with the parent), so
-        // rows anchored to them aren't copied either. Never cloned: promoted/permanent rows
-        // (they're world canon, not branch state). Characters stay fork-point-scoped as before —
-        // they carry no visual/bg state.
-        const [forkMessage] = await session.query<{ active_swipe_id: string | null }>(
-          'select active_swipe_id from chat_messages where message_id = $1 and chat_id = $2',
-          [forkFromMessageId, chatId],
-        );
-        const forkSwipeId = forkMessage?.active_swipe_id;
-        const branchForkSwipeId = forkSwipeId ? swipeIdMap.get(forkSwipeId) : undefined;
+        // docs/plans/vistalyze_integration/segway.md §2.7 / db/migrations/0096: LINK, don't clone,
+        // the fork's referenced locations/characters into the new branch. Every location_chat_links/
+        // character_chat_links row belonging to the parent chat whose anchor is among the *copied*
+        // messages gets a sibling link row on the branch pointing at the SAME location_id/
+        // character_id — not a fresh row. Both chats now reference the identical row, so a later
+        // refinement (the describer pass, a promotion, etc.) is visible from both branches instead
+        // of silently diverging, matching the user's explicit "duping or linking, you pick — link"
+        // call. This applies uniformly regardless of status (transient/permanent/inactive): status
+        // only tracks sync-tick progress now, not cross-chat visibility, so a promoted location
+        // referenced before the fork point comes along exactly like a still-transient one. Rows
+        // anchored to an uncopied (post-fork-point) message are correctly left unlinked in the new
+        // branch, same as today.
         const copiedSwipeIds = [...swipeIdMap.keys()];
         if (copiedSwipeIds.length > 0) {
-          const resurrectionLocations = await session.query<{
-            location_id: string;
-            name: string;
-            visual_description: string;
-            definition: string | null;
-            environment: string;
-            seed: number | null;
-            image_url: string | null;
-            image_generated_at: string | null;
-            image_rendered_input: string | null;
-            image_render_hash: string | null;
-            anchor_swipe_id: string | null;
-          }>(
-            `select location_id, name, visual_description, definition, environment::text as environment, seed, image_url, image_generated_at, image_rendered_input::text as image_rendered_input, image_render_hash, anchor_swipe_id from locations
-             where user_id = $1 and anchor_swipe_id = any($2::uuid[]) and status in ('transient', 'inactive')`,
-            [userId, copiedSwipeIds],
+          const parentLocationLinks = await session.query<{ location_id: string; anchor_swipe_id: string | null }>(
+            `select location_id, anchor_swipe_id from location_chat_links
+             where chat_id = $1 and anchor_swipe_id = any($2::uuid[])`,
+            [chatId, copiedSwipeIds],
           );
-          // Parent location_id -> the branch's cloned location_id. Needed below to re-key the
-          // per-swipe image associations onto the branch's own rows (location ids are a global
-          // PK — the parent's rows can't be reused).
-          const branchLocationIdMap = new Map<string, string>();
-          for (const loc of resurrectionLocations) {
-            // docs/plans/vistalyze_integration/endpoint.md §6.2: carry seed/image_url/image_generated_at
-            // forward too — without them every fork forces a fresh render for a resurrected
-            // location even when nothing about it visually changed, silently defeating §1.3's
-            // cache-first commitment on the one path that most needs it (forking is exactly when
-            // a stale/expensive re-render is most wasteful). The image_rendered_input snapshot
-            // and image_render_hash must come along as well: cache validation (endpoint.md
-            // §5.1.2) compares the render hash (migration 0076) first, so a clone without it
-            // would never hit the cache even though its inputs are byte-identical to the
-            // parent's. Character resurrection is unaffected — characters carry no visual fields.
-            const branchAnchorSwipeId = loc.anchor_swipe_id ? (swipeIdMap.get(loc.anchor_swipe_id) ?? branchForkSwipeId) : undefined;
-            const [cloned] = await session.query<{ location_id: string }>(
-              `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_generated_at, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id)
-               values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9::jsonb, $10, 'transient', $11, $12)
-               returning location_id`,
-              [userId, loc.name, loc.visual_description, loc.definition, loc.environment, loc.seed == null ? null : toImageGenSeed(loc.seed), loc.image_url, loc.image_generated_at, loc.image_rendered_input, loc.image_render_hash, newChatId, branchAnchorSwipeId ?? null],
+          for (const link of parentLocationLinks) {
+            const branchAnchorSwipeId = link.anchor_swipe_id ? swipeIdMap.get(link.anchor_swipe_id) : undefined;
+            if (!branchAnchorSwipeId) continue;
+            await session.query(
+              `insert into location_chat_links (location_id, chat_id, anchor_swipe_id) values ($1, $2, $3)
+               on conflict (location_id, chat_id) do nothing`,
+              [link.location_id, newChatId, branchAnchorSwipeId],
             );
-            if (cloned) branchLocationIdMap.set(loc.location_id, cloned.location_id);
           }
+
+          const parentCharacterLinks = await session.query<{ character_id: string; anchor_swipe_id: string | null }>(
+            `select character_id, anchor_swipe_id from character_chat_links
+             where chat_id = $1 and anchor_swipe_id = any($2::uuid[])`,
+            [chatId, copiedSwipeIds],
+          );
+          for (const link of parentCharacterLinks) {
+            const branchAnchorSwipeId = link.anchor_swipe_id ? swipeIdMap.get(link.anchor_swipe_id) : undefined;
+            if (!branchAnchorSwipeId) continue;
+            await session.query(
+              `insert into character_chat_links (character_id, chat_id, anchor_swipe_id) values ($1, $2, $3)
+               on conflict (character_id, chat_id) do nothing`,
+              [link.character_id, newChatId, branchAnchorSwipeId],
+            );
+          }
+
           // endpoint.md §5.1.8's per-swipe image associations for every copied swipe, re-keyed to
-          // the branch's own chat/swipe/location ids (values ride along unchanged — same URL,
-          // same render hash, same render time): a cycle-back inside the branch reuses the
-          // recorded URL instead of re-generating, exactly like the parent. Rows whose location
-          // wasn't resurrected (permanent rows, or rows anchored to an alternate swipe that
-          // didn't come along) are skipped — the branch has no row to point them at.
+          // the branch's own chat/swipe ids — location_id rides along unchanged since the location
+          // itself is shared, not cloned. A cycle-back inside the branch reuses the recorded URL
+          // instead of re-generating, exactly like the parent.
           const swipeImageRows = await session.query<{
             swipe_id: string;
             location_id: string;
@@ -1267,8 +1297,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           );
           for (const si of swipeImageRows) {
             const branchSwipeId = swipeIdMap.get(si.swipe_id);
-            const branchLocationId = branchLocationIdMap.get(si.location_id);
-            if (!branchSwipeId || !branchLocationId) continue;
+            if (!branchSwipeId) continue;
             await session.query(
               `insert into location_swipe_images (chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at)
                values ($1, $2, $3, $4, $5, $6)
@@ -1277,21 +1306,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
                  image_url = excluded.image_url,
                  render_hash = excluded.render_hash,
                  image_generated_at = excluded.image_generated_at`,
-              [newChatId, branchSwipeId, branchLocationId, si.image_url, si.render_hash, si.image_generated_at],
-            );
-          }
-        }
-        if (branchForkSwipeId) {
-          const resurrectionCharacters = await session.query<{ name: string }>(
-            `select name from characters
-             where user_id = $1 and anchor_swipe_id = $2 and status in ('transient', 'inactive')`,
-            [userId, forkSwipeId],
-          );
-          for (const c of resurrectionCharacters) {
-            await session.query(
-              `insert into characters (user_id, name, status, anchor_chat_id, anchor_swipe_id)
-               values ($1, $2, 'transient', $3, $4)`,
-              [userId, c.name, newChatId, branchForkSwipeId],
+              [newChatId, branchSwipeId, si.location_id, si.image_url, si.render_hash, si.image_generated_at],
             );
           }
         }

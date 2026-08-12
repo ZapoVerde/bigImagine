@@ -150,6 +150,7 @@ import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
 import type { LorebookEntryDraft } from '../util/parseCharacterBookEntries.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
+import { DEFAULT_REASONING_CLOSE_TAG, DEFAULT_REASONING_OPEN_TAG } from '../orchestrator/liveReasoning.js';
 import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../orchestrator/describeLocation.js';
 import { DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../util/renderLocationBlock.js';
 import { loadSlopRules, replaceSlopRules, type SlopRuleInput } from '../orchestrator/cleanupLoop.js';
@@ -1148,7 +1149,7 @@ export interface ChatMemorySettings {
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;
   // RAG dynamic-cutoff knobs (migration 0091, io/chatMemory/recallCutoff.ts —
-  // docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port) — read live on
+  // docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port) — read live on
   // every RP prompt assembly alongside the 0077 trio, no restart. autoRecallChunkTopK above is
   // the **Max** ceiling the cutoff clamps to; these three are the Min floor, the Pool Multiple P
   // (candidate pool = P × Max, min 6), and the strictness mode in raw-distance space where lower
@@ -1401,6 +1402,16 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
 // effect on the very next poll, no restart. Slop rules are a full-set replace (delete-all +
 // insert-each in one system-scoped transaction, cleanupLoop.ts's replaceSlopRules) — the page
 // edits the whole set and saves; there is no per-rule CRUD surface.
+//
+// The reasoning tag pair (reasoning_open_tag / reasoning_close_tag, migration 0095,
+// docs/plans/reasoning-blocks-plan.md) lives on this same block per the plan's §13/§18
+// alignment with the cleanup config's existing scope — the Cleanup page is the "in-stream
+// transform" surface, and the tags are another one. Like the header regex, an empty value is a
+// deliberate override: the detector disables when either tag is blank (liveReasoning.ts's
+// resolveReasoningTags), so saving '' here turns reasoning blocks off; the defaults ('<think>' /
+// '</think>') are the built-in pair liveReasoning.ts falls back to when a key is unset. Because
+// the values are read live at the start of every RP streaming turn, a save takes effect on the
+// very next turn — no restart.
 
 export interface CleanupSettings {
   headerRegex: string;
@@ -1408,14 +1419,20 @@ export interface CleanupSettings {
   footerRegex: string;
   footerPrompt: string;
   slopRules: SlopRuleInput[];
+  /** The reasoning-block tag pair (defaults '<think>' / '</think>'); either one blank =
+   *  detection disabled. Same live-read shape as the header/footer regex fields. */
+  reasoningOpenTag: string;
+  reasoningCloseTag: string;
 }
 
 export async function getCleanupSettings(store: OrchestratorSettingsStore, db: PostgresClient): Promise<CleanupSettings> {
-  const [headerRegex, headerPrompt, footerRegex, footerPrompt] = await Promise.all([
+  const [headerRegex, headerPrompt, footerRegex, footerPrompt, reasoningOpenTag, reasoningCloseTag] = await Promise.all([
     store.get('cleanup_header_regex'),
     store.get('cleanup_header_prompt'),
     store.get('cleanup_footer_regex'),
     store.get('cleanup_footer_prompt'),
+    store.get('reasoning_open_tag'),
+    store.get('reasoning_close_tag'),
   ]);
   const slopRules = await loadSlopRules(db);
   return {
@@ -1424,6 +1441,8 @@ export async function getCleanupSettings(store: OrchestratorSettingsStore, db: P
     footerRegex: footerRegex ?? DEFAULT_CLEANUP_CONFIG.footerRegex,
     footerPrompt: footerPrompt ?? DEFAULT_CLEANUP_CONFIG.footerPrompt,
     slopRules,
+    reasoningOpenTag: reasoningOpenTag ?? DEFAULT_REASONING_OPEN_TAG,
+    reasoningCloseTag: reasoningCloseTag ?? DEFAULT_REASONING_CLOSE_TAG,
   };
 }
 
@@ -1434,17 +1453,23 @@ export interface SetCleanupSettingsBody {
   footerPrompt?: string;
   /** Present = full-set replace (the page always sends its whole edited set). */
   slopRules?: SlopRuleInput[];
+  /** The reasoning-block tag pair; either one '' = detection disabled. Optional, like the
+   *  header/footer fields — omitted fields are left untouched. */
+  reasoningOpenTag?: string;
+  reasoningCloseTag?: string;
 }
 
 export function parseSetCleanupSettingsBody(raw: unknown): SetCleanupSettingsBody | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { header_regex, header_prompt, footer_regex, footer_prompt, slop_rules } = raw as Record<string, unknown>;
+  const { header_regex, header_prompt, footer_regex, footer_prompt, slop_rules, reasoning_open_tag, reasoning_close_tag } = raw as Record<string, unknown>;
   if (
     header_regex === undefined &&
     header_prompt === undefined &&
     footer_regex === undefined &&
     footer_prompt === undefined &&
-    slop_rules === undefined
+    slop_rules === undefined &&
+    reasoning_open_tag === undefined &&
+    reasoning_close_tag === undefined
   ) {
     return undefined;
   }
@@ -1452,6 +1477,8 @@ export function parseSetCleanupSettingsBody(raw: unknown): SetCleanupSettingsBod
   if (header_prompt !== undefined && typeof header_prompt !== 'string') return undefined;
   if (footer_regex !== undefined && typeof footer_regex !== 'string') return undefined;
   if (footer_prompt !== undefined && typeof footer_prompt !== 'string') return undefined;
+  if (reasoning_open_tag !== undefined && typeof reasoning_open_tag !== 'string') return undefined;
+  if (reasoning_close_tag !== undefined && typeof reasoning_close_tag !== 'string') return undefined;
   if (slop_rules !== undefined) {
     if (!Array.isArray(slop_rules)) return undefined;
     const rules: SlopRuleInput[] = [];
@@ -1486,9 +1513,24 @@ export function parseSetCleanupSettingsBody(raw: unknown): SetCleanupSettingsBod
         enabled: typeof enabled === 'boolean' ? enabled : true,
       });
     }
-    return { headerRegex: h(header_regex), headerPrompt: h(header_prompt), footerRegex: h(footer_regex), footerPrompt: h(footer_prompt), slopRules: rules };
+    return {
+      headerRegex: h(header_regex),
+      headerPrompt: h(header_prompt),
+      footerRegex: h(footer_regex),
+      footerPrompt: h(footer_prompt),
+      slopRules: rules,
+      reasoningOpenTag: h(reasoning_open_tag),
+      reasoningCloseTag: h(reasoning_close_tag),
+    };
   }
-  return { headerRegex: h(header_regex), headerPrompt: h(header_prompt), footerRegex: h(footer_regex), footerPrompt: h(footer_prompt) };
+  return {
+    headerRegex: h(header_regex),
+    headerPrompt: h(header_prompt),
+    footerRegex: h(footer_regex),
+    footerPrompt: h(footer_prompt),
+    reasoningOpenTag: h(reasoning_open_tag),
+    reasoningCloseTag: h(reasoning_close_tag),
+  };
 }
 
 function h(v: unknown): string | undefined {
@@ -1505,6 +1547,8 @@ export async function setCleanupSettings(
   if (body.footerRegex !== undefined) await store.set('cleanup_footer_regex', body.footerRegex);
   if (body.footerPrompt !== undefined) await store.set('cleanup_footer_prompt', body.footerPrompt);
   if (body.slopRules !== undefined) await replaceSlopRules(db, body.slopRules);
+  if (body.reasoningOpenTag !== undefined) await store.set('reasoning_open_tag', body.reasoningOpenTag);
+  if (body.reasoningCloseTag !== undefined) await store.set('reasoning_close_tag', body.reasoningCloseTag);
 }
 
 // --- Canon settings (docs/canonize-plan.md §6, bi_principles.md §13/§18) ---
@@ -1512,7 +1556,7 @@ export async function setCleanupSettings(
 // canon facts recall_canon_facts returns, read live on every recall call, no restart) and
 // canon_extraction_prompt (the background extraction call's prompt template — "default + bespoke"
 // override per bi_principles.md §18, empty clears back to the built-in, same shape as the
-// chat_memory_* prompts above). Since migration 0092 (docs/plans/rag-dynamic-cutoff-plan.md
+// chat_memory_* prompts above). Since migration 0092 (docs/plans/completed/rag-dynamic-cutoff-plan.md
 // Stage 2) canon_recall_top_k doubles as the fact lane's per-channel **Max** for the dynamic
 // cutoff, with canon_recall_min (default '2') as its Min floor — read live by
 // buildAutoRecallParts alongside the shared 0091 knobs. The extraction pass that consumes the
@@ -2303,7 +2347,7 @@ export async function getChatMemorySyncStatus(db: PostgresClient): Promise<ChatM
 export interface LocationRenderStatusRow {
   locationId: string;
   name: string;
-  status: string;
+  status: string | null;
   /** visual_description non-empty (the describer or the scraper's name seed). */
   described: boolean;
   /** definition non-empty (the describer's Definition half, migration 0078). */
@@ -2319,7 +2363,7 @@ export interface LocationRenderStatusRow {
 interface LocationRenderStatusQueryRow {
   location_id: string;
   name: string;
-  status: string;
+  status: string | null;
   described: boolean;
   defined: boolean;
   rendered: boolean;
@@ -2380,18 +2424,37 @@ export interface LocationAdminRow {
   userId: string;
   name: string;
   parentName: string | null;
-  status: string;
+  status: string | null;
   imageUrl: string | null;
   updatedAt: string;
+  chatTitles: string[];
 }
 
+// db/migrations/0096's link table replaces the old anchor_chat_id column, so "which chat(s) is
+// this row in" is now a join, not a field — surfaced here as titles (chat_sessions.title) so the
+// roster visibly proves the chat-scope fix: an auto-registered row's chatTitles empties out the
+// instant its last owning chat is deleted or its anchor message is edited away, at which point the
+// cleanup trigger removes the row itself and it stops appearing at all. User-authored rows
+// (status is null) never get a link row, so chatTitles is always [] for them.
 export async function getLocationsAdmin(db: PostgresClient): Promise<LocationAdminRow[]> {
   const users = await db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
   const rows: LocationAdminRow[] = [];
   for (const { user_id: userId } of users) {
     const userRows = await db.withUserScope(userId, (session) =>
-      session.query<{ location_id: string; name: string; parent_name: string | null; status: string; image_url: string | null; updated_at: string }>(
-        `select l.location_id, l.name, p.name as parent_name, l.status, l.image_url, l.updated_at
+      session.query<{
+        location_id: string;
+        name: string;
+        parent_name: string | null;
+        status: string | null;
+        image_url: string | null;
+        updated_at: string;
+        chat_titles: string[] | null;
+      }>(
+        `select l.location_id, l.name, p.name as parent_name, l.status, l.image_url, l.updated_at,
+                (select coalesce(array_agg(cs.title order by cs.title), '{}')
+                 from location_chat_links lcl
+                 join chat_sessions cs on cs.chat_id = lcl.chat_id
+                 where lcl.location_id = l.location_id) as chat_titles
          from locations l
          left join locations p on p.location_id = l.parent_location_id
          order by coalesce(p.name, l.name), l.name`,
@@ -2406,6 +2469,7 @@ export async function getLocationsAdmin(db: PostgresClient): Promise<LocationAdm
         status: r.status,
         imageUrl: r.image_url,
         updatedAt: r.updated_at,
+        chatTitles: r.chat_titles ?? [],
       });
     }
   }

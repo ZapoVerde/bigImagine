@@ -11,13 +11,16 @@ import './CleanupView.css';
 //      slop-rules table — "forbidden phrases/words/slop"), and the two format contracts the
 //      header/footer repairs enforce — each expressed as a regex trigger + a repair prompt in
 //      the user's own words ("the format expressed as a prompt"). All of it is re-read live
-//      every tick, so a save takes effect on the next poll, no restart.
+//      every tick, so a save takes effect on the next poll, no restart. The reasoning-block tag
+//      pair (reasoning-blocks-plan.md) lives here too, per the plan's §13/§18 alignment with the
+//      cleanup config's scope — the in-stream-transform surface — and is read live at the start
+//      of every RP streaming turn; either tag blank disables detection.
 //   2. ACTIVITY (user-scoped, no admin key): pick one of your RP chats, see its recent cleanup
 //      jobs (what was cleaned / flagged, newest first), and trigger a run-now pass.
 //
 // The per-chat opt-in itself lives in ChatSettings (the "Async cleanup pass" toggle) and is
-// configured here per RP chat on the activity side; the header/footer/slop config below is
-// household-wide.
+// configured here per RP chat on the activity side; the header/footer/slop/reasoning-tag config
+// below is household-wide.
 export default function CleanupView({ apiKey }: { apiKey: string | null }) {
   // --- setup (admin) ---
   const [settings, setSettings] = useState<CleanupSettings | null>(null);
@@ -25,6 +28,8 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
   const [headerPrompt, setHeaderPrompt] = useState('');
   const [footerRegex, setFooterRegex] = useState('');
   const [footerPrompt, setFooterPrompt] = useState('');
+  const [reasoningOpenTag, setReasoningOpenTag] = useState('');
+  const [reasoningCloseTag, setReasoningCloseTag] = useState('');
   const [slopRules, setSlopRules] = useState<SlopRule[]>([]);
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
@@ -36,6 +41,8 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
       setHeaderPrompt(loaded.headerPrompt);
       setFooterRegex(loaded.footerRegex);
       setFooterPrompt(loaded.footerPrompt);
+      setReasoningOpenTag(loaded.reasoningOpenTag);
+      setReasoningCloseTag(loaded.reasoningCloseTag);
       setSlopRules(loaded.slopRules);
       return { ok: true };
     } catch (error) {
@@ -86,6 +93,8 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
           header_prompt: headerPrompt,
           footer_regex: footerRegex,
           footer_prompt: footerPrompt,
+          reasoning_open_tag: reasoningOpenTag,
+          reasoning_close_tag: reasoningCloseTag,
           slop_rules: slopRules.map((r) => ({
             setName: r.setName,
             position: r.position,
@@ -309,6 +318,26 @@ export default function CleanupView({ apiKey }: { apiKey: string | null }) {
           Footer repair prompt
           <textarea rows={6} value={footerPrompt} onChange={(e) => setFooterPrompt(e.target.value)} />
         </label>
+      </section>
+
+      <section className="cleanup-section">
+        <h2>Reasoning blocks</h2>
+        <p className="cleanup-note">
+          The tag pair whose wrapped span a model&rsquo;s reply is classified as <em>reasoning</em> (docs/plans/reasoning-blocks-plan.md) —
+          streamed live under the reply and stored separately, never re-sent as part of the conversation. Defaults:{' '}
+          <code>{'<think>'}</code> / <code>{'</think>'}</code>. Either one blank disables detection; the value is read live at
+          the start of every RP streaming turn, so a save takes effect on the very next turn.
+        </p>
+        <div className="cleanup-reasoning-tags">
+          <label>
+            Opening tag
+            <input value={reasoningOpenTag} onChange={(e) => setReasoningOpenTag(e.target.value)} placeholder="<think>" />
+          </label>
+          <label>
+            Closing tag
+            <input value={reasoningCloseTag} onChange={(e) => setReasoningCloseTag(e.target.value)} placeholder="</think>" />
+          </label>
+        </div>
       </section>
 
       <div className="cleanup-section-actions">

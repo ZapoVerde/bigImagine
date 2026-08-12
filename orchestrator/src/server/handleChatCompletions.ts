@@ -3,7 +3,7 @@
  * @stamp 2026-08-12
  * @architectural-role IO Wrapper — POST /v1/chat/completions from httpServer.ts
  * @description
- * The main turn endpoint (docs/plans/rp-streaming-plan.md, turn-loop-plan.md): body validation
+ * The main turn endpoint (docs/plans/completed/rp-streaming-plan.md, turn-loop-plan.md): body validation
  * + vision gate, the persisted-session path (chat_id → params/tools, assembleSessionTurnContext,
  * pre-persisted user anchor message, 'main' prompt-trace capture), the buffered runTurn lane and
  * the RP streaming lane (SSE deferred until first delta, client-close abort), post-turn
@@ -11,6 +11,14 @@
  * scrape, background chat naming, canvas note), and the response tails that fire the decoupled
  * location-image pass on 'finish'. Stateless Open WebUI traffic keeps the original behavior
  * bit-for-bit (no chat_id → no assembly, no trace, no persistence).
+ *
+ * Reasoning blocks (docs/plans/reasoning-blocks-plan.md) ride this endpoint's SSE stream: each
+ * reasoning delta the turn classifies is relayed as a { bigimagine_reasoning: true, delta }
+ * frame (onReasoningDelta → res.write), independent of the cleanup opt-in, and the accumulated
+ * reasoning is persisted in its own column via appendMessages — and carried forward into the
+ * cleanup handoff's composed swipe (finalizeCleanupResult's reasoning param), so a live repair
+ * never nulls it out. Turn 1 withholds reasoning like it withholds content, and sends it as one
+ * frame before the whole-reply chunk once persistence completes.
  *
  * @api-declaration
  * handleChatCompletions(req, res, deps) — POST /v1/chat/completions
@@ -277,7 +285,7 @@ export async function handleChatCompletions(
 
   let reply: string;
   let focusedNoteId: string | null | undefined;
-  // Real token-level streaming for the RP lane (docs/plans/rp-streaming-plan.md): when an RP chat
+  // Real token-level streaming for the RP lane (docs/plans/completed/rp-streaming-plan.md): when an RP chat
   // asks for stream: true, the turn runs through runStreamingRpTurn instead of runTurn and every
   // delta is relayed to the client as it arrives. The chat-kind lane (tool-calling turns, Open
   // WebUI) is untouched and keeps the buffered runTurn path byte-for-byte.
@@ -307,7 +315,7 @@ export async function handleChatCompletions(
   };
   req.on('close', onClientClose);
 
-  // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): wired only for RP chats that opted
+  // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): wired only for RP chats that opted
   // into the cleanup subloop (cleanup_enabled_at) and have a persisted session (chat_id) — the
   // live engine's bigimagine_cleanup / bigimagine_patch frames ride the same SSE stream, and the
   // finalizeCleanupResult handoff writes the composed swipe exactly the way the poll tick does.
@@ -345,6 +353,25 @@ export async function handleChatCompletions(
         }
       }
     : undefined;
+  // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): every reasoning delta the turn's
+  // detector classifies is relayed as its own bigimagine_reasoning frame — the same
+  // always-before-[DONE] interleaving as the cleanup frames, and the client renders them into a
+  // <details> sibling above the markdown. Deliberately NOT gated by liveCleanupActive (reasoning
+  // is independent of the cleanup opt-in) and NOT gated by skipLiveTriggers (the detector runs
+  // unconditionally inside streamingTurn; this callback only relays what it classified — the plan
+  // says detection happens on every RP streaming turn). Reasoning frames can arrive before the
+  // first content delta (models emit thinking first), so headers are committed on the first frame
+  // of any kind, exactly like the cleanup frames. Turn 1 withholds reasoning exactly like content
+  // (firstLlmTurn below — the raw reply is never streamed live): it is sent as one frame in the
+  // final SSE phase, right before the whole-reply chunk, preserving "reasoning, then reply".
+  const onReasoningDelta: (reasoningDelta: string) => void = (reasoningDelta) => {
+    if (firstLlmTurn) return;
+    if (!streamHeadersSent) {
+      writeStreamHeaders(res);
+      streamHeadersSent = true;
+    }
+    res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
+  };
   // The live path holds the loop's in-flight guard for (chat, messageId, '*') from stream start
   // through finalizeCleanupResult — the assistant messageId is pre-generated before the turn and
   // the swipeId isn't known until appendMessages runs, so the wildcard key keeps the 5s poll tick
@@ -352,6 +379,11 @@ export async function handleChatCompletions(
   let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
   let cleanupAbortController: AbortController | undefined;
   let liveCleanupGuardHeld = false;
+  // The turn's accumulated reasoning span (reasoning-blocks-plan.md): read after runStreamingRpTurn
+  // resolves for persistence (appendMessages) and for turn-1's final reasoning frame; absent when
+  // the turn produced no reasoning span. Declared here because both consumers live outside the
+  // turn's own try block scope.
+  let turnReasoning: RunStreamingRpTurnResult['reasoning'] | undefined;
   // The composed text/outcomes the handoff produced — read again after the if (body.chat_id)
   // block closes (turn-1's final SSE chunk carries the composed text), so declared here.
   let cleanupComposed: string | undefined;
@@ -394,6 +426,7 @@ export async function handleChatCompletions(
         chats,
         onCleanupEvent,
         skipLiveTriggers: firstLlmTurn,
+        onReasoningDelta,
         onDelta: (delta) => {
           // Turn 1 is deliberately NOT streamed live (plan Edge Cases): ensureFirstTurnHeader may
           // rewrite the reply after the stream resolves, so relaying raw pre-repair text would show
@@ -409,6 +442,7 @@ export async function handleChatCompletions(
       });
       reply = turnResult.content;
       cleanupHandoff = turnResult.cleanup;
+      turnReasoning = turnResult.reasoning;
       if (mainTraceEntry) {
         mainTraceEntry.usage = turnResult.usage;
         mainTraceEntry.price = turnPrice;
@@ -521,7 +555,9 @@ export async function handleChatCompletions(
       // reply is appended here now. Stage 2 (segway.md §4) then scrapes the turn's header block
       // into trusted scene state, anchored to the new message's active swipe — fail-open inside
       // the scraper, so it can never block or degrade the turn.
-      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
+      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [
+        { role: 'assistant', content: reply, messageId: assistantMessageId, reasoning: turnReasoning?.text },
+      ]);
       assistantMessage = insertedAssistant;
       // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream's end-of-stream
       // repairs (tail body, footer, deferred 'llm' pass) patch the composed buffer, and every
@@ -556,7 +592,16 @@ export async function handleChatCompletions(
       // writeback — same finalizeCleanupResult, so the message is indistinguishable in
       // cleanup_jobs from one the tick caught. Fail-open inside; then the in-flight guard drops.
       if (cleanupOutcomes && cleanupComposed) {
-        await finalizeCleanupResult(cleanupDeps, userId, body.chat_id, assistantMessageId!, reply, cleanupComposed, cleanupOutcomes);
+        await finalizeCleanupResult(
+          cleanupDeps,
+          userId,
+          body.chat_id,
+          assistantMessageId!,
+          reply,
+          cleanupComposed,
+          cleanupOutcomes,
+          turnReasoning?.text, // carry the reasoning into the composed swipe — see finalizeCleanupResult
+        );
       }
     } finally {
       releaseLiveCleanupGuard();
@@ -637,6 +682,13 @@ export async function handleChatCompletions(
     // chunk here, post header-repair.
     if (!streamHeadersSent) writeStreamHeaders(res);
     if (firstLlmTurn) {
+      // Reasoning was withheld during the turn exactly like the reply itself (firstLlmTurn in
+      // onReasoningDelta); it's sent here as one frame before the whole-reply chunk — "present
+      // only when the turn produced a reasoning span" (the frame is skipped entirely otherwise),
+      // preserving the reasoning-then-reply order of live streaming.
+      if (turnReasoning) {
+        res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: turnReasoning.text })}\n\n`);
+      }
       // The composed text (if the live path ran) is what finalizeCleanupResult persisted as the
       // active swipe; turn-1's raw reply is never relayed to the client, so send the composed
       // text here (falling back to reply when no live pass ran — byte-identical to the old path).

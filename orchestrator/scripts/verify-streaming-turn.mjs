@@ -1,5 +1,5 @@
 // Proves the RP lane's shared streaming turn core (orchestrator/streamingTurn.ts,
-// docs/plans/rp-streaming-plan.md) — the one place token-level streaming of an RP turn lives.
+// docs/plans/completed/rp-streaming-plan.md) — the one place token-level streaming of an RP turn lives.
 //
 // The fake pool below is the same shape verify-loop.mjs uses: it simulates exactly the two
 // statements postgres.ts issues (set_config then a query) per connection, captures every
@@ -14,6 +14,11 @@
 //   - a blank final reply is retried with the same message history, then fails loudly when the
 //     budget is spent (mirroring loop.ts's MAX_EMPTY_REPLY_RETRIES rule)
 //   - an abort mid-turn surfaces as an isAbortError (the shape POST /v1/chat/abort relies on)
+//   - reasoning blocks (docs/plans/reasoning-blocks-plan.md): a tagged reply splits into
+//     reasoning deltas (onReasoningDelta) and de-tagged content deltas (onDelta), in order;
+//     result.reasoning carries the trimmed span; a tagless reply is a byte-identical
+//     regression guard (no reasoning, same deltas); the no-completeStream fallback classifies
+//     a whole-reply delta in one push (delta-size agnosticism)
 
 import { createStubLlmProvider } from '../dist/io/llm/stub.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
@@ -70,6 +75,18 @@ function createFakePool() {
   };
 }
 
+// The settings store: every key returns undefined (unset) — the reasoning tags fall back to the
+// built-in '<think>'/'</think>' pair, so detection is ON for every turn below, exactly as it is
+// for a fresh deployment (reasoning-blocks-plan.md §6). Tagless replies therefore pass through
+// byte-identically, which the regression case asserts explicitly.
+function createFakeSettings() {
+  return {
+    async get(_key) {
+      return undefined;
+    },
+  };
+}
+
 function baseOpts(pool, llm, overrides = {}) {
   return {
     userId: 'u1',
@@ -80,7 +97,7 @@ function baseOpts(pool, llm, overrides = {}) {
     db: createPostgresClient(pool),
     // Unused unless onCleanupEvent is passed (live cleanup is off by default); present to satisfy
     // the core's required deps (in-stream-cleanup-plan.md Contracts).
-    settings: {},
+    settings: createFakeSettings(),
     chats: {},
     onDelta: () => {},
     ...overrides,
@@ -117,6 +134,68 @@ function baseOpts(pool, llm, overrides = {}) {
   assert(deltas.length === 1 && deltas[0] === 'A whole reply in one piece.', 'the fallback delivers exactly one whole-reply delta');
   assert(result.content === 'A whole reply in one piece.', 'the fallback resolves with the same content');
   assert(pool.turnMetricsInserts[0].outcome === 'ok', 'the fallback still writes an ok metrics row');
+}
+
+// --- reasoning block (reasoning-blocks-plan.md): a tagged reply splits into reasoning + content,
+// in arrival order; the stub chunks the reply, so the tags straddle delta boundaries ---
+{
+  const pool = createFakePool();
+  const llm = createStubLlmProvider([
+    { message: { role: 'assistant', content: 'She nods.<think>She knows he is lying but says nothing.</think>"Tea?" she asks.' }, toolCalls: [], usage: { promptTokens: 12, completionTokens: 9, totalTokens: 21 } },
+  ]);
+  const deltas = [];
+  const reasoningDeltas = [];
+  const result = await runStreamingRpTurn(
+    baseOpts(pool, llm, {
+      onDelta: (d) => deltas.push(d),
+      onReasoningDelta: (r) => reasoningDeltas.push(r),
+    }),
+  );
+  assert(deltas.join('') === 'She nods."Tea?" she asks.', 'content deltas are de-tagged — the tags never reach onDelta');
+  assert(reasoningDeltas.join('') === 'She knows he is lying but says nothing.', 'reasoning deltas carry the span (across the stub\'s chunk boundaries) via onReasoningDelta');
+  assert(result.content === 'She nods."Tea?" she asks.', 'the resolved content is the de-tagged reply');
+  assert(result.reasoning && result.reasoning.text === 'She knows he is lying but says nothing.', 'result.reasoning carries the trimmed accumulated span');
+  assert(result.reasoning.durationMs >= 0, 'result.reasoning carries the thinking duration');
+  assert(pool.turnMetricsInserts[0].outcome === 'ok', 'the reasoning turn still records an ok metrics row');
+}
+
+// --- tagless regression guard: byte-identical relay, no reasoning produced ---
+{
+  const pool = createFakePool();
+  const llm = createStubLlmProvider([
+    { message: { role: 'assistant', content: 'A plain reply with no tags at all.' }, toolCalls: [], usage: { promptTokens: 12, completionTokens: 5, totalTokens: 17 } },
+  ]);
+  const deltas = [];
+  const reasoningDeltas = [];
+  const result = await runStreamingRpTurn(
+    baseOpts(pool, llm, {
+      onDelta: (d) => deltas.push(d),
+      onReasoningDelta: (r) => reasoningDeltas.push(r),
+    }),
+  );
+  assert(deltas.join('') === 'A plain reply with no tags at all.', 'a tagless reply relays byte-identically through onDelta');
+  assert(reasoningDeltas.length === 0 && result.reasoning === undefined, 'a tagless reply produces no reasoning at all (result.reasoning absent, never empty string)');
+  assert(result.content === 'A plain reply with no tags at all.', 'the resolved content is unchanged by detection');
+}
+
+// --- reasoning through the no-completeStream fallback: one whole-reply delta, classified in one
+// push (the plan's delta-size agnosticism — a whole-reply delta behaves like the streamed case) ---
+{
+  const pool = createFakePool();
+  const llm = createStubLlmProvider([
+    { message: { role: 'assistant', content: 'Intro.<think>One whole thought.</think>Outro.' }, toolCalls: [], usage: { promptTokens: 10, completionTokens: 6, totalTokens: 16 } },
+  ]);
+  delete llm.completeStream;
+  const deltas = [];
+  const reasoningDeltas = [];
+  const result = await runStreamingRpTurn(
+    baseOpts(pool, llm, {
+      onDelta: (d) => deltas.push(d),
+      onReasoningDelta: (r) => reasoningDeltas.push(r),
+    }),
+  );
+  assert(deltas.join('') === 'Intro.Outro.' && reasoningDeltas.join('') === 'One whole thought.', 'the fallback\'s single delta still splits into reasoning + de-tagged content');
+  assert(result.reasoning?.text === 'One whole thought.' && result.content === 'Intro.Outro.', 'the fallback resolves the same split result as the streamed path');
 }
 
 // --- blank replies are retried (same history), then fail loudly when the budget is spent ---

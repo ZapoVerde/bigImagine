@@ -70,7 +70,7 @@ export interface ChatCompletionResponse {
   choices: { index: number; message: { role: string; content: string }; finish_reason: string }[];
 }
 
-// The streaming abort/error terminal frame (docs/plans/rp-streaming-plan.md Contracts): one extra
+// The streaming abort/error terminal frame (docs/plans/completed/rp-streaming-plan.md Contracts): one extra
 // `data: ...` line sent before [DONE], only when the in-flight stream is aborted (Stop button /
 // dropped client) or fails after the SSE headers already committed (so an HTTP status change is
 // no longer possible). Never present on a successful stream — an OpenAI-compatible client that has
@@ -360,9 +360,13 @@ export interface LocationAdminRow {
   userId: string;
   name: string;
   parentName: string | null;
-  status: string;
+  status: string | null;
   imageUrl: string | null;
   updatedAt: string;
+  // db/migrations/0096's location_chat_links — the chat(s) this row is currently linked to. Always
+  // [] for a user-authored row (status null); an auto-registered row disappears from this list
+  // entirely (the cleanup trigger deletes it) once its last chat link is gone.
+  chatTitles: string[];
 }
 
 // orchestrator/src/io/chatSessions.ts — persisted chat sessions
@@ -599,7 +603,7 @@ export interface ChatMemorySyncStatusRow {
 export interface LocationRenderStatusRow {
   locationId: string;
   name: string;
-  status: string;
+  status: string | null;
   described: boolean;
   defined: boolean;
   rendered: boolean;
@@ -698,6 +702,19 @@ export interface CleanupPatchFrame {
   replacement: string;
 }
 
+// The live reasoning-block SSE frame (docs/plans/reasoning-blocks-plan.md Contracts), interleaved
+// with the content-delta chunks exactly like the cleanup frames and never a normal content chunk
+// nor [DONE] — same additive contract (a client that has never heard of the field never sees it).
+// A reasoning frame carries one slice of the model's accumulated reasoning span (the text between
+// the configured open/close tag pair), relayed in arrival order; `delta` is append-only — the
+// client's reasoning buffer for the turn is the concatenation of every delta so far, and the
+// finished span is also returned via the persisted message's `reasoning` field (present only when
+// the turn produced a span).
+export interface ReasoningFrame {
+  bigimagine_reasoning: true;
+  delta: string;
+}
+
 // GET /v1/cleanup/jobs — one chat's recent cleanup activity (cleanupLoop.ts's CleanupJobInfo),
 // the Cleanup page's "recently cleaned / flagged" list. status is the job's fail-open outcome;
 // notes carries what changed / why it was flagged; preview is the first ~120 chars of the
@@ -735,6 +752,13 @@ export interface CleanupSettings {
   footerRegex: string;
   footerPrompt: string;
   slopRules: SlopRule[];
+  /** The reasoning-block tag pair (docs/plans/reasoning-blocks-plan.md): the open/close markers
+   *  whose wrapped span a reply is classified as reasoning (defaults '<think>' / '</think>',
+   *  which liveReasoning.ts falls back to when a key is unset). Either one blank = detection
+   *  disabled — the same empty-override meaning the header regex carries. Read live at the
+   *  start of every RP streaming turn, so a save takes effect on the very next turn. */
+  reasoningOpenTag: string;
+  reasoningCloseTag: string;
 }
 
 export interface StoredChatMessage {
@@ -751,6 +775,12 @@ export interface StoredChatMessage {
    *  last LLM response). index is its current position among stored variants (0-based); count is
    *  how many exist. Undefined means never swiped — content is the only version. */
   swipes?: { index: number; count: number };
+  /** The turn's reasoning block (docs/plans/reasoning-blocks-plan.md): the de-tagged span between
+   *  the configured open/close tag pair, persisted by the server when the turn produced one.
+   *  Present only then (absent = no span, never an empty string) — the message never renders the
+   *  tags themselves. Follows its message: each swipe variant carries its own reasoning, and an
+   *  edit to `content` clears it (the de-tagged span no longer corresponds to the edited text). */
+  reasoning?: string;
 }
 
 export interface ChatDetail {
@@ -894,7 +924,7 @@ export interface PromptPreviewGroup {
    *  the cleaned text replaces the raw reply in the message, so this is its only home). Rendered
    *  as its own collapsible block; kept out of `items` so the group's totals stay prompt-side. */
   reply?: PromptPreviewItem;
-  /** Cache-coverage report for the Main Prompt tag tree (docs/plans/prompt-inspector-tag-tree.md §3.2):
+  /** Cache-coverage report for the Main Prompt tag tree (docs/plans/completed/prompt-inspector-tag-tree.md §3.2):
    *  when this is a 'main' group with ≥2 recorded turns, the length in chars (UTF-16 code units,
    *  the same unit as the tag-tree's section offsets) of the longest prefix this turn's joined
    *  items text shares with the previous turn's — the run the provider's prefix cache would
@@ -904,7 +934,7 @@ export interface PromptPreviewGroup {
   /** When stablePrefixChars is set: epoch ms of the previous 'main' call the diff is against. */
   previousCallAt?: number;
   /** Per-subsection identity stability over the last x calls on record
-   *  (docs/plans/prompt-inspector-tag-tree.md §3.3): the server replays the trace's main entries as
+   *  (docs/plans/completed/prompt-inspector-tag-tree.md §3.3): the server replays the trace's main entries as
    *  consecutive pairs; each section (keyed by canonical tag name + occurrence index) counts one
    *  observation per call it existed in, identical when its full span is byte-identical to the
    *  previous call's same section. The percentage shown per section is identical / seen. Absent

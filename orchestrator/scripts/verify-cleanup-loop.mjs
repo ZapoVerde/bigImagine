@@ -140,15 +140,17 @@ function createFakePool() {
           }
 
           // findDueMessages — assistant messages after the stamp with fewer than three region
-          // rows for their active swipe
-          if (sql.includes('select m.message_id, m.content, m.created_at')) {
+          // rows for their active swipe. The reasoning column rides along (0095_reasoning_blocks.sql
+          // — finalizeCleanupResult carries it into the composed swipe so a live repair never
+          // nulls the turn path's persisted reasoning).
+          if (sql.includes('select m.message_id, m.content, m.reasoning, m.created_at')) {
             const [chatId, enabledAt] = params;
             const rows = chatMessages
               .filter(
                 (m) => m.chat_id === chatId && m.role === 'assistant' && m.created_at > enabledAt && !hasAllRegions(m),
               )
               .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id))
-              .map((m) => ({ message_id: m.message_id, content: m.content, created_at: m.created_at }));
+              .map((m) => ({ message_id: m.message_id, content: m.content, reasoning: m.reasoning ?? null, created_at: m.created_at }));
             return { rows };
           }
 

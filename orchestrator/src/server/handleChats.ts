@@ -12,6 +12,11 @@
  * location-image / turn-execution helpers from httpServer.ts until plan step 6 extracts those
  * (benign ESM cycle — function declarations used only at request time).
  *
+ * The swipe route's streaming branch also relays reasoning deltas (reasoning-blocks-plan.md) as
+ * bigimagine_reasoning SSE frames — gated only on streamingRp, NOT on cleanup_enabled_at, since
+ * reasoning is independent of the cleanup opt-in — via regenerateSwipe's onReasoningDelta,
+ * mirroring handleChatCompletions exactly (send/swipe parity).
+ *
  * @api-declaration
  * handleChatRoutes(req, res, deps, userId, url)
  *   — GET/POST /v1/chats; GET/POST/DELETE /v1/chats/:id
@@ -512,7 +517,7 @@ export async function handleChatRoutes(
         }
         res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
       };
-      // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): forward the cleanup events to
+      // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): forward the cleanup events to
       // regenerateSwipe for RP chats that opted in (cleanup_enabled_at), which translates them
       // into SSE frames mirroring handleChatCompletions exactly — the send/swipe parity the plan
       // carries through to cleanup. Same first-frame-commits-headers rule as onDelta above.
@@ -532,7 +537,22 @@ export async function handleChatRoutes(
               }
             }
           : undefined;
-      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta, onCleanupEvent);
+      // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): forward each reasoning delta to
+      // regenerateSwipe, which relays it to this callback for a bigimagine_reasoning SSE frame —
+      // the send/swipe parity carried through to reasoning exactly like the cleanup frames. NOT
+      // gated on cleanup_enabled_at: reasoning is independent of the cleanup opt-in (detection
+      // runs unconditionally inside streamingTurn), so an RP swipe that never enabled cleanup
+      // still streams its thinking live. Same first-frame-commits-headers rule as onDelta.
+      const onReasoningDelta: ((reasoningDelta: string) => void) | undefined = streamingRp
+        ? (reasoningDelta) => {
+            if (!streamHeadersSent) {
+              writeStreamHeaders(res);
+              streamHeadersSent = true;
+            }
+            res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
+          }
+        : undefined;
+      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta, onCleanupEvent, onReasoningDelta);
       if (!result.ok) {
         if (streamingRp && streamHeadersSent) {
           // Streaming had already begun: headers are committed, so surface the failure/abort as

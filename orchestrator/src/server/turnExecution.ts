@@ -11,10 +11,18 @@
  * shared assembleSessionTurnContext seam, persisted via chats.recordSwipe, post-cleanup
  * location scrape, no new user message).
  *
+ * Reasoning blocks (docs/plans/reasoning-blocks-plan.md) follow the same relay-and-persist
+ * shape as handleChatCompletions: onReasoningDelta (forwarded by the swipe route) relays each
+ * classified reasoning delta as a bigimagine_reasoning SSE frame, and the accumulated reasoning
+ * is persisted with the regenerated swipe via recordSwipe — and carried into the cleanup
+ * handoff's composed swipe (finalizeCleanupResult's reasoning param), so a live repair never
+ * nulls it out. Non-streaming swipes still detect + persist (no frames; the caller reads the
+ * returned message's `reasoning` field).
+ *
  * @api-declaration
  * resolveTurnLlm(deps, sessionParams, chatId) — { turnLlm, turnDefaultModel, turnPrice }
- * regenerateSwipe(deps, userId, chatId, detail, messageId, stream?, onDelta?) — { ok: true,
- *   message, locationId? } | { ok: false, aborted?, error }
+ * regenerateSwipe(deps, userId, chatId, detail, messageId, stream?, onDelta?, onCleanupEvent?,
+ *   onReasoningDelta?) — { ok: true, message, locationId? } | { ok: false, aborted?, error }
  *
  * @contract
  *   assertions:
@@ -133,7 +141,7 @@ export async function regenerateSwipe(
   chatId: string,
   detail: ChatDetail,
   messageId: string,
-  // Real token-level streaming for the RP lane (docs/plans/rp-streaming-plan.md) — same gate as
+  // Real token-level streaming for the RP lane (docs/plans/completed/rp-streaming-plan.md) — same gate as
   // handleChatCompletions's streaming branch: only session.kind === 'rp' streams, and the swipe
   // route only passes stream: true when the client asked for it (body.stream, default false).
   // When streaming, the caller (the swipe route) is responsible for writing SSE frames from
@@ -141,11 +149,18 @@ export async function regenerateSwipe(
   // accumulated reply so the caller can finish its stream.
   stream = false,
   onDelta?: (textDelta: string) => void,
-  // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): the swipe route forwards its
+  // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): the swipe route forwards its
   // bigimagine_cleanup / bigimagine_patch SSE-frame callback here, gated on the chat's
   // cleanup_enabled_at. When absent, no live cleanup runs for this swipe and the poll tick stays
   // the only cleanup path.
   onCleanupEvent?: (event: CleanupLiveEvent) => void,
+  // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): the swipe route forwards its
+  // bigimagine_reasoning SSE-frame callback here. Optional exactly like onCleanupEvent — an
+  // absent callback still classifies and persists the reasoning (the detector runs
+  // unconditionally inside streamingTurn; only the live relay is skipped, e.g. non-streaming
+  // swipes), and the accumulated reasoning is returned to the caller via the persisted
+  // message's `reasoning` field either way.
+  onReasoningDelta?: (reasoningDelta: string) => void,
 ): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
   const { db, settings, chats } = deps;
   const { session } = detail;
@@ -216,6 +231,11 @@ export async function regenerateSwipe(
   let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
   let cleanupAbortController: AbortController | undefined;
   let liveCleanupGuardHeld = false;
+  // The regenerated turn's accumulated reasoning span (reasoning-blocks-plan.md): persisted via
+  // recordSwipe below and carried into the cleanup handoff's composed swipe; absent when the
+  // turn produced no reasoning span. Declared here because both consumers live outside the
+  // turn's own try block scope.
+  let turnReasoning: RunStreamingRpTurnResult['reasoning'] | undefined;
   const releaseLiveCleanupGuard = () => {
     if (liveCleanupGuardHeld) {
       liveCleanupGuardHeld = false;
@@ -250,10 +270,12 @@ export async function regenerateSwipe(
         settings,
         chats,
         onCleanupEvent,
+        onReasoningDelta,
         onDelta,
       });
       reply = turnResult.content;
       cleanupHandoff = turnResult.cleanup;
+      turnReasoning = turnResult.reasoning;
       traceEntry.usage = turnResult.usage;
       traceEntry.price = turnPrice;
     } catch (err) {
@@ -308,7 +330,10 @@ export async function regenerateSwipe(
   // inside it is what makes the final return reachable only with a defined message.
   let swipeResult: StoredChatMessage | undefined;
   try {
-    const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
+    // reasoning (reasoning-blocks-plan.md): the regenerated reply's span is persisted with the
+    // new swipe AND mirrored onto the row (recordSwipe's contract) — each swipe's reasoning is
+    // independent, so the stashed previous swipe keeps its own (the plan's swipe edge case).
+    const updated = await chats.recordSwipe(userId, chatId, messageId, reply, turnReasoning?.text);
     if (!updated) {
       return { ok: false, error: 'message no longer exists' };
     }
@@ -327,7 +352,7 @@ export async function regenerateSwipe(
           signal: cleanupAbortController!.signal,
           onCleanupEvent,
         });
-        await finalizeCleanupResult(cleanupDeps, userId, chatId, messageId, reply, fsResult.composed, fsResult.outcomes);
+        await finalizeCleanupResult(cleanupDeps, userId, chatId, messageId, reply, fsResult.composed, fsResult.outcomes, turnReasoning?.text);
       } catch (err) {
         if (isAbortError(err)) {
           // A Stop landed during the end-of-stream repairs: the regenerated swipe above is already

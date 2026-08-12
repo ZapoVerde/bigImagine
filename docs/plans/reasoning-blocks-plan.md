@@ -33,7 +33,7 @@ line for line.
 
 ## Adapting This to BigImagine
 
-The one structural difference that matters: `docs/plans/rp-streaming-plan.md`'s own Principles
+The one structural difference that matters: `docs/plans/completed/rp-streaming-plan.md`'s own Principles
 section already established that **text interpretation stays server-side** (bi_principles.md §2 —
 "streamed deltas are relayed data, never interpreted by the frontend"), which is exactly why that
 plan rejected a client-side DOM-patch approach for cleanup. ST has no choice but to parse in the

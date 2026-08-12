@@ -47,6 +47,7 @@ import type {
   Folder,
   LlmConnectionSummary,
   PromptPreset,
+  ReasoningFrame,
 } from '../api/types';
 import CanvasPanel from '../components/canvas/CanvasPanel';
 import LorebookPanel from '../components/lorebook/LorebookPanel';
@@ -135,6 +136,10 @@ interface DisplayMessage {
   /** Swipe capability on the last LLM response — present only once this message has been
    *  regenerated at least once. See api/types.ts's StoredChatMessage for the shape. */
   swipes?: { index: number; count: number };
+  /** The turn's reasoning block (docs/plans/reasoning-blocks-plan.md) — the de-tagged span the
+   *  model produced between the configured tag pair; present only when the turn produced one,
+   *  per swipe variant. See StoredChatMessage.reasoning. */
+  reasoning?: string;
 }
 
 function toWireMessages(messages: DisplayMessage[]): ChatMessage[] {
@@ -373,6 +378,18 @@ export default function ChatView({
   // via send()/swipe()'s onCleanupStatus, and cleared when the stream resolves so the settled
   // poll becomes authoritative again. null = no live cleanup turn in flight.
   const [cleanupLive, setCleanupLive] = useState<CleanupLivePillState | null>(null);
+  // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): the in-flight turn's live reasoning
+  // buffer, fed from the bigimagine_reasoning SSE frames via send()/swipe()'s onReasoningDelta.
+  // null = no live reasoning yet this turn (the overwhelmingly common case — a model that never
+  // uses the tags produces no frames and this stays null, so nothing extra renders). The buffer
+  // is rendered on the streaming target — the tail placeholder during a send (the only
+  // message without a messageId while a send streams) or the being-regenerated message during a
+  // swipe (liveReasoningTargetId). liveReasoningDone flips when the stream resolves: the block
+  // stays open while thinking and collapses once done, and the post-stream refresh swaps the
+  // live buffer for the canonical row's persisted `reasoning` (the field wins once present).
+  const [liveReasoning, setLiveReasoning] = useState<string | null>(null);
+  const [liveReasoningDone, setLiveReasoningDone] = useState(false);
+  const [liveReasoningTargetId, setLiveReasoningTargetId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
@@ -592,7 +609,7 @@ export default function ChatView({
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
-        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes })));
+        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load chat'));
     refreshLocationImage(chatId);
@@ -826,7 +843,7 @@ export default function ChatView({
   // a tool's focusHint — shows up without a separate request.
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
-    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes })));
+    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
     setActiveChat(detail.session);
     refreshLocationImage(chatId);
   }
@@ -1035,6 +1052,13 @@ export default function ChatView({
         if (streaming) {
           setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
           setLiveStreaming(true);
+          // Reasoning blocks (reasoning-blocks-plan.md): a fresh turn starts with an empty live
+          // buffer aimed at the tail placeholder (target null = "the last message, the only
+          // id-less one while a send streams"). Frames append to it; the block stays open while
+          // the turn streams and collapses when liveReasoningDone flips in the finally below.
+          setLiveReasoning(null);
+          setLiveReasoningDone(false);
+          setLiveReasoningTargetId(null);
           await chatCompletion(
             toWireMessages(nextMessages),
             apiKey,
@@ -1066,6 +1090,10 @@ export default function ChatView({
             // there is no already-streamed raw text to correct in place.
             handleCleanupStatus,
             (frame) => applyCleanupPatch(frame),
+            // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
+            // the live buffer — deliberately separate from the content accumulation, so the
+            // rendered content stays de-tagged (the server persists the same split).
+            (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
           );
         } else {
           await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
@@ -1079,6 +1107,10 @@ export default function ChatView({
         // The stream is over — drop the live pill overrides so the settled poll becomes
         // authoritative again (cleanupLiveStatus.ts's ambient-hint-then-canonical-record handoff).
         setCleanupLive(null);
+        // Reasoning: the live block collapses now (thinking → done); the refresh below swaps the
+        // buffer for the canonical row's persisted `reasoning`, so a reasoning turn shows its
+        // span collapsed, and a reasoning-less one shows nothing (the buffer is dropped).
+        setLiveReasoningDone(true);
       }
       // Reconcile: for a streamed turn the placeholder is replaced by the server's canonical row
       // (dropped entirely if the stream aborted and nothing was persisted); for a buffered turn
@@ -1163,6 +1195,19 @@ export default function ChatView({
       let abortedStream = false;
       let result: SwipeResult;
       if (streamingSwipe) {
+        // Reasoning blocks (reasoning-blocks-plan.md): a regeneration streams its own live
+        // buffer aimed at the being-regenerated message (liveReasoningTargetId = messageId);
+        // frames append to it, the block stays open while streaming, and the final mapping below
+        // swaps the buffer for the canonical row's persisted `reasoning` after the refresh.
+        setLiveReasoning(null);
+        setLiveReasoningDone(false);
+        setLiveReasoningTargetId(messageId);
+        // The message being regenerated still holds the swipe it's replacing — clear it before
+        // the first delta arrives, same as send()'s pending bubble starting at ''. Otherwise every
+        // delta (and any live-cleanup patch, whose start/end offsets are computed against a
+        // zero-based buffer for this turn only) lands on top of/into the old swipe's text instead
+        // of a clean one, visibly appending until the post-stream refresh overwrites it.
+        setMessages((prev) => prev.map((m) => (m.messageId === messageId ? { ...m, content: '' } : m)));
         result = await swipeMessage(
           activeChat.chatId,
           messageId,
@@ -1184,6 +1229,9 @@ export default function ChatView({
           // message in place, so patches splice into that message by id.
           handleCleanupStatus,
           (frame) => applyCleanupPatch(frame, messageId),
+          // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
+          // the live buffer, separate from the content accumulation (content stays de-tagged).
+          (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
         );
       } else {
         result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
@@ -1196,7 +1244,7 @@ export default function ChatView({
           if (reverted) setLocationImage(swipedFrom);
         } else {
           setMessages((prev) =>
-            prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes } : m)),
+            prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes, reasoning: result.message.reasoning } : m)),
           );
           if (streamingSwipe) {
             // The regenerated variant is recordSwipe'd server-side by the time [DONE] arrived —
@@ -1233,6 +1281,9 @@ export default function ChatView({
       // The regeneration stream is over — drop the live pill overrides so the settled poll is
       // authoritative again (same handoff as a send's finally).
       setCleanupLive(null);
+      // Reasoning (reasoning-blocks-plan.md): the live block collapses now; the refresh in the
+      // success branch above swaps the buffer for the canonical row's persisted `reasoning`.
+      setLiveReasoningDone(true);
     }
   }
 
@@ -1638,6 +1689,22 @@ export default function ChatView({
             const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
             const showCounter = !!m.swipes && m.swipes.count > 1;
             const showRerun = !isOpeningGreeting && !hasMoreSwipesAhead;
+            // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): the block renders whenever
+            // this assistant message has a persisted `reasoning` (the canonical row) or is the
+            // live target of an in-flight turn's reasoning buffer — the id-less tail placeholder
+            // during a send, or the being-regenerated message during a swipe. The live buffer
+            // wins while the message IS the streaming target (a swipe regenerating a message
+            // that already has reasoning from an older variant must show the new thinking, not
+            // the stale span); the persisted field is authoritative everywhere else, and takes
+            // over the moment the post-stream refresh lands. The live block stays open while the
+            // turn streams and collapses once done (liveReasoningDone — mirrors ST's default
+            // off-after-done); the canonical block always renders collapsed, opened on demand.
+            const isLiveReasoningTarget =
+              liveReasoning !== null &&
+              (m.messageId ? m.messageId === liveReasoningTargetId : i === messages.length - 1);
+            const shownReasoning =
+              m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
+            const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
             return (
               <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}`}>
                 {selectionMode && (
@@ -1673,6 +1740,28 @@ export default function ChatView({
                   </div>
                 ) : (
                   <>
+                    {/* Reasoning block (docs/plans/reasoning-blocks-plan.md): a first-class
+                        <details> sibling above the content — same SillyTavern-style "hidden text"
+                        idiom the raw markdown below already supports, applied to the model's
+                        thinking span instead of LLM-authored markdown. Rendered from the
+                        persisted field (collapsed, opened on demand) or the live in-flight
+                        buffer (open while streaming, collapsed once done). The text runs through
+                        the same sanitizing markdown pipeline as the content below — never raw
+                        HTML injection. */}
+                    {shownReasoning !== undefined && (
+                      <details className="mes_reasoning_details" open={reasoningLiveOpen}>
+                        <summary>Reasoning</summary>
+                        <div className="mes_reasoning">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm, remarkBreaks, remarkQuotes]}
+                            remarkRehypeOptions={{ allowDangerousHtml: true }}
+                            rehypePlugins={[rehypeRaw, [rehypeSanitize, defaultSchema]]}
+                          >
+                            {shownReasoning}
+                          </ReactMarkdown>
+                        </div>
+                      </details>
+                    )}
                     <div className="markdown-content">
                       {/* allowDangerousHtml + rehypeRaw let literal HTML the LLM writes inline (chiefly
                           <details>/<summary> spoiler blocks, SillyTavern-style "hidden text") parse into

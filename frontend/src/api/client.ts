@@ -43,6 +43,7 @@ import type {
   PersonaSettings,
   ProfileModelsResult,
   PromptPreview,
+  ReasoningFrame,
   ScreenLockSettings,
   StagedAttachment,
   StoredChatMessage,
@@ -157,8 +158,11 @@ export async function uploadAttachment(file: File, apiKey: string | null): Promi
  *  [DONE] only after the message is persisted, so the caller can trust the streamed text is
  *  already saved. The abort/error terminal frame (bigimagine_error) is reported through
  *  onTerminalFrame (the caller decides what to show, per rp-streaming-plan.md Edge Cases); the
- *  stream still ends with [DONE] and resolves normally either way. Passing onDelta implies
- *  stream: true; the body is byte-identical to the non-streaming call otherwise.
+ *  stream still ends with [DONE] and resolves normally either way. Reasoning blocks
+ *  (docs/plans/reasoning-blocks-plan.md) arrive as bigimagine_reasoning frames and are reported
+ *  through onReasoningDelta — they never enter the content accumulation, so the resolved
+ *  response's content stays de-tagged. Passing onDelta implies stream: true; the body is
+ *  byte-identical to the non-streaming call otherwise.
  *
  *  Deliberately omits `model` from the body: httpServer.ts's handleChatCompletions treats
  *  body.model as a real per-request override (`options.model ?? config.model` in the LLM
@@ -185,6 +189,7 @@ export async function chatCompletion(
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
   onCleanupStatus?: (frame: CleanupStatusFrame) => void,
   onCleanupPatch?: (frame: CleanupPatchFrame) => void,
+  onReasoningDelta?: (frame: ReasoningFrame) => void,
 ): Promise<ChatCompletionResponse> {
   const streaming = !!onDelta;
   const res = await fetch('/v1/chat/completions', {
@@ -210,7 +215,7 @@ export async function chatCompletion(
     if (bufferedContent) onDelta(bufferedContent);
     return buffered;
   }
-  const { id, created, model, content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch);
+  const { id, created, model, content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch, onReasoningDelta);
   return {
     id,
     object: 'chat.completion',
@@ -223,20 +228,24 @@ export async function chatCompletion(
 /** Reads a streaming SSE response to completion: relays every content delta to onDelta in arrival
  *  order, reports the abort/error terminal frame through onTerminalFrame (the stream does not end
  *  there — [DONE] still follows), forwards the in-stream cleanup frames through onCleanupStatus /
- *  onCleanupPatch, and resolves once [DONE] arrives. The wire format is the server's
- *  OpenAI-compatible framing: `data: {chunk json}` blocks separated by blank lines,
- *  `data: {bigimagine_error frame}` when the turn was aborted or failed mid-stream, interleaved
- *  `data: {bigimagine_cleanup frame}` / `data: {bigimagine_patch frame}` cleanup frames
- *  (in-stream-cleanup-plan.md — a consumer that has never heard of them ignores them), and a final
- *  `data: [DONE]` terminator. Chunk JSON carries id/created/model on every frame (captured here
- *  from the first one seen) and `choices[0].delta.content` per text piece; non-JSON or comment
- *  lines are ignored. */
+ *  onCleanupPatch, forwards the reasoning-block frames through onReasoningDelta, and resolves
+ *  once [DONE] arrives. The wire format is the server's OpenAI-compatible framing:
+ *  `data: {chunk json}` blocks separated by blank lines, `data: {bigimagine_error frame}` when
+ *  the turn was aborted or failed mid-stream, interleaved `data: {bigimagine_cleanup frame}` /
+ *  `data: {bigimagine_patch frame}` cleanup frames (in-stream-cleanup-plan.md) and
+ *  `data: {bigimagine_reasoning frame}` reasoning frames (reasoning-blocks-plan.md — a consumer
+ *  that has never heard of them ignores them), and a final `data: [DONE]` terminator. Chunk JSON
+ *  carries id/created/model on every frame (captured here from the first one seen) and
+ *  `choices[0].delta.content` per text piece; reasoning frames are deliberately NOT content, so
+ *  they never enter the contentParts accumulation — the resolved content stays de-tagged;
+ *  non-JSON or comment lines are ignored. */
 async function consumeSseCompletionStream(
   res: Response,
   onDelta: (textDelta: string) => void,
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
   onCleanupStatus?: (frame: CleanupStatusFrame) => void,
   onCleanupPatch?: (frame: CleanupPatchFrame) => void,
+  onReasoningDelta?: (frame: ReasoningFrame) => void,
 ): Promise<{ id: string; created: number; model: string; content: string }> {
   const reader = res.body?.getReader();
   if (!reader) throw new ApiError(0, 'streaming response has no body');
@@ -265,6 +274,7 @@ async function consumeSseCompletionStream(
       bigimagine_error?: unknown;
       bigimagine_cleanup?: unknown;
       bigimagine_patch?: unknown;
+      bigimagine_reasoning?: unknown;
       choices?: { delta?: { content?: unknown }; finish_reason?: string }[];
     };
     if (chunk.bigimagine_error === true) {
@@ -287,6 +297,13 @@ async function consumeSseCompletionStream(
       const patch = parsed as CleanupPatchFrame;
       applyPatchToAccumulated(contentParts, patch);
       onCleanupPatch?.(patch);
+      return false;
+    }
+    if (chunk.bigimagine_reasoning === true) {
+      // Reasoning-block frame (reasoning-blocks-plan.md) — one slice of the model's accumulated
+      // reasoning span, relayed in arrival order. Deliberately NOT content: it never enters the
+      // contentParts accumulation (the resolved content stays de-tagged); keep reading.
+      onReasoningDelta?.(parsed as ReasoningFrame);
       return false;
     }
     if (chunk.id) id = chunk.id;
@@ -572,8 +589,11 @@ export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier
  *  same SSE chunk framing as chatCompletion's streaming mode (see consumeSseCompletionStream) —
  *  there is no SwipeResult JSON on the wire. The streamed text is recordSwipe'd server-side by
  *  the time [DONE] arrives, so the caller should refresh the canonical row afterward; the
- *  returned minimal message carries the accumulated content for immediate display. prev/next
- *  cycling (no LLM call) is unaffected — passing onDelta there is a no-op on the response shape. */
+ *  returned minimal message carries the accumulated content for immediate display. Reasoning
+ *  blocks arrive as bigimagine_reasoning frames and are reported through onReasoningDelta (they
+ *  never enter the content accumulation); the persisted reasoning is available on the refreshed
+ *  row. prev/next cycling (no LLM call) is unaffected — passing onDelta there is a no-op on the
+ *  response shape. */
 export async function swipeMessage(
   chatId: string,
   messageId: string,
@@ -583,6 +603,7 @@ export async function swipeMessage(
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
   onCleanupStatus?: (frame: CleanupStatusFrame) => void,
   onCleanupPatch?: (frame: CleanupPatchFrame) => void,
+  onReasoningDelta?: (frame: ReasoningFrame) => void,
 ): Promise<SwipeResult> {
   const path = `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`;
   if (!onDelta) {
@@ -603,7 +624,7 @@ export async function swipeMessage(
     if ('message' in buffered && buffered.message?.content) onDelta(buffered.message.content);
     return buffered;
   }
-  const { content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch);
+  const { content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch, onReasoningDelta);
   return { message: { messageId, role: 'assistant', content, createdAt: new Date().toISOString() } };
 }
 
@@ -1407,6 +1428,10 @@ export async function adminSetCleanupSettings(
       llmPrompt: string | null;
       enabled: boolean;
     }[];
+    // Reasoning-block tag pair (reasoning-blocks-plan.md): the open/close markers; either one
+    // '' = detection disabled. Same optional-patch semantics as the header/footer fields.
+    reasoning_open_tag?: string;
+    reasoning_close_tag?: string;
   },
   adminKey: string | null,
 ): Promise<CleanupSettings> {

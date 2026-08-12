@@ -740,6 +740,51 @@
   gap: 1.2rem;
 }
 
+/* Reasoning block (docs/plans/reasoning-blocks-plan.md): the model's de-tagged thinking span,
+   a first-class <details> sibling above the content — the same SillyTavern-style hidden-text
+   idiom the markdown below already supports, but for a structured field instead of raw
+   LLM-authored markdown. Muted and compact: the collapsed summary reads as a quiet "Reasoning"
+   affordance rather than competing with the reply, and the expanded body reuses the bubble's
+   markdown conventions at a slightly smaller size with the same first/last-child margin trim as
+   .markdown-content below. */
+.mes_reasoning_details {
+  margin: 0 0 0.5rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 0.5rem;
+  background: var(--color-bg-panel);
+}
+.mes_reasoning_details > summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 0.3rem 0.6rem;
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  list-style: none; /* hide the native disclosure triangle — the ▸/▾ marker below replaces it */
+}
+.mes_reasoning_details > summary::-webkit-details-marker {
+  display: none;
+}
+.mes_reasoning_details > summary::before {
+  content: '▸ ';
+  color: var(--color-text-faint);
+}
+.mes_reasoning_details[open] > summary::before {
+  content: '▾ ';
+}
+.mes_reasoning_details .mes_reasoning {
+  padding: 0 0.6rem 0.5rem;
+  font-size: 0.9em;
+  color: var(--color-text-secondary);
+}
+.mes_reasoning_details .mes_reasoning > :first-child {
+  margin-top: 0;
+}
+.mes_reasoning_details .mes_reasoning > :last-child {
+  margin-bottom: 0;
+}
+
 /* react-markdown renders real block elements now (remark-breaks turns single newlines into <br>,
    so pre-wrap on the bubble itself is no longer needed/wanted) — just trim the default browser
    margins so paragraphs/lists don't add more vertical gap than a plain chat bubble should have. */

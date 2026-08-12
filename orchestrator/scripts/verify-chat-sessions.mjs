@@ -20,11 +20,13 @@ function assert(cond, message) {
 // locations / characters tables ---
 function createFakePool() {
   const sessions = new Map(); // chat_id -> row
-  const messages = []; // {message_id, chat_id, user_id, role, content, created_at, active_swipe_id}
-  const swipes = []; // {swipe_id, message_id, content, created_at}
+  const messages = []; // {message_id, chat_id, user_id, role, content, reasoning, created_at, active_swipe_id}
+  const swipes = []; // {swipe_id, message_id, content, reasoning, created_at}
   const folders = new Map(); // folder_id -> row
   const locations = []; // {location_id, user_id, name, status, anchor_chat_id, anchor_swipe_id, ...}
   const characters = []; // {character_id, user_id, name, status, anchor_chat_id, anchor_swipe_id}
+  const locationChatLinks = []; // {location_id, chat_id, anchor_swipe_id} — forkChat §2.7 link rows
+  const characterChatLinks = []; // {character_id, chat_id, anchor_swipe_id} — forkChat §2.7 link rows
   const swipeImages = []; // {chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at}
   const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
   const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
@@ -42,6 +44,8 @@ function createFakePool() {
     locations,
     characters,
     swipeImages,
+    locationChatLinks,
+    characterChatLinks,
     syncStatus,
     canonCounts,
     syncPoints,
@@ -268,7 +272,10 @@ function createFakePool() {
             const ids = Array.isArray(params[0]) ? params[0] : [params[0]];
             const rows = swipes
               .filter((s) => ids.includes(s.message_id))
-              .map((s) => ({ message_id: s.message_id, swipe_id: s.swipe_id }));
+              // Reasoning (0095_reasoning_blocks.sql): getChat's metadata lookup only reads
+              // swipe_id, but cycleSwipe/recordSwipeIfContent select content+reasoning from the
+              // same table — carry all three so every consumer of this branch is satisfied.
+              .map((s) => ({ message_id: s.message_id, swipe_id: s.swipe_id, content: s.content ?? null, reasoning: s.reasoning ?? null }));
             return { rows };
           }
           if (sql.includes('select chat_id, title, folder_id, updated_at from chat_sessions')) {
@@ -320,13 +327,14 @@ function createFakePool() {
           // chat_messages — always returns the inserted row (real Postgres only does with
           // `returning message_id`, but appendMessages always asks for it now, so this stays simple).
           if (sql.includes('insert into chat_messages')) {
-            const [chatId, userId, role, content] = params;
+            const [chatId, userId, role, content, reasoning] = params;
             const row = {
               message_id: randomUUID(),
               chat_id: chatId,
               user_id: userId,
               role,
               content,
+              reasoning: reasoning ?? null,
               created_at: now(),
               active_swipe_id: null,
             };
@@ -343,8 +351,8 @@ function createFakePool() {
           }
           // ensureActiveSwipe / forkChat mirroring: give a message its own swipe row.
           if (sql.includes('insert into chat_message_swipes')) {
-            const [messageId, content, createdAt] = params;
-            const row = { swipe_id: randomUUID(), message_id: messageId, content, created_at: createdAt ?? now() };
+            const [messageId, content, reasoning, createdAt] = params;
+            const row = { swipe_id: randomUUID(), message_id: messageId, content, reasoning: reasoning ?? null, created_at: createdAt ?? now() };
             swipes.push(row);
             return { rows: [{ swipe_id: row.swipe_id }] };
           }
@@ -355,14 +363,17 @@ function createFakePool() {
             return { rows: [] };
           }
           // recordSwipeIfContent's content writeback (regeneration / in-place edit): content and
-          // the fresh swipe together. Matches after the active_swipe_id-only branch above, which
-          // its `set content = $1, active_swipe_id = $2` clause doesn't collide with.
+          // the fresh swipe together; reasoning rides along (0095_reasoning_blocks.sql — the row
+          // mirrors the active swipe's reasoning). Matches after the active_swipe_id-only branch
+          // above, which its `set active_swipe_id = $1` clause doesn't collide with. Also serves
+          // cycleSwipe, whose update has the same content+active_swipe_id+reasoning shape.
           if (sql.includes('update chat_messages set content')) {
-            const [content, swipeId, messageId] = params;
+            const [content, swipeId, reasoning, messageId] = params;
             const row = messages.find((m) => m.message_id === messageId);
             if (row) {
               row.content = content;
               row.active_swipe_id = swipeId;
+              row.reasoning = reasoning ?? null;
             }
             return { rows: [] };
           }
@@ -371,6 +382,38 @@ function createFakePool() {
           // `where user_id` in the real SQL, so the matchers don't require adjacency. Since the
           // fork now resurrects every copied swipe (not just the fork point's), the anchor param
           // is an array; a bare id (the characters query, fork-point only) still works.
+          if (sql.includes('from location_chat_links') && sql.includes('anchor_swipe_id')) {
+            const [chatId, anchorParam] = params;
+            const anchorIds = Array.isArray(anchorParam) ? anchorParam : [anchorParam];
+            return {
+              rows: locationChatLinks
+                .filter((l) => l.chat_id === chatId && l.anchor_swipe_id && anchorIds.includes(l.anchor_swipe_id))
+                .map((l) => ({ location_id: l.location_id, anchor_swipe_id: l.anchor_swipe_id ?? null })),
+            };
+          }
+          if (sql.includes('from character_chat_links') && sql.includes('anchor_swipe_id')) {
+            const [chatId, anchorParam] = params;
+            const anchorIds = Array.isArray(anchorParam) ? anchorParam : [anchorParam];
+            return {
+              rows: characterChatLinks
+                .filter((c) => c.chat_id === chatId && c.anchor_swipe_id && anchorIds.includes(c.anchor_swipe_id))
+                .map((c) => ({ character_id: c.character_id, anchor_swipe_id: c.anchor_swipe_id ?? null })),
+            };
+          }
+          if (sql.includes('insert into location_chat_links')) {
+            const [locationId, chatId, anchorSwipeId] = params;
+            if (!locationChatLinks.some((l) => l.location_id === locationId && l.chat_id === chatId)) {
+              locationChatLinks.push({ location_id: locationId, chat_id: chatId, anchor_swipe_id: anchorSwipeId ?? null });
+            }
+            return { rows: [] };
+          }
+          if (sql.includes('insert into character_chat_links')) {
+            const [characterId, chatId, anchorSwipeId] = params;
+            if (!characterChatLinks.some((c) => c.character_id === characterId && c.chat_id === chatId)) {
+              characterChatLinks.push({ character_id: characterId, chat_id: chatId, anchor_swipe_id: anchorSwipeId ?? null });
+            }
+            return { rows: [] };
+          }
           if (sql.includes('from locations') && sql.includes('anchor_swipe_id')) {
             const [userId, anchorParam] = params;
             const anchorIds = Array.isArray(anchorParam) ? anchorParam : [anchorParam];
@@ -749,6 +792,52 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   );
 }
 
+// --- Reasoning blocks (db/migrations/0095_reasoning_blocks.sql): the optional reasoning column
+// lands on the correct row/swipe, follows each swipe independently, is absent (never empty
+// string) when a turn has none, and is cleared by an edit ---
+{
+  const chat = await store.createChat(USER_A, { title: 'Reasoning scratch' });
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1 with thought', reasoning: 'the plan: open the door' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2 no thought' },
+  ]);
+  const detail = await store.getChat(USER_A, chat.chatId);
+  const a1 = detail.messages[1];
+  const a2 = detail.messages[3];
+  assert(a1.reasoning === 'the plan: open the door', "a fresh send's reasoning lands on the row");
+  assert(a2.reasoning === undefined, 'a turn with no reasoning leaves the field absent, not empty string');
+
+  // recordSwipe: the regenerated swipe + row take the passed reasoning; the original keeps its
+  // own (each swipe's reasoning is independent — the plan's swipe edge case).
+  const regen = await store.recordSwipe(USER_A, chat.chatId, a1.messageId, 'A1 regen', 'the new plan: lock the door');
+  assert(regen && regen.reasoning === 'the new plan: lock the door', "recordSwipe writes the regenerated swipe's reasoning onto the message");
+  const cycledPrev = await store.cycleSwipe(USER_A, chat.chatId, a1.messageId, 'prev');
+  assert(
+    cycledPrev.status === 'switched' && cycledPrev.message.reasoning === 'the plan: open the door',
+    "cycling 'prev' shows the original swipe's own reasoning, not the regenerated one's",
+  );
+  const cycledNext = await store.cycleSwipe(USER_A, chat.chatId, a1.messageId, 'next');
+  assert(
+    cycledNext.status === 'switched' && cycledNext.message.reasoning === 'the new plan: lock the door',
+    "cycling 'next' back shows the regenerated swipe's own reasoning",
+  );
+
+  // editMessageContent clears reasoning for the edited row (a user-typed edit has no reasoning
+  // behind it — the plan's edge case); the pre-existing swipe (the regenerated variant) keeps
+  // its own reasoning when cycled back to.
+  const edited = await store.editMessageContent(USER_A, chat.chatId, a1.messageId, 'A1 edited');
+  assert(edited && edited.reasoning === undefined, 'editing a message clears its reasoning');
+  const afterEdit = await store.getChat(USER_A, chat.chatId);
+  assert(afterEdit.messages[1].reasoning === undefined, 'the edited row reads back with no reasoning');
+  const cycledBack = await store.cycleSwipe(USER_A, chat.chatId, a1.messageId, 'prev');
+  assert(
+    cycledBack.status === 'switched' && cycledBack.message.reasoning === 'the new plan: lock the door',
+    'the pre-edit swipe keeps its own reasoning after the edit clears the row',
+  );
+}
+
 // --- forkChat: copies settings + messages up to the fork point, tracks lineage ---
 {
   const forkFolder = await store.createFolder(USER_A, { name: 'Fork test folder' });
@@ -852,10 +941,12 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(detail.messages[0].swipes.index === 0 && detail.messages[0].swipes.count === 1, 'a single canonical swipe row reads back as {index: 0, count: 1}');
 }
 
-// --- forkChat resurrection (§2.7): the fork's transient/inactive rows come along, cloned as
-// fresh transient rows anchored to the branch's own swipes; permanent rows do not. Every copied
-// swipe's locations come along (not just the fork point's), and the per-swipe image
-// associations (location_swipe_images) are re-keyed onto the branch. ---
+// --- forkChat §2.7 (db/migrations/0096): the fork's referenced locations/characters are LINKED,
+// not cloned — sibling location_chat_links/character_chat_links rows on the branch pointing at
+// the SAME location_id/character_id, so a later refinement is visible from both branches. Every
+// copied swipe's links come along (not just the fork point's), and the per-swipe image
+// associations (location_swipe_images) are re-keyed onto the branch with the shared location id.
+// Permanent rows are never linked (they're world canon, visible everywhere already). ---
 {
   const parent = await store.createChat(USER_A, { title: 'Resurrection parent' });
   await store.appendMessages(USER_A, parent.chatId, [
@@ -868,7 +959,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   const forkPoint = detail.messages[3]; // A2 — fork after two full turns
 
   // Simulate two scraped turns: each assistant message has its own active swipe, with a
-  // transient location anchored to each (the fork point's and the earlier turn's), plus a
+  // transient location linked to each (the fork point's and the earlier turn's), plus a
   // permanent location that must not come along.
   const turnSwipe1 = randomUUID();
   const forkSwipe2 = randomUUID();
@@ -879,6 +970,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
 
   const caveId = randomUUID();
   const bridgeId = randomUUID();
+  const forestId = randomUUID();
   pool.locations.push({
     location_id: caveId,
     user_id: USER_A,
@@ -910,7 +1002,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     anchor_swipe_id: turnSwipe1,
   });
   pool.locations.push({
-    location_id: randomUUID(),
+    location_id: forestId,
     user_id: USER_A,
     name: 'The Forest Clearing',
     visual_description: 'Sunlight.',
@@ -919,14 +1011,20 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     anchor_chat_id: null,
     anchor_swipe_id: null,
   });
+  // The parent's link rows (what forkChat actually reads to decide what comes along).
+  pool.locationChatLinks.push({ location_id: caveId, chat_id: parent.chatId, anchor_swipe_id: forkSwipe2 });
+  pool.locationChatLinks.push({ location_id: bridgeId, chat_id: parent.chatId, anchor_swipe_id: turnSwipe1 });
+
+  const goblinId = randomUUID();
   pool.characters.push({
-    character_id: randomUUID(),
+    character_id: goblinId,
     user_id: USER_A,
     name: 'Goblin Merchant',
     status: 'inactive',
     anchor_chat_id: parent.chatId,
     anchor_swipe_id: forkSwipe2,
   });
+  pool.characterChatLinks.push({ character_id: goblinId, chat_id: parent.chatId, anchor_swipe_id: forkSwipe2 });
   // Per-swipe image associations (migration 0076): both turns' swipes have recorded bgs.
   pool.swipeImages.push({
     chat_id: parent.chatId,
@@ -957,50 +1055,65 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
 
   const branchLocations = pool.locations.filter((l) => l.anchor_chat_id === branch.chatId);
   assert(
-    branchLocations.length === 2 && branchLocations.every((l) => l.status === 'transient'),
-    'both turns\' transient locations (fork point + earlier turn) are cloned into the branch as fresh transient rows',
+    branchLocations.length === 0,
+    'locations are linked, not cloned — no fresh location rows appear in the branch',
   );
-  const branchCave = branchLocations.find((l) => l.name === 'The Dark Cave');
-  const branchBridge = branchLocations.find((l) => l.name === 'The Old Bridge');
+  const branchLocationLinks = pool.locationChatLinks.filter((l) => l.chat_id === branch.chatId);
   assert(
-    branchCave && branchCave.anchor_swipe_id === branchMsgA2.active_swipe_id,
-    'the fork point\'s cloned location is anchored to the branch\'s fork-point swipe',
+    branchLocationLinks.length === 2 && branchLocationLinks.every((l) => pool.locations.some((loc) => loc.location_id === l.location_id)),
+    'both turns\' referenced locations are linked into the branch (sibling link rows, same location rows)',
   );
+  const caveLink = branchLocationLinks.find((l) => l.location_id === caveId);
+  const bridgeLink = branchLocationLinks.find((l) => l.location_id === bridgeId);
   assert(
-    branchBridge && branchBridge.anchor_swipe_id === branchMsgA1.active_swipe_id,
-    'an earlier turn\'s cloned location is anchored to the branch\'s corresponding earlier swipe',
-  );
-  assert(
-    branchCave.seed === 42 && branchCave.image_url === 'https://cdn.example.invalid/dark-cave.png',
-    'endpoint.md §6.2: the cloned location carries seed/image_url/image_generated_at forward, so a fork does not force a fresh render',
+    caveLink && caveLink.anchor_swipe_id === branchMsgA2.active_swipe_id,
+    'the fork point\'s location link is anchored to the branch\'s fork-point swipe',
   );
   assert(
-    JSON.stringify(branchCave.image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
-    'the cloned location carries the render-input snapshot too, so its cache check (endpoint.md §5.1.2) hits on the branch',
+    bridgeLink && bridgeLink.anchor_swipe_id === branchMsgA1.active_swipe_id,
+    'an earlier turn\'s location link is anchored to the branch\'s corresponding earlier swipe',
+  );
+  const sharedCave = pool.locations.find((l) => l.location_id === caveId);
+  assert(
+    sharedCave &&
+      sharedCave.seed === 42 &&
+      sharedCave.image_url === 'https://cdn.example.invalid/dark-cave.png' &&
+      sharedCave.image_render_hash === 'render-hash-abc',
+    'the shared location row keeps its render cache (seed/image_url/hash) — linking never forces a fresh render',
   );
   assert(
-    branchCave.image_render_hash === 'render-hash-abc' && branchBridge.image_render_hash === 'render-hash-def',
-    'the cloned locations carry the prompt render hashes (migration 0076) so their cache checks hit on the branch',
+    sharedCave &&
+      JSON.stringify(sharedCave.image_rendered_input) === JSON.stringify({ visual_description: 'Stalactites.', environment: { time_of_day: 'night' }, seed: 42 }),
+    'the shared location row keeps the render-input snapshot, so its cache check hits on the branch too',
   );
-  assert(pool.locations.some((l) => l.name === 'The Forest Clearing' && l.anchor_chat_id === null), 'a permanent location is world canon — never cloned into the branch');
+  assert(
+    !pool.locationChatLinks.some((l) => l.chat_id === branch.chatId && l.location_id === forestId),
+    'a permanent location is world canon — never linked into the branch',
+  );
 
   const branchSwipeImages = pool.swipeImages.filter((s) => s.chat_id === branch.chatId);
-  assert(branchSwipeImages.length === 2, 'both per-swipe image associations are cloned into the branch');
-  const branchCaveRow = branchSwipeImages.find((s) => s.location_id === branchCave.location_id);
-  const branchBridgeRow = branchSwipeImages.find((s) => s.location_id === branchBridge.location_id);
+  assert(branchSwipeImages.length === 2, 'both per-swipe image associations are re-keyed into the branch');
+  const branchCaveRow = branchSwipeImages.find((s) => s.location_id === caveId);
+  const branchBridgeRow = branchSwipeImages.find((s) => s.location_id === bridgeId);
   assert(
     branchCaveRow && branchCaveRow.swipe_id === branchMsgA2.active_swipe_id && branchCaveRow.image_url === 'https://cdn.example.invalid/dark-cave.png' && branchCaveRow.render_hash === 'render-hash-abc',
-    'the fork-point swipe\'s association is re-keyed to the branch chat/swipe/location ids with URL + render hash carried over',
+    'the fork-point swipe\'s association is re-keyed to the branch chat/swipe ids with URL + render hash carried over (shared location id)',
   );
   assert(
     branchBridgeRow && branchBridgeRow.swipe_id === branchMsgA1.active_swipe_id && branchBridgeRow.image_url === 'https://cdn.example.invalid/old-bridge.png' && branchBridgeRow.render_hash === 'render-hash-def',
     'an earlier turn\'s association is re-keyed too, so prev/next cycling inside the branch reuses the recorded URL',
   );
 
-  const branchCharacters = pool.characters.filter((c) => c.anchor_chat_id === branch.chatId);
   assert(
-    branchCharacters.length === 1 && branchCharacters[0].name === 'Goblin Merchant' && branchCharacters[0].status === 'transient',
-    'the fork point\'s inactive character is resurrected into the branch as transient',
+    !pool.characters.some((c) => c.anchor_chat_id === branch.chatId),
+    'characters are linked, not cloned — no fresh character rows appear in the branch',
+  );
+  const branchCharacterLinks = pool.characterChatLinks.filter((c) => c.chat_id === branch.chatId);
+  assert(
+    branchCharacterLinks.length === 1 &&
+      branchCharacterLinks[0].character_id === goblinId &&
+      branchCharacterLinks[0].anchor_swipe_id === branchMsgA2.active_swipe_id,
+    'the fork point\'s character is linked into the branch (sibling character_chat_links row, same character row)',
   );
 }
 

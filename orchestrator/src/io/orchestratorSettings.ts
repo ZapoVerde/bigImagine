@@ -90,7 +90,7 @@
  *
  * chat_memory_auto_recall_chunk_min / chat_memory_auto_recall_pool_multiple /
  * chat_memory_auto_recall_cutoff_mode (io/chatMemory/recallCutoff.ts, migration 0091,
- * docs/plans/rag-dynamic-cutoff-plan.md — Stage 1 of the CNZ retrieval port) are the RAG dynamic
+ * docs/plans/completed/rag-dynamic-cutoff-plan.md — Stage 1 of the CNZ retrieval port) are the RAG dynamic
  * cutoff's three knobs, read live on every RP prompt assembly alongside the 0077 trio, no
  * restart. auto_recall_chunk_top_k is now the **Max** ceiling the cutoff clamps to; chunk_min is
  * the Min floor (default '2' — how many chunks are injected at minimum even when the distribution
@@ -112,7 +112,7 @@
  * Director Pass wiring. Both were added to 0010's CHECK constraint together in 0048, the same
  * widen-both-sides shape 0043's own entry documents.
  *
- * canon_recall_min (migration 0092, docs/plans/rag-dynamic-cutoff-plan.md Stage 2) is the
+ * canon_recall_min (migration 0092, docs/plans/completed/rag-dynamic-cutoff-plan.md Stage 2) is the
  * canon_facts lane's Min floor for the RAG dynamic cutoff: the per-channel pair of
  * canon_recall_top_k (which Stage 1 established as that lane's Max), integer-as-text, default
  * '2'. Read live by recallForPrompt.ts's buildAutoRecallParts alongside the Max; the two shared
@@ -142,7 +142,7 @@
  * screen_lock_password.
  *
  * llm_gate_max_concurrent/llm_gate_max_concurrent_agent_routine/llm_gate_max_retries/
- * llm_gate_retry_base_ms/llm_gate_retry_max_ms (migration 0056, docs/plans/llm-gate-plan.md) tune the
+ * llm_gate_retry_base_ms/llm_gate_retry_max_ms (migration 0056, docs/plans/completed/llm-gate-plan.md) tune the
  * gate's retry/queueing behavior (io/llm/llmGate.ts, llmQueue.ts, llmBackoff.ts) — read live on
  * every complete() call, same no-restart shape as everything else in this file. The two
  * max_concurrent keys are separate per-lane caps (interactive chat/system calls vs. background
@@ -206,6 +206,15 @@
  * many trailing turn-pairs form the narrative context (integer-as-text, default '1', VLZ's
  * describerHistory). Read live on every pass, no restart, editable from the Settings tab's Image
  * Generation fieldset.
+ *
+ * reasoning_open_tag/reasoning_close_tag (migration 0095, docs/plans/reasoning-blocks-plan.md)
+ * are the reasoning-block tag pair — the open/close markers whose wrapped span a model's reply
+ * is classified as reasoning (defaults '<think>' / '</think>'), read live by
+ * orchestrator/liveReasoning.ts at the start of every RP streaming turn, no restart. Either one
+ * blank = detection disabled (the plan's "both prefix and suffix must be defined" guard, the
+ * same shape as cleanup_header_regex's empty-override meaning). Editable from the Cleanup page's
+ * setup block alongside the header/footer regex fields, per the plan's §13/§18 alignment with
+ * the cleanup config's existing scope.
  *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
@@ -294,6 +303,8 @@ export const SETTING_NAMES = [
   'lorebook_token_budget',
   'lorebook_recall_top_k',
   'lorebook_recursion_enabled',
+  'reasoning_open_tag',
+  'reasoning_close_tag',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

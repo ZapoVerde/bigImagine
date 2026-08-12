@@ -3,7 +3,7 @@
  * @stamp 2026-08-11
  * @architectural-role Orchestrator — the RP lane's single shared streaming turn core
  * @description
- * The one place token-level streaming of an RP turn lives (docs/plans/rp-streaming-plan.md).
+ * The one place token-level streaming of an RP turn lives (docs/plans/completed/rp-streaming-plan.md).
  * Both of server/httpServer.ts's LLM-entry points — handleChatCompletions (a fresh send) and
  * regenerateSwipe (Rerun / swipe past the last stored variant) — converge on this function for
  * an RP + stream:true turn, so streaming exists exactly once, not as two independently-evolving
@@ -19,19 +19,32 @@
  * and record turn_metrics the same way — it never interprets what a delta or reply *means* (that
  * stays the LLM's job alone, bb_principles.md §2).
  *
+ * Reasoning blocks (docs/plans/reasoning-blocks-plan.md): every delta is also run through
+ * liveReasoning.ts's tag detector, alongside (never instead of) the live-cleanup hook. A span
+ * inside the configured open/close tag pair is routed to onReasoningDelta — never to onDelta —
+ * and the accumulated reasoning returns in the result for the caller to persist in its own
+ * column. The live-cleanup engine sees only the de-tagged content (liveCleanup's composed
+ * buffer must stay in the client's coordinate space, and the client never accumulated the
+ * tags). Detection is not gated by skipLiveTriggers and not a "cleanup" feature — it runs on
+ * every RP streaming turn, subject only to the tags being configured.
+ *
  * Deliberate divergence from runTurn: the blank-reply retry re-calls completeStream with the
  * exact same message history (never pushing a blank attempt into it) — a retry here is safe
  * precisely because "blank" means nothing but whitespace was ever relayed, so nothing meaningful
  * reached the client from the failed attempt. A connection whose adapter has no completeStream
  * degrades to one whole-reply delta via complete() (bb_principles.md §6) — the turn still
- * "streams" in the contract sense, just with one big delta instead of many.
+ * "streams" in the contract sense, just with one big delta instead of many. The plan's
+ * "all-reasoning, no-reply" edge case is decided here: a turn that produced a reasoning span
+ * but no reply text is NOT blank (it persists as reasoning with empty content — see the retry
+ * comment in runStreamingRpTurnInner); blank means both channels empty.
  *
  * @api-declaration
  * runStreamingRpTurn(opts) — drives one RP turn through the gated provider's completeStream,
- *   relaying every delta to opts.onDelta in arrival order, and resolves with the accumulated
- *   final text + vendor usage. Throws AbortError-shaped errors the same way runTurn does
- *   (isAbortError from turnAbort.ts recognizes them) — callers handle abort identically to
- *   today's runTurn catch block.
+ *   relaying every content delta to opts.onDelta and every reasoning delta to
+ *   opts.onReasoningDelta in arrival order, and resolves with the accumulated final text +
+ *   vendor usage + accumulated reasoning ({ text, durationMs } when a span was produced).
+ *   Throws AbortError-shaped errors the same way runTurn does (isAbortError from turnAbort.ts
+ *   recognizes them) — callers handle abort identically to today's runTurn catch block.
  *
  * @contract
  *   assertions:
@@ -58,6 +71,7 @@ import {
   type LiveCleanupContext,
   type LiveRegionOutcome,
 } from './liveCleanup.js';
+import { createReasoningDetector, resolveReasoningTags, type ReasoningDetector } from './liveReasoning.js';
 import type { CleanupLoopDeps } from './cleanupLoop.js';
 
 /** Same automatic retry budget as runTurn (loop.ts's MAX_EMPTY_REPLY_RETRIES) for a blank final
@@ -100,6 +114,15 @@ export interface RunStreamingRpTurnOptions {
    *  Never called after the promise resolves or rejects. The caller (httpServer.ts) serializes
    *  each call into one SSE frame immediately, so "relay" means live, not buffered. */
   onDelta: (textDelta: string) => void;
+  /** Called once per reasoning delta (the part of the stream classified inside the configured
+   *  tag pair — see orchestrator/liveReasoning.ts), in arrival order, interleaved with onDelta
+   *  exactly as the provider emitted them. The reasoning text never reaches onDelta — a
+   *  reasoning span is routed to this callback alone, and the tags themselves are consumed. The
+   *  caller (httpServer.ts) translates each call into a bigimagine_reasoning SSE frame, the
+   *  same interleaving convention as the existing bigimagine_cleanup / bigimagine_patch frames.
+   *  Optional: an absent callback still classifies and returns the accumulated reasoning in the
+   *  result — detection is not gated on relaying (reasoning-blocks-plan.md Logic). */
+  onReasoningDelta?: (reasoningDelta: string) => void;
   /** When provided, live cleanup runs for this turn (the caller gates on the chat's
    *  cleanup_enabled_at + RP kind — an absent callback means no live cleanup at all, and the
    *  poll tick stays the only cleanup path). Each event is translated by the caller into a
@@ -117,6 +140,14 @@ export interface RunStreamingRpTurnOptions {
 export interface RunStreamingRpTurnResult {
   content: string;
   usage?: LlmUsage;
+  /** Present when this turn produced a reasoning span (liveReasoning.ts detected a configured
+   *  tag pair around part of the stream — the plan's Contracts: "present only when the turn
+   *  produced a reasoning span; absent (never empty-string) otherwise"). `text` is the trimmed
+   *  accumulated reasoning — what the caller persists alongside content (and never resends, by
+   *  virtue of living in its own column); `durationMs` is the thinking window (open tag
+   *  completed -> close tag completed or implicit close at stream end), for the client's
+   *  "Thought for Xs" label. */
+  reasoning?: { text: string; durationMs: number };
   /** Present when live cleanup ran for this turn (onCleanupEvent was provided and the connection
    *  has a completeStream). The composed buffer (byte-identical to what the caller accumulated
    *  via onDelta), the three regions' live states as of stream end, and the live engine's
@@ -175,6 +206,11 @@ async function runStreamingRpTurnInner(
   // The live engine's deps — the same shape cleanupLoop.ts's tick runs on, built here from the
   // core's own deps so liveCleanup's dispatchStep is literally the poll tick's function.
   const liveDeps: CleanupLoopDeps = { db: opts.db, llm, settings: opts.settings, chats: opts.chats };
+  // The reasoning tag pair, read live per turn (reasoning-blocks-plan.md Logic: detection is
+  // not a "cleanup" feature — it runs unconditionally on every RP streaming turn, subject only
+  // to the tags actually being configured; a blank pair disables it entirely).
+  const reasoningTags = await resolveReasoningTags(opts.settings);
+  const reasoningEnabled = reasoningTags.openTag.length > 0 && reasoningTags.closeTag.length > 0;
 
   log.info(`runStreamingRpTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
 
@@ -184,6 +220,13 @@ async function runStreamingRpTurnInner(
   // attempt (rp-streaming-plan.md Edge Cases). A non-blank failure (including one after deltas
   // were relayed) propagates immediately — loop.ts's completeWithBlankRetry treats a thrown
   // llm.complete the same way: the caller decides what the client sees.
+  // reasoning-blocks-plan.md Edge Cases ("close tag never arrives"): a turn is only "blank"
+  // when BOTH channels are empty. A turn that produced a reasoning span but no reply text is
+  // NOT retried — it persists as reasoning with empty content (the plan's "whatever was
+  // buffered becomes the persisted reasoning" — the thought is real signal worth keeping, and
+  // an all-reasoning turn is not the silent-empty failure the retry rule exists to catch). The
+  // detector is recreated on every blank retry, so a discarded attempt's reasoning can never
+  // leak into the retry.
   let attempts = 0;
   // Created once (first completeStream attempt) when the caller opted into live cleanup; reset
   // on every blank retry so the buffer/region state mirror relayedText (a whitespace-only first
@@ -195,6 +238,44 @@ async function runStreamingRpTurnInner(
     const llmStart = Date.now();
     let relayedText = '';
     let usage: LlmUsage | undefined;
+    // The per-attempt reasoning detector (recreated on every blank retry, like liveCtx). When
+    // the tag pair is disabled, `undefined` keeps the whole pre-existing code path byte-identical.
+    const reasoningDetector: ReasoningDetector | undefined = reasoningEnabled
+      ? createReasoningDetector(reasoningTags.openTag, reasoningTags.closeTag)
+      : undefined;
+    /** Classify one raw provider delta and relay each channel to its own sink: reasoning text
+     *  only ever reaches onReasoningDelta (never onDelta — the tags themselves are consumed),
+     *  content text reaches onDelta and the live-cleanup engine with the same byte sequence the
+     *  client accumulates (liveCleanup's composed buffer must stay in the client's coordinate
+     *  space, so cleanup runs on the de-tagged content, not the raw stream). */
+    const relayDelta = (delta: string): void => {
+      if (delta.length === 0) return;
+      if (!reasoningDetector) {
+        relayedText += delta;
+        opts.onDelta(delta);
+        if (liveCtx) {
+          if (opts.skipLiveTriggers) {
+            liveCtx.composed += delta;
+          } else {
+            onLiveDelta(liveCtx, liveDeps, userId, opts.taskId, delta, signal, opts.onCleanupEvent);
+          }
+        }
+        return;
+      }
+      const { reasoningDelta, contentDelta } = reasoningDetector.push(delta);
+      if (reasoningDelta) opts.onReasoningDelta?.(reasoningDelta);
+      if (contentDelta) {
+        relayedText += contentDelta;
+        opts.onDelta(contentDelta);
+        if (liveCtx) {
+          if (opts.skipLiveTriggers) {
+            liveCtx.composed += contentDelta;
+          } else {
+            onLiveDelta(liveCtx, liveDeps, userId, opts.taskId, contentDelta, signal, opts.onCleanupEvent);
+          }
+        }
+      }
+    };
     if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
     if (llm.completeStream) {
       if (opts.onCleanupEvent && !liveCtx) {
@@ -203,33 +284,43 @@ async function runStreamingRpTurnInner(
         liveCtx = await createLiveCleanupContext(liveDeps, userId, opts.taskId);
       }
       const turn = await llm.completeStream(messages, [], (delta) => {
-        relayedText += delta;
-        opts.onDelta(delta);
-        if (liveCtx) {
-          if (opts.skipLiveTriggers) {
-            // Turn 1: still accumulate the buffer for the caller's finishStream whole-body pass;
-            // the early-header and live-body triggers are deliberately not engaged.
-            liveCtx.composed += delta;
-          } else {
-            // Relay first, inspect second — the raw stream is never withheld for a repair; the
-            // live hooks fire their LLM repairs concurrently under the same turn signal.
-            onLiveDelta(liveCtx, liveDeps, userId, opts.taskId, delta, signal, opts.onCleanupEvent);
-          }
-        }
+        // Relay first, inspect second — the raw stream is never withheld for a repair; the
+        // live hooks fire their LLM repairs concurrently under the same turn signal.
+        relayDelta(delta);
       }, { model, ...sampling, signal });
       // The provider resolves with the fully-accumulated text; onDelta already relayed each
       // piece live. Use the resolved content (not our own concatenation) as the canonical reply,
-      // same as completeWithBlankRetry trusts turn.message.content.
-      relayedText = turn.message.content;
+      // same as completeWithBlankRetry trusts turn.message.content — except when the reasoning
+      // detector was active: turn.message.content then still contains the raw tagged span, and
+      // the canonical reply must be the de-tagged text the client actually accumulated.
+      relayedText = reasoningDetector ? relayedText : turn.message.content;
       usage = turn.usage;
     } else {
       // No streaming capability on this connection (bb_principles.md §6): degrade to one
       // whole-reply delta via complete(). The turn still "streams" in the contract sense — the
-      // caller sees exactly one onDelta call carrying the full reply.
+      // caller sees exactly one onDelta call carrying the full reply (or, with a reasoning
+      // detector active, one onReasoningDelta call for the span and one onDelta for the rest —
+      // the detector is delta-size agnostic and classifies a whole-reply delta in one push).
       const turn = await llm.complete(messages, [], { model, ...sampling, signal });
-      relayedText = turn.message.content;
       usage = turn.usage;
-      if (relayedText.length > 0) opts.onDelta(relayedText);
+      relayDelta(turn.message.content);
+    }
+    // End-of-stream: the detector's leftover (an implicit close while still thinking — the
+    // close tag never arrived; or a partial open tag flushed as ordinary content) is relayed
+    // now so the client's live buffers match the persisted text. The accumulated reasoning is
+    // read off the detector afterwards.
+    let finalReasoning: { text: string; durationMs: number } | undefined;
+    if (reasoningDetector) {
+      const fin = reasoningDetector.finalize();
+      if (fin.reasoningDelta) opts.onReasoningDelta?.(fin.reasoningDelta);
+      if (fin.contentDelta) {
+        relayedText += fin.contentDelta;
+        opts.onDelta(fin.contentDelta);
+      }
+      const text = reasoningDetector.reasoning.trim();
+      if (text.length > 0) {
+        finalReasoning = { text, durationMs: reasoningDetector.durationMs() ?? 0 };
+      }
     }
     metrics.rounds.push({
       round: 0,
@@ -241,7 +332,8 @@ async function runStreamingRpTurnInner(
     });
 
     attempts++;
-    if (isBlankReply(relayedText) && attempts <= MAX_EMPTY_REPLY_RETRIES) {
+    const blankReply = isBlankReply(relayedText) && !finalReasoning;
+    if (blankReply && attempts <= MAX_EMPTY_REPLY_RETRIES) {
       log.warn(`runStreamingRpTurn blank reply, retrying`, {
         userId,
         attempt: attempts,
@@ -250,14 +342,15 @@ async function runStreamingRpTurnInner(
       if (liveCtx) resetLiveCleanupContext(liveCtx);
       continue;
     }
-    if (isBlankReply(relayedText)) {
+    if (blankReply) {
       throw new Error(`runStreamingRpTurn: LLM returned an empty reply after ${MAX_EMPTY_REPLY_RETRIES} retries`);
     }
 
-    log.info(`runStreamingRpTurn done`, { userId, relayedChars: relayedText.length });
+    log.info(`runStreamingRpTurn done`, { userId, relayedChars: relayedText.length, reasoningChars: finalReasoning?.text.length ?? 0 });
     return {
       content: relayedText,
       usage,
+      reasoning: finalReasoning,
       cleanup: liveCtx ? { composed: liveCtx.composed, liveOutcomes: collectLiveOutcomes(liveCtx), ctx: liveCtx } : undefined,
     };
   }

@@ -385,7 +385,9 @@ function createFakeChatSessionStore() {
       for (const m of messages) {
         // The send path pre-generates the assistant message id (handleChatCompletions) so the
         // in-stream cleanup ledger can be keyed to it; honor it when present, else mint one.
-        const row = { messageId: m.messageId ?? newId('msg'), role: m.role, content: m.content, createdAt: ++counter };
+        // reasoning rides along (0095_reasoning_blocks.sql) — the fake store mirrors the real
+        // store's optional reasoning param so the end-to-end reasoning fixture can assert it.
+        const row = { messageId: m.messageId ?? newId('msg'), role: m.role, content: m.content, reasoning: m.reasoning ?? undefined, createdAt: ++counter };
         arr.push(row);
         inserted.push({ messageId: row.messageId, role: row.role });
       }
@@ -473,10 +475,11 @@ function createFakeChatSessionStore() {
     async listFolders(userId) {
       return [...folders.values()].filter((f) => f.userId === userId);
     },
-    async recordSwipe(userId, chatId, messageId, newContent) {
+    async recordSwipe(userId, chatId, messageId, newContent, reasoning) {
       // Minimal mirror of io/chatSessions.ts's recordSwipe (regenerateSwipe's persistence tail) —
       // the regenerated text becomes the message's newest swipe and active content. Needed for the
       // swipe route's needs_regenerate outcome, which the pre-streaming suite never exercised.
+      // reasoning rides along (0095_reasoning_blocks.sql) exactly like the real store.
       const row = sessions.get(chatId);
       if (!row || row.userId !== userId) return undefined;
       const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
@@ -491,15 +494,17 @@ function createFakeChatSessionStore() {
       const idx = swipes.length - 1;
       activeSwipeIdx.set(messageId, idx);
       target.content = newContent;
+      target.reasoning = reasoning ?? undefined;
       return {
         messageId,
         role: 'assistant',
         content: newContent,
         createdAt: target.createdAt,
+        reasoning: reasoning ?? undefined,
         swipes: { index: idx, count: swipes.length },
       };
     },
-    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent) {
+    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent, reasoning) {
       // Minimal mirror of io/chatSessions.ts's recordSwipeIfContent — finalizeCleanupResult's
       // atomic writeback (in-stream-cleanup-plan.md): the mid-flight guard refuses when the
       // message no longer holds the content the repair planned against (a user regen or swipe
@@ -521,6 +526,7 @@ function createFakeChatSessionStore() {
       const idx = swipes.length - 1;
       activeSwipeIdx.set(messageId, idx);
       target.content = newContent;
+      target.reasoning = reasoning ?? undefined;
       return {
         newSwipeId,
         message: {
@@ -528,6 +534,7 @@ function createFakeChatSessionStore() {
           role: 'assistant',
           content: newContent,
           createdAt: target.createdAt,
+          reasoning: reasoning ?? undefined,
           swipes: { index: idx, count: swipes.length },
         },
       };
@@ -1188,7 +1195,7 @@ assert(
   'PATCH /v1/admin/connections/:id updates only the given field, leaving name untouched',
 );
 
-// Per-connection pricing (docs/plans/prompt-inspector-usage-cost.md): the three price fields
+// Per-connection pricing (docs/plans/completed/prompt-inspector-usage-cost.md): the three price fields
 // round-trip through create/list/patch; a cleared (null) price leaves the others untouched; a
 // non-numeric or negative price is rejected at the boundary (never reaching the store).
 const createPricedRes = await fetch(`${base}/v1/admin/connections`, {
@@ -2808,7 +2815,7 @@ server.close();
   serverMain.close();
 }
 
-// --- Part 5d: the captured Main Prompt's usage/cost receipt (docs/plans/prompt-inspector-usage-cost.md) ---
+// --- Part 5d: the captured Main Prompt's usage/cost receipt (docs/plans/completed/prompt-inspector-usage-cost.md) ---
 // Once a turn resolves, the captured 'main' group carries the vendor-reported usage (from
 // runTurn's result) plus the acting connection's price (resolveTurnLlm's live price read — the
 // active connection's row in the default branch). An unpriced connection still shows usage but no
@@ -3380,7 +3387,7 @@ server.close();
   server7.close();
 }
 
-// --- Part 8: RP real-token streaming (docs/plans/rp-streaming-plan.md), end to end ---
+// --- Part 8: RP real-token streaming (docs/plans/completed/rp-streaming-plan.md), end to end ---
 // A dedicated server so the stub's scripted turns belong to these fixtures alone. The stub's
 // completeStream replays each turn's content in several deterministic chunks, so a streamed RP
 // turn produces multiple SSE data: frames that must concatenate to exactly what gets persisted.
@@ -3454,6 +3461,16 @@ function cleanupPatchFrame(payload) {
     return null;
   }
 }
+// Reasoning frames (docs/plans/reasoning-blocks-plan.md Contracts): bigimagine_reasoning carries
+// one slice of the model's classified thinking span. Returns the delta string, null otherwise.
+function reasoningFrameDelta(payload) {
+  try {
+    const v = JSON.parse(payload);
+    return v && v.bigimagine_reasoning === true ? v.delta : null;
+  } catch {
+    return null;
+  }
+}
 
 {
   const rpKey = 'good-key-rp:44444444-4444-4444-4444-444444444444';
@@ -3463,6 +3480,7 @@ function cleanupPatchFrame(payload) {
     { message: { role: 'assistant', content: 'The tide turned against the harbor wall.' }, toolCalls: [] }, // fixture 2: swipe stream
     { message: { role: 'assistant', content: 'A first turn with no scene header yet.' }, toolCalls: [] }, // fixture 4a: turn-1 stream
     { message: { role: 'assistant', content: '' }, toolCalls: [] }, // fixture 4b: the repair reply (empty → raw kept)
+    { message: { role: 'assistant', content: 'She nods.<think>She knows he is lying but says nothing.</think>"Tea?" she asks.' }, toolCalls: [] }, // fixture 5: reasoning frames
   ]);
   const pool8 = createFakePool();
   const db8 = createPostgresClient(pool8);
@@ -3584,6 +3602,42 @@ function cleanupPatchFrame(payload) {
     const detail = await chats8.getChat(userId8, chat.chatId);
     const last = detail.messages[detail.messages.length - 1];
     assert(last.role === 'assistant' && last.content === deltas[0], 'the persisted turn-1 message matches the single streamed chunk');
+  }
+
+  // --- Fixture 5: reasoning blocks (docs/plans/reasoning-blocks-plan.md) — a tagged reply
+  // emits bigimagine_reasoning frames interleaved before [DONE], the content channel stays
+  // de-tagged, and the persisted message carries BOTH the de-tagged content and the reasoning
+  // span (own column, never resent into any prompt-stack field) ---
+  {
+    const chat = await chats8.createChat(userId8, { title: 'Reasoning RP', kind: 'rp' });
+    await chats8.appendMessages(userId8, chat.chatId, [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'an earlier reply' },
+    ]);
+    const res = await fetch(`${base8}/v1/chat/completions`, {
+      method: 'POST',
+      headers: auth8,
+      body: JSON.stringify({
+        messages: [
+          { role: 'user', content: 'start' },
+          { role: 'assistant', content: 'an earlier reply' },
+          { role: 'user', content: 'continue' },
+        ],
+        chat_id: chat.chatId,
+        stream: true,
+      }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'a reasoning RP stream:true send returns an SSE response');
+    const payloads = await readSseData(res);
+    const deltas = payloads.map(deltaText).filter((d) => d !== null);
+    const reasoning = payloads.map(reasoningFrameDelta).filter((d) => d !== null).join('');
+    assert(reasoning === 'She knows he is lying but says nothing.', 'bigimagine_reasoning frames carry the classified span (concatenated) before [DONE]');
+    assert(deltas.join('') === 'She nods."Tea?" she asks.', 'content deltas are de-tagged — the tags never reach the content channel');
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the reasoning stream still ends with [DONE]');
+    assert(payloads.every((p) => !isErrorFrame(p)), 'a successful reasoning stream carries no bigimagine_error frame');
+    const detail = await chats8.getChat(userId8, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(last.content === 'She nods."Tea?" she asks.' && last.reasoning === 'She knows he is lying but says nothing.', 'the persisted message carries de-tagged content AND the reasoning span');
   }
 
   // --- Fixture 4: a mid-stream abort (POST /v1/chat/abort) surfaces as the bigimagine_error/
