@@ -29,8 +29,11 @@ import { runWithCallContext } from '../io/llm/callContext.js';
 import { log } from '../io/logger.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
-import { runStreamingRpTurn } from '../orchestrator/streamingTurn.js';
-import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
+import { runStreamingRpTurn, type RunStreamingRpTurnResult } from '../orchestrator/streamingTurn.js';
+import { abortTurn, isAbortError, registerTurnAbort, unregisterTurnAbort } from '../orchestrator/turnAbort.js';
+import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, type CleanupLoopDeps, type CleanupRegionOutcome } from '../orchestrator/cleanupLoop.js';
+import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
+import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
 import { parseStoryHeader, scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
@@ -127,6 +130,10 @@ export async function handleChatCompletions(
   // (docs/plans/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
   // the async heuristic subloop (cleanupLoop.ts), opted in per chat via cleanup_enabled_at.
   let sessionPromptStackPresetId: string | null = null;
+  // When this chat opted into the cleanup subloop (migration 0072) — non-null gates the live
+  // cleanup path (in-stream-cleanup-plan.md) for this turn's stream. Hoisted out of the chat_id
+  // block below because the streaming branch (which reads it) sits outside that block's scope.
+  let sessionCleanupEnabledAt: string | null = null;
   // The already-persisted latest user message's id (rerun/edit-resend case, where there's no new
   // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
   // use even when this turn doesn't add a fresh chat_messages row of its own.
@@ -144,6 +151,7 @@ export async function handleChatCompletions(
     sessionKind = detail.session.kind;
     sessionCharacterId = detail.session.characterId;
     sessionPromptStackPresetId = detail.session.promptStackPresetId;
+    sessionCleanupEnabledAt = detail.session.cleanupEnabledAt;
     existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
@@ -299,6 +307,74 @@ export async function handleChatCompletions(
   };
   req.on('close', onClientClose);
 
+  // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): wired only for RP chats that opted
+  // into the cleanup subloop (cleanup_enabled_at) and have a persisted session (chat_id) — the
+  // live engine's bigimagine_cleanup / bigimagine_patch frames ride the same SSE stream, and the
+  // finalizeCleanupResult handoff writes the composed swipe exactly the way the poll tick does.
+  // The gate keeps a chat that never enabled cleanup free of both live repairs and cleanup frames.
+  const liveCleanupActive = streamingRp && !!body.chat_id && sessionCleanupEnabledAt != null;
+  const cleanupDeps: CleanupLoopDeps = {
+    db,
+    llm: deps.llm, // the household gated provider — same one the poll tick's repairs use
+    settings,
+    chats,
+    // Same deferred post-repair location-scrape trigger the poll tick wires at the composition
+    // root (index.ts): a live header repair also lands a location, so the bg pass fires too.
+    onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
+  };
+  const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined = liveCleanupActive
+    ? (event) => {
+        // Cleanup frames can arrive before the first content delta (turn 1's finishStream runs
+        // after persistence; the header check can fire on an early delta) — commit SSE headers
+        // on the first frame of any kind.
+        if (!streamHeadersSent) {
+          writeStreamHeaders(res);
+          streamHeadersSent = true;
+        }
+        // Turn 1 is never streamed live (same rule as onDelta below): the client has accumulated
+        // no raw text, so a patch span would splice against an empty buffer — and the composed
+        // text arrives wholesale in the post-persistence chunk anyway, making any in-place
+        // correction redundant. Status frames still go out so the pills track the repairs.
+        if (event.kind === 'patch' && firstLlmTurn) return;
+        if (event.kind === 'status') {
+          res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
+        } else {
+          res.write(
+            `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
+          );
+        }
+      }
+    : undefined;
+  // The live path holds the loop's in-flight guard for (chat, messageId, '*') from stream start
+  // through finalizeCleanupResult — the assistant messageId is pre-generated before the turn and
+  // the swipeId isn't known until appendMessages runs, so the wildcard key keeps the 5s poll tick
+  // from launching a duplicate repair pass in the appendMessages→finalizeCleanupResult window.
+  let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
+  let cleanupAbortController: AbortController | undefined;
+  let liveCleanupGuardHeld = false;
+  // The composed text/outcomes the handoff produced — read again after the if (body.chat_id)
+  // block closes (turn-1's final SSE chunk carries the composed text), so declared here.
+  let cleanupComposed: string | undefined;
+  let cleanupOutcomes: CleanupRegionOutcome[] | undefined;
+  const releaseLiveCleanupGuard = () => {
+    if (liveCleanupGuardHeld) {
+      liveCleanupGuardHeld = false;
+      if (body.chat_id && assistantMessageId) releaseCleanupInFlight(body.chat_id, assistantMessageId, '*');
+      if (cleanupAbortController) unregisterTurnAbort(taskId, cleanupAbortController);
+      // The settled cleanup_jobs rows finalizeCleanupResult just wrote are authoritative now —
+      // drop the live overlay so a later getCleanupStatus polls the DB, not this turn's frames.
+      if (body.chat_id) clearCleanupLiveStatus(body.chat_id);
+    }
+  };
+  if (liveCleanupActive && body.chat_id && assistantMessageId) {
+    claimCleanupInFlight(body.chat_id, assistantMessageId, '*');
+    // A second controller under the same taskId — registerTurnAbort supports several per key —
+    // so finishStream's end-of-stream repairs share the turn's abort signal (one Stop cancels
+    // everything, including a repair still in flight when the stream ended).
+    cleanupAbortController = registerTurnAbort(taskId);
+    liveCleanupGuardHeld = true;
+  }
+
   if (streamingRp) {
     try {
       const turnResult = await runStreamingRpTurn({
@@ -314,6 +390,10 @@ export async function handleChatCompletions(
         },
         llm: turnLlm,
         db,
+        settings,
+        chats,
+        onCleanupEvent,
+        skipLiveTriggers: firstLlmTurn,
         onDelta: (delta) => {
           // Turn 1 is deliberately NOT streamed live (plan Edge Cases): ensureFirstTurnHeader may
           // rewrite the reply after the stream resolves, so relaying raw pre-repair text would show
@@ -328,6 +408,7 @@ export async function handleChatCompletions(
         },
       });
       reply = turnResult.content;
+      cleanupHandoff = turnResult.cleanup;
       if (mainTraceEntry) {
         mainTraceEntry.usage = turnResult.usage;
         mainTraceEntry.price = turnPrice;
@@ -338,11 +419,13 @@ export async function handleChatCompletions(
         if (isAbortError(err)) {
           log.info(`runStreamingRpTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
           req.off('close', onClientClose);
+          releaseLiveCleanupGuard();
           sendJson(res, 499, { error: 'turn aborted' });
           return;
         }
         log.error(`runStreamingRpTurn failed for user ${userId}`, err);
         req.off('close', onClientClose);
+        releaseLiveCleanupGuard();
         sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
         return;
       }
@@ -352,6 +435,7 @@ export async function handleChatCompletions(
       log.error(`runStreamingRpTurn failed for user ${userId} after streaming began`, err);
       writeStreamErrorTerminalFrame(res, isAbortError(err), err instanceof Error ? err.message : String(err));
       req.off('close', onClientClose);
+      releaseLiveCleanupGuard();
       return;
     }
   } else {
@@ -400,27 +484,78 @@ export async function handleChatCompletions(
     }
   }
 
-  if (body.chat_id) {    // Repair the scene header synchronously when the raw reply lacks one, so the scrape below has
+  if (body.chat_id) {
+    // Repair the scene header synchronously when the raw reply lacks one, so the scrape below has
     // a header to resolve a location from and the bg pass fires on turn 1 — the async cleanup
     // subloop would otherwise add the header only after this reply was already persisted and
     // scraped, and nothing re-scrapes (see orchestrator/ensureFirstTurnHeader.ts). One small LLM
     // call, first turn only, fail-open: a failed repair stores and sends the raw reply,
     // byte-identical to before.
-    if (firstLlmTurn && reply) {
-      reply = await ensureFirstTurnHeader(
-        { settings: deps.settings },
-        turnLlm,
-        userId,
-        body.chat_id,
-        reply,
-        messagesForLlm,
-      );
+    // Everything between the wildcard claim above and this finally can throw — appendMessages on
+    // a DB error, ensureFirstTurnHeader on a provider bug — and the guard must drop either way,
+    // or the 5s poll tick would never process this message again until restart. releaseLiveCleanupGuard
+    // is idempotent, so the finally is the handoff segment's single release point. The composed
+    // text and outcomes are read after the finally (turn-1's final SSE chunk carries the composed
+    // text), so they are declared here in the enclosing block.
+    let firstTurnHeaderRepaired = false;
+    let assistantMessage: { messageId: string; role: 'user' | 'assistant' } | undefined;
+    try {
+      if (firstLlmTurn && reply) {
+        const rawReply = reply;
+        reply = await ensureFirstTurnHeader(
+          { settings: deps.settings },
+          turnLlm,
+          userId,
+          body.chat_id,
+          reply,
+          messagesForLlm,
+        );
+        firstTurnHeaderRepaired = reply !== rawReply;
+      }
+      // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream runs BEFORE
+      // persistence — its end-of-stream repairs (tail body, footer, deferred 'llm' pass) patch the
+      // composed buffer, and every patch was already relayed to the client via SSE frames; the
+      // composed text is what finalizeCleanupResult writes as the next swipe, with the raw reply
+      // kept as swipe #0 (the same durable shape the poll tick produces). Turn 1: baseText is
+      // ensureFirstTurnHeader's output and the header region is attributed from its own result.
+      if (cleanupHandoff) {
+        try {
+          const fsResult = await finishStream(cleanupHandoff.ctx, cleanupDeps, reply, {
+            userId,
+            chatId: body.chat_id,
+            signal: cleanupAbortController!.signal,
+            onCleanupEvent,
+            skipLiveTriggers: firstLlmTurn,
+            headerDeployed: firstTurnHeaderRepaired,
+          });
+          cleanupComposed = fsResult.composed;
+          cleanupOutcomes = fsResult.outcomes;
+        } catch (err) {
+          if (isAbortError(err)) {
+            // A Stop landed during the end-of-stream repairs: the raw reply is still persisted
+            // below, but no composed swipe and no job rows — the message stays due and the poll
+            // tick catches it, same as the tick's own abort path.
+            log.info(`live cleanup handoff aborted for user ${userId}`, { chatId: body.chat_id });
+          } else {
+            throw err; // finishStream is fail-open internally — a non-abort throw here is a bug
+          }
+        }
+      }
+      // The user message (if this was a genuinely new turn) is already persisted above, before
+      // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
+      // scrapes the turn's header block into trusted scene state, anchored to the new message's
+      // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
+      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
+      assistantMessage = insertedAssistant;
+      // The composed text (if the live path ran) becomes the next swipe, exactly the poll tick's
+      // writeback — same finalizeCleanupResult, so the message is indistinguishable in
+      // cleanup_jobs from one the tick caught. Fail-open inside; then the in-flight guard drops.
+      if (cleanupOutcomes && cleanupComposed) {
+        await finalizeCleanupResult(cleanupDeps, userId, body.chat_id, assistantMessageId!, reply, cleanupComposed, cleanupOutcomes);
+      }
+    } finally {
+      releaseLiveCleanupGuard();
     }
-    // The user message (if this was a genuinely new turn) is already persisted above, before
-    // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
-    // scrapes the turn's header block into trusted scene state, anchored to the new message's
-    // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
-    const [assistantMessage] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
     // docs/lorebook-plan.md §3e/§4 — the activation log is written after the turn completes
     // ("write after, not during"): one row per entry this turn injected, the source sticky/
     // cooldown resolve from next turn. writeLorebookActivationLog fails open inside itself, so a
@@ -497,8 +632,11 @@ export async function handleChatCompletions(
     // chunk here, post header-repair.
     if (!streamHeadersSent) writeStreamHeaders(res);
     if (firstLlmTurn) {
+      // The composed text (if the live path ran) is what finalizeCleanupResult persisted as the
+      // active swipe; turn-1's raw reply is never relayed to the client, so send the composed
+      // text here (falling back to reply when no live pass ran — byte-identical to the old path).
       res.write(
-        `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: reply }, null))}\n\n`,
+        `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: cleanupComposed ?? reply }, null))}\n\n`,
       );
     }
     res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, {}, 'stop'))}\n\n`);

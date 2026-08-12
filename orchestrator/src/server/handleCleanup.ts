@@ -29,10 +29,12 @@ import { getCleanupSettings, parseSetCleanupSettingsBody, setCleanupSettings } f
 import { authenticate, readJsonBody, sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
 
-// The async cleanup subloop's (cleanupLoop.ts) read surface for the chat's floating status pill —
-// the TRG-style unchanged | thinking | modified | ⚠flagged state of the newest eligible message,
-// plus how many messages are still pending. Polled by the frontend the same way it polls
-// /v1/chat/status; the loop's per-message jobs in cleanup_jobs are the source of truth.
+// The async cleanup subloop's (cleanupLoop.ts) read surface for the chat's floating status pills —
+// the per-region (header/body/footer) pill states of the newest eligible message, each
+// not-called | in-flux | deployed | flagged (in-stream-cleanup-plan.md), plus how many messages
+// are still pending. Polled by the frontend the same way it polls /v1/chat/status; the loop's
+// per-message jobs in cleanup_jobs are the source of truth, with the live in-stream path's
+// cleanupLiveStatus map overlaid while a turn is actively streaming.
 export async function handleCleanupStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
   if (!userId) {

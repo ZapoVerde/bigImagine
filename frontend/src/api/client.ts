@@ -21,8 +21,10 @@ import type {
   ChatSyncStatus,
   ChubCardDetail,
   CleanupJob,
+  CleanupPatchFrame,
   CleanupSettings,
   CleanupStatus,
+  CleanupStatusFrame,
   ConnectionTestResult,
   CreateConnectionInput,
   CreateImageConnectionInput,
@@ -181,6 +183,8 @@ export async function chatCompletion(
   images?: { mimeType: string; base64: string }[],
   onDelta?: (textDelta: string) => void,
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
+  onCleanupStatus?: (frame: CleanupStatusFrame) => void,
+  onCleanupPatch?: (frame: CleanupPatchFrame) => void,
 ): Promise<ChatCompletionResponse> {
   const streaming = !!onDelta;
   const res = await fetch('/v1/chat/completions', {
@@ -206,7 +210,7 @@ export async function chatCompletion(
     if (bufferedContent) onDelta(bufferedContent);
     return buffered;
   }
-  const { id, created, model, content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame);
+  const { id, created, model, content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch);
   return {
     id,
     object: 'chat.completion',
@@ -218,9 +222,12 @@ export async function chatCompletion(
 
 /** Reads a streaming SSE response to completion: relays every content delta to onDelta in arrival
  *  order, reports the abort/error terminal frame through onTerminalFrame (the stream does not end
- *  there — [DONE] still follows), and resolves once [DONE] arrives. The wire format is the
- *  server's OpenAI-compatible framing: `data: {chunk json}` blocks separated by blank lines,
- *  `data: {bigimagine_error frame}` when the turn was aborted or failed mid-stream, and a final
+ *  there — [DONE] still follows), forwards the in-stream cleanup frames through onCleanupStatus /
+ *  onCleanupPatch, and resolves once [DONE] arrives. The wire format is the server's
+ *  OpenAI-compatible framing: `data: {chunk json}` blocks separated by blank lines,
+ *  `data: {bigimagine_error frame}` when the turn was aborted or failed mid-stream, interleaved
+ *  `data: {bigimagine_cleanup frame}` / `data: {bigimagine_patch frame}` cleanup frames
+ *  (in-stream-cleanup-plan.md — a consumer that has never heard of them ignores them), and a final
  *  `data: [DONE]` terminator. Chunk JSON carries id/created/model on every frame (captured here
  *  from the first one seen) and `choices[0].delta.content` per text piece; non-JSON or comment
  *  lines are ignored. */
@@ -228,6 +235,8 @@ async function consumeSseCompletionStream(
   res: Response,
   onDelta: (textDelta: string) => void,
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
+  onCleanupStatus?: (frame: CleanupStatusFrame) => void,
+  onCleanupPatch?: (frame: CleanupPatchFrame) => void,
 ): Promise<{ id: string; created: number; model: string; content: string }> {
   const reader = res.body?.getReader();
   if (!reader) throw new ApiError(0, 'streaming response has no body');
@@ -254,12 +263,30 @@ async function consumeSseCompletionStream(
       created?: number;
       model?: string;
       bigimagine_error?: unknown;
+      bigimagine_cleanup?: unknown;
+      bigimagine_patch?: unknown;
       choices?: { delta?: { content?: unknown }; finish_reason?: string }[];
     };
     if (chunk.bigimagine_error === true) {
       // Abort/error terminal frame — report it and keep reading; [DONE] follows and ends the
       // stream normally so the caller's resolve-on-[DONE] shape holds either way.
       onTerminalFrame?.(parsed as StreamingTerminalFrame);
+      return false;
+    }
+    if (chunk.bigimagine_cleanup === true) {
+      // In-stream cleanup status frame — one region's pill state (live path); keep reading.
+      onCleanupStatus?.(parsed as CleanupStatusFrame);
+      return false;
+    }
+    if (chunk.bigimagine_patch === true) {
+      // In-stream cleanup patch frame — a content splice in onDelta-accumulated coordinates; keep
+      // reading. Applied here too (in frame order) so the resolved content is byte-identical to
+      // the server's composed buffer — the swipe path persists that composed text, and
+      // ChatView replaces the regenerated message with it; without the splice, live repairs
+      // would visibly revert until the post-swipe DB refresh.
+      const patch = parsed as CleanupPatchFrame;
+      applyPatchToAccumulated(contentParts, patch);
+      onCleanupPatch?.(patch);
       return false;
     }
     if (chunk.id) id = chunk.id;
@@ -291,6 +318,22 @@ async function consumeSseCompletionStream(
     }
   }
   return { id, created: created || Math.floor(Date.now() / 1000), model, content: contentParts.join('') };
+}
+
+/** Splices a cleanup patch into the delta-accumulated parts, in frame order. The patch
+ *  coordinates are in server-composed-buffer space, and the parts array mirrors that buffer
+ *  (every delta pushed, every patch spliced, in arrival order), so the coordinates are valid
+ *  against the joined text. The joined result becomes the single accumulated part — later
+ *  patches and deltas still line up, because the buffer they were computed against moved with
+ *  ours. String slicing clamps out-of-range arguments, so an unexpected coordinate can never
+ *  throw here. */
+function applyPatchToAccumulated(
+  parts: string[],
+  patch: { start: number; end: number; replacement: string },
+): void {
+  const joined = parts.join('');
+  parts.length = 0;
+  parts.push(joined.slice(0, patch.start) + patch.replacement + joined.slice(patch.end));
 }
 
 /** GET /v1/chat/status — polled by ChatView while `sending` is true, alongside the still-in-flight
@@ -538,6 +581,8 @@ export async function swipeMessage(
   apiKey: string | null,
   onDelta?: (textDelta: string) => void,
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
+  onCleanupStatus?: (frame: CleanupStatusFrame) => void,
+  onCleanupPatch?: (frame: CleanupPatchFrame) => void,
 ): Promise<SwipeResult> {
   const path = `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`;
   if (!onDelta) {
@@ -558,7 +603,7 @@ export async function swipeMessage(
     if ('message' in buffered && buffered.message?.content) onDelta(buffered.message.content);
     return buffered;
   }
-  const { content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame);
+  const { content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame, onCleanupStatus, onCleanupPatch);
   return { message: { messageId, role: 'assistant', content, createdAt: new Date().toISOString() } };
 }
 

@@ -41,6 +41,8 @@ import type {
   ChatMessage,
   ChatParams,
   ChatSessionRow,
+  CleanupPatchFrame,
+  CleanupStatusFrame,
   ContextStackPreset,
   Folder,
   LlmConnectionSummary,
@@ -50,7 +52,7 @@ import CanvasPanel from '../components/canvas/CanvasPanel';
 import LorebookPanel from '../components/lorebook/LorebookPanel';
 import BranchMapPanel from '../components/branchMap/BranchMapPanel';
 import ChatSyncStatusPanel from '../components/chatSyncStatus/ChatSyncStatusPanel';
-import CleanupStatusPill from '../components/cleanup/CleanupStatusPill';
+import CleanupStatusPill, { type CleanupLivePillState } from '../components/cleanup/CleanupStatusPill';
 import StagingBar, { type StagedFile } from '../components/attachments/StagingBar';
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import LegibilityMenu from '../components/chat/LegibilityMenu';
@@ -366,6 +368,11 @@ export default function ChatView({
   // send() is being filled by onDelta, so the static "…" pending bubble is suppressed while this
   // is true — the live text is the status.
   const [liveStreaming, setLiveStreaming] = useState(false);
+  // The three cleanup pills' live per-region states while a turn with in-stream cleanup is
+  // actively streaming (in-stream-cleanup-plan.md) — fed from the bigimagine_cleanup SSE frames
+  // via send()/swipe()'s onCleanupStatus, and cleared when the stream resolves so the settled
+  // poll becomes authoritative again. null = no live cleanup turn in flight.
+  const [cleanupLive, setCleanupLive] = useState<CleanupLivePillState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
@@ -931,6 +938,35 @@ export default function ChatView({
     }
   }
 
+  /** In-stream cleanup status frame (client.ts's CleanupStatusFrame): update the three pills'
+   *  live states for this stream (the server-side live map, cleanupLiveStatus.ts, overlaid on the
+   *  settled poll — in-stream-cleanup-plan.md's ambient-hint-then-canonical-record handoff). */
+  const handleCleanupStatus = (frame: CleanupStatusFrame) => {
+    setCleanupLive((prev) => ({
+      ...(prev ?? { header: 'not-called', body: 'not-called', footer: 'not-called' }),
+      [frame.region]: frame.state,
+    }));
+  };
+
+  /** In-stream cleanup patch frame (client.ts's CleanupPatchFrame): the server spliced this span
+   *  into its composed buffer — byte-identical to the text this client accumulated via onDelta
+   *  (raw deltas plus every patch already applied, in the same order both sides applied them) —
+   *  so the same splice at the same offsets keeps the visible text in sync. For a send the target
+   *  is the in-progress placeholder (the tail); for a swipe it's the regenerating message. */
+  const applyCleanupPatch = (frame: CleanupPatchFrame, messageId?: string) => {
+    setMessages((prev) => {
+      const idx = messageId ? prev.findIndex((m) => m.messageId === messageId) : prev.length - 1;
+      const target = prev[idx];
+      if (!target || target.role !== 'assistant') return prev;
+      const next = [...prev];
+      next[idx] = {
+        ...target,
+        content: target.content.slice(0, frame.start) + frame.replacement + target.content.slice(frame.end),
+      };
+      return next;
+    });
+  };
+
   async function send() {
     const text = draft.trim();
     const resendLast = resendMode();
@@ -1023,6 +1059,13 @@ export default function ChatView({
               // streaming began surfaces as an error banner instead.
               if (!frame.aborted) setError(frame.message);
             },
+            // In-stream cleanup (in-stream-cleanup-plan.md): the live pill states ride the same
+            // SSE stream as the deltas, and the content patches splice into the placeholder in
+            // onDelta-accumulated coordinates (the tail while this send is in flight). Patches
+            // never arrive for turn 1 — the server sends the composed text wholesale there, so
+            // there is no already-streamed raw text to correct in place.
+            handleCleanupStatus,
+            (frame) => applyCleanupPatch(frame),
           );
         } else {
           await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
@@ -1033,6 +1076,9 @@ export default function ChatView({
           setTurnStatus(null);
         }
         setLiveStreaming(false);
+        // The stream is over — drop the live pill overrides so the settled poll becomes
+        // authoritative again (cleanupLiveStatus.ts's ambient-hint-then-canonical-record handoff).
+        setCleanupLive(null);
       }
       // Reconcile: for a streamed turn the placeholder is replaced by the server's canonical row
       // (dropped entirely if the stream aborted and nothing was persisted); for a buffered turn
@@ -1133,6 +1179,11 @@ export default function ChatView({
             if (frame.aborted) abortedStream = true;
             else setError(frame.message);
           },
+          // In-stream cleanup (in-stream-cleanup-plan.md): same frames as a send, but a swipe
+          // has no turn-1 special case — every delta (and patch) targets the regenerating
+          // message in place, so patches splice into that message by id.
+          handleCleanupStatus,
+          (frame) => applyCleanupPatch(frame, messageId),
         );
       } else {
         result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
@@ -1179,6 +1230,9 @@ export default function ChatView({
     } finally {
       setSwipingId(null);
       setSwipeRegenerating(false);
+      // The regeneration stream is over — drop the live pill overrides so the settled poll is
+      // authoritative again (same handoff as a send's finally).
+      setCleanupLive(null);
     }
   }
 
@@ -1486,6 +1540,7 @@ export default function ChatView({
               <CleanupStatusPill
                 apiKey={apiKey}
                 chatId={activeChat.chatId}
+                liveStatus={cleanupLive}
                 onSettled={() => {
                   const id = activeChat.chatId;
                   if (chatIdRef.current !== id) return;

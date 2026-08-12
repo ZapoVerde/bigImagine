@@ -17,7 +17,7 @@ import { createPostgresClient } from '../dist/io/postgres.js';
 import { createFieldCipher } from '../dist/io/fieldCipher.js';
 import { CREDENTIAL_NAMES } from '../dist/io/providerCredentials.js';
 import { clearPromptTrace } from '../dist/io/promptTrace.js';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
 
@@ -280,6 +280,7 @@ function createFakeChatSessionStore() {
 
   return {
     sessions,
+    messagesByChat,
     swipesByMessage,
     syncStatusByChat,
     syncInspections,
@@ -312,6 +313,9 @@ function createFakeChatSessionStore() {
         characterId: init.characterId ?? null,
         promptStackPresetId: init.promptStackPresetId ?? null,
         cleanupPresetId: null,
+        // The cleanup opt-in stamp (0071 Cleanup page): non-null turns the in-stream cleanup path
+        // on for this RP chat (handleChatCompletions' live gate reads it via getChat).
+        cleanupEnabledAt: init.cleanupEnabledAt ?? null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -379,7 +383,9 @@ function createFakeChatSessionStore() {
       // clock_timestamp() fixed in chatSessions.ts itself (see appendMessages there).
       const inserted = [];
       for (const m of messages) {
-        const row = { messageId: newId('msg'), role: m.role, content: m.content, createdAt: ++counter };
+        // The send path pre-generates the assistant message id (handleChatCompletions) so the
+        // in-stream cleanup ledger can be keyed to it; honor it when present, else mint one.
+        const row = { messageId: m.messageId ?? newId('msg'), role: m.role, content: m.content, createdAt: ++counter };
         arr.push(row);
         inserted.push({ messageId: row.messageId, role: row.role });
       }
@@ -493,6 +499,48 @@ function createFakeChatSessionStore() {
         swipes: { index: idx, count: swipes.length },
       };
     },
+    async recordSwipeIfContent(userId, chatId, messageId, expectedContent, newContent) {
+      // Minimal mirror of io/chatSessions.ts's recordSwipeIfContent — finalizeCleanupResult's
+      // atomic writeback (in-stream-cleanup-plan.md): the mid-flight guard refuses when the
+      // message no longer holds the content the repair planned against (a user regen or swipe
+      // landed meanwhile; the fresh content carries no cleanup_jobs row so the tick picks it up).
+      // Returns the new swipe id so the caller can key its cleanup_jobs rows to it.
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
+      if (!target) return undefined;
+      if (expectedContent !== undefined && target.content !== expectedContent) return undefined;
+      let swipes = swipesByMessage.get(messageId) ?? [];
+      if (swipes.length === 0) {
+        swipes = [target.content];
+        swipesByMessage.set(messageId, swipes);
+        activeSwipeIdx.set(messageId, 0);
+      }
+      const newSwipeId = newId('swipe');
+      swipes.push(newContent);
+      const idx = swipes.length - 1;
+      activeSwipeIdx.set(messageId, idx);
+      target.content = newContent;
+      return {
+        newSwipeId,
+        message: {
+          messageId,
+          role: 'assistant',
+          content: newContent,
+          createdAt: target.createdAt,
+          swipes: { index: idx, count: swipes.length },
+        },
+      };
+    },
+    async ensureActiveSwipe(userId, chatId, messageId) {
+      // Minimal mirror of io/chatSessions.ts's ensureActiveSwipe (the post-cleanup location
+      // scrape's anchor read) — a stable id suffices here: the scrape fails open at the
+      // extractFromHeader DB step anyway, so only the anchor lookup needs to succeed.
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
+      return target ? 'swipe-live-1' : undefined;
+    },
     async createFolder(userId, init) {
       const folderId = newId('folder');
       const row = { folderId, userId, name: init.name, parentId: init.parentId ?? null };
@@ -550,10 +598,24 @@ function createFakePool() {
   // (withUserScope, rows shaped like the query's snake_case result columns).
   const renderStatusUsers = [];
   const renderStatusLocations = [];
+  // In-stream cleanup fixtures (part 9): cleanupMessages seeds the pool-side chat_messages reads
+  // (recent history + the FOR UPDATE content/active-swipe check), cleanupJobs records the
+  // finalizeCleanupResult ledger for assertion.
+  const cleanupMessages = [];
+  const cleanupJobs = [];
+  // Set by part 9: live lookup of a chat's message by id (the fake chat store's own rows), for
+  // finalizeCleanupResult's FOR UPDATE content/active-swipe read on the no-change path — the
+  // send path's assistant message id is generated inside the request, so it can't be seeded.
+  let resolveCleanupMessage;
   return {
     inserts,
     characters,
     slotsByPreset,
+    cleanupMessages,
+    cleanupJobs,
+    set resolveCleanupMessage(fn) {
+      resolveCleanupMessage = fn;
+    },
     setChatLocationState(chatId, state) {
       chatLocationState.set(chatId, state);
     },
@@ -671,6 +733,44 @@ function createFakePool() {
           //   shaped like the query's snake_case result columns.
           if (sql.startsWith('select location_id, name, status')) {
             return { rows: renderStatusLocations };
+          }
+          // --- In-stream cleanup (in-stream-cleanup-plan.md): the queries the live path's
+          // context load and finalizeCleanupResult issue. Slop rules default to none; recent
+          // history to the seeded cleanupMessages (repair prompts are stubbed, so contents never
+          // matter); the location-block reads return empty — this suite has no scenes/locations
+          // rows, which is the faithful "no <locations> block" answer. cleanup_jobs inserts are
+          // recorded (pool.cleanupJobs) for assertion; the FOR UPDATE content/active-swipe read
+          // serves the no-change record path. ---
+          if (sql.includes('select') && sql.includes('from cleanup_slop_rules')) {
+            return { rows: [] };
+          }
+          if (sql.includes('select role, content from chat_messages') && sql.includes('limit $2')) {
+            const [chatId] = params;
+            return { rows: cleanupMessages.filter((m) => m.chat_id === chatId).map((m) => ({ role: m.role, content: m.content })) };
+          }
+          if (sql.includes('join scenes s on s.scene_id = cs.scene_id')) return { rows: [] };
+          if (sql.includes('select name from locations') && sql.includes('parent_location_id is null')) return { rows: [] };
+          if (sql.includes('select content, active_swipe_id from chat_messages')) {
+            const [messageId, chatId] = params;
+            const seeded = cleanupMessages.find((x) => x.message_id === messageId && x.chat_id === chatId);
+            const m = seeded ?? resolveCleanupMessage?.(messageId, chatId);
+            return { rows: m ? [{ content: m.content, active_swipe_id: m.active_swipe_id }] : [] };
+          }
+          if (sql.includes('insert into cleanup_jobs')) {
+            const [chatId, messageId, swipeId, region, status, changed, notes] = params;
+            if (!cleanupJobs.some((j) => j.message_id === messageId && j.swipe_id === swipeId && j.region === region)) {
+              cleanupJobs.push({
+                job_id: randomUUID(),
+                chat_id: chatId,
+                message_id: messageId,
+                swipe_id: swipeId,
+                region,
+                status,
+                changed,
+                notes,
+              });
+            }
+            return { rows: [] };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -3286,55 +3386,76 @@ server.close();
 // turn produces multiple SSE data: frames that must concatenate to exactly what gets persisted.
 // A separate second server hosts the abortable provider for the mid-stream abort fixture (it
 // needs to yield control between deltas so the test can fire POST /v1/chat/abort mid-flight).
-{
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  // Collects the SSE data: payloads of a response body into an array, in arrival order. The
-  // OpenAI chunk shape is `{ choices: [{ delta: { content }, finish_reason }] }`; the new
-  // terminal frame is `{ bigimagine_error, aborted, message }`; the terminator is the literal
-  // `[DONE]` line. Content deltas and finish_reason 'stop' are both picked out of the chunks.
-  async function readSseData(res) {
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    const payloads = [];
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buffer.indexOf('\n\n')) !== -1) {
-        const block = buffer.slice(0, idx);
-        buffer = buffer.slice(idx + 2);
-        for (const line of block.split('\n')) {
-          if (line.startsWith('data: ')) payloads.push(line.slice('data: '.length));
-        }
+// SSE helpers live at module scope here — both part 8 and part 9's in-stream cleanup fixtures
+// read the same streaming frame shapes.
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Collects the SSE data: payloads of a response body into an array, in arrival order. The
+// OpenAI chunk shape is `{ choices: [{ delta: { content }, finish_reason }] }`; the new
+// terminal frame is `{ bigimagine_error, aborted, message }`; the terminator is the literal
+// `[DONE]` line. Content deltas and finish_reason 'stop' are both picked out of the chunks.
+async function readSseData(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  const payloads = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      for (const line of block.split('\n')) {
+        if (line.startsWith('data: ')) payloads.push(line.slice('data: '.length));
       }
     }
-    return payloads;
   }
-  function deltaText(payload) {
-    try {
-      return JSON.parse(payload).choices?.[0]?.delta?.content ?? null;
-    } catch {
-      return null;
-    }
+  return payloads;
+}
+function deltaText(payload) {
+  try {
+    return JSON.parse(payload).choices?.[0]?.delta?.content ?? null;
+  } catch {
+    return null;
   }
-  function finishReason(payload) {
-    try {
-      return JSON.parse(payload).choices?.[0]?.finish_reason ?? null;
-    } catch {
-      return null;
-    }
+}
+function finishReason(payload) {
+  try {
+    return JSON.parse(payload).choices?.[0]?.finish_reason ?? null;
+  } catch {
+    return null;
   }
-  function isErrorFrame(payload) {
-    try {
-      const v = JSON.parse(payload);
-      return v && v.bigimagine_error === true;
-    } catch {
-      return false;
-    }
+}
+function isErrorFrame(payload) {
+  try {
+    const v = JSON.parse(payload);
+    return v && v.bigimagine_error === true;
+  } catch {
+    return false;
   }
+}
+// In-stream cleanup frames (in-stream-cleanup-plan.md Contracts): bigimagine_cleanup carries
+// one region's live pill state; bigimagine_patch carries a content splice in onDelta-accumulated
+// coordinates. Both return null for any other payload.
+function cleanupStatusFrame(payload) {
+  try {
+    const v = JSON.parse(payload);
+    return v && v.bigimagine_cleanup === true ? { region: v.region, state: v.state } : null;
+  } catch {
+    return null;
+  }
+}
+function cleanupPatchFrame(payload) {
+  try {
+    const v = JSON.parse(payload);
+    return v && v.bigimagine_patch === true ? { region: v.region, start: v.start, end: v.end, replacement: v.replacement } : null;
+  } catch {
+    return null;
+  }
+}
 
+{
   const rpKey = 'good-key-rp:44444444-4444-4444-4444-444444444444';
   const streamedReply = 'The wind carried the smell of rain through the shutters.';
   const streamLlm = createStubLlmProvider([
@@ -3551,6 +3672,221 @@ server.close();
   }
 
   server8.close();
+}
+
+// --- Part 9: in-stream cleanup (in-stream-cleanup-plan.md) — real-socket verification of the
+// live repair path end to end. A streaming RP turn whose raw reply has a malformed header emits
+// the bigimagine_cleanup in-flux frame for region "header" plus a bigimagine_patch frame before
+// [DONE], and finalizeCleanupResult writes the composed text as the next swipe (raw kept as
+// swipe #0) with one cleanup_jobs row per region; the swipe route's needs_regenerate stream does
+// the same (send/swipe parity); a fully conforming turn emits no patch frames and records three
+// not-called outcomes. ---
+{
+  const cleanupKey = 'good-key-cleanup:66666666-6666-6666-6666-666666666666';
+  const userId9 = '66666666-6666-6666-6666-666666666666';
+  const auth9 = { 'content-type': 'application/json', authorization: 'Bearer good-key-cleanup' };
+  const cleanupEnabledAt = '2026-01-01T00:00:00.000Z';
+  // The scripted replies (stub LLM serves them in order across completeStream AND complete):
+  // rawA/rawB are non-first-turn replies with a malformed header (a bracket line that fails the
+  // canonical `[... | ... | ...]` + Present: shape) and no footer, so the live path repairs both;
+  // conforming needs no repair at all.
+  const headerA = '[Late Evening | 🗓️ Saturday, August 15, 2026 | 📍 The Manor - Hallway]\nPresent: Mara';
+  const headerB = '[Late Evening | 🗓️ Saturday, August 15, 2026 | 📍 The Manor - Study]\nPresent: Kai';
+  const footerBlock = '<details><summary>▸</summary>\ninner thoughts\n</details>';
+  const rawA = '[Wandering hours later]\nShe stepped inside.\nDust swirled in the light.\n';
+  const rawB = '[The rain falls]\nThe fire spat.\nShadows danced.\n';
+  const conforming =
+    '[Early Morning | 🗓️ Sunday, August 16, 2026 | 📍 The Manor - Kitchen]\nPresent: Mara, Kai\n\n' +
+    'Mara poured the tea.\nKai reached for the cup.\n\n' +
+    '<details><summary>▸</summary>\ncalm inner thoughts\n</details>';
+  const cleanupLlm = createStubLlmProvider([
+    { message: { role: 'assistant', content: rawA }, toolCalls: [] }, // fixture A: turn (malformed header)
+    { message: { role: 'assistant', content: headerA }, toolCalls: [] }, // fixture A: header repair
+    { message: { role: 'assistant', content: footerBlock }, toolCalls: [] }, // fixture A: footer repair
+    { message: { role: 'assistant', content: rawB }, toolCalls: [] }, // fixture B: turn (malformed header)
+    { message: { role: 'assistant', content: headerB }, toolCalls: [] }, // fixture B: header repair
+    { message: { role: 'assistant', content: footerBlock }, toolCalls: [] }, // fixture B: footer repair
+    { message: { role: 'assistant', content: conforming }, toolCalls: [] }, // fixture C: turn (already conforming)
+  ]);
+  const pool9 = createFakePool();
+  const db9 = createPostgresClient(pool9);
+  const chats9 = createFakeChatSessionStore();
+  // The no-change record path (fixture C) reads the message's content + active swipe through the
+  // pool, but the send path's assistant message id is generated inside the request — resolve it
+  // live from the fake store's own rows instead of seeding.
+  pool9.resolveCleanupMessage = (messageId, chatId) => {
+    const m = (chats9.messagesByChat.get(chatId) ?? []).find((x) => x.messageId === messageId);
+    return m ? { content: m.content, active_swipe_id: 'swipe-live-1' } : undefined;
+  };
+  const server9 = startHttpServer({
+    llm: cleanupLlm,
+    db: db9,
+    tools: createToolRegistry([echoTool]),
+    apiKeys: createApiKeyStore(cleanupKey),
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chats9,
+    adminApiKey: 'unused-in-part-9',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server9.once('listening', resolve));
+  const base9 = `http://127.0.0.1:${server9.address().port}`;
+
+  // --- Fixture A: a non-first-turn RP send whose raw reply has a malformed header emits the
+  // live header repair frames before [DONE], and the persisted message + cleanup_jobs rows
+  // reflect the composed text (raw kept as swipe #0) ---
+  {
+    const chat = await chats9.createChat(userId9, { title: 'Live cleanup send', kind: 'rp', cleanupEnabledAt });
+    await chats9.appendMessages(userId9, chat.chatId, [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'an earlier reply' },
+    ]);
+    const res = await fetch(`${base9}/v1/chat/completions`, {
+      method: 'POST',
+      headers: auth9,
+      body: JSON.stringify({
+        messages: [
+          { role: 'user', content: 'start' },
+          { role: 'assistant', content: 'an earlier reply' },
+          { role: 'user', content: 'continue' },
+        ],
+        chat_id: chat.chatId,
+        stream: true,
+      }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'a cleanup-enabled RP stream:true send returns an SSE response');
+    const payloads = await readSseData(res);
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the cleanup send stream ends with [DONE]');
+    const statusFrames = payloads.map(cleanupStatusFrame).filter((f) => f !== null);
+    const patchFrames = payloads.map(cleanupPatchFrame).filter((f) => f !== null);
+    assert(
+      statusFrames.some((f) => f.region === 'header' && f.state === 'in-flux'),
+      'a malformed raw header emits a bigimagine_cleanup in-flux frame for region "header"',
+    );
+    assert(
+      statusFrames.some((f) => f.region === 'header' && f.state === 'deployed'),
+      'the header region transitions to deployed once the repair lands',
+    );
+    const headerPatch = patchFrames.find((f) => f.region === 'header');
+    assert(
+      headerPatch &&
+        headerPatch.start === 0 &&
+        headerPatch.end === 24 && // '[Wandering hours later]\n' — the malformed attempt is swallowed
+        headerPatch.replacement.startsWith('[Late Evening'),
+      'a bigimagine_patch frame splices the malformed span (0..24) with the repaired header',
+    );
+    const detail = await chats9.getChat(userId9, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(
+      last.content.startsWith('[Late Evening') &&
+        !last.content.includes('[Wandering hours later]') &&
+        last.content.includes('Dust swirled') &&
+        last.content.endsWith('</details>'),
+      'the persisted message is the composed text (repaired header + body + repaired footer)',
+    );
+    assert(
+      (chats9.swipesByMessage.get(last.messageId) ?? [])[0] === rawA,
+      'the original raw reply is preserved as swipe #0',
+    );
+    const jobsFor = pool9.cleanupJobs.filter((j) => j.message_id === last.messageId);
+    assert(jobsFor.length === 3, 'finalizeCleanupResult records one cleanup_jobs row per region');
+    const job = (region) => jobsFor.find((j) => j.region === region);
+    assert(job('header')?.status === 'done' && job('header')?.changed === true, 'the header job records done/changed (deployed pill)');
+    assert(job('body')?.status === 'done' && job('body')?.changed === false, 'the body job records done/unchanged (not-called pill)');
+    assert(job('footer')?.status === 'done' && job('footer')?.changed === true, 'the footer job records done/changed (deployed pill)');
+  }
+
+  // --- Fixture B: the swipe route's needs_regenerate stream repairs the same way (send/swipe
+  // parity) — the regenerated raw text is recordSwipe'd, then the live cleanup handoff rewrites
+  // the composed text and records the per-region jobs ---
+  {
+    const chat = await chats9.createChat(userId9, { title: 'Live cleanup swipe', kind: 'rp', cleanupEnabledAt });
+    await chats9.appendMessages(userId9, chat.chatId, [{ role: 'user', content: 'start' }]);
+    const [assistantMsg] = await chats9.appendMessages(userId9, chat.chatId, [{ role: 'assistant', content: 'original reply' }]);
+    const res = await fetch(`${base9}/v1/chats/${chat.chatId}/messages/${assistantMsg.messageId}/swipe`, {
+      method: 'POST',
+      headers: auth9,
+      body: JSON.stringify({ direction: 'next', stream: true }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'a cleanup-enabled needs_regenerate swipe with stream:true returns an SSE response');
+    const payloads = await readSseData(res);
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the cleanup swipe stream ends with [DONE]');
+    const statusFrames = payloads.map(cleanupStatusFrame).filter((f) => f !== null);
+    const patchFrames = payloads.map(cleanupPatchFrame).filter((f) => f !== null);
+    assert(
+      statusFrames.some((f) => f.region === 'header' && f.state === 'in-flux'),
+      'the swipe stream emits the header in-flux frame too (send/swipe parity)',
+    );
+    assert(
+      patchFrames.some((f) => f.region === 'header' && f.start === 0 && f.replacement.startsWith('[Late Evening')),
+      'the swipe stream carries the header patch frame',
+    );
+    const detail = await chats9.getChat(userId9, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(
+      last.messageId === assistantMsg.messageId &&
+        last.content.startsWith('[Late Evening') &&
+        !last.content.includes('[The rain falls]') &&
+        last.content.endsWith('</details>'),
+      'the swipe regenerated message is rewritten to the composed text',
+    );
+    assert(
+      (chats9.swipesByMessage.get(assistantMsg.messageId) ?? []).includes(rawB),
+      'the swipe raw regenerated text is kept as a swipe (recordSwipe + writeback)',
+    );
+    const jobsFor = pool9.cleanupJobs.filter((j) => j.message_id === assistantMsg.messageId);
+    assert(jobsFor.length === 3 && jobsFor.some((j) => j.region === 'header' && j.status === 'done' && j.changed === true), 'the swipe cleanup_jobs rows record the repair per region');
+  }
+
+  // --- Fixture C: a fully conforming turn emits no patch frames and no in-flux/deployed/flagged
+  // status — the header early check reports not-called, and finalizeCleanupResult records three
+  // not-called outcomes against the active swipe ---
+  {
+    const chat = await chats9.createChat(userId9, { title: 'Live cleanup conforming', kind: 'rp', cleanupEnabledAt });
+    await chats9.appendMessages(userId9, chat.chatId, [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'an earlier reply' },
+    ]);
+    const res = await fetch(`${base9}/v1/chat/completions`, {
+      method: 'POST',
+      headers: auth9,
+      body: JSON.stringify({
+        messages: [
+          { role: 'user', content: 'start' },
+          { role: 'assistant', content: 'an earlier reply' },
+          { role: 'user', content: 'continue' },
+        ],
+        chat_id: chat.chatId,
+        stream: true,
+      }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'a conforming cleanup-enabled stream:true send returns an SSE response');
+    const payloads = await readSseData(res);
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the conforming stream ends with [DONE]');
+    const patchFrames = payloads.map(cleanupPatchFrame).filter((f) => f !== null);
+    const statusFrames = payloads.map(cleanupStatusFrame).filter((f) => f !== null);
+    assert(patchFrames.length === 0, 'a turn needing no repairs emits no bigimagine_patch frames');
+    assert(
+      statusFrames.every((f) => f.state === 'not-called') &&
+        statusFrames.some((f) => f.region === 'header' && f.state === 'not-called'),
+      'the only cleanup status frame is the header not-called confirmation — never in-flux/deployed/flagged',
+    );
+    const detail = await chats9.getChat(userId9, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(last.content === conforming, 'the conforming reply is persisted byte-identical (no writeback)');
+    const jobsFor = pool9.cleanupJobs.filter((j) => j.message_id === last.messageId);
+    assert(jobsFor.length === 3, 'the conforming turn still records one cleanup_jobs row per region');
+    assert(
+      jobsFor.every((j) => j.status === 'done' && j.changed === false),
+      'all three region outcomes stay not-called (done/unchanged)',
+    );
+  }
+
+  server9.close();
 }
 
 if (process.exitCode) {

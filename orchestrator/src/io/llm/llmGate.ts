@@ -201,7 +201,8 @@ async function preflightAgentRoutineCheck(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   jobId: string,
-): Promise<void> {  const enabled = (await settings.get('agent_routines_enabled')) === 'true';
+): Promise<void> {
+  const enabled = (await settings.get('agent_routines_enabled')) === 'true';
   if (!enabled) throw new Error('agent_routines_enabled is off — this routine will not run until re-enabled in Settings');
 
   const job = await loadJobCaps(db, jobId);

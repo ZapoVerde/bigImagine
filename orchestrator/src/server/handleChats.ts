@@ -51,6 +51,7 @@ import {
   resolveChatLocationImage,
 } from './locationImages.js';
 import { regenerateSwipe } from './turnExecution.js';
+import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import type { HttpServerDeps } from './httpServer.js';
 
 export function isChatPatchBody(value: unknown): value is {
@@ -503,7 +504,7 @@ export async function handleChatRoutes(
       const onClientClose = () => {
         if (streamingRp) abortTurn(chatId);
       };
-      if (streamingRp) req.on('close', onClientClose);
+      req.on('close', onClientClose);
       const onDelta = (delta: string) => {
         if (!streamHeadersSent) {
           writeStreamHeaders(res);
@@ -511,7 +512,27 @@ export async function handleChatRoutes(
         }
         res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
       };
-      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta);
+      // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): forward the cleanup events to
+      // regenerateSwipe for RP chats that opted in (cleanup_enabled_at), which translates them
+      // into SSE frames mirroring handleChatCompletions exactly — the send/swipe parity the plan
+      // carries through to cleanup. Same first-frame-commits-headers rule as onDelta above.
+      const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined =
+        streamingRp && detail.session.cleanupEnabledAt != null
+          ? (event) => {
+              if (!streamHeadersSent) {
+                writeStreamHeaders(res);
+                streamHeadersSent = true;
+              }
+              if (event.kind === 'status') {
+                res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
+              } else {
+                res.write(
+                  `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
+                );
+              }
+            }
+          : undefined;
+      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta, onCleanupEvent);
       if (!result.ok) {
         if (streamingRp && streamHeadersSent) {
           // Streaming had already begun: headers are committed, so surface the failure/abort as

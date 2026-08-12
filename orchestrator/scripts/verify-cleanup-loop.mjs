@@ -15,7 +15,14 @@
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { getPromptTrace } from '../dist/io/promptTrace.js';
-import { runCleanupTick, getCleanupStatus, runCleanupNow, getCleanupJobs } from '../dist/orchestrator/cleanupLoop.js';
+import {
+  runCleanupTick,
+  getCleanupStatus,
+  runCleanupNow,
+  getCleanupJobs,
+  claimCleanupInFlight,
+  releaseCleanupInFlight,
+} from '../dist/orchestrator/cleanupLoop.js';
 import {
   getCleanupSettings,
   parseSetCleanupSettingsBody,
@@ -43,6 +50,15 @@ function createFakePool() {
   const jobs = []; // cleanup_jobs rows
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
+
+  // Per-region dedup (migration 0090): a message is covered once its active swipe has one
+  // cleanup_jobs row for each of header/body/footer.
+  const hasAllRegions = (m) => {
+    const regions = new Set(
+      jobs.filter((j) => j.message_id === m.message_id && j.swipe_id === m.active_swipe_id).map((j) => j.region),
+    );
+    return regions.size >= 3;
+  };
 
   return {
     users,
@@ -123,16 +139,13 @@ function createFakePool() {
             return { rows };
           }
 
-          // findDueMessages — assistant messages after the stamp with no job for their active swipe
+          // findDueMessages — assistant messages after the stamp with fewer than three region
+          // rows for their active swipe
           if (sql.includes('select m.message_id, m.content, m.created_at')) {
             const [chatId, enabledAt] = params;
             const rows = chatMessages
               .filter(
-                (m) =>
-                  m.chat_id === chatId &&
-                  m.role === 'assistant' &&
-                  m.created_at > enabledAt &&
-                  !jobs.some((j) => j.message_id === m.message_id && j.swipe_id === m.active_swipe_id),
+                (m) => m.chat_id === chatId && m.role === 'assistant' && m.created_at > enabledAt && !hasAllRegions(m),
               )
               .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id))
               .map((m) => ({ message_id: m.message_id, content: m.content, created_at: m.created_at }));
@@ -140,7 +153,7 @@ function createFakePool() {
           }
 
           // loadHistory — messages before the target (chronological boundary)
-          if (sql.includes('select role, content from chat_messages')) {
+          if (sql.includes('select role, content from chat_messages') && sql.includes('created_at < $3')) {
             const [chatId, messageId, createdAt] = params;
             const rows = chatMessages
               .filter(
@@ -154,6 +167,17 @@ function createFakePool() {
             return { rows };
           }
 
+          // loadRecentHistory — the boundary-less variant (the live path: last N messages)
+          if (sql.includes('select role, content from chat_messages') && sql.includes('limit $2')) {
+            const [chatId] = params;
+            const rows = chatMessages
+              .filter((m) => m.chat_id === chatId)
+              .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id))
+              .slice(-40)
+              .map((m) => ({ role: m.role, content: m.content }));
+            return { rows };
+          }
+
           // recordJobForActiveSwipe: content + active swipe read (verified against expectedContent),
           // then job insert
           if (sql.includes('select content, active_swipe_id from chat_messages')) {
@@ -161,16 +185,17 @@ function createFakePool() {
             const m = chatMessages.find((x) => x.message_id === messageId && x.chat_id === chatId);
             return { rows: m ? [{ content: m.content, active_swipe_id: m.active_swipe_id }] : [] };
           }
-          // recordJob: job insert (the active-swipe variant above shares this exact SQL)
+          // recordJob(s): per-region job inserts (the active-swipe variant shares this SQL)
           if (sql.includes('insert into cleanup_jobs')) {
-            const [chatId, messageId, swipeId, status, changed, notes] = params;
-            const exists = jobs.some((j) => j.message_id === messageId && j.swipe_id === swipeId);
+            const [chatId, messageId, swipeId, region, status, changed, notes] = params;
+            const exists = jobs.some((j) => j.message_id === messageId && j.swipe_id === swipeId && j.region === region);
             if (!exists) {
               jobs.push({
                 job_id: randomUUID(),
                 chat_id: chatId,
                 message_id: messageId,
                 swipe_id: swipeId,
+                region,
                 status,
                 changed,
                 notes,
@@ -197,31 +222,26 @@ function createFakePool() {
             const sess = chatSessions.get(chatId);
             const count = chatMessages.filter(
               (m) =>
-                m.chat_id === chatId &&
-                m.role === 'assistant' &&
-                sess &&
-                m.created_at > sess.cleanup_enabled_at &&
-                !jobs.some((j) => j.message_id === m.message_id && j.swipe_id === m.active_swipe_id),
+                m.chat_id === chatId && m.role === 'assistant' && sess && m.created_at > sess.cleanup_enabled_at && !hasAllRegions(m),
             ).length;
             return { rows: [{ count: String(count) }] };
           }
-          if (sql.includes('select m.message_id, m.created_at from chat_messages')) {
+          if (sql.includes('select m.message_id, m.created_at, m.active_swipe_id from chat_messages')) {
             const [chatId] = params;
             const sess = chatSessions.get(chatId);
             const rows = chatMessages
               .filter((m) => m.chat_id === chatId && m.role === 'assistant' && sess && m.created_at > sess.cleanup_enabled_at)
               .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.message_id.localeCompare(a.message_id))
               .slice(0, 1)
-              .map((m) => ({ message_id: m.message_id, created_at: m.created_at }));
+              .map((m) => ({ message_id: m.message_id, created_at: m.created_at, active_swipe_id: m.active_swipe_id }));
             return { rows };
           }
-          if (sql.includes('select j.status, j.changed from cleanup_jobs')) {
+          if (sql.includes('select j.region, j.status, j.changed from cleanup_jobs')) {
             const [messageId] = params;
             const m = chatMessages.find((x) => x.message_id === messageId);
-            const match = jobs.filter((j) => j.message_id === messageId && m && j.swipe_id === m.active_swipe_id);
-            const rows = match.length
-              ? [{ status: match[match.length - 1].status, changed: match[match.length - 1].changed }]
-              : [];
+            const rows = jobs
+              .filter((j) => j.message_id === messageId && m && j.swipe_id === m.active_swipe_id)
+              .map((j) => ({ region: j.region, status: j.status, changed: j.changed }));
             return { rows };
           }
 
@@ -355,9 +375,13 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
 
   assert(llm.calls.length === 0, 'a conforming reply fires no LLM calls');
-  assert(pool.jobs.length === 1, 'one cleanup_jobs row is recorded for the conforming reply');
-  assert(pool.jobs[0].status === 'done' && pool.jobs[0].changed === false, 'conforming reply job is done+unchanged');
-  assert(pool.jobs[0].message_id === message.message_id, 'job is anchored to the processed message');
+  assert(pool.jobs.length === 3, 'one cleanup_jobs row per region is recorded for the conforming reply');
+  assert(pool.jobs.every((j) => j.status === 'done' && j.changed === false), 'conforming reply jobs are all done+unchanged');
+  assert(
+    new Set(pool.jobs.map((j) => j.region)).size === 3 && pool.jobs.every((j) => ['header', 'body', 'footer'].includes(j.region)),
+    'the three rows cover exactly header, body, and footer',
+  );
+  assert(pool.jobs.every((j) => j.message_id === message.message_id), 'jobs are anchored to the processed message');
   assert(pool.swipes.some((s) => s.message_id === message.message_id), 'ensureActiveSwipe materialized a swipe for the job key');
 }
 
@@ -446,8 +470,12 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(current.content.startsWith(VALID_HEADER), 'the header survives the slop rewrite');
   assert(current.content.includes(VALID_FOOTER.trim()), 'the conforming footer survives the slop rewrite');
   assert(llm.calls.length === 0, 'a remove-only cleanup makes no LLM call');
-  const job = pool.jobs.find((j) => j.message_id === message.message_id);
-  assert(job && job.status === 'done' && job.changed === true, 'the rewrite job is done+changed');
+  const job = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'body');
+  assert(job && job.status === 'done' && job.changed === true, 'the remove-rewrite body job is done+changed');
+  assert(
+    pool.jobs.filter((j) => j.message_id === message.message_id && j.region !== 'body').every((j) => j.status === 'done' && j.changed === false),
+    'header and footer regions report done+unchanged for a body-only rewrite',
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +507,10 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(llm.calls[1][0].content.includes('footer'), 'the second repair prompt is the footer build');
   const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
   assert(current.content.startsWith(VALID_HEADER), 'the header repair prompt output replaced the missing header');
-  const job = pool.jobs.find((j) => j.message_id === message.message_id);
-  assert(job && job.status === 'done' && job.changed === true, 'the header repair job is done+changed');
+  const headerJob = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'header');
+  assert(headerJob && headerJob.status === 'done' && headerJob.changed === true, 'the header repair job is done+changed');
+  const footerJob = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'footer');
+  assert(footerJob && footerJob.status === 'done', 'the footer build job is recorded for its own region');
 }
 
 // ---------------------------------------------------------------------------
@@ -549,8 +579,8 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
   assert(current.content.includes('<details><summary>▸</summary>'), 'the fresh footer block is appended to the reply');
   assert(current.content.startsWith(VALID_HEADER), 'the header survives the footer build');
-  const job = pool.jobs.find((j) => j.message_id === message.message_id);
-  assert(job && job.status === 'done' && job.changed === true, 'the footer-build reply is done+changed');
+  const footerJob = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'footer');
+  assert(footerJob && footerJob.status === 'done' && footerJob.changed === true, 'the footer-build job is done+changed');
 }
 
 // ---------------------------------------------------------------------------
@@ -573,8 +603,9 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
     pool.chatMessages.find((m) => m.message_id === message.message_id).content === 'She refused to flinch.\n',
     'a failed repair leaves the raw text untouched (fail-open)',
   );
-  const job = pool.jobs.find((j) => j.message_id === message.message_id);
-  assert(job && job.status === 'flagged' && job.changed === false, 'a failed repair is recorded as flagged, not thrown');
+  const job = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'header');
+  assert(job && job.status === 'flagged' && job.changed === false, 'a failed header repair is recorded as flagged, not thrown');
+  assert(pool.jobs.filter((j) => j.message_id === message.message_id).length === 3, 'every region gets its own ledger row even when repairs fail');
 }
 
 // ---------------------------------------------------------------------------
@@ -661,12 +692,19 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   const onChat = addChat(pool, { userId: 'u1' });
   const msg = addMessage(pool, { chatId: onChat, userId: 'u1', content: 'No header here.\n' });
   const before = await getCleanupStatus(db, 'u1', onChat);
-  assert(before && before.enabled === true && before.latest?.state === 'thinking', 'an uncovered new message reads thinking');
+  assert(
+    before && before.enabled === true && before.latest?.regions.header.state === 'not-called',
+    'an uncovered new message reads not-called (grey) for every region',
+  );
+  assert(
+    before.latest.regions.body.state === 'not-called' && before.latest.regions.footer.state === 'not-called',
+    'body and footer regions also read not-called before the tick covers them',
+  );
 
   const llm = createFakeLlm((messages) => VALID_HEADER.trimEnd());
   await runCleanupTick({ db, llm, settings: createFakeSettings(), chats: createFakeChats(pool) });
   const after = await getCleanupStatus(db, 'u1', onChat);
-  assert(after && after.latest?.state === 'modified', 'after the loop rewrites it, the pill reads modified');
+  assert(after && after.latest?.regions.header.state === 'deployed', 'after the loop repairs the header, the pill reads deployed');
   assert(after.latest.messageId === msg.message_id, 'the pill tracks the newest eligible message');
   assert(after.pending === 0, 'no messages remain pending after the tick');
 }
@@ -753,16 +791,16 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   const db = createPostgresClient(pool);
   await db.withUserScope('u1', (session) =>
     session.query(
-      `insert into cleanup_jobs (chat_id, message_id, swipe_id, status, changed, notes, finished_at)
-       values ($1, $2, $3, $4, $5, $6, now()) on conflict (message_id, swipe_id) do nothing`,
-      [chatId, older.message_id, 's-older', 'done', true, 'header:ok'],
+      `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+       values ($1, $2, $3, $4, $5, $6, $7, now()) on conflict (message_id, swipe_id, region) do nothing`,
+      [chatId, older.message_id, 's-older', 'header', 'done', true, 'header:ok'],
     ),
   );
   await db.withUserScope('u1', (session) =>
     session.query(
-      `insert into cleanup_jobs (chat_id, message_id, swipe_id, status, changed, notes, finished_at)
-       values ($1, $2, $3, $4, $5, $6, now()) on conflict (message_id, swipe_id) do nothing`,
-      [chatId, newer.message_id, 's-newer', 'flagged', false, 'header:missing'],
+      `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+       values ($1, $2, $3, $4, $5, $6, $7, now()) on conflict (message_id, swipe_id, region) do nothing`,
+      [chatId, newer.message_id, 's-newer', 'footer', 'flagged', false, 'footer:missing'],
     ),
   );
 
@@ -802,9 +840,75 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   // Let the first pass finish: writeback + job recorded, then a fresh tick must see it covered.
   llm.resolve();
   await firstTick;
-  assert(pool.jobs.length === 1 && pool.jobs[0].status === 'done', 'completed pass records its job');
+  assert(pool.jobs.length === 3 && pool.jobs.every((j) => j.status === 'done'), 'completed pass records one done job per region');
   await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
-  assert(llm.calls.length === 1, 'covered message is not re-planned after the job lands');
+  assert(llm.calls.length === 1, 'covered message is not re-planned after the jobs land');
+}
+
+// ---------------------------------------------------------------------------
+// 16. Wildcard in-flight guard: the live path's (chatId, messageId, *) claim — held from stream
+//     start through finalizeCleanupResult — must make the poll tick skip the message entirely
+// ---------------------------------------------------------------------------
+{
+  const pool = createFakePool();
+  addUser(pool, 'u1');
+  const chatId = addChat(pool, { userId: 'u1' });
+  const message = addMessage(pool, { chatId, userId: 'u1', content: 'No header here.\n' });
+  const llm = createFakeLlm((messages) => VALID_HEADER.trimEnd());
+  const chats = createFakeChats(pool);
+  const db = createPostgresClient(pool);
+
+  // Simulate the live path's stream-start claim (the assistant messageId is pre-generated before
+  // the turn begins; the swipeId isn't known yet, hence the wildcard).
+  claimCleanupInFlight(chatId, message.message_id, '*');
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
+  assert(
+    pool.jobs.length === 0 && llm.calls.length === 0,
+    'the wildcard in-flight claim blocks the poll tick (live path vs tick, plan G2)',
+  );
+  releaseCleanupInFlight(chatId, message.message_id, '*');
+  await runCleanupTick({ db, llm, settings: createFakeSettings(), chats });
+  // 'No header here.\n' also lacks a footer (0066 rule 3 reversed 2026-08-11), so the released
+  // pass fires the header repair and the footer build — two calls, three region rows.
+  assert(pool.jobs.length === 3 && llm.calls.length === 2, 'releasing the wildcard claim lets the tick process the message');
+}
+
+// ---------------------------------------------------------------------------
+// 17. Per-region dedup: a message is due until its active swipe has one row per region
+// ---------------------------------------------------------------------------
+{
+  const pool = createFakePool();
+  addUser(pool, 'u1');
+  const chatId = addChat(pool, { userId: 'u1' });
+  const message = addMessage(pool, { chatId, userId: 'u1', content: CLEAN_REPLY });
+  const chats = createFakeChats(pool);
+  const db = createPostgresClient(pool);
+  // Materialize the active swipe, then cover header + footer only — the body region is still
+  // uncovered, so the message must stay due.
+  const swipeId = await chats.ensureActiveSwipe('u1', chatId, message.message_id);
+  await db.withUserScope('u1', (session) =>
+    session.query(
+      `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+       values ($1, $2, $3, $4, $5, $6, $7, now()) on conflict (message_id, swipe_id, region) do nothing`,
+      [chatId, message.message_id, swipeId, 'header', 'done', false, 'seeded'],
+    ),
+  );
+  await db.withUserScope('u1', (session) =>
+    session.query(
+      `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+       values ($1, $2, $3, $4, $5, $6, $7, now()) on conflict (message_id, swipe_id, region) do nothing`,
+      [chatId, message.message_id, swipeId, 'footer', 'done', false, 'seeded'],
+    ),
+  );
+
+  await runCleanupTick({ db, llm: createFakeLlm(), settings: createFakeSettings(), chats });
+  assert(pool.jobs.length === 3, 'a message with two covered regions is still due (per-region dedup)');
+  assert(
+    pool.jobs.some((j) => j.region === 'body' && j.status === 'done'),
+    'the uncovered body region gets its row without re-processing the covered ones',
+  );
+  await runCleanupTick({ db, llm: createFakeLlm(), settings: createFakeSettings(), chats });
+  assert(pool.jobs.length === 3, 'once all three regions are covered, the message is no longer due');
 }
 
 

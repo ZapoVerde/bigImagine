@@ -28,8 +28,12 @@ import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import { log } from '../io/logger.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
-import { runStreamingRpTurn } from '../orchestrator/streamingTurn.js';
-import { isAbortError } from '../orchestrator/turnAbort.js';
+import { runStreamingRpTurn, type RunStreamingRpTurnResult } from '../orchestrator/streamingTurn.js';
+import { isAbortError, registerTurnAbort, unregisterTurnAbort } from '../orchestrator/turnAbort.js';
+import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, type CleanupLoopDeps } from '../orchestrator/cleanupLoop.js';
+import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
+import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
+import { fireLocationImageGeneration } from './locationImages.js';
 import { createToolRegistry, filterToolRegistry } from '../orchestrator/toolRegistry.js';
 import { getHouseholdTimezone } from './adminServer.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
@@ -137,6 +141,11 @@ export async function regenerateSwipe(
   // accumulated reply so the caller can finish its stream.
   stream = false,
   onDelta?: (textDelta: string) => void,
+  // In-stream cleanup (docs/plans/in-stream-cleanup-plan.md): the swipe route forwards its
+  // bigimagine_cleanup / bigimagine_patch SSE-frame callback here, gated on the chat's
+  // cleanup_enabled_at. When absent, no live cleanup runs for this swipe and the poll tick stays
+  // the only cleanup path.
+  onCleanupEvent?: (event: CleanupLiveEvent) => void,
 ): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
   const { db, settings, chats } = deps;
   const { session } = detail;
@@ -192,6 +201,38 @@ export async function regenerateSwipe(
   // below exactly — the route decides what the client sees (499 vs terminal frame) based on
   // whether headers were already written. A non-RP or non-streaming swipe keeps runTurn.
   const streamingRp = session.kind === 'rp' && stream === true;
+  // Same live-cleanup gate as handleChatCompletions's streaming branch, plus the same wildcard
+  // in-flight guard (chat, messageId, '*') held from stream start through finalizeCleanupResult so
+  // the 5s poll tick never launches a duplicate repair pass on this message mid-writeback. The
+  // cleanup LLM is the household gated provider (deps.llm), exactly like the poll tick's repairs.
+  const liveCleanupActive = streamingRp && !!onCleanupEvent && session.cleanupEnabledAt != null;
+  const cleanupDeps: CleanupLoopDeps = {
+    db,
+    llm: deps.llm,
+    settings,
+    chats,
+    onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
+  };
+  let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
+  let cleanupAbortController: AbortController | undefined;
+  let liveCleanupGuardHeld = false;
+  const releaseLiveCleanupGuard = () => {
+    if (liveCleanupGuardHeld) {
+      liveCleanupGuardHeld = false;
+      releaseCleanupInFlight(chatId, messageId, '*');
+      if (cleanupAbortController) unregisterTurnAbort(chatId, cleanupAbortController);
+      // The settled cleanup_jobs rows finalizeCleanupResult just wrote are authoritative now —
+      // drop the live overlay so a later getCleanupStatus polls the DB, not this turn's frames.
+      clearCleanupLiveStatus(chatId);
+    }
+  };
+  if (liveCleanupActive) {
+    claimCleanupInFlight(chatId, messageId, '*');
+    // A second controller under the same taskId (registerTurnAbort supports several per key) so
+    // finishStream's end-of-stream repairs share the turn's Stop signal.
+    cleanupAbortController = registerTurnAbort(chatId);
+    liveCleanupGuardHeld = true;
+  }
   if (streamingRp) {
     // stream=true implies the caller (the swipe route) passed onDelta — this is a programming
     // error if it didn't, not a runtime degradation path; fail loudly per conventions §11.
@@ -206,17 +247,23 @@ export async function regenerateSwipe(
         sampling: { temperature: session.params.temperature, topP: session.params.top_p, maxTokens: session.params.max_tokens },
         llm: turnLlm,
         db,
+        settings,
+        chats,
+        onCleanupEvent,
         onDelta,
       });
       reply = turnResult.content;
+      cleanupHandoff = turnResult.cleanup;
       traceEntry.usage = turnResult.usage;
       traceEntry.price = turnPrice;
     } catch (err) {
       if (isAbortError(err)) {
         log.info(`swipe regenerate aborted for chat ${chatId}`);
+        releaseLiveCleanupGuard();
         return { ok: false, aborted: true, error: 'turn aborted' };
       }
       log.error(`swipe regenerate failed for chat ${chatId}`, err);
+      releaseLiveCleanupGuard();
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   } else {
@@ -253,8 +300,47 @@ export async function regenerateSwipe(
     }
   }
 
-  const updated = await chats.recordSwipe(userId, chatId, messageId, reply);  if (!updated) {
-    return { ok: false, error: 'message no longer exists' };
+  // Everything between the wildcard claim above and this finally can throw — recordSwipe on a
+  // DB error, finishStream on a non-abort bug (rethrown below) — and the guard must drop either
+  // way, or the 5s poll tick would never process this message again until restart.
+  // releaseLiveCleanupGuard is idempotent, so the finally is the handoff segment's single
+  // release point. swipeResult's narrowing is lost across the try — the early !updated return
+  // inside it is what makes the final return reachable only with a defined message.
+  let swipeResult: StoredChatMessage | undefined;
+  try {
+    const updated = await chats.recordSwipe(userId, chatId, messageId, reply);
+    if (!updated) {
+      return { ok: false, error: 'message no longer exists' };
+    }
+    swipeResult = updated;
+    // Live cleanup persistence handoff (in-stream-cleanup-plan.md): recordSwipe just persisted the
+    // regenerated raw text as the new active swipe — finishStream applies the end-of-stream repairs
+    // (tail body, footer, deferred 'llm' pass) to the composed buffer, and finalizeCleanupResult
+    // writes the composed text as the NEXT swipe (original stays a swipe, the send/swipe parity the
+    // plan's Logic section carries through). Same finalizeCleanupResult the poll tick uses, so the
+    // message is indistinguishable in cleanup_jobs from one the tick caught.
+    if (cleanupHandoff) {
+      try {
+        const fsResult = await finishStream(cleanupHandoff.ctx, cleanupDeps, reply, {
+          userId,
+          chatId,
+          signal: cleanupAbortController!.signal,
+          onCleanupEvent,
+        });
+        await finalizeCleanupResult(cleanupDeps, userId, chatId, messageId, reply, fsResult.composed, fsResult.outcomes);
+      } catch (err) {
+        if (isAbortError(err)) {
+          // A Stop landed during the end-of-stream repairs: the regenerated swipe above is already
+          // persisted (the regeneration succeeded — report it as such); no composed swipe and no
+          // job rows, so the poll tick catches the message, same as the tick's own abort path.
+          log.info(`swipe live cleanup handoff aborted for chat ${chatId}`);
+        } else {
+          throw err; // finishStream is fail-open internally — a non-abort throw here is a bug
+        }
+      }
+    }
+  } finally {
+    releaseLiveCleanupGuard();
   }
   // Stage 2 (docs/plans/vistalyze_integration/segway.md §4, location.md §4.2): post-cleanup heuristic
   // extraction against the regenerated text — recordSwipe above just made its swipe active,
@@ -281,5 +367,5 @@ export async function regenerateSwipe(
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
   }
-  return { ok: true, message: updated, locationId };
+  return { ok: true, message: swipeResult!, locationId };
 }

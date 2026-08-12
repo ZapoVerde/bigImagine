@@ -15,6 +15,7 @@
 import {
   extractParagraph,
   collectUniqueParagraphs,
+  nextCompletedParagraph,
   compileRulePattern,
   evaluateSlopRules,
   inspectHeader,
@@ -86,6 +87,40 @@ const SLOP = [
 
   const dup = collectUniqueParagraphs('delve once and delve twice in one line', re);
   assert(dup.length === 1, 'collectUniqueParagraphs: two matches in the same paragraph dedupe to one');
+}
+
+// --- nextCompletedParagraph (live streaming cursor) --------------------------------------------
+{
+  // Streaming: "first line\n" closes -> returns it; the open tail is not returned until it closes.
+  const streaming = 'first line\nsecond li';
+  const p1 = nextCompletedParagraph(streaming, 0);
+  assert(p1 && p1.text === 'first line' && p1.start === 0 && p1.end === 10, 'nextCompletedParagraph: closed paragraph returned with end at the newline');
+  assert(nextCompletedParagraph(streaming, p1.end + 1) === null, 'nextCompletedParagraph: unterminated tail is not completed (deferred to finishStream)');
+
+  // The tail closes on the next delta -> cursor advances across paragraphs in order.
+  const closed = 'first line\nsecond line\n';
+  const p2 = nextCompletedParagraph(closed, p1.end + 1);
+  assert(p2 && p2.text === 'second line' && p2.start === 11 && p2.end === 22, 'nextCompletedParagraph: cursor advances to the next closed paragraph');
+  assert(nextCompletedParagraph(closed, p2.end + 1) === null, 'nextCompletedParagraph: buffer exhausted after the last newline');
+
+  // The engine's streaming invariant: every closed paragraph is visited exactly once.
+  const multi = 'alpha\nbeta\ngamma\n';
+  let cursor = 0;
+  const seen = [];
+  for (let p = nextCompletedParagraph(multi, cursor); p !== null; p = nextCompletedParagraph(multi, cursor)) {
+    seen.push(p.text);
+    cursor = p.end + 1;
+  }
+  assert(seen.join(',') === 'alpha,beta,gamma', 'nextCompletedParagraph: all closed paragraphs visited exactly once, in order');
+
+  // Blank paragraph ("\n\n") is a valid completed paragraph, matching extractParagraph's semantics.
+  const blank = 'one\n\nthree\n';
+  const pb = nextCompletedParagraph(blank, 4);
+  assert(pb && pb.text === '' && pb.start === 4 && pb.end === 4, 'nextCompletedParagraph: an empty paragraph is completed at its own newline');
+
+  // Empty buffer / exhausted cursor -> null, never an empty paragraph.
+  assert(nextCompletedParagraph('', 0) === null, 'nextCompletedParagraph: empty buffer yields null');
+  assert(nextCompletedParagraph('x', 1) === null, 'nextCompletedParagraph: cursor past the end yields null');
 }
 
 // --- compileRulePattern ------------------------------------------------------------------------

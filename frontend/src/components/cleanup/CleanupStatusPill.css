@@ -1,19 +1,30 @@
-/* The floating async-cleanup status pill in the chat header — TRG-badge states (unchanged |
- * thinking | modified, plus our ⚠ flagged) in one small rounded pill. Colors match the TRG
- * reference (SillyTavern-Triggeryze/style.css): gray muted = unchanged, red pulse = thinking,
- * green = modified, amber = flagged. */
+/* The three small floating async-cleanup status pills in the chat header (in-stream-cleanup-plan.md)
+ * — one per region (h = header, b = body, f = footer), each with the four-state vocabulary
+ * not-called | in-flux | deployed | flagged. Colors match the TRG reference
+ * (SillyTavern-Triggeryze/style.css): muted gray = not-called, red pulse = in-flux (a repair is
+ * in flight — the poll tick is working, or the live stream is patching), green = deployed (a
+ * repair actually changed the text), amber = flagged (a repair was needed but produced nothing).
+ * Same shape/placement/click-to-run-now interaction as the old single pill, just three instances
+ * side by side (mobile-first: small enough to not wrap on a narrow viewport). */
+.cleanup-status-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex-shrink: 0;
+}
+
 .cleanup-status-pill {
   display: inline-flex;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.15rem 0.6rem;
+  gap: 0.2rem;
+  padding: 0.1rem 0.4rem;
   border-radius: var(--radius-pill);
   border: 1px solid var(--color-border);
   background: var(--color-bg-surface);
   font-size: var(--font-size-sm);
+  line-height: 1.2;
   color: var(--color-text-muted);
   cursor: pointer;
-  flex-shrink: 0;
   transition: border-color 0.15s ease;
 }
 
@@ -27,7 +38,8 @@
 }
 
 .cleanup-status-text {
-  text-transform: capitalize;
+  text-transform: lowercase;
+  font-weight: var(--font-weight-semibold);
 }
 
 .cleanup-status-pending {
@@ -35,10 +47,11 @@
   font-weight: var(--font-weight-semibold);
   color: var(--color-text-secondary);
   padding-left: 0.15rem;
+  font-size: var(--font-size-sm);
 }
 
-/* thinking — the loop is actively working on the newest reply (TRG's red pulse). */
-.cleanup-status-thinking {
+/* in-flux — a repair is in flight for this region (TRG's red pulse). */
+.cleanup-status-in-flux {
   animation: cleanup-pulse 0.9s ease-in-out infinite;
   border-color: rgba(200, 55, 55, 0.5);
   color: #f99;
@@ -54,13 +67,13 @@
   }
 }
 
-/* unchanged — nothing needed fixing, or the reply hasn't landed yet. */
-.cleanup-status-unchanged {
+/* not-called — nothing needed fixing in this region (or the reply hasn't landed yet). */
+.cleanup-status-not-called {
   opacity: 0.65;
 }
 
-/* modified — the loop rewrote the reply (original kept as a swipe), TRG's green. */
-.cleanup-status-modified {
+/* deployed — a repair rewrote this region's text (original kept as a swipe), TRG's green. */
+.cleanup-status-deployed {
   background: rgba(50, 180, 80, 0.25);
   border-color: rgba(50, 180, 80, 0.5);
   color: #8f8;

@@ -17,7 +17,8 @@
  * design, plan v2 §1), cleanup_enabled_at not null (the per-chat opt-in switch), archived_at null
  * — then each chat's due assistant messages: role 'assistant', created AFTER the chat's
  * cleanup_enabled_at stamp (the retro-flood guard — enabling cleanup never re-processes old
- * history), with no cleanup_jobs row for their active swipe (exact per-(message, swipe) dedup).
+ * history), with fewer than three cleanup_jobs rows for their active swipe (per-region dedup:
+ * a message is due until its active swipe has one row for each of header/body/footer).
  *
  * Per due message the pipeline is:
  *   1. deps.chats.ensureActiveSwipe — a never-regenerated message has no swipe row yet, and the
@@ -40,11 +41,11 @@
  *      → nothing applied, job 'flagged' (the problem was left in place — the Cleanup page's
  *      flagged list). If outputs were non-empty but the text is byte-identical (LLM reproduced it)
  *      → 'done', changed=false.
- *   7. Record the cleanup_jobs row against the message's CURRENT active swipe id (freshly read
- *      after any writeback) — so the next tick's dedup sees this exact content as covered, and
- *      cycling to an alternate swipe legitimately starts a new job (migration 0072's own intent).
- *      Insert with ON CONFLICT (message_id, swipe_id) DO NOTHING: the unique index is the real
- *      concurrency guard against a run-now tick racing the poll tick.
+ *   7. Record one cleanup_jobs row PER REGION against the message's CURRENT active swipe id
+ *      (freshly read after any writeback) — so the next tick's dedup sees each region as covered,
+ *      and cycling to an alternate swipe legitimately starts new jobs (migration 0072's own
+ *      intent). Insert with ON CONFLICT (message_id, swipe_id, region) DO NOTHING: the unique
+ *      index is the real concurrency guard against a run-now tick racing the poll tick.
  *
  * Every step is fail-open (cleanup_prompt.md §1's contract carried forward): a config/slop load
  * failure, a provider timeout, or a job-insert collision all log and leave the message as-is; the
@@ -60,7 +61,7 @@
  * startCleanupLoop(deps)                       — begins polling every POLL_INTERVAL_MS
  * runCleanupTick(deps)                         — one poll cycle, exported so verify scripts drive it
  * getCleanupStatus(db, userId, chatId)         — the pill/page read surface:
- *                                               { enabled, pending, latest: {messageId, state} | null }
+ *                                               { enabled, pending, latest: {messageId, regions} | null }
  * runCleanupNow(deps, userId, chatId)          — immediate pass over one chat (the page's run-now)
  * CleanupLoopDeps                              — { db, llm, settings, chats }
  *
@@ -69,7 +70,9 @@
  *     purity:          impure (Postgres IO, LLM IO; owns the setInterval timer it starts)
  *     state_ownership: [the setInterval timer this starts; the in-flight (chat, message, swipe)
  *                       guard set that keeps overlapping ticks from re-planning a message whose
- *                       repair pass is still running]
+ *                       repair pass is still running (the live path holds a '*' wildcard swipe
+ *                       key across the whole live span); finalizeCleanupResult, the shared
+ *                       persistence handoff with the live path]
  *     external_io:     [Postgres, the LLM via the shared gated provider]
  */
 
@@ -93,6 +96,7 @@ import {
   type SlopRule,
 } from './cleanupHeuristics.js';
 import { loadLocationBlock, scrapeTurnPresence } from './locationAndPresenceScraper.js';
+import { getCleanupLiveStatus } from './cleanupLiveStatus.js';
 
 const POLL_INTERVAL_MS = 5_000; // the pill/user watches for the rewrite — snappy, unlike the 30s chat-memory digest
 /** How much of the chat's history precedes one message for {{history, N}} resolution. formatHistoryPairs
@@ -110,6 +114,30 @@ const HISTORY_READ_LIMIT = 40;
  *  Module-level in-memory only, same lifetime as the timer — a process bounce drops the set and
  *  the ledger re-plans, which is the restart tolerance the tick already has. */
 const inFlightRepairs = new Set<string>();
+
+/** Claim the in-flight guard for a (chat, message, swipe) triple, or the live path's wildcard
+ *  (chatId, messageId, '*') — the live path claims the wildcard from stream start through
+ *  finalizeCleanupResult (the assistant messageId is pre-generated before the turn begins; the
+ *  swipeId isn't known until ensureActiveSwipe/recordSwipe runs), so the 5s tick can never launch
+ *  a duplicate repair pass on a message the live path is still finishing (the plan's G2).
+ *  Returns false (no-op) when the exact key was already held. */
+export function claimCleanupInFlight(chatId: string, messageId: string, swipeId: string | '*'): boolean {
+  const key = `${chatId}:${messageId}:${swipeId}`;
+  if (inFlightRepairs.has(key)) return false;
+  inFlightRepairs.add(key);
+  return true;
+}
+
+/** Release a guard held by claimCleanupInFlight. */
+export function releaseCleanupInFlight(chatId: string, messageId: string, swipeId: string | '*'): void {
+  inFlightRepairs.delete(`${chatId}:${messageId}:${swipeId}`);
+}
+
+/** True when any repair pass is running for this (chat, message, swipe) — the exact triple or
+ *  the live path's wildcard claim. */
+function isCleanupInFlight(chatId: string, messageId: string, swipeId: string): boolean {
+  return inFlightRepairs.has(`${chatId}:${messageId}:${swipeId}`) || inFlightRepairs.has(`${chatId}:${messageId}:*`);
+}
 
 export interface CleanupLoopDeps {
   db: PostgresClient;
@@ -161,23 +189,39 @@ interface StatusChatRow {
 interface LatestMessageRow {
   message_id: string;
   created_at: string;
+  active_swipe_id: string | null;
 }
 
-interface JobStateRow {
-  status: string;
+/** One region's pill state — the four-state vocabulary of the in-stream cleanup plan
+ *  (docs/plans/in-stream-cleanup-plan.md): grey until a repair was applied (not-called), red
+ *  while a repair is in flight or the tick is mid-pass (in-flux), green once a repair actually
+ *  changed the text (deployed), ⚠ when a repair was needed but produced nothing (flagged). */
+export type CleanupRegionState = 'not-called' | 'in-flux' | 'deployed' | 'flagged';
+
+/** One region's contribution to a finished cleanup pass — the ledger row shape (migration
+ *  0090). finalizeCleanupResult writes one of these per region evaluated. */
+export interface CleanupRegionOutcome {
+  region: 'header' | 'body' | 'footer';
+  status: 'done' | 'flagged' | 'error';
   changed: boolean;
+  notes: string;
 }
-
-/** The pill's per-message state — TRG's unchanged | thinking | modified, plus our ⚠ flagged. */
-export type CleanupMessageState = 'thinking' | 'unchanged' | 'modified' | 'flagged';
 
 export interface CleanupStatus {
   enabled: boolean;
-  /** Assistant messages after the stamp whose active swipe has no job yet (or none materialized). */
+  /** Assistant messages after the stamp whose active swipe lacks at least one region row. */
   pending: number;
-  /** The newest assistant message after the stamp, with its pill state; null when there is none
-   *  yet (pill shows nothing / 'off' rather than inventing a state for a pre-stamp message). */
-  latest: { messageId: string; state: CleanupMessageState } | null;
+  /** The newest assistant message after the stamp, with its three per-region pill states; null
+   *  when there is none yet (pill shows nothing / 'off' rather than inventing a state for a
+   *  pre-stamp message). */
+  latest: {
+    messageId: string;
+    regions: {
+      header: { state: CleanupRegionState };
+      body: { state: CleanupRegionState };
+      footer: { state: CleanupRegionState };
+    };
+  } | null;
 }
 
 /** The header/footer config + persona_name resolved live for one tick. */
@@ -264,6 +308,25 @@ async function loadHistory(
   });
 }
 
+/** The last HISTORY_READ_LIMIT messages in a chat, oldest first, for {{history, N}} — the
+ *  boundary-less sibling of loadHistory: the live cleanup path runs before the turn's assistant
+ *  message exists, so there is no messageId/createdAt to bound against; it wants everything
+ *  before the turn's own (already-persisted) user message. */
+export async function loadRecentHistory(db: PostgresClient, userId: string, chatId: string): Promise<LlmMessage[]> {
+  return db.withUserScope(userId, async (session) => {
+    const rows = await session.query<{ role: string; content: string }>(
+      `select role, content from chat_messages
+       where chat_id = $1
+       order by created_at desc, message_id desc
+       limit $2`,
+      [chatId, HISTORY_READ_LIMIT],
+    );
+    return rows
+      .reverse()
+      .map((m) => ({ role: (m.role === 'user' || m.role === 'assistant' ? m.role : 'user') as 'user' | 'assistant', content: m.content }));
+  });
+}
+
 /** One repair step → one prompt trace entry + one LLM call. Fail-open: null on throw or empty
  *  output (applyRepairSteps then leaves that region untouched). The trace entry is recorded before
  *  the call (promptTrace.ts's contract — the prompt is sent either way) and then picks up the
@@ -317,6 +380,12 @@ async function dispatchStep(
   }
 }
 
+/** One repair step → one prompt trace entry + one LLM call. Fail-open: null on throw or empty
+ *  output (applyRepairSteps then leaves that region untouched). Exported so the live path
+ *  (liveCleanup.ts) dispatches repairs with the exact same function the poll tick uses. */
+export { dispatchStep };
+
+
 function describePlan(plan: CleanupPlan): string {
   const parts: string[] = [];
   if (plan.header.status !== 'ok') parts.push(`header:${plan.header.status}`);
@@ -355,9 +424,11 @@ async function processDueMessage(
     // still 'due' — no job is recorded until the pass finishes — and launches another LLM repair
     // call for the same content, the runaway that saturated the LLM lane and starved interactive
     // turns on 2026-08-08. Skip, don't queue: the next tick re-reads the ledger and only picks
-    // the message up again if this pass left it uncovered (e.g. the user swiped mid-flight).
+    // the message up again if this pass left it uncovered (e.g. the user swiped mid-flight). The
+    // live path's wildcard claim (chatId, messageId, '*') is honored here too — a turn whose live
+    // cleanup span hasn't finished yet must not be double-processed by this tick.
     inFlightKey = `${chatId}:${message.message_id}:${swipeId}`;
-    if (inFlightRepairs.has(inFlightKey)) {
+    if (isCleanupInFlight(chatId, message.message_id, swipeId)) {
       log.debug(`cleanup loop: message ${message.message_id} in chat ${chatId} already being repaired, skipping this tick`, {
         swipe: swipeId,
       });
@@ -396,82 +467,52 @@ async function processDueMessage(
       return;
     }
     const cleaned = applyRepairSteps(plan.text, steps, outputs);
-    const applied = steps.length > 0 && outputs.some((o) => o !== null);
 
-    if (cleaned !== message.content) {
-      // Atomic writeback + mid-flight guard in one transaction (recordSwipeIfContent): if the
-      // user regenerated or swiped while the repair LLM ran, the content no longer matches what
-      // we planned against and nothing is written — the new content carries no job, so the next
-      // tick picks it up. The returned newSwipeId is the swipe that now holds the cleaned text;
-      // the job keys to exactly that pair, so a user cycle right after still leaves the cleaned
-      // swipe covered while the alternate swipe legitimately starts its own job (0072's comment).
-      const result = await deps.chats.recordSwipeIfContent(userId, chatId, message.message_id, message.content, cleaned);
-      if (!result) {
-        log.warn(`cleanup loop: message ${message.message_id} changed mid-flight, skipping writeback`);
-        return;
+    // Per-region attribution (migration 0090): every region evaluated in this pass gets its own
+    // ledger row, so the poll tick and the live path share one persistence shape (the plan's
+    // one-implementation rule). A region is 'flagged' when it needed steps but none produced
+    // output; 'done'+changed is decided by applying that region's own steps to plan.text and
+    // comparing (plus, for the body, whether the deterministic 'remove' rules changed the text at
+    // all — plan.text is the post-'remove' text) — so a repair that reproduced the text
+    // byte-identical still records changed=false, exactly the old pill's 'unchanged' meaning.
+    const regionOf = (s: RepairStep): 'header' | 'body' | 'footer' =>
+      s.kind === 'repair-header' ? 'header' : s.kind === 'repair-footer' ? 'footer' : 'body';
+    const outcomes: CleanupRegionOutcome[] = (['header', 'body', 'footer'] as const).map((region) => {
+      const own = steps.map((s, i) => ({ s, output: outputs[i] })).filter(({ s }) => regionOf(s) === region);
+      if (own.length === 0) {
+        return { region, status: 'done', changed: region === 'body' && plan.text !== message.content, notes: `no ${region} steps needed` };
       }
-      await recordJob(deps.db, userId, chatId, message.message_id, result.newSwipeId, 'done', true, describePlan(plan));
+      const regionText = applyRepairSteps(plan.text, own.map(({ s }) => s), own.map(({ output }) => output));
+      const changed = regionText !== plan.text || (region === 'body' && plan.text !== message.content);
+      const applied = own.some(({ output }) => output !== null);
+      if (!applied) {
+        log.warn(`cleanup loop: message ${message.message_id} in chat ${chatId} ${region} flagged — repair needed but produced no output`, {
+          notes: describePlan(plan),
+        });
+      }
+      return { region, status: applied ? 'done' : 'flagged', changed, notes: describePlan(plan) };
+    });
+    if (outcomes.some((o) => o.changed)) {
       log.info(`cleanup loop: rewrote message ${message.message_id} in chat ${chatId}`, { notes: describePlan(plan) });
-
-      // location.md §4.3 — the deferred post-cleanup scrape: the raw reply's header was bad, so
-      // the call-site scrape (httpServer.ts) skipped it; the header was just repaired and now
-      // passes inspection — scrape the REPAIRED text so this turn resolves its location/scene/
-      // presence, and fire the describe→render chain for the newly-established location. Closes
-      // the race documented in ensureFirstTurnHeader.ts (before the tracker, nothing re-scraped
-      // after a repair). Fire-and-forget, fail-open: never blocks the tick.
-      const headerRepaired = steps.some((s, i) => s.kind === 'repair-header' && outputs[i] !== null);
-      if (headerRepaired && inspectHeader(cleaned, config.header).status === 'ok') {
-        // Mode from the cleaned swipe's ordinal (location.md §4.3.2): the cleanup writeback
-        // always adds exactly one swipe, so index 1 = the message was never regenerated
-        // ('extend' — a location change advances previous_scene_id, the 0076 revert target);
-        // index ≥ 2 = the active content was itself a regeneration ('replace' — never advances
-        // it). A manual regeneration of an extend turn counts as replace, which is correct.
-        const mode = (result.message.swipes?.index ?? 0) > 1 ? 'replace' : 'extend';
-        void (async () => {
-          try {
-            const locationId = await scrapeTurnPresence(
-              { db: deps.db, settings: deps.settings, ensureActiveSwipe: (u, c, m) => deps.chats.ensureActiveSwipe(u, c, m) },
-              userId,
-              chatId,
-              message.message_id,
-              cleaned,
-              mode,
-            );
-            if (locationId) deps.onLocationScraped?.(userId, chatId, locationId);
-          } catch (err) {
-            // scrapeTurnPresence is fail-open internally; this belt-and-braces guard keeps the
-            // callback from ever taking the tick down (location.md §1.3).
-            log.warn(`cleanup loop: deferred scrape failed for message ${message.message_id} (fail-open)`, { chatId, err });
-          }
-        })();
-      }
-      return;
-    }
-
-    if (steps.length > 0 && !applied) {
-      // Steps were needed but every output was empty/erred — the problem is still there.
-      log.warn(`cleanup loop: message ${message.message_id} in chat ${chatId} flagged — repairs needed but produced no output`, {
-        notes: describePlan(plan),
-      });
-      await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'flagged', false, describePlan(plan));
-      return;
-    }
-
-    // Either nothing needed fixing at all (no steps, text unchanged) or the repairs applied cleanly
-    // but produced byte-identical text (the LLM reproduced it). Covered either way, no change.
-    if (steps.length > 0) {
-      // applied is true here (the !applied branch returned above) — the LLM ran and reproduced
-      // the text, which is worth knowing: the prompt fired but changed nothing.
-      log.info(`cleanup loop: repair reproduced the text byte-identical for message ${message.message_id} in chat ${chatId}`, {
+    } else if (steps.length > 0) {
+      log.info(`cleanup loop: repairs reproduced the text byte-identical for message ${message.message_id} in chat ${chatId}`, {
         notes: describePlan(plan),
       });
     } else {
       log.debug(`cleanup loop: nothing to fix for message ${message.message_id} in chat ${chatId}`);
     }
-    await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'done', false, describePlan(plan));
+    // One persistence handoff shared with the live path: writeback (if the text changed) +
+    // per-region jobs + the deferred location scrape when a header repair landed.
+    await finalizeCleanupResult(deps, userId, chatId, message.message_id, message.content, cleaned, outcomes);
   } catch (err) {
     log.error(`cleanup loop: unexpected failure processing message ${message.message_id} in chat ${chatId}`, err);
-    await recordJobForActiveSwipe(deps, userId, chatId, message.message_id, message.content, 'error', false, 'unexpected failure').catch((e) =>
+    const errorOutcomes: CleanupRegionOutcome[] = (['header', 'body', 'footer'] as const).map((region) => ({
+      region,
+      status: 'error',
+      changed: false,
+      notes: 'unexpected failure',
+    }));
+    await recordJobsForActiveSwipe(deps, userId, chatId, message.message_id, message.content, errorOutcomes).catch((e) =>
       log.error(`cleanup loop: failed to record error job for ${message.message_id}`, e),
     );
   } finally {
@@ -484,53 +525,117 @@ async function processDueMessage(
   }
 }
 
-/** Record a job against a specific swipe id. ON CONFLICT DO NOTHING — the unique
- *  (message_id, swipe_id) index is the concurrency guard; a concurrent run-now tick or poll tick
- *  that already covered this pair is a no-op, not an error. Fail-open: a job-insert failure here
- *  only loses the ledger row, never the message (the next tick's dedup sees the swipe uncovered
- *  and simply re-plans it, which converges once the text is clean) — so it must never throw into
- *  processDueMessage's catch, which would mislabel an already-successful rewrite as 'error'. */
-async function recordJob(
+/** Record one job row per evaluated region against a specific swipe id. ON CONFLICT DO NOTHING —
+ *  the unique (message_id, swipe_id, region) index is the concurrency guard; a concurrent run-now
+ *  tick or poll tick that already covered this region is a no-op, not an error. Fail-open: a
+ *  job-insert failure here only loses the ledger row, never the message (the next tick's dedup
+ *  sees the region uncovered and simply re-plans it, which converges once the text is clean) — so
+ *  it must never throw into finalizeCleanupResult, which would mislabel an already-successful
+ *  rewrite as 'error'. */
+async function recordJobs(
   db: PostgresClient,
   userId: string,
   chatId: string,
   messageId: string,
   swipeId: string,
-  status: 'done' | 'flagged' | 'error',
-  changed: boolean,
-  notes: string,
+  regionOutcomes: CleanupRegionOutcome[],
 ): Promise<void> {
   try {
-    await db.withUserScope(userId, (session) =>
-      session.query(
-        `insert into cleanup_jobs (chat_id, message_id, swipe_id, status, changed, notes, finished_at)
-         values ($1, $2, $3, $4, $5, $6, now())
-         on conflict (message_id, swipe_id) do nothing`,
-        [chatId, messageId, swipeId, status, changed, notes],
-      ),
-    );
+    await db.withUserScope(userId, async (session) => {
+      for (const o of regionOutcomes) {
+        await session.query(
+          `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+           values ($1, $2, $3, $4, $5, $6, $7, now())
+           on conflict (message_id, swipe_id, region) do nothing`,
+          [chatId, messageId, swipeId, o.region, o.status, o.changed, o.notes],
+        );
+      }
+    });
   } catch (err) {
-    log.error(`cleanup loop: failed to record job for message ${messageId} (${status}), will re-plan next tick`, err);
+    log.error(`cleanup loop: failed to record jobs for message ${messageId}, will re-plan next tick`, err);
   }
 }
 
-/** Record a job against the message's active swipe, but only when that swipe still holds the
- *  content we processed (expectedContent) — the no-change path, where no writeback happened, so
- *  the job key must be verified: if the user regenerated or swiped mid-flight, the current active
- *  swipe is NOT what we processed, and keying a job to it would wrongly mark that content covered
- *  (the next tick then skips it forever). Refuse instead — the new content has no job, so the next
- *  tick picks it up. Read + verify + insert in one transaction; a message deleted mid-cleanup
- *  records nothing rather than a dangling job. Fail-open like recordJob — a ledger write must
- *  never cascade into processDueMessage's catch. */
-async function recordJobForActiveSwipe(
+/** One persistence handoff for a finished cleanup pass — the poll tick and the live path both
+ *  call this, so there is exactly one implementation of "write the cleaned text + record the
+ *  per-region ledger" (the plan's one-implementation rule). Writes the composed final text as a
+ *  new swipe when it differs (original stays swipe #0, exactly recordSwipeIfContent's existing
+ *  contract), then records one cleanup_jobs row per evaluated region. Also runs the deferred
+ *  post-repair location scrape (location.md §4.3) when a header repair landed — the raw reply's
+ *  bad header made the call-site scrape skip it, and the repaired text now passes inspection.
+ *  Fail-open throughout: never throws to its caller. */
+export async function finalizeCleanupResult(
+  deps: CleanupLoopDeps,
+  userId: string,
+  chatId: string,
+  messageId: string,
+  originalContent: string,
+  composedContent: string,
+  regionOutcomes: CleanupRegionOutcome[],
+): Promise<void> {
+  if (composedContent === originalContent) {
+    // Nothing to write back — record the per-region rows against the active swipe, but only when
+    // that swipe still holds the content we processed (see recordJobsForActiveSwipe).
+    await recordJobsForActiveSwipe(deps, userId, chatId, messageId, originalContent, regionOutcomes);
+    return;
+  }
+  // Atomic writeback + mid-flight guard in one transaction (recordSwipeIfContent): if the user
+  // regenerated or swiped while the repair LLM ran, the content no longer matches what we planned
+  // against and nothing is written — the new content carries no job, so the next tick picks it up.
+  const result = await deps.chats.recordSwipeIfContent(userId, chatId, messageId, originalContent, composedContent);
+  if (!result) {
+    log.warn(`cleanup: message ${messageId} in chat ${chatId} changed mid-flight, skipping writeback`);
+    return;
+  }
+  await recordJobs(deps.db, userId, chatId, messageId, result.newSwipeId, regionOutcomes);
+  log.info(`cleanup: rewrote message ${messageId} in chat ${chatId}`, {
+    notes: regionOutcomes.map((o) => `${o.region}:${o.status}`).join(','),
+  });
+
+  // location.md §4.3 — the deferred post-cleanup scrape. Fire-and-forget, fail-open.
+  if (regionOutcomes.some((o) => o.region === 'header' && o.changed)) {
+    const config = await resolveCleanupConfig(deps.settings);
+    if (inspectHeader(composedContent, config.header).status === 'ok') {
+      // Mode from the cleaned swipe's ordinal (location.md §4.3.2): the cleanup writeback always
+      // adds exactly one swipe, so index 1 = the message was never regenerated ('extend' — a
+      // location change advances previous_scene_id, the 0076 revert target); index ≥ 2 = the
+      // active content was itself a regeneration ('replace' — never advances it).
+      const mode = (result.message.swipes?.index ?? 0) > 1 ? 'replace' : 'extend';
+      void (async () => {
+        try {
+          const locationId = await scrapeTurnPresence(
+            { db: deps.db, settings: deps.settings, ensureActiveSwipe: (u, c, m) => deps.chats.ensureActiveSwipe(u, c, m) },
+            userId,
+            chatId,
+            messageId,
+            composedContent,
+            mode,
+          );
+          if (locationId) deps.onLocationScraped?.(userId, chatId, locationId);
+        } catch (err) {
+          log.warn(`cleanup: deferred scrape failed for message ${messageId} (fail-open)`, { chatId, err });
+        }
+      })();
+    }
+  }
+}
+
+/** Record one job row per evaluated region against the message's active swipe, but only when
+ *  that swipe still holds the content we processed (expectedContent) — the no-change path, where
+ *  no writeback happened, so the job key must be verified: if the user regenerated or swiped
+ *  mid-flight, the current active swipe is NOT what we processed, and keying a job to it would
+ *  wrongly mark that content covered (the next tick then skips it forever). Refuse instead — the
+ *  new content has no job, so the next tick picks it up. Read + verify + insert in one
+ *  transaction; a message deleted mid-cleanup records nothing rather than a dangling job.
+ *  Fail-open like recordJobs — a ledger write must never cascade into finalizeCleanupResult's
+ *  callers. */
+async function recordJobsForActiveSwipe(
   deps: CleanupLoopDeps,
   userId: string,
   chatId: string,
   messageId: string,
   expectedContent: string,
-  status: 'done' | 'flagged' | 'error',
-  changed: boolean,
-  notes: string,
+  regionOutcomes: CleanupRegionOutcome[],
 ): Promise<void> {
   try {
     await deps.db.withUserScope(userId, (session) =>
@@ -548,16 +653,18 @@ async function recordJobForActiveSwipe(
           const current = rows[0];
           if (!current || !current.active_swipe_id) return; // message gone — nothing to record against
           if (current.content !== expectedContent) return; // user changed it mid-flight — next tick picks it up
-          await session.query(
-            `insert into cleanup_jobs (chat_id, message_id, swipe_id, status, changed, notes, finished_at)
-             values ($1, $2, $3, $4, $5, $6, now())
-             on conflict (message_id, swipe_id) do nothing`,
-            [chatId, messageId, current.active_swipe_id, status, changed, notes],
-          );
+          for (const o of regionOutcomes) {
+            await session.query(
+              `insert into cleanup_jobs (chat_id, message_id, swipe_id, region, status, changed, notes, finished_at)
+               values ($1, $2, $3, $4, $5, $6, $7, now())
+               on conflict (message_id, swipe_id, region) do nothing`,
+              [chatId, messageId, current.active_swipe_id, o.region, o.status, o.changed, o.notes],
+            );
+          }
         }),
     );
   } catch (err) {
-    log.error(`cleanup loop: failed to record job for message ${messageId} (${status}), will re-plan next tick`, err);
+    log.error(`cleanup loop: failed to record jobs for message ${messageId}, will re-plan next tick`, err);
   }
 }
 
@@ -584,10 +691,10 @@ async function findDueMessages(db: PostgresClient, userId: string, chatId: strin
        where m.chat_id = $1
          and m.role = 'assistant'
          and m.created_at > $2
-         and not exists (
-           select 1 from cleanup_jobs j
-           where j.message_id = m.message_id and j.swipe_id = m.active_swipe_id
-         )
+         and (
+           select count(distinct j2.region) from cleanup_jobs j2
+           where j2.message_id = m.message_id and j2.swipe_id = m.active_swipe_id
+         ) < 3
        order by m.created_at, m.message_id`,
       [chatId, enabledAt],
     ),
@@ -629,9 +736,12 @@ export function startCleanupLoop(deps: CleanupLoopDeps): void {
 // ---------------------------------------------------------------------------
 
 /** The pill/page read surface: whether the chat is opted in, how many messages are still pending,
- *  and the newest eligible message's state. Mirrors the loop's roster predicates exactly (kind =
- *  'rp', archived_at null) — a chat that the loop would never process reports enabled:false rather
- *  than a never-draining pending count. Undefined only when the chat doesn't exist. */
+ *  and the newest eligible message's per-region pill states. Mirrors the loop's roster predicates
+ *  exactly (kind = 'rp', archived_at null) — a chat that the loop would never process reports
+ *  enabled:false rather than a never-draining pending count. Undefined only when the chat doesn't
+ *  exist. While a turn streams, the live path's ambient map (cleanupLiveStatus.ts) is overlaid on
+ *  top of the settled rows, so a polling read never shows stale 'not-called' for a region a repair
+ *  is actually working on. */
 export async function getCleanupStatus(db: PostgresClient, userId: string, chatId: string): Promise<CleanupStatus | undefined> {
   return db.withUserScope(userId, async (session) => {
     const [chat] = await session.query<StatusChatRow>(
@@ -652,15 +762,15 @@ export async function getCleanupStatus(db: PostgresClient, userId: string, chatI
        where m.chat_id = $1
          and m.role = 'assistant'
          and m.created_at > s.cleanup_enabled_at
-         and not exists (
-           select 1 from cleanup_jobs j
-           where j.message_id = m.message_id and j.swipe_id = m.active_swipe_id
-         )`,
+         and (
+           select count(distinct j2.region) from cleanup_jobs j2
+           where j2.message_id = m.message_id and j2.swipe_id = m.active_swipe_id
+         ) < 3`,
       [chatId],
     );
 
     const [latest] = await session.query<LatestMessageRow>(
-      `select m.message_id, m.created_at from chat_messages m
+      `select m.message_id, m.created_at, m.active_swipe_id from chat_messages m
        join chat_sessions s on s.chat_id = m.chat_id
        where m.chat_id = $1 and m.role = 'assistant' and m.created_at > s.cleanup_enabled_at
        order by m.created_at desc, m.message_id desc
@@ -669,21 +779,41 @@ export async function getCleanupStatus(db: PostgresClient, userId: string, chatI
     );
     if (!latest) return { enabled: true, pending: Number(pendingRow?.count ?? 0), latest: null };
 
-    const [job] = await session.query<JobStateRow>(
-      `select j.status, j.changed from cleanup_jobs j
+    const jobRows = await session.query<{ region: string; status: string; changed: boolean }>(
+      `select j.region, j.status, j.changed from cleanup_jobs j
        join chat_messages m on m.message_id = j.message_id
        where j.message_id = $1 and j.swipe_id = m.active_swipe_id
-       order by j.finished_at desc nulls last
-       limit 1`,
+       order by j.finished_at desc nulls last`,
       [latest.message_id],
     );
 
-    let state: CleanupMessageState;
-    if (!job) state = 'thinking'; // landed but the loop hasn't covered this swipe yet
-    else if (job.status === 'flagged' || job.status === 'error') state = 'flagged';
-    else state = job.changed ? 'modified' : 'unchanged';
+    // Per-region state (the settled mapping, plan Contracts): the newest job row wins — done+
+    // changed → deployed, done+!changed → not-called, flagged/error → flagged. No row: in-flux
+    // while the live path's ambient map or the in-flight guard covers the message, else
+    // not-called.
+    const live = getCleanupLiveStatus(chatId);
+    const inFlight =
+      (latest.active_swipe_id && isCleanupInFlight(chatId, latest.message_id, latest.active_swipe_id)) ||
+      isCleanupInFlight(chatId, latest.message_id, '*');
+    const regionState = (region: 'header' | 'body' | 'footer'): { state: CleanupRegionState } => {
+      const row = jobRows.find((r) => r.region === region);
+      if (row) {
+        const state: CleanupRegionState =
+          row.status === 'flagged' || row.status === 'error' ? 'flagged' : row.changed ? 'deployed' : 'not-called';
+        return { state };
+      }
+      if (live && live[region]) return live[region]!;
+      return { state: inFlight ? 'in-flux' : 'not-called' };
+    };
 
-    return { enabled: true, pending: Number(pendingRow?.count ?? 0), latest: { messageId: latest.message_id, state } };
+    return {
+      enabled: true,
+      pending: Number(pendingRow?.count ?? 0),
+      latest: {
+        messageId: latest.message_id,
+        regions: { header: regionState('header'), body: regionState('body'), footer: regionState('footer') },
+      },
+    };
   });
 }
 

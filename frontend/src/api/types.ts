@@ -649,15 +649,43 @@ export interface ChatSyncStatus {
 }
 
 // GET /v1/cleanup/status — the async cleanup subloop's per-chat read surface (cleanupLoop.ts's
-// CleanupStatus), polled by the floating chat status pill. TRG-style states on the newest
-// eligible message: thinking (landed, loop hasn't covered it yet), unchanged, modified, flagged
-// (repair needed but produced nothing / unexpected error). enabled:false means the chat is not
-// opted in (or not RP / archived) — the pill renders nothing, not a fake 'unchanged'.
-export type CleanupMessageState = 'thinking' | 'unchanged' | 'modified' | 'flagged';
+// CleanupStatus), polled by the floating chat status pills. Per-region pill states on the newest
+// eligible message (in-stream-cleanup-plan.md): each region is not-called (nothing needed fixing),
+// in-flux (a repair is in flight — the loop is working, or the live path is streaming), deployed
+// (a repair actually changed the text), or flagged (a repair was needed but produced nothing /
+// errored). enabled:false means the chat is not opted in (or not RP / archived) — the pills
+// render nothing, not fake 'not-called' states.
+export type CleanupRegionState = 'not-called' | 'in-flux' | 'deployed' | 'flagged';
 export interface CleanupStatus {
   enabled: boolean;
   pending: number;
-  latest: { messageId: string; state: CleanupMessageState } | null;
+  latest: {
+    messageId: string;
+    regions: {
+      header: { state: CleanupRegionState };
+      body: { state: CleanupRegionState };
+      footer: { state: CleanupRegionState };
+    };
+  } | null;
+}
+
+// The live in-stream cleanup SSE frames (in-stream-cleanup-plan.md Contracts), interleaved with
+// the content-delta chunks and never a normal content chunk nor [DONE] — an OpenAI-compatible
+// client that has never heard of these fields simply never sees them (the same additive contract
+// bigimagine_error established). A status frame reports one region's pill state; a patch frame
+// carries a content splice — start/end are character offsets into the text accumulated via onDelta
+// so far (raw deltas plus every patch already applied, in the same order both sides applied them).
+export interface CleanupStatusFrame {
+  bigimagine_cleanup: true;
+  region: 'header' | 'body' | 'footer';
+  state: CleanupRegionState;
+}
+export interface CleanupPatchFrame {
+  bigimagine_patch: true;
+  region: 'header' | 'body' | 'footer';
+  start: number;
+  end: number;
+  replacement: string;
 }
 
 // GET /v1/cleanup/jobs — one chat's recent cleanup activity (cleanupLoop.ts's CleanupJobInfo),

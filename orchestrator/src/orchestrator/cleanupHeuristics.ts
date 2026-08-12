@@ -173,6 +173,21 @@ export function collectUniqueParagraphs(text: string, re: RegExp): Paragraph[] {
   return [...seen.values()].sort((a, b) => a.start - b.start);
 }
 
+/**
+ * Returns the next newline-terminated paragraph at or after `fromOffset`, or null when the rest
+ * of the buffer holds no completed paragraph. Paragraph semantics match extractParagraph: `end`
+ * points at the closing newline and the returned text excludes it — a paragraph is "completed"
+ * only once its trailing newline has arrived. The live cleanup engine (liveCleanup.ts) calls
+ * this after every delta and advances its cursor to `end + 1`; the buffer's final, unterminated
+ * paragraph is never returned here — finishStream's end-of-stream body pass is what judges it.
+ */
+export function nextCompletedParagraph(buffer: string, fromOffset: number): Paragraph | null {
+  const nl = buffer.indexOf('\n', fromOffset);
+  if (nl === -1) return null;
+  const start = buffer.lastIndexOf('\n', fromOffset - 1) + 1;
+  return { text: buffer.slice(start, nl), start, end: nl };
+}
+
 // ---------------------------------------------------------------------------
 // Slop rule engine
 // ---------------------------------------------------------------------------

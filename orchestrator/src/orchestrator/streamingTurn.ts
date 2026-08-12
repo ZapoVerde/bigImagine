@@ -45,8 +45,20 @@ import { log, runWithRequestId } from '../io/logger.js';
 import type { LlmMessage, LlmProvider, LlmUsage } from '../io/llm/types.js';
 import { runWithCallContext, type LlmCallKind } from '../io/llm/callContext.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
+import type { ChatSessionStore } from '../io/chatSessions.js';
 import { createMetricsAccumulator, recordTurnMetrics, type TurnMetricsAccumulator } from '../io/turnMetrics.js';
 import { registerTurnAbort, unregisterTurnAbort } from './turnAbort.js';
+import {
+  collectLiveOutcomes,
+  createLiveCleanupContext,
+  onLiveDelta,
+  resetLiveCleanupContext,
+  type CleanupLiveEvent,
+  type LiveCleanupContext,
+  type LiveRegionOutcome,
+} from './liveCleanup.js';
+import type { CleanupLoopDeps } from './cleanupLoop.js';
 
 /** Same automatic retry budget as runTurn (loop.ts's MAX_EMPTY_REPLY_RETRIES) for a blank final
  *  reply: one initial attempt plus up to this many retries, then the turn fails visibly rather
@@ -78,15 +90,41 @@ export interface RunStreamingRpTurnOptions {
   model?: string;
   sampling?: { temperature?: number; topP?: number; maxTokens?: number };
   db: PostgresClient;
+  /** The same OrchestratorSettingsStore cleanupLoop.ts reads its config from — the live engine
+   *  resolves the header/footer regex + prompts and the slop rules from it (in-stream-cleanup-plan.md). */
+  settings: OrchestratorSettingsStore;
+  /** A chats handle for history, matching CleanupLoopDeps — the live repairs' {{history, N}}.
+   *  Required even when onCleanupEvent is absent (a caller that never opts in still passes it). */
+  chats: ChatSessionStore;
   /** Called once per text delta, in arrival order, with the exact text the provider streamed.
    *  Never called after the promise resolves or rejects. The caller (httpServer.ts) serializes
    *  each call into one SSE frame immediately, so "relay" means live, not buffered. */
   onDelta: (textDelta: string) => void;
+  /** When provided, live cleanup runs for this turn (the caller gates on the chat's
+   *  cleanup_enabled_at + RP kind — an absent callback means no live cleanup at all, and the
+   *  poll tick stays the only cleanup path). Each event is translated by the caller into a
+   *  bigimagine_cleanup / bigimagine_patch SSE frame, interleaved with the content deltas.
+   *  The raw stream is never delayed for any repair — cleanup only ever follows up on text
+   *  already relayed, via a patch. */
+  onCleanupEvent?: (event: CleanupLiveEvent) => void;
+  /** Turn 1 of a new chat: the early-header and live-body triggers are not engaged (the reply
+   *  is fully buffered and header-repaired synchronously before anything streams); the composed
+   *  buffer still accumulates so the caller's finishStream can run the whole-body tail pass +
+   *  footer + deferred 'llm' pass through the shared handoff. */
+  skipLiveTriggers?: boolean;
 }
 
 export interface RunStreamingRpTurnResult {
   content: string;
   usage?: LlmUsage;
+  /** Present when live cleanup ran for this turn (onCleanupEvent was provided and the connection
+   *  has a completeStream). The composed buffer (byte-identical to what the caller accumulated
+   *  via onDelta), the three regions' live states as of stream end, and the live engine's
+   *  context — the caller runs liveCleanup.finishStream(ctx, deps, baseText, ...) with it, then
+   *  finalizeCleanupResult. Undefined for a no-completeStream connection (nothing can be caught
+   *  live — the poll tick handles the message, unchanged from today) or when the caller never
+   *  opted in. */
+  cleanup?: { composed: string; liveOutcomes: LiveRegionOutcome[]; ctx: LiveCleanupContext };
 }
 
 export async function runStreamingRpTurn(opts: RunStreamingRpTurnOptions): Promise<RunStreamingRpTurnResult> {
@@ -134,6 +172,9 @@ async function runStreamingRpTurnInner(
 ): Promise<RunStreamingRpTurnResult> {
   const { llm, model, sampling, userId } = opts;
   const messages: LlmMessage[] = [{ role: 'system', content: opts.systemPrompt }, ...opts.messages];
+  // The live engine's deps — the same shape cleanupLoop.ts's tick runs on, built here from the
+  // core's own deps so liveCleanup's dispatchStep is literally the poll tick's function.
+  const liveDeps: CleanupLoopDeps = { db: opts.db, llm, settings: opts.settings, chats: opts.chats };
 
   log.info(`runStreamingRpTurn start`, { userId, provider: llm.name, model, historyLength: opts.messages.length });
 
@@ -144,15 +185,37 @@ async function runStreamingRpTurnInner(
   // were relayed) propagates immediately — loop.ts's completeWithBlankRetry treats a thrown
   // llm.complete the same way: the caller decides what the client sees.
   let attempts = 0;
+  // Created once (first completeStream attempt) when the caller opted into live cleanup; reset
+  // on every blank retry so the buffer/region state mirror relayedText (a whitespace-only first
+  // attempt can't fire a spurious header repair, and patch offsets never diverge from what the
+  // client accumulated). Never created for a no-completeStream connection — nothing streams
+  // live, so nothing can be caught live; the poll tick stays the only cleanup path for it.
+  let liveCtx: LiveCleanupContext | undefined;
   for (;;) {
     const llmStart = Date.now();
     let relayedText = '';
     let usage: LlmUsage | undefined;
     if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
     if (llm.completeStream) {
+      if (opts.onCleanupEvent && !liveCtx) {
+        // Fail-open inside: a config load failure returns undefined and the turn streams with no
+        // live cleanup (the poll tick catches the message afterwards).
+        liveCtx = await createLiveCleanupContext(liveDeps, userId, opts.taskId);
+      }
       const turn = await llm.completeStream(messages, [], (delta) => {
         relayedText += delta;
         opts.onDelta(delta);
+        if (liveCtx) {
+          if (opts.skipLiveTriggers) {
+            // Turn 1: still accumulate the buffer for the caller's finishStream whole-body pass;
+            // the early-header and live-body triggers are deliberately not engaged.
+            liveCtx.composed += delta;
+          } else {
+            // Relay first, inspect second — the raw stream is never withheld for a repair; the
+            // live hooks fire their LLM repairs concurrently under the same turn signal.
+            onLiveDelta(liveCtx, liveDeps, userId, opts.taskId, delta, signal, opts.onCleanupEvent);
+          }
+        }
       }, { model, ...sampling, signal });
       // The provider resolves with the fully-accumulated text; onDelta already relayed each
       // piece live. Use the resolved content (not our own concatenation) as the canonical reply,
@@ -184,6 +247,7 @@ async function runStreamingRpTurnInner(
         attempt: attempts,
         maxRetries: MAX_EMPTY_REPLY_RETRIES,
       });
+      if (liveCtx) resetLiveCleanupContext(liveCtx);
       continue;
     }
     if (isBlankReply(relayedText)) {
@@ -191,6 +255,10 @@ async function runStreamingRpTurnInner(
     }
 
     log.info(`runStreamingRpTurn done`, { userId, relayedChars: relayedText.length });
-    return { content: relayedText, usage };
+    return {
+      content: relayedText,
+      usage,
+      cleanup: liveCtx ? { composed: liveCtx.composed, liveOutcomes: collectLiveOutcomes(liveCtx), ctx: liveCtx } : undefined,
+    };
   }
 }

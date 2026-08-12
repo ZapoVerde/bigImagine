@@ -78,6 +78,10 @@ function baseOpts(pool, llm, overrides = {}) {
     systemPrompt: 'You are Aria, a tavern keeper. Stay in character.',
     llm,
     db: createPostgresClient(pool),
+    // Unused unless onCleanupEvent is passed (live cleanup is off by default); present to satisfy
+    // the core's required deps (in-stream-cleanup-plan.md Contracts).
+    settings: {},
+    chats: {},
     onDelta: () => {},
     ...overrides,
   };
