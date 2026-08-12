@@ -3,6 +3,14 @@
  * @stamp 2026-08-12
  * @architectural-role IO Wrapper — the orchestrator's HTTP surface
  * @description
+ * Thin bootstrap + route table only. As of the 2026-08-12 breakdown
+ * (docs/plans/httpserver-breakdown-plan.md), every request handler this module wires lives in its
+ * own server/handle*.ts module (handleChats.ts, handleChatCompletions.ts, handleAdmin*.ts,
+ * promptAssembly.ts/promptPreview.ts/locationImages.ts/turnExecution.ts, ...); this file keeps
+ * HttpServerDeps, the [method, path, handler] route table below (with the withUser/withAdmin auth
+ * wrappers), and startHttpServer. The paragraphs that follow document the HTTP surface those
+ * handlers implement — each stays with its endpoint rather than moving into the handler files.
+ *
  * The only "server" bigBrain exposes. Speaks just enough of the OpenAI Chat Completions shape
  * for the native frontend SPA to drive a turn (the shape was already OpenAI-compatible from
  * bigBrain's own history; nothing forces keeping it, but there's no reason to change it either).
@@ -398,472 +406,208 @@ async function handleScreenLockSettingsGet(req: IncomingMessage, res: ServerResp
 
 
 
+type RouteHandler = (
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: HttpServerDeps,
+) => Promise<void>;
+
+interface Route {
+  /** HTTP method this route answers; '*' matches any method (the CRUD family routes). */
+  method: 'GET' | 'POST' | '*';
+  /** Exact path, prefix (prefix: true), or path family — see the matchers below. */
+  path?: string;
+  prefix?: boolean;
+  /** Match path, path/, and path?... — the prefix-with-query pattern the CRUD families use. */
+  family?: string | string[];
+  run: RouteHandler;
+}
+
+/** Route-table matcher — preserves the original if-chain's exact conditions. */
+function routeMatches(req: IncomingMessage, route: Route): boolean {
+  if (route.method !== '*' && req.method !== route.method) return false;
+  const url = req.url ?? '';
+  if (route.family !== undefined) {
+    const families = Array.isArray(route.family) ? route.family : [route.family];
+    return families.some((f) => url === f || url.startsWith(`${f}/`) || url.startsWith(`${f}?`));
+  }
+  if (route.prefix) return url.startsWith(route.path!);
+  return url === route.path;
+}
+
+/** Authenticate to a user_id — the value authenticate() resolves, never anything the body says. */
+async function withUser(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: HttpServerDeps,
+  fn: (userId: string) => Promise<void>,
+): Promise<void> {
+  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
+  if (!userId) {
+    sendJson(res, 401, { error: 'missing or unrecognized API key' });
+    return;
+  }
+  await fn(userId);
+}
+
+/** Admin gate: any Cloudflare Access identity that cleared the hostname, else the static admin key. */
+async function withAdmin(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: HttpServerDeps,
+  fn: () => Promise<void>,
+): Promise<void> {
+  if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
+    sendJson(res, 401, { error: 'missing or incorrect admin key' });
+    return;
+  }
+  await fn();
+}
+
+/** Serve one FRONTEND_DIST_DIR file, rejecting path traversal (the old if-chain's `..` guard).
+ *  distPrefix keeps the subdirectory (e.g. 'assets/') — the URL's path prefix was already sliced
+ *  off by the caller, and the file lives at dist/<distPrefix><relativePath>. */
+async function serveDistFile(res: ServerResponse, distPrefix: string, distRelativePath: string): Promise<void> {
+  const relativePath = decodeURIComponent(distRelativePath);
+  if (relativePath.includes('..')) {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  await serveStaticFile(res, `${FRONTEND_DIST_DIR}/${distPrefix}${relativePath}`);
+}
+
+// The route table. Registration order IS the precedence: prefix routes match in the order they
+// appear, so the two /v1/characters/ sub-routes sit before the generic /v1/characters/ prefix
+// (same as the old if-chain), and everything else mirrors the if-chain's order exactly.
+const routes: Route[] = [
+  // ---- SPA + PWA static (served unauthenticated; Cloudflare Access gates the whole hostname) ----
+  { method: 'GET', path: '/', run: async (_req, res, _deps) => { await serveStaticFile(res, `${FRONTEND_DIST_DIR}/index.html`); } },
+  { method: 'GET', prefix: true, path: '/assets/', run: async (req, res, _deps) => { await serveDistFile(res, 'assets/', (req.url ?? '').slice('/assets/'.length)); } },
+  // PWA installability: web app manifest + its icons (frontend/public/*, copied to dist/ root
+  // verbatim by Vite — unlike /assets/, these keep their source filenames, so each needs its own
+  // route rather than a single prefix match).
+  { method: 'GET', path: '/manifest.json', run: async (_req, res, _deps) => { await serveStaticFile(res, `${FRONTEND_DIST_DIR}/manifest.json`); } },
+  { method: 'GET', path: '/apple-touch-icon.png', run: async (_req, res, _deps) => { await serveStaticFile(res, `${FRONTEND_DIST_DIR}/apple-touch-icon.png`); } },
+  { method: 'GET', prefix: true, path: '/icons/', run: async (req, res, _deps) => { await serveDistFile(res, 'icons/', (req.url ?? '').slice('/icons/'.length)); } },
+  { method: 'GET', path: '/healthz', run: async (_req, res, _deps) => { sendJson(res, 200, { status: 'ok' }); } },
+
+  // ---- Household-key/Access-gated reads (no admin key) ----
+  { method: 'POST', path: '/v1/client-logs', run: async (req, res, deps) => { await handleClientLogs(req, res, deps); } },
+  { method: 'GET', path: '/v1/whoami', run: async (req, res, deps) => { await handleWhoAmI(req, res, deps); } },
+  { method: 'GET', path: '/v1/models', run: async (_req, res, deps) => { await handleModels(res, deps); } },
+  { method: 'GET', path: '/v1/timezone', run: async (req, res, deps) => { await handleHouseholdTimezoneGet(req, res, deps); } },
+  { method: 'GET', path: '/v1/chat-background-settings', run: async (req, res, deps) => { await handleChatBackgroundSettingsGet(req, res, deps); } },
+  { method: 'GET', path: '/v1/chat-legibility-settings', run: async (req, res, deps) => { await handleChatLegibilitySettingsGet(req, res, deps); } },
+  { method: 'GET', path: '/v1/screen-lock-settings', run: async (req, res, deps) => { await handleScreenLockSettingsGet(req, res, deps); } },
+
+  // ---- Chat turns, cleanup, attachments (user-authenticated) ----
+  { method: 'GET', prefix: true, path: '/v1/chat/status', run: async (req, res, deps) => { await handleChatTurnStatus(req, res, deps); } },
+  { method: 'GET', prefix: true, path: '/v1/cleanup/status', run: async (req, res, deps) => { await handleCleanupStatus(req, res, deps); } },
+  { method: 'GET', prefix: true, path: '/v1/cleanup/jobs', run: async (req, res, deps) => { await handleCleanupJobs(req, res, deps); } },
+  { method: 'POST', path: '/v1/cleanup/run', run: async (req, res, deps) => { await handleCleanupRunNow(req, res, deps); } },
+  { method: 'POST', path: '/v1/chat/completions', run: async (req, res, deps) => { await handleChatCompletions(req, res, deps); } },
+  { method: 'POST', path: '/v1/chat/abort', run: async (req, res, deps) => { await handleChatAbort(req, res, deps); } },
+  { method: 'POST', path: '/v1/attachments/extract', run: async (req, res, deps) => { await handleUploadAttachment(req, res, deps); } },
+
+  // ---- Characters ----
+  { method: 'POST', path: '/v1/characters/import', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      const result = await importCharacterCard(req, deps, userId);
+      sendJson(res, result.status, result.body);
+    }) },
+  // Must sit before the generic GET /v1/characters/ prefix below, which would otherwise swallow
+  // it — same registration order as the chub-avatar route. Backs BrowseChubView.tsx's card modal.
+  { method: 'GET', prefix: true, path: '/v1/characters/chub-detail', run: async (req, res, deps) => withUser(req, res, deps, async () => {
+      const result = await handleChubCardDetail(req, { settings: deps.settings });
+      sendJson(res, result.status, result.body);
+    }) },
+  { method: 'GET', prefix: true, path: '/v1/characters/chub-avatar', run: async (req, res, deps) => withUser(req, res, deps, async () => {
+      await handleChubAvatarProxy(req, res, deps);
+    }) },
+  { method: 'GET', prefix: true, path: '/v1/characters/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handleCharacterExportRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+
+  // ---- Chats / folders / location image notify (any method — the CRUD handlers dispatch on it) ----
+  { method: '*', family: '/v1/chats', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handleChatRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: '*', family: '/v1/folders', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handleFolderRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: 'POST', prefix: true, path: '/v1/locations/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      // endpoint.md §5.2: the Chat View's broken-background-image notify — user-scoped, clears the
+      // stale URL so the next visit re-renders.
+      await handleLocationImageBroken(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+
+  // ---- Tools (handleToolInvoke authenticates itself, same as the old chain) ----
+  { method: 'GET', path: '/v1/tools', run: async (req, res, deps) => withUser(req, res, deps, async () => {
+      sendJson(res, 200, { names: deps.tools.definitions().map((def) => def.name) });
+    }) },
+  { method: 'POST', prefix: true, path: '/v1/tools/', run: async (req, res, deps) => {
+      const toolName = decodeURIComponent(new URL(req.url!, 'http://placeholder').pathname.slice('/v1/tools/'.length));
+      await handleToolInvoke(req, res, deps, toolName);
+    } },
+
+  // ---- Admin: credentials + connections ----
+  { method: 'GET', path: '/v1/admin/credentials', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleAdminCredentialsList(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/credentials', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleAdminCredentialsSet(req, res, deps); }) },
+  { method: '*', family: '/v1/admin/connections', run: async (req, res, deps) => withAdmin(req, res, deps, async () => {
+      await handleAdminConnectionRoutes(req, res, deps, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: '*', family: '/v1/admin/image-connections', run: async (req, res, deps) => withAdmin(req, res, deps, async () => {
+      await handleAdminImageConnectionRoutes(req, res, deps, new URL(req.url!, 'http://placeholder'));
+    }) },
+
+  // ---- Admin: settings GET/POST pairs ----
+  { method: 'GET', path: '/v1/admin/image-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleImageSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/image-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleImageSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/location-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/location-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/locations', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationsGet(res, deps); }) },
+  { method: 'GET', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/chat-background-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatBackgroundSettingsGet(req, res, deps); }) },
+  { method: 'POST', path: '/v1/admin/chat-background-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatBackgroundSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/chat-legibility-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatLegibilitySettingsGet(req, res, deps); }) },
+  { method: 'POST', path: '/v1/admin/chat-legibility-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatLegibilitySettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/notification-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleNotificationSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/notification-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleNotificationSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/screen-lock-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleAdminScreenLockSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/screen-lock-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleAdminScreenLockSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/pia-proxy-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePiaProxyUrlGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/pia-proxy-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePiaProxyUrlSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/persona-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePersonaSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/persona-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePersonaSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/chat-memory-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatMemorySettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/chat-memory-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatMemorySettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/chat-memory-sync-status', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleChatMemorySyncStatusGet(res, deps); }) },
+  { method: 'GET', path: '/v1/admin/location-render-status', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationRenderStatusGet(res, deps); }) },
+  { method: 'GET', path: '/v1/admin/canon-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCanonSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/canon-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCanonSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/cleanup-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCleanupSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/cleanup-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCleanupSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/lorebook-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLorebookSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/lorebook-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLorebookSettingsSet(req, res, deps); }) },
+  { method: '*', family: ['/v1/admin/lorebooks', '/v1/admin/lorebook-entries'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => {
+      await handleAdminLorebookRoutes(req, res, deps, new URL(req.url!, 'http://placeholder'));
+    }) },
+];
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   deps: HttpServerDeps,
 ): Promise<void> {
-  if (req.method === 'GET' && req.url === '/') {
-    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/index.html`);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/assets/')) {
-    const relativePath = decodeURIComponent(req.url.slice('/assets/'.length));
-    if (relativePath.includes('..')) {
-      sendJson(res, 404, { error: 'not found' });
+  for (const route of routes) {
+    if (routeMatches(req, route)) {
+      await route.run(req, res, deps);
       return;
     }
-    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/assets/${relativePath}`);
-    return;
-  }
-  // PWA installability: web app manifest + its icons (frontend/public/*, copied to dist/ root
-  // verbatim by Vite — unlike /assets/, these keep their source filenames, so each needs its own
-  // route rather than a single prefix match).
-  if (req.method === 'GET' && req.url === '/manifest.json') {
-    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/manifest.json`);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/apple-touch-icon.png') {
-    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/apple-touch-icon.png`);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/icons/')) {
-    const relativePath = decodeURIComponent(req.url.slice('/icons/'.length));
-    if (relativePath.includes('..')) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    await serveStaticFile(res, `${FRONTEND_DIST_DIR}/icons/${relativePath}`);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/healthz') {
-    sendJson(res, 200, { status: 'ok' });
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/client-logs') {
-    await handleClientLogs(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/whoami') {
-    await handleWhoAmI(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/models') {
-    await handleModels(res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/timezone') {
-    await handleHouseholdTimezoneGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/chat-background-settings') {
-    await handleChatBackgroundSettingsGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/chat-legibility-settings') {
-    await handleChatLegibilitySettingsGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/screen-lock-settings') {
-    await handleScreenLockSettingsGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/chat/status')) {
-    await handleChatTurnStatus(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/cleanup/status')) {
-    await handleCleanupStatus(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/cleanup/jobs')) {
-    await handleCleanupJobs(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/cleanup/run') {
-    await handleCleanupRunNow(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/chat/completions') {
-    await handleChatCompletions(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/chat/abort') {
-    await handleChatAbort(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/attachments/extract') {
-    await handleUploadAttachment(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/characters/import') {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    const result = await importCharacterCard(req, deps, userId);
-    sendJson(res, result.status, result.body);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/chub-avatar')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    await handleChubAvatarProxy(req, res, deps);
-    return;
-  }
-  // Must sit before the generic GET /v1/characters/ prefix below, which would otherwise swallow
-  // it — same registration order as the chub-avatar route. Backs BrowseChubView.tsx's card modal.
-  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/chub-detail')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    const result = await handleChubCardDetail(req, { settings: deps.settings });
-    sendJson(res, result.status, result.body);
-    return;
-  }
-  if (req.method === 'GET' && req.url?.startsWith('/v1/characters/')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    await handleCharacterExportRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (req.url === '/v1/chats' || req.url?.startsWith('/v1/chats/') || req.url?.startsWith('/v1/chats?')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    await handleChatRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (req.url === '/v1/folders' || req.url?.startsWith('/v1/folders/')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    await handleFolderRoutes(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (req.method === 'POST' && req.url?.startsWith('/v1/locations/')) {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    // endpoint.md §5.2: the Chat View's broken-background-image notify — user-scoped, clears the
-    // stale URL so the next visit re-renders.
-    await handleLocationImageBroken(req, res, deps, userId, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/tools') {
-    const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-    if (!userId) {
-      sendJson(res, 401, { error: 'missing or unrecognized API key' });
-      return;
-    }
-    sendJson(res, 200, { names: deps.tools.definitions().map((def) => def.name) });
-    return;
-  }
-  if (req.method === 'POST' && req.url?.startsWith('/v1/tools/')) {
-    const toolName = decodeURIComponent(new URL(req.url, 'http://placeholder').pathname.slice('/v1/tools/'.length));
-    await handleToolInvoke(req, res, deps, toolName);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/credentials') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminCredentialsList(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/credentials') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminCredentialsSet(req, res, deps);
-    return;
-  }
-  if (req.url === '/v1/admin/connections' || req.url?.startsWith('/v1/admin/connections/') || req.url?.startsWith('/v1/admin/connections?')) {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminConnectionRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (
-    req.url === '/v1/admin/image-connections' ||
-    req.url?.startsWith('/v1/admin/image-connections/') ||
-    req.url?.startsWith('/v1/admin/image-connections?')
-  ) {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminImageConnectionRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/image-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleImageSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/image-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleImageSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/location-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLocationSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/location-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLocationSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/locations') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLocationsGet(res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/timezone') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleTimezoneGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/timezone') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleTimezoneSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/chat-background-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatBackgroundSettingsGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/chat-background-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatBackgroundSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/chat-legibility-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatLegibilitySettingsGet(req, res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/chat-legibility-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatLegibilitySettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/notification-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleNotificationSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/notification-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleNotificationSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/screen-lock-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminScreenLockSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/screen-lock-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminScreenLockSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/pia-proxy-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handlePiaProxyUrlGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/pia-proxy-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handlePiaProxyUrlSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/persona-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handlePersonaSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/persona-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handlePersonaSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatMemorySettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/chat-memory-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatMemorySettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/chat-memory-sync-status') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleChatMemorySyncStatusGet(res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/location-render-status') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLocationRenderStatusGet(res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/canon-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCanonSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/canon-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCanonSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/cleanup-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCleanupSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/cleanup-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleCleanupSettingsSet(req, res, deps);
-    return;
-  }
-  if (req.method === 'GET' && req.url === '/v1/admin/lorebook-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLorebookSettingsGet(res, deps);
-    return;
-  }
-  if (req.method === 'POST' && req.url === '/v1/admin/lorebook-settings') {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleLorebookSettingsSet(req, res, deps);
-    return;
-  }
-  if (
-    req.url === '/v1/admin/lorebooks' ||
-    req.url?.startsWith('/v1/admin/lorebooks/') ||
-    req.url?.startsWith('/v1/admin/lorebooks?') ||
-    req.url === '/v1/admin/lorebook-entries' ||
-    req.url?.startsWith('/v1/admin/lorebook-entries/') ||
-    req.url?.startsWith('/v1/admin/lorebook-entries?')
-  ) {
-    if (!(await isAdminAuthorized(req, deps.adminApiKey, deps.accessIdentity))) {
-      sendJson(res, 401, { error: 'missing or incorrect admin key' });
-      return;
-    }
-    await handleAdminLorebookRoutes(req, res, deps, new URL(req.url, 'http://placeholder'));
-    return;
   }
   sendJson(res, 404, { error: 'not found' });
 }
+
 
 export function startHttpServer(deps: HttpServerDeps): Server {
   const server = createServer((req, res) => {
