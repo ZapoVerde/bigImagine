@@ -36,6 +36,17 @@
  * is scale-free (no absolute constants — consistent with the module's relative-σ-floor
  * convention) and a strict inversion of Canonize's multiplicative semantics.
  *
+ * Since 2026-08-17 (Stage 4 of the same plan) the module also owns the anchored keyword blend
+ * (their RAG_strategy_v4.md §3 Step 3) as a pure export, `blendKeyword(window, alpha)`. The
+ * distance-space form is the item the Stage-1 Background explicitly left open ("flagged there,
+ * not resolved here" — see the plan's Stage 4 addendum for the full reasoning): Canonize blends
+ * in similarity space with an anchor of (1−α) × max(s_vec), and the literal distance mirror —
+ * subtract (t_i/t_max) × (1−α) × min(d) — collapses whenever the best match is a near-duplicate
+ * (min(d) ≈ 0 silences the keyword lane). So the blend happens in the bounded similarity space
+ * s = 1/(1+d): strictly monotone, bounded (0,1], and the anchor max(s) = 1/(1+min(d)) is always
+ * meaningful. Blended back with d' = max(0, 1/s' − 1); the pool statistics in applyCutoff still
+ * run on distance, keeping the pipeline's distance-native convention consistently.
+ *
  * @api-declaration
  * poolSize(max, poolMultiple) -> number — the SQL LIMIT for the candidate pool, Canonize's own
  *   N_C = max(round(P × M), 6) unchanged. Called BEFORE the query runs.
@@ -48,6 +59,12 @@
  *   `ageChunks` chunks behind the conversation's newest archived chunk survives to the cutoff.
  *   age 0 (the newest chunk) returns 1 (no decay); the factor falls off as 1 − 0.025·ln(2·age+1)
  *   and floors at 0.70 so ancient-but-relevant chunks are never buried entirely.
+ * blendKeyword(window, alpha?) -> { rows, scale } — Canonize's Step 3 anchored keyword blend in
+ *   distance space (see the Stage-4 paragraph above): each row's kwScore re-ranks it within the
+ *   window (index-aligned output rows carry the blended distance and the keyword contribution;
+ *   `scale` is the max contribution, Canonize's telemetry `kw≤`, 0 when the lane is inert). The
+ *   caller re-sorts by the blended distances (ascending) before applyCutoff, since the blend can
+ *   re-rank.
  *
  * @contract
  *   assertions:
@@ -86,6 +103,73 @@ export const DECAY_COEFFICIENT = 0.025;
 /** Turn-pairs per chunk — chunkChatTranscript's MESSAGES_PER_CHUNK (4 messages = 2 pairs),
  *  the age-unit mapping between chunk ordinals and Canonize's pair-counted age. */
 export const PAIRS_PER_CHUNK = 2;
+
+/** Stage 4 constant, Canonize's own value (RAG_strategy_v4.md §3 Step 3): the keyword blend
+ *  weight α — at 0.7 the keyword lane can contribute at most 30% of the strongest vector
+ *  similarity in the window. Kept a plain constant, not a setting, exactly like the Stage 3
+ *  decay constants — the plan's Stage-4 scope names no new setting; promoting α to a DB-backed
+ *  RagView knob is the same mechanical follow-up Stage 3 documented. */
+export const KEYWORD_BLEND_ALPHA = 0.7;
+
+export interface KeywordBlendRow {
+  /** Decayed L2 distance to the query vector (recallForPrompt.ts's chunk `distance` column). */
+  distance: number;
+  /** Full-text rank for the same row (recallForPrompt.ts's `kw_score` column — ts_rank over
+   *  chat_chunks.content_tsv, migration 0093). 0/null when the row has no keyword match: the
+   *  keyword lane is additive, so a row can only rank better, never worse. */
+  kwScore: number | null | undefined;
+}
+
+export interface KeywordBlendResult {
+  /** Index-aligned with the input window: each row's distance after the keyword blend, plus its
+   *  keyword contribution. The caller re-sorts by `distance` (ascending) before applyCutoff. */
+  rows: { distance: number; kwContribution: number }[];
+  /** The max keyword contribution applied in this window (Canonize's telemetry `kw≤`): how much
+   *  the strongest keyword match moved the top vector similarity. 0 when no row has a keyword
+   *  match — the blend is inert and every distance is unchanged. */
+  scale: number;
+}
+
+/** Canonize's anchored keyword blend (RAG_strategy_v4.md §3 Step 3) in distance space — the
+ *  form the Stage-1 Background deliberately left open until a second lane existed (resolved in
+ *  the plan's Stage 4 addendum). Canonize blends in similarity space (higher is better):
+ *  s_i = s_vec_i + (t_i/t_max) × (1−α) × max(s_vec), anchored so the keyword lane contributes
+ *  at most (1−α) × the strongest vector match. Raw L2 distance has no fixed scale, and the
+ *  literal mirror (subtract (t_i/t_max) × (1−α) × min(d)) collapses when the best match is a
+ *  near-duplicate, so the blend happens in the bounded similarity space s = 1/(1+d) — strictly
+ *  monotone (ordering-preserving), bounded (0,1], and the anchor max(s) = 1/(1+min(d)) is always
+ *  meaningful — then converts back with d' = max(0, 1/s' − 1): a row clamped at 0 is a perfect
+ *  match (top vector AND top keyword). applyCutoff still measures distance, so the pipeline
+ *  keeps its distance-native convention.
+ *
+ *  `window` is the caller's fetched candidate window (recallForPrompt.ts's KEYWORD_WINDOW_SIZE),
+ *  any order — maxKw and max(s) are computed over it, the bounded analog of Canonize's
+ *  whole-collection anchors (their query returns topK=100k; see the Stage 4 addendum's window
+ *  note). No keyword match anywhere (maxKw = 0) or an empty window → scale 0, every distance
+ *  unchanged. */
+export function blendKeyword(
+  window: KeywordBlendRow[],
+  alpha: number = KEYWORD_BLEND_ALPHA,
+): KeywordBlendResult {
+  if (window.length === 0) return { rows: [], scale: 0 };
+  const maxKw = window.reduce((m, w) => Math.max(m, w.kwScore ?? 0), 0);
+  if (maxKw <= 0) {
+    return { rows: window.map((w) => ({ distance: w.distance, kwContribution: 0 })), scale: 0 };
+  }
+  const maxS = window.reduce((m, w) => Math.max(m, 1 / (1 + w.distance)), 0);
+  const scale = (1 - alpha) * maxS;
+  return {
+    rows: window.map((w) => {
+      const contribution = ((w.kwScore ?? 0) / maxKw) * scale;
+      // A row with no keyword match (contribution 0) keeps its distance EXACTLY — the keyword
+      // lane is additive and must not perturb a non-matching row even by float rounding.
+      if (contribution === 0) return { distance: w.distance, kwContribution: 0 };
+      const blended = 1 / (1 + w.distance) + contribution;
+      return { distance: Math.max(0, 1 / blended - 1), kwContribution: contribution };
+    }),
+    scale,
+  };
+}
 
 export interface CutoffStats {
   /** The pool actually measured — equals distances.length (the caller's fetched row count). */

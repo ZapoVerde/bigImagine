@@ -551,3 +551,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   CHECK rebuild as 0091 (complete vocabulary, all of 0010–0091, 71 keys); the two shared knobs
   from 0091 (pool_multiple/cutoff_mode) apply to the fact lane unchanged. Read live by
   recallForPrompt.ts; unset/corrupt → `DEFAULT_FACT_MIN`. Idempotent hand-apply one-shot.
+- `0093_chat_chunks_keyword_lane.sql` — Stage 4 of the CNZ retrieval port: the keyword/FTS lane
+  over `chat_chunks.content`. Adds a STORED generated `content_tsv` column
+  (`to_tsvector('english', content)` — computed on insert and backfilled for existing rows, no
+  trigger/backfill script) plus a GIN index (`chat_chunks_content_tsv_gin`). The chunk query in
+  recallForPrompt.ts scores every fetched row with `ts_rank(content_tsv, ...)` and
+  recallCutoff.ts's `blendKeyword` re-ranks the keyword window by blended distance before the
+  cutoff (Canonize's RAG_strategy_v4.md §3 Step 3, chat channel only). No settings keys — the
+  blend constants are plain constants per the plan. Idempotent hand-apply one-shot.

@@ -18,6 +18,11 @@
 //      distance by Canonize's factor max(0.70, 1 − 0.025·ln(2·ageChunks + 1)) in SQL, ages each
 //      row against the chat's newest chunk ordinal, and orders/measures the DECAYED distance —
 //      decay before pool formation, Canonize's pipeline order, chat lane only.
+//   6. Stage 4 keyword lane (recallCutoff.blendKeyword, migration 0093): the chunks query
+//      scores every row with ts_rank(content_tsv, ...) as kw_score (tsquery = the OR of the
+//      query text's lexemes), fetches the KEYWORD_WINDOW_SIZE window (≥ the pool) instead of
+//      the pool alone, and the blend re-ranks the window by blended distance before the cutoff
+//      — a strong keyword hit can promote a mediocre vector match into the injected set.
 
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
@@ -112,7 +117,7 @@ function fakeSettings(value) {
 {
   const session = createFakeSession({
     chunkRows: [
-      { ordinal: 7, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1 },
+      { ordinal: 7, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
     ],
     factRows: [
       { fact_id: 'f1', category: 'plot', summary: 'the heist', detail: 'planned for Tuesday', distance: 0.1 },
@@ -156,7 +161,7 @@ function fakeSettings(value) {
 {
   // Corrupt canon_recall_top_k must fall back to the default, never reach `limit NaN`.
   const session = createFakeSession({
-    chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1 }],
+    chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1, kw_score: 0 }],
   });
   const block = await buildAutoRecallPrompt(
     session,
@@ -207,7 +212,7 @@ function fakeSettings(value) {
 // --- 4. The three retrieval knobs (migration 0077) drive the read path ---
 {
   // enabled='false' must short-circuit before any embedding/DB call (the master switch).
-  const session = createFakeSession({ chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1 }] });
+  const session = createFakeSession({ chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1, kw_score: 0 }] });
   const seen = [];
   const probingEmbeddings = {
     name: 's',
@@ -274,12 +279,20 @@ function fakeSettings(value) {
     'auto_recall_pairs=2 keeps only the last 2 turn-pairs in the query',
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 6/.test(sql)),
-    'auto_recall_chunk_top_k=2 sizes the candidate pool (poolSize(2, 2) = 6), not a direct LIMIT 2',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
+    'auto_recall_chunk_top_k=2 still fetches the keyword window (≥ pool 6 → limit 100), not a direct LIMIT 2',
   );
   assert(
     seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('as distance')),
     'the chunks query selects the (Stage 3 decayed) distance so the cutoff can measure the pool',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('ts_rank(content_tsv')),
+    'the chunks query scores every row with ts_rank over content_tsv (the Stage 4 keyword lane)',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes("to_tsvector('english', $4)")),
+    "the chunks query builds the keyword tsquery from the embedded query text's lexemes (to_tsvector('english', $4))",
   );
   assert(
     seenSql.some(
@@ -312,8 +325,8 @@ function fakeSettings(value) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 8/.test(sql)),
-    'a corrupt auto_recall_chunk_top_k falls back to the default Max (4) → pool 8, never NaN',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
+    'a corrupt auto_recall_chunk_top_k falls back to the default Max (4) → window 100, never NaN',
   );
 }
 {
@@ -336,8 +349,8 @@ function fakeSettings(value) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 24/.test(sql)),
-    'an oversized auto_recall_chunk_top_k clamps to the MAX_CHUNK_TOP_K cap (12) → pool 24',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
+    'an oversized auto_recall_chunk_top_k clamps to the MAX_CHUNK_TOP_K cap (12) → window 100, never unbounded',
   );
 }
 
@@ -352,7 +365,7 @@ function countChunkBlocks(block) {
   // own wiring test): top_k=8 → pool = poolSize(8, 2) = 16; mean keeps the cluster clamped to
   // Max (8), mean+1sd keeps only the clearly-matched tail (4). Settings flow into the cutoff.
   const spread = [0.15, 0.18, 0.22, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
-  const chunkRows = spread.map((distance, i) => ({ ordinal: i + 1, summary: null, content: `c${i}`, distance }));
+  const chunkRows = spread.map((distance, i) => ({ ordinal: i + 1, summary: null, content: `c${i}`, distance, kw_score: 0 }));
   const makeSession = () => ({
     async query(sql) {
       if (sql.includes('from chat_chunks')) return chunkRows;
@@ -397,7 +410,7 @@ function countChunkBlocks(block) {
 }
 {
   // A flat pool (no signal) collapses to the Chunk Min floor — the cutoff actually cuts.
-  const flat = Array.from({ length: 16 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `f${i}`, distance: 0.5 }));
+  const flat = Array.from({ length: 16 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `f${i}`, distance: 0.5, kw_score: 0 }));
   const session = {
     async query(sql) {
       if (sql.includes('from chat_chunks')) return flat;
@@ -426,7 +439,7 @@ function countChunkBlocks(block) {
 {
   // A min above the Max clamps to the Max at read time — it can never bypass the cutoff by
   // being larger than the pool (top_k=2 → pool 6; min=6 would bypass, clamped min=2 floors).
-  const flat = Array.from({ length: 6 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `g${i}`, distance: 0.5 }));
+  const flat = Array.from({ length: 6 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `g${i}`, distance: 0.5, kw_score: 0 }));
   const session = {
     async query(sql) {
       if (sql.includes('from chat_chunks')) return flat;
@@ -453,7 +466,8 @@ function countChunkBlocks(block) {
   );
 }
 {
-  // Pool Multiple drives the SQL pool: P=5 with top_k=2 → poolSize(2, 5) = 10 → LIMIT 10.
+  // Pool Multiple still floors the chunk window (the pool concept survives as the window floor
+  // and the fact lane's LIMIT): P=5 with top_k=2 → poolSize(2, 5) = 10 → window = max(10, 100).
   const seenSql = [];
   const session = {
     async query(sql) {
@@ -477,12 +491,13 @@ function countChunkBlocks(block) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 10/.test(sql)),
-    'chat_memory_auto_recall_pool_multiple=5 sizes the pool (poolSize(2, 5) = 10)',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
+    'chat_memory_auto_recall_pool_multiple=5 still floors the window above the pool (window ≥ pool 10 → limit 100)',
   );
 }
 {
-  // The pool caps at MAX_POOL_SIZE (40): top_k=999 clamps to 12, P=5 → poolSize(12, 5) = 60 → 40.
+  // The chunk fetch is bounded by the keyword window (100), not the old MAX_POOL_SIZE (40):
+  // top_k=999 clamps to 12, P=5 → poolSize(12, 5) = 60 → capped pool 40 → window 100.
   const seenSql = [];
   const session = {
     async query(sql) {
@@ -506,8 +521,8 @@ function countChunkBlocks(block) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 40/.test(sql)),
-    'the candidate pool is capped at MAX_POOL_SIZE (40), never an unbounded LIMIT',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 100/.test(sql)),
+    'the keyword window caps the chunk fetch (100) — never an unbounded LIMIT',
   );
 }
 
@@ -675,6 +690,51 @@ function countFactBullets(block) {
     factSql && factSql.includes('as distance'),
     'the canon_facts query selects the raw distance so the cutoff can measure the fact pool',
   );
+}
+
+// --- 7. Stage 4: the keyword blend re-ranks the chunk window before the cutoff ---
+{
+  // The plan's own wiring test for the keyword lane: the same distance-spread window as the
+  // cutoff tests, but ordinal 10 (distance 0.50 — a mediocre vector match) carries the ONLY
+  // keyword hit (kw_score 100). Without the blend, mean+1sd keeps ordinals 1-4 (threshold ≈
+  // 0.2525) and ordinal 10 stays out. With the blend, ordinal 10's distance collapses to ≈
+  // 0.078 (top keyword + 30% of the top vector similarity) — it is injected while marginal
+  // rows drop out. Proves the blend is wired into buildAutoRecallParts's chunk path end to
+  // end, not just unit-tested in isolation (the fake window mirrors the real SQL, which now
+  // selects kw_score).
+  const spread = [0.15, 0.18, 0.22, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
+  const makeRows = (keywordOnOrdinal10) =>
+    spread.map((distance, i) => ({
+      ordinal: i + 1,
+      summary: null,
+      content: `c${i + 1}`,
+      distance,
+      kw_score: keywordOnOrdinal10 && i === 9 ? 100 : 0,
+    }));
+  const run = (rows) =>
+    buildAutoRecallPrompt(
+      {
+        async query(sql) {
+          if (sql.includes('from chat_chunks')) return rows;
+          if (sql.includes('from canon_facts')) return [];
+          return [];
+        },
+      },
+      fakeSettings(
+        new Map([
+          ['chat_memory_auto_recall_chunk_top_k', '8'],
+          ['chat_memory_auto_recall_cutoff_mode', 'mean+1sd'],
+        ]),
+      ),
+      createStubEmbeddingProvider(8),
+      'user-1',
+      'chat-1',
+      [{ role: 'user', content: 'hi' }],
+    );
+  const baseline = await run(makeRows(false));
+  const blended = await run(makeRows(true));
+  assert(!baseline.includes('<memory turns="10">'), 'without a keyword hit the mediocre vector match is NOT injected');
+  assert(blended.includes('<memory turns="10">'), 'the keyword blend promotes the mediocre vector match into the injected set');
 }
 
 // --- Sanity: the exported constants are what the wiring depends on ---

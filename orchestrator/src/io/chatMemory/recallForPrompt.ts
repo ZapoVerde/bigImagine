@@ -73,6 +73,19 @@
  * plain distance (Canonize's decay is chat-channel-only). The factor's constants are Canonize's
  * own (floor 0.70, coefficient 0.025), kept as plain constants per the plan — no new setting.
  *
+ * Since 2026-08-17 (Stage 4 of the same plan) the chunk lane adds Canonize's keyword/FTS lane
+ * (RAG_strategy_v4.md §3 Step 3): each fetched row's distance is re-ranked by its keyword match
+ * BEFORE the pool is sliced and measured, Canonize's pipeline order (decay → keyword blend →
+ * pool statistics), chat lane only. The chunk query now fetches a KEYWORD_WINDOW_SIZE window
+ * (not the pool alone), scores every row with ts_rank over the content_tsv generated column
+ * (migration 0093 — the tsquery is the OR of the query text's lexemes; a query with no lexemes
+ * yields NULL, coalesced to 0, so the lane is inert rather than erroring), and
+ * recallCutoff.ts's `blendKeyword` re-ranks the window by blended distance — the distance-space
+ * form the Stage-1 doc flagged open: s = 1/(1+d) → blend with the (1−α) × top-vector-similarity
+ * anchor → back to distance. The blend is additive (a row with no keyword match keeps its
+ * decayed distance), its constants (KEYWORD_BLEND_ALPHA 0.7, KEYWORD_WINDOW_SIZE 100) are plain
+ * constants per the plan — no new setting, no admin/frontend surface.
+ *
  * @api-declaration
  * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
  * buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages) ->
@@ -93,7 +106,7 @@ import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { DbSession } from '../postgres.js';
 import type { LlmMessage } from '../llm/types.js';
 import { toPgVectorLiteral } from '../../util/pgvector.js';
-import { applyCutoff, poolSize, type CutoffMode } from './recallCutoff.js';
+import { applyCutoff, blendKeyword, poolSize, type CutoffMode } from './recallCutoff.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
@@ -153,6 +166,17 @@ const MAX_CHUNK_TOP_K = 12;
  *  verbatim, so it can be a few multiples of the ceiling without ever shipping that many rows. */
 const MAX_POOL_SIZE = 40;
 
+/** Stage 4: the chunk lane's fetch window. The query returns this many best-first (decayed-
+ *  distance) rows so the keyword blend (recallCutoff.ts blendKeyword) has room to promote
+ *  lexical matches BEYOND the vector top-N_C before the pool is sliced from blended ranks —
+ *  Canonize's pipeline (blend over the full collection, then slice the pool) with their
+ *  topK=100k whole-collection fetch bounded so the per-turn fetch stays bounded. Generous
+ *  relative to MAX_POOL_SIZE's 40, and the pool statistics only ever measure the blended
+ *  top-N_C of it. The window must be >= the pool (the Math.max at the query keeps that true
+ *  even if constants drift), so the blend always has at least a pool's worth of rows to
+ *  promote within. Plain constant per the plan — no new setting. */
+const KEYWORD_WINDOW_SIZE = 100;
+
 interface ChunkRow {
   ordinal: number;
   summary: string;
@@ -163,6 +187,11 @@ interface ChunkRow {
    *  distribution before deciding how many to keep — Canonize applies decay BEFORE pool
    *  statistics, and the SQL ORDER BY uses the same decayed value. */
   distance: number;
+  /** Full-text rank for this row (Stage 4) — ts_rank over chat_chunks.content_tsv (migration
+   *  0093) for the query's lexemes, 0 when the row has no keyword match. Feeds
+   *  recallCutoff.ts's `blendKeyword`, which re-ranks the window by blended distance before the
+   *  cutoff measures it — the keyword lane is additive, so a row can only rank better. */
+  kw_score: number;
 }
 
 interface CanonFactRow {
@@ -328,33 +357,45 @@ export function buildAutoRecallParts(
       const [vector] = await embeddings.embed([query]);
       if (!vector) return { chunks: [], facts: [] };
 
-      // Both lanes fetch a candidate *pool* (Pool Multiple × Max, capped — recallCutoff's
-      // poolSize) rather than exactly Max rows: the cutoff needs each pool's distribution to
-      // decide how many of its leading rows are worth injecting. The shared Pool Multiple and
-      // Cutoff Mode apply to both lanes unchanged (the Stage-1 naming anticipated this); the
-      // per-channel Max (chunkTopK / factTopK) and Min (chunkMin / factMin) differ per lane.
+      // Both lanes fetch candidate rows rather than exactly Max rows: the cutoff needs each
+      // pool's distribution to decide how many of its leading rows are worth injecting. The
+      // fact lane still sizes its fetch by the shared Pool Multiple × Max (capped — its $4
+      // LIMIT); the chunk lane's fetch is now the Stage-4 keyword window (see
+      // KEYWORD_WINDOW_SIZE) — the pool sizing still floors the window (window >= pool so the
+      // blend always has at least a pool's worth of rows to promote within) and sizes the fact
+      // lane. The shared Pool Multiple and Cutoff Mode apply to both lanes unchanged (the
+      // Stage-1 naming anticipated this); the per-channel Max (chunkTopK / factTopK) and Min
+      // (chunkMin / factMin) differ per lane.
       const pool = Math.min(poolSize(chunkTopK, poolMultiple), MAX_POOL_SIZE);
       const factPool = Math.min(poolSize(factTopK, poolMultiple), MAX_POOL_SIZE);
+      const keywordWindow = Math.max(pool, KEYWORD_WINDOW_SIZE);
 
       const [chunkRows, facts] = await Promise.all([
         session.query<ChunkRow>(
-          // Stage 3: each row's distance is the raw `vector_embed <-> $query` divided by
+          // Stages 3-4: each row's distance is the raw `vector_embed <-> $query` divided by
           // Canonize's temporal-decay factor (recallCutoff.ts `decayFactor`) — a chunk
           // `ageChunks` chunks behind the newest archived chunk gets distance × 1/factor, so
           // older-but-relevant chunks rank (and are measured by the cutoff) as if farther away.
           // The expression mirrors decayFactor() verbatim — keep in sync
           // (verify-recall-for-prompt.mjs asserts the SQL shape). `now` is the newest chunk
           // ordinal for this chat (scalar subquery, index-assisted by chat_chunks_by_chat), so
-          // the freshest chunk has age 0 → factor 1 → no decay.
+          // the freshest chunk has age 0 → factor 1 → no decay. Stage 4 adds the keyword lane:
+          // every row is scored with ts_rank over the content_tsv generated column (migration
+          // 0093) for the OR of the query text's lexemes (ts_rank over a NULL tsquery is NULL,
+          // coalesced to 0 when the query has none — the lane is inert, never an error), and
+          // the fetch is the KEYWORD_WINDOW window rather than the pool alone, so blendKeyword
+          // has room to promote lexical matches before the pool is sliced from blended ranks.
           `select ordinal, summary, content,
                   (vector_embed <-> $3)
                     / greatest(0.70, 1.0 - 0.025 * ln(2 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
-                    as distance
+                    as distance,
+                  coalesce(ts_rank(content_tsv, (select string_agg(lexeme, ' | ')::tsquery from unnest(to_tsvector('english', $4)))), 0)
+                    as kw_score
            from chat_chunks
            where user_id = $1 and chat_id = $2
            order by distance
-           limit ${pool}`,
-          [userId, chatId, toPgVectorLiteral(vector)],
+           limit ${keywordWindow}`,
+          [userId, chatId, toPgVectorLiteral(vector), query],
         ),
         session.query<CanonFactRow>(
           `with candidates as (
@@ -375,16 +416,24 @@ export function buildAutoRecallParts(
         ),
       ]);
 
-      // Decide how many pool rows clear the threshold in each lane, then keep exactly that many
-      // (the rows arrive best-first, so a leading slice is the right cut). Telemetry per call —
-      // the seam where a "nothing worth recalling" turn becomes visible instead of silently
-      // injecting mediocre matches (bi_principles.md §11).
-      const { keepCount, stats } = applyCutoff(chunkRows.map((r) => r.distance), {
+      // Stage 4: the chunk lane's keyword blend (recallCutoff.ts blendKeyword) — each row's
+      // ts_rank kw_score re-ranks the window by blended distance BEFORE the pool is sliced and
+      // measured, Canonize's pipeline order (decay → keyword blend → pool statistics). The
+      // blend is additive: a row with no keyword match keeps its decayed distance, so the
+      // keyword lane can only promote, never bury. Re-sort by blended distance (the query
+      // returned decayed-distance order) before the cutoff, then keep the leading slice.
+      const { rows: blendedRows, scale: kwScale } = blendKeyword(
+        chunkRows.map((r) => ({ distance: r.distance, kwScore: r.kw_score })),
+      );
+      const orderedChunks = chunkRows
+        .map((r, i) => ({ row: r, distance: blendedRows[i].distance }))
+        .sort((a, b) => a.distance - b.distance);
+      const { keepCount, stats } = applyCutoff(orderedChunks.map((x) => x.distance), {
         min: chunkMin,
         max: chunkTopK,
         cutoffMode,
       });
-      const chunks = chunkRows.slice(0, keepCount);
+      const chunks = orderedChunks.slice(0, keepCount).map((x) => x.row);
       log.info('buildAutoRecallParts: chunk cutoff applied', {
         userId,
         chatId,
@@ -392,6 +441,8 @@ export function buildAutoRecallParts(
         max: chunkTopK,
         keepCount,
         temporalDecay: true, // Stage 3: distances measured are decayed (recallCutoff.decayFactor)
+        keywordLane: true, // Stage 4: distances measured are keyword-blended (recallCutoff.blendKeyword)
+        kwScale, // the max keyword contribution (Canonize's telemetry `kw≤`; 0 = lane inert)
         ...stats,
       });
 

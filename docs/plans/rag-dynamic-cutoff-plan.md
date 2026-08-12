@@ -331,3 +331,64 @@ tell the measured distribution is decayed.
 
 **Scope.** Chat lane only (Canonize: "chat channel only"); the canon_facts lane keeps its
 plain distance. No schema change, no index change, no settings change.
+
+---
+
+## Stage 4 addendum — keyword/FTS lane on chat_chunks (implemented 2026-08-17, commit pending)
+
+Status: implemented on top of Stages 1-3. What shipped, and the decisions this stage resolves
+that the Stage-1 doc deliberately left open ("flagged there, not resolved here"):
+
+**Distance-space blend form (the flagged item).** Canonize's Step 3 blend is
+`s_i = s_vec_i + (t_i/t_max) × (1−α) × max(s_vec)` in similarity space. Raw L2 distance has no
+fixed scale, and the literal distance mirror — subtract `(t_i/t_max) × (1−α) × min(d)` —
+collapses whenever the best match is a near-duplicate (min(d) ≈ 0 silences the keyword lane).
+Stage 4 therefore blends in the bounded similarity space `s = 1/(1+d)`: strictly monotone
+(ordering-preserving), bounded (0,1], and the anchor `max(s) = 1/(1+min(d))` is always
+meaningful — the keyword lane can contribute at most (1−α) × the strongest vector match,
+Canonize's exact interpretability. Blended back with `d' = max(0, 1/s' − 1)` (a row clamped at
+0 is a top-vector AND top-keyword match — perfect); the pool statistics still run on distance,
+keeping the pipeline's distance-native convention consistently (the option the Stage-1
+Background named first).
+
+**Window, not pool, is the chunk fetch unit.** Canonize blends over the full collection
+(topK=100k) and slices the pool from blended ranks. Stage 4 fetches a bounded **keyword
+window** (`KEYWORD_WINDOW_SIZE` 100, ≥ MAX_POOL_SIZE 40) ordered by decayed vector distance,
+scores each row with `ts_rank` in SQL, blends in JS, re-sorts by blended distance, and only
+then slices the blended top-N_C pool for applyCutoff — the same pipeline order (decay → keyword
+blend → pool statistics), with the window as the documented bound so the per-turn fetch stays
+bounded. The Stage-1 pool sizing (P × Max) now only floors the window and still sizes the fact
+lane's LIMIT; the chunk lane's pool statistics measure the blended window.
+
+**Keyword lane is additive-only.** The window is selected purely by decayed vector distance;
+`ts_rank` is a SELECT column, never a `@@` WHERE filter — a row can only rank *better* via
+keyword, never be excluded, so the keyword lane can't reduce recall below what the vector lane
+found. The GIN index (migration 0093) is added per the plan's own scope text ("tsvector column
++ GIN index on chat_chunks.content") and serves future keyword-filtered paths (the plan's
+"later canon_facts text" widening, the recall tools); the Stage-4 query itself doesn't need it.
+
+**Scoring + query adaptation.** Canonize's custom in-memory TF-IDF becomes Postgres native
+`ts_rank` over a STORED generated `content_tsv` column (`to_tsvector('english', content)` —
+computed on insert and backfilled for existing rows, no trigger, no backfill script). The
+tsquery is the OR of the query text's lexemes (`string_agg` over `to_tsvector('english', $4)`);
+a query with no lexemes yields a NULL tsquery → `ts_rank` is NULL → coalesced to 0 → blend
+inert → the vector lane is unaffected (never an error). Absolute `ts_rank` scale is irrelevant
+because the blend normalizes by maxKw. The transcript query text retains its
+`User:`/`Assistant:` prefixes
+(the module's documented deviation from CNZ's speaker-stripping) — their lexemes contribute a
+minor, maxKw-normalized constant at worst.
+
+**No new setting.** `KEYWORD_BLEND_ALPHA` (0.7, Canonize's own default) and
+`KEYWORD_WINDOW_SIZE` (100) are plain constants, exactly like Stage 3's decay constants — the
+plan's Stage-4 scope lists no settings surface ("tsvector column + GIN index + keyword-search
+module + anchored blend"). Promoting α to a DB-backed RagView knob is the same mechanical
+follow-up Stage 3 documented.
+
+**Scope.** Chat lane only (`chat_chunks.content`); the plan's "later canon_facts text" stays
+out, matching Stage 3's chat-channel-only discipline and the user's direction (RP-chat main
+memory focus; tools and lorebook untouched).
+
+**Deploy note.** Migration 0093 must be hand-applied before the chunk query works — it
+references `content_tsv`, and an unapplied migration fails the chunk lane open (empty chunks,
+never a broken turn — the fail-open contract still holds). Same standing hand-apply convention
+as 0091/0092 (both still unapplied as of this addendum).

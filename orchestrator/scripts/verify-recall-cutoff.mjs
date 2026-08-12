@@ -1,18 +1,22 @@
 // Proves io/chatMemory/recallCutoff.ts — the CNZ rag/cutoff.js pool-statistics stage ported onto
-// BigImagine's single content-vector lane (docs/plans/rag-dynamic-cutoff-plan.md, Stages 1-3 of
+// BigImagine's single content-vector lane (docs/plans/rag-dynamic-cutoff-plan.md, Stages 1-4 of
 // the CNZ retrieval port). Pure arithmetic: no IO, no settings access. poolSize sizes the SQL
 // LIMIT the IO wrapper issues; applyCutoff decides how many of the already-fetched, best-first
 // rows are worth injecting; decayFactor (Stage 3) is Canonize's temporal-decay multiplier the
-// chunk query divides each raw distance by, before the pool is formed. The read-path wiring
-// (settings → pool → slice → telemetry) is proven by verify-recall-for-prompt.mjs; this file
-// pins the math itself.
+// chunk query divides each raw distance by, before the pool is formed; blendKeyword (Stage 4) is
+// Canonize's anchored keyword blend re-ranking the fetched window before the cutoff measures it.
+// The read-path wiring (settings → pool → slice → telemetry) is proven by
+// verify-recall-for-prompt.mjs; this file pins the math itself.
 //
 // Canonize's own formulas with the plan's two documented adaptations: distances are raw L2
 // distance (lower = better), so the stricter modes SUBTRACT σ from the mean (Canonize adds it in
 // similarity space) and rows are kept while distance < threshold; and the σ floor is relative
-// (0.01 × mean) because raw distance has no fixed scale to borrow an absolute floor from.
+// (0.01 × mean) because raw distance has no fixed scale to borrow an absolute floor from. The
+// keyword blend (Stage 4) happens in the bounded similarity space s = 1/(1+d) — see the Stage 4
+// addendum — because a literal distance-space subtraction collapses when the best match is a
+// near-duplicate.
 
-import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, PAIRS_PER_CHUNK } from '../dist/io/chatMemory/recallCutoff.js';
+import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, PAIRS_PER_CHUNK, blendKeyword, KEYWORD_BLEND_ALPHA } from '../dist/io/chatMemory/recallCutoff.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -116,6 +120,69 @@ function closeTo(a, b, tol = 1e-9) {
   );
   // The constants are Canonize's own, exported so the SQL mirror can be checked against them.
   assert(DECAY_FACTOR_FLOOR === 0.7 && DECAY_COEFFICIENT === 0.025 && PAIRS_PER_CHUNK === 2, 'Stage 3 constants are Canonize\'s own (0.70 / 0.025 / 2)');
+}
+
+// --- Stage 4: anchored keyword blend (Canonize's Step 3, adapted to distance space via the
+// bounded similarity transform s = 1/(1+d) — see the plan's Stage 4 addendum) ---
+{
+  // No keyword matches anywhere → the blend is inert: every distance unchanged, scale 0.
+  const out = blendKeyword([
+    { distance: 0.5, kwScore: 0 },
+    { distance: 0.9, kwScore: 0 },
+  ]);
+  assert(out.scale === 0, 'no keyword matches → scale 0, the blend is inert');
+  assert(out.rows[0].distance === 0.5 && out.rows[1].distance === 0.9, 'no keyword matches → every distance unchanged');
+  assert(out.rows[0].kwContribution === 0 && out.rows[1].kwContribution === 0, 'no keyword matches → zero keyword contribution');
+  assert(KEYWORD_BLEND_ALPHA === 0.7, 'KEYWORD_BLEND_ALPHA is Canonize\'s own default (0.7)');
+}
+{
+  // An empty window blends to nothing without dividing by zero.
+  const out = blendKeyword([]);
+  assert(out.rows.length === 0 && out.scale === 0, 'an empty window blends to nothing (scale 0)');
+}
+{
+  // The cap: the top keyword match contributes exactly (1−α) × the strongest vector similarity.
+  // distances [0.25, 0.5], kw [10, 0] → s = [0.8, 0.667]; maxS = 0.8; scale = 0.3 × 0.8 = 0.24.
+  const out = blendKeyword([
+    { distance: 0.25, kwScore: 10 },
+    { distance: 0.5, kwScore: 0 },
+  ]);
+  assert(closeTo(out.scale, (1 - 0.7) * (1 / 1.25)), 'the top keyword match contributes exactly (1−α) × max vector similarity (kw≤ = 0.24)');
+  assert(closeTo(out.rows[0].kwContribution, 0.24), 'the top keyword row carries the full contribution');
+  assert(closeTo(out.rows[1].kwContribution, 0), 'a non-matching row gets no keyword contribution');
+  // Top vector AND top keyword → blended similarity 1.04 → distance clamps at 0 (perfect match).
+  assert(out.rows[0].distance === 0, 'top vector + top keyword clamps the blended distance to 0 (perfect match)');
+  assert(out.rows[1].distance === 0.5, 'a non-matching row keeps its exact decayed distance');
+}
+{
+  // Keyword promotion: a mediocre vector match with a strong keyword hit outranks closer vector
+  // matches with no keyword hit. distances [0.5, 0.6, 0.9], kw [0, 0, 20]:
+  // s = [0.667, 0.625, 0.526]; maxS = 0.667; scale = 0.2; row 3: s' = 0.726 → d' = 0.377.
+  const out = blendKeyword([
+    { distance: 0.5, kwScore: 0 },
+    { distance: 0.6, kwScore: 0 },
+    { distance: 0.9, kwScore: 20 },
+  ]);
+  const d = out.rows.map((r) => r.distance);
+  assert(d[2] < d[0] && d[2] < d[1], 'a strong keyword match promotes a mediocre vector match above closer non-matches');
+  assert(closeTo(d[2], 1 / (1 / (1 + 0.9) + 0.3 * (1 / 1.5)) - 1), 'the promoted row\'s distance is the exact blend inverse');
+  assert(d[0] === 0.5 && d[1] === 0.6, 'rows without a keyword match keep their decayed distance');
+}
+{
+  // Proportional: contributions scale with kwScore (half the max → half the contribution).
+  const out = blendKeyword([
+    { distance: 0.5, kwScore: 10 },
+    { distance: 0.5, kwScore: 5 },
+  ]);
+  assert(closeTo(out.rows[1].kwContribution, out.rows[0].kwContribution / 2), 'keyword contribution is proportional to kwScore (t_i/t_max)');
+  assert(out.rows[0].distance < out.rows[1].distance, 'equal vector matches re-rank by keyword strength (stronger keyword → closer)');
+}
+{
+  // α semantics: α=1 → the lane is completely inert; α=0 → full strength (scale = maxS).
+  const inert = blendKeyword([{ distance: 0.5, kwScore: 10 }], 1);
+  assert(inert.scale === 0 && inert.rows[0].distance === 0.5, 'alpha 1 → the keyword lane contributes nothing');
+  const full = blendKeyword([{ distance: 0.5, kwScore: 10 }], 0);
+  assert(closeTo(full.scale, 1 / 1.5), 'alpha 0 → the keyword lane contributes at full strength (scale = max similarity)');
 }
 
 console.log('\nrecall-cutoff verification passed');
