@@ -86,6 +86,18 @@
  * decayed distance), its constants (KEYWORD_BLEND_ALPHA 0.7, KEYWORD_WINDOW_SIZE 100) are plain
  * constants per the plan — no new setting, no admin/frontend surface.
  *
+ * Since 2026-08-17 (Stage 5 of the same plan) the chunk lane adds Canonize's header/second
+ * vector lane (RAG_strategy_v4.md §3 Step 1): the query runs twice — once against
+ * chat_chunks.vector_embed (content, migration 0037) and once against
+ * chat_chunks.summary_vector_embed (header, migration 0094, NULL rows skipped) — and
+ * recallCutoff.ts's `mergeLanes` fuses them with best-of scoring (the closer of the two
+ * decayed distances) plus the 1.08× dual-confirmation bonus for chunks that matched both
+ * lanes. The fused window then flows through the Stage 4 keyword blend and the Stage 1 cutoff
+ * unchanged, preserving Canonize's pipeline order (fusion → decay-equivalent → keyword blend →
+ * pool statistics). chatMemorySync.ts embeds chunk summaries from the next sync pass onward
+ * (migration 0094's column is NULL for pre-existing rows, so those chunks stay
+ * content-lane-only). No new setting, no admin/frontend surface.
+ *
  * @api-declaration
  * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
  * buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages) ->
@@ -106,7 +118,7 @@ import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { DbSession } from '../postgres.js';
 import type { LlmMessage } from '../llm/types.js';
 import { toPgVectorLiteral } from '../../util/pgvector.js';
-import { applyCutoff, blendKeyword, poolSize, type CutoffMode } from './recallCutoff.js';
+import { applyCutoff, blendKeyword, mergeLanes, poolSize, type CutoffMode } from './recallCutoff.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
@@ -370,9 +382,9 @@ export function buildAutoRecallParts(
       const factPool = Math.min(poolSize(factTopK, poolMultiple), MAX_POOL_SIZE);
       const keywordWindow = Math.max(pool, KEYWORD_WINDOW_SIZE);
 
-      const [chunkRows, facts] = await Promise.all([
+      const [chunkRows, headerRows, facts] = await Promise.all([
         session.query<ChunkRow>(
-          // Stages 3-4: each row's distance is the raw `vector_embed <-> $query` divided by
+          // Stages 3-5: each row's distance is the raw `vector_embed <-> $query` divided by
           // Canonize's temporal-decay factor (recallCutoff.ts `decayFactor`) — a chunk
           // `ageChunks` chunks behind the newest archived chunk gets distance × 1/factor, so
           // older-but-relevant chunks rank (and are measured by the cutoff) as if farther away.
@@ -397,6 +409,25 @@ export function buildAutoRecallParts(
            limit ${keywordWindow}`,
           [userId, chatId, toPgVectorLiteral(vector), query],
         ),
+        // Stage 5: the header lane — same shape against chat_chunks.summary_vector_embed
+        // (migration 0094), skipping rows that predate it (NULL = never embedded; the content
+        // lane still covers them). Same decayed distance + same lane-independent keyword score
+        // (kw_score comes from content_tsv, not the lane's vector), so mergeLanes can fuse the
+        // two windows with best-of scoring + the 1.08× dual-confirmation bonus. A chunk the
+        // content lane missed can enter the merged window here — the header lane is additive.
+        session.query<ChunkRow>(
+          `select ordinal, summary, content,
+                  (summary_vector_embed <-> $3)
+                    / greatest(0.70, 1.0 - 0.025 * ln(2 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
+                    as distance,
+                  coalesce(ts_rank(content_tsv, (select string_agg(lexeme, ' | ')::tsquery from unnest(to_tsvector('english', $4)))), 0)
+                    as kw_score
+           from chat_chunks
+           where user_id = $1 and chat_id = $2 and summary_vector_embed is not null
+           order by distance
+           limit ${keywordWindow}`,
+          [userId, chatId, toPgVectorLiteral(vector), query],
+        ),
         session.query<CanonFactRow>(
           `with candidates as (
              select f.fact_id, f.category, f.summary, f.detail, f.arc_tag, f.entity_key, f.approved_at, f.vector_embed
@@ -416,17 +447,28 @@ export function buildAutoRecallParts(
         ),
       ]);
 
-      // Stage 4: the chunk lane's keyword blend (recallCutoff.ts blendKeyword) — each row's
-      // ts_rank kw_score re-ranks the window by blended distance BEFORE the pool is sliced and
-      // measured, Canonize's pipeline order (decay → keyword blend → pool statistics). The
-      // blend is additive: a row with no keyword match keeps its decayed distance, so the
-      // keyword lane can only promote, never bury. Re-sort by blended distance (the query
-      // returned decayed-distance order) before the cutoff, then keep the leading slice.
-      const { rows: blendedRows, scale: kwScale } = blendKeyword(
-        chunkRows.map((r) => ({ distance: r.distance, kwScore: r.kw_score })),
+      // Stage 5: fuse the two vector lanes (recallCutoff.ts mergeLanes — Canonize's RRF fusion,
+      // Step 1) BEFORE the keyword blend, matching their pipeline order. Each chunk's distance
+      // becomes the best-of (min) of its content and header decayed distances, with the 1.08×
+      // dual-confirmation bonus when the chunk matched both lanes; header-only chunks join the
+      // merged window, so the header lane can only add recall, never suppress it.
+      const { rows: fusedRows, dualCount } = mergeLanes(
+        chunkRows.map((r) => ({ ordinal: r.ordinal, distance: r.distance, kwScore: r.kw_score })),
+        headerRows.map((r) => ({ ordinal: r.ordinal, distance: r.distance, kwScore: r.kw_score })),
       );
-      const orderedChunks = chunkRows
-        .map((r, i) => ({ row: r, distance: blendedRows[i].distance }))
+      const chunkByOrdinal = new Map([...chunkRows, ...headerRows].map((r) => [r.ordinal, r] as const));
+      // Stage 4: the chunk lane's keyword blend (recallCutoff.ts blendKeyword) — each row's
+      // ts_rank kw_score re-ranks the fused window by blended distance BEFORE the pool is
+      // sliced and measured, Canonize's pipeline order (fusion → keyword blend → pool
+      // statistics). The blend is additive: a row with no keyword match keeps its fused
+      // distance, so the keyword lane can only promote, never bury. Re-sort by blended distance
+      // (the queries returned decayed-distance order) before the cutoff, then keep the leading
+      // slice.
+      const { rows: blendedRows, scale: kwScale } = blendKeyword(
+        fusedRows.map((r) => ({ distance: r.distance, kwScore: r.kwScore ?? 0 })),
+      );
+      const orderedChunks = fusedRows
+        .map((r, i) => ({ row: chunkByOrdinal.get(r.ordinal)!, distance: blendedRows[i].distance }))
         .sort((a, b) => a.distance - b.distance);
       const { keepCount, stats } = applyCutoff(orderedChunks.map((x) => x.distance), {
         min: chunkMin,
@@ -443,6 +485,8 @@ export function buildAutoRecallParts(
         temporalDecay: true, // Stage 3: distances measured are decayed (recallCutoff.decayFactor)
         keywordLane: true, // Stage 4: distances measured are keyword-blended (recallCutoff.blendKeyword)
         kwScale, // the max keyword contribution (Canonize's telemetry `kw≤`; 0 = lane inert)
+        headerLane: true, // Stage 5: distances measured are fused across content+header (mergeLanes)
+        dualCount, // how many chunks matched both lanes and received the 1.08× dual bonus
         ...stats,
       });
 

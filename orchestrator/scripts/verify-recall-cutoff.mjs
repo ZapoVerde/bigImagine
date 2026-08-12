@@ -1,12 +1,14 @@
 // Proves io/chatMemory/recallCutoff.ts — the CNZ rag/cutoff.js pool-statistics stage ported onto
-// BigImagine's single content-vector lane (docs/plans/rag-dynamic-cutoff-plan.md, Stages 1-4 of
-// the CNZ retrieval port). Pure arithmetic: no IO, no settings access. poolSize sizes the SQL
-// LIMIT the IO wrapper issues; applyCutoff decides how many of the already-fetched, best-first
-// rows are worth injecting; decayFactor (Stage 3) is Canonize's temporal-decay multiplier the
-// chunk query divides each raw distance by, before the pool is formed; blendKeyword (Stage 4) is
-// Canonize's anchored keyword blend re-ranking the fetched window before the cutoff measures it.
-// The read-path wiring (settings → pool → slice → telemetry) is proven by
-// verify-recall-for-prompt.mjs; this file pins the math itself.
+// BigImagine's chunk lanes (docs/plans/rag-dynamic-cutoff-plan.md, Stages 1-5 of the CNZ
+// retrieval port). Pure arithmetic: no IO, no settings access. poolSize sizes the SQL LIMIT the
+// IO wrapper issues; applyCutoff decides how many of the already-fetched, best-first rows are
+// worth injecting; decayFactor (Stage 3) is Canonize's temporal-decay multiplier the chunk query
+// divides each raw distance by, before the pool is formed; blendKeyword (Stage 4) is Canonize's
+// anchored keyword blend re-ranking the fetched window before the cutoff measures it;
+// mergeLanes/dualBonus (Stage 5) are Canonize's content+header RRF fusion — best-of distance
+// with the 1.08× dual-confirmation bonus for chunks that matched both lanes. The read-path
+// wiring (settings → pool → slice → telemetry) is proven by verify-recall-for-prompt.mjs; this
+// file pins the math itself.
 //
 // Canonize's own formulas with the plan's two documented adaptations: distances are raw L2
 // distance (lower = better), so the stricter modes SUBTRACT σ from the mean (Canonize adds it in
@@ -16,7 +18,7 @@
 // addendum — because a literal distance-space subtraction collapses when the best match is a
 // near-duplicate.
 
-import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, PAIRS_PER_CHUNK, blendKeyword, KEYWORD_BLEND_ALPHA } from '../dist/io/chatMemory/recallCutoff.js';
+import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, PAIRS_PER_CHUNK, blendKeyword, KEYWORD_BLEND_ALPHA, dualBonus, mergeLanes, DUAL_CONFIRM_BONUS } from '../dist/io/chatMemory/recallCutoff.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -185,5 +187,53 @@ function closeTo(a, b, tol = 1e-9) {
   assert(closeTo(full.scale, 1 / 1.5), 'alpha 0 → the keyword lane contributes at full strength (scale = max similarity)');
 }
 
-console.log('\nrecall-cutoff verification passed');
+// --- Stage 5: dualBonus — the exact distance-space inverse of Canonize's capped ×1.08 ---
+{
+  assert(DUAL_CONFIRM_BONUS === 1.08, 'Stage 5 constant is Canonize\'s own DUAL_BONUS (1.08)');
+  assert(dualBonus(0) === 0, 'a perfect dual match stays perfect (s=1 → ×1.08 caps at 1 → d\'=0)');
+  assert(dualBonus(0.08) === 0, 'the similarity cap at 1 is a distance floor: d=0.08 → s=1/1.08 → ×1.08 = 1 → d\'=0');
+  // d=0.5: s = 1/1.5 = 0.6667; ×1.08 = 0.72; d' = 1/0.72 − 1 = 0.3889.
+  assert(closeTo(dualBonus(0.5), 1 / ((1 / (1 + 0.5)) * 1.08) - 1), 'the dual bonus is the exact inverse of s × 1.08 (d=0.5 → 0.3889)');
+  const a = dualBonus(0.3);
+  const b = dualBonus(0.6);
+  assert(a < 0.3 && b < 0.6 && a < b, 'the bonus strictly improves every matched chunk and is monotone in distance');
+  assert(dualBonus(0.5) < 0.5 && dualBonus(0.5) > 0, 'a mid-distance dual match is promoted but not clamped');
+}
+
+// --- Stage 5: mergeLanes — best-of across the two vector lanes + dual bonus for both-matched ---
+{
+  // Inert header lane: passthrough — every distance unchanged, no dual counts.
+  const passthrough = mergeLanes(
+    [
+      { ordinal: 1, distance: 0.2 },
+      { ordinal: 2, distance: 0.5 },
+    ],
+    [],
+  );
+  assert(passthrough.dualCount === 0 && passthrough.rows.length === 2, 'an empty header lane passes the content window through untouched');
+  assert(passthrough.rows[0].distance === 0.2 && passthrough.rows[1].distance === 0.5, 'passthrough rows keep their exact content distances');
+
+  // Best-of: the closer lane wins; both-matched chunks get the dual bonus on the best distance.
+  const fused = mergeLanes(
+    [
+      { ordinal: 1, distance: 0.5, kwScore: 3 }, // header is closer → fused = dualBonus(0.3)
+      { ordinal: 2, distance: 0.2, kwScore: 0 }, // content is closer → fused = dualBonus(0.2)
+      { ordinal: 3, distance: 0.7, kwScore: 0 }, // content-only → unchanged
+    ],
+    [
+      { ordinal: 1, distance: 0.3 },
+      { ordinal: 2, distance: 0.6 },
+      { ordinal: 4, distance: 0.4, kwScore: 9 }, // header-only → joins the window
+    ],
+  );
+  assert(fused.dualCount === 2, 'dualCount counts exactly the chunks that matched both lanes (2)');
+  assert(closeTo(fused.rows[0].distance, dualBonus(0.3)), 'best-of picks the closer header distance and applies the dual bonus');
+  assert(closeTo(fused.rows[1].distance, dualBonus(0.2)), 'best-of picks the closer content distance and applies the dual bonus');
+  assert(fused.rows[2].distance === 0.7, 'a content-only chunk keeps its exact distance — the header lane is additive');
+  const headerOnly = fused.rows.find((r) => r.ordinal === 4);
+  assert(headerOnly !== undefined && closeTo(headerOnly.distance, 0.4), 'a header-only chunk joins the merged window with its header distance');
+  assert(headerOnly !== undefined && headerOnly.kwScore === 9, 'a header-only chunk carries its keyword score (lane-independent in SQL)');
+  assert(fused.rows[0].kwScore === 3, 'a both-matched chunk keeps its content keyword score');
+}
+
 if (process.exitCode) process.exit(process.exitCode);

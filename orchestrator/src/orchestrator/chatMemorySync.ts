@@ -510,10 +510,16 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         return chunkChatTranscript(toArchive, startOrdinal);
       });
 
-      const { summaries, vectors } = await step('summarize_embed', async () => {
+      const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
         const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt)));
         const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
-        return { summaries, vectors };
+        // Stage 5 of the CNZ retrieval port (docs/plans/rag-dynamic-cutoff-plan.md): the header
+        // lane — embed each chunk's summary too, into chat_chunks.summary_vector_embed
+        // (migration 0094). recallForPrompt.ts's chunk path fuses the content and summary lanes
+        // with best-of scoring + Canonize's 1.08× dual-confirmation bonus. Chunks written
+        // before 0094 have a NULL summary_vector_embed and stay content-lane-only.
+        const summaryVectors = await deps.embeddings.embed(summaries);
+        return { summaries, vectors, summaryVectors };
       });
 
       const nextOrdinal = (lastSynced[0]?.ordinal ?? -1) + 1;
@@ -529,9 +535,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       await step('insert_chunks', async () => {
         for (const [i, chunk] of chunks.entries()) {
           await session.query(
-            `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed)
-             values ($1, $2, $3, $4, $5, $6, $7)`,
-            [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!)],
+            `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed)
+             values ($1, $2, $3, $4, $5, $6, $7, $8)`,
+            [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!), toPgVectorLiteral(summaryVectors[i]!)],
           );
         }
       });

@@ -559,3 +559,11 @@ Already applied by hand, not run automatically (see the file for the exact comma
   recallCutoff.ts's `blendKeyword` re-ranks the keyword window by blended distance before the
   cutoff (Canonize's RAG_strategy_v4.md §3 Step 3, chat channel only). No settings keys — the
   blend constants are plain constants per the plan. Idempotent hand-apply one-shot.
+- `0094_chat_chunks_summary_lane.sql` — Stage 5 of the CNZ retrieval port: the header/second
+  vector lane over `chat_chunks.summary`. Adds a nullable `summary_vector_embed vector(2048)`
+  column (NULL for pre-existing rows — the header lane query skips NULLs, so old chunks stay
+  content-lane-only; chatMemorySync.ts embeds summaries from the next sync pass onward). The
+  chunk path in recallForPrompt.ts queries both lanes and merges them with best-of scoring plus
+  Canonize's 1.08× dual-confirmation bonus (recallCutoff.ts's `dualBonus`, chat channel only).
+  No index (vector(2048) is too wide to index, same as `vector_embed` per 0047) and no settings
+  keys. Idempotent hand-apply one-shot.

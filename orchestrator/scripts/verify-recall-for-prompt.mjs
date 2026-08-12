@@ -23,6 +23,11 @@
 //      query text's lexemes), fetches the KEYWORD_WINDOW_SIZE window (≥ the pool) instead of
 //      the pool alone, and the blend re-ranks the window by blended distance before the cutoff
 //      — a strong keyword hit can promote a mediocre vector match into the injected set.
+//   7. Stage 5 header lane (recallCutoff.mergeLanes/dualBonus, migration 0094): the chunk
+//      path issues a SECOND chat_chunks query against summary_vector_embed (same decayed
+//      distance, NULL rows skipped, same window), fuses the two windows with best-of scoring
+//      + the 1.08× dual-confirmation bonus before the keyword blend, and can recall chunks
+//      the content lane never fetched.
 
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
@@ -44,11 +49,14 @@ function assert(cond, message) {
 // --- Fake session: DbSession.query returns T[] directly (postgres.ts), NOT pg's {rows} shape
 // (that unwrap happens inside withUserScope's inTransaction). The fake is a session-shaped
 // object so buildAutoRecallPrompt can be driven without a PostgresClient at all.
-function createFakeSession({ chunkRows = [], factRows = [], throwOn = null } = {}) {
+function createFakeSession({ chunkRows = [], headerRows = [], factRows = [], throwOn = null } = {}) {
   return {
     async query(sql) {
       if (sql.includes('from chat_chunks')) {
         if (throwOn === 'chunks') throw new Error('chunks boom');
+        // Stage 5: the chunk path issues TWO chat_chunks queries — the content lane
+        // (vector_embed <->) and the header lane (summary_vector_embed <->).
+        if (sql.includes('summary_vector_embed')) return headerRows;
         return chunkRows;
       }
       if (sql.includes('from canon_facts')) {
@@ -304,6 +312,26 @@ function fakeSettings(value) {
     seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('(select max(ordinal) from chat_chunks')),
     'the chunks query ages each row against the chat\'s newest chunk ordinal (max(ordinal))',
   );
+  assert(
+    seenSql.some((sql) => sql.includes('summary_vector_embed <-> $3') && sql.includes('greatest(0.70')),
+    'the header lane query (Stage 5) measures the same decayed distance against summary_vector_embed',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('summary_vector_embed') && sql.includes('is not null')),
+    'the header lane skips rows that predate migration 0094 (summary_vector_embed IS NOT NULL)',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('summary_vector_embed') && sql.includes('ts_rank(content_tsv')),
+    'the header lane computes the same lane-independent keyword score (ts_rank over content_tsv)',
+  );
+  assert(
+    seenSql.some((sql) => /summary_vector_embed[\s\S]*limit 100/.test(sql)),
+    'the header lane fetches the same KEYWORD_WINDOW window (limit 100)',
+  );
+  assert(
+    seenSql.filter((sql) => sql.includes('from chat_chunks') && sql.includes('as distance')).length === 2,
+    'the chunk path issues exactly two chat_chunks queries — the content lane and the header lane',
+  );
 }
 {
   // A corrupt chunk top-k falls back to the constant default, never a NaN limit.
@@ -368,7 +396,10 @@ function countChunkBlocks(block) {
   const chunkRows = spread.map((distance, i) => ({ ordinal: i + 1, summary: null, content: `c${i}`, distance, kw_score: 0 }));
   const makeSession = () => ({
     async query(sql) {
-      if (sql.includes('from chat_chunks')) return chunkRows;
+      if (sql.includes('from chat_chunks')) {
+        if (sql.includes('summary_vector_embed')) return []; // Stage 5: header lane inert in this fixture
+        return chunkRows;
+      }
       if (sql.includes('from canon_facts')) return [];
       return [];
     },
@@ -413,7 +444,10 @@ function countChunkBlocks(block) {
   const flat = Array.from({ length: 16 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `f${i}`, distance: 0.5, kw_score: 0 }));
   const session = {
     async query(sql) {
-      if (sql.includes('from chat_chunks')) return flat;
+      if (sql.includes('from chat_chunks')) {
+        if (sql.includes('summary_vector_embed')) return []; // Stage 5: header lane inert in this fixture
+        return flat;
+      }
       if (sql.includes('from canon_facts')) return [];
       return [];
     },
@@ -442,7 +476,10 @@ function countChunkBlocks(block) {
   const flat = Array.from({ length: 6 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `g${i}`, distance: 0.5, kw_score: 0 }));
   const session = {
     async query(sql) {
-      if (sql.includes('from chat_chunks')) return flat;
+      if (sql.includes('from chat_chunks')) {
+        if (sql.includes('summary_vector_embed')) return []; // Stage 5: header lane inert in this fixture
+        return flat;
+      }
       if (sql.includes('from canon_facts')) return [];
       return [];
     },
@@ -715,7 +752,10 @@ function countFactBullets(block) {
     buildAutoRecallPrompt(
       {
         async query(sql) {
-          if (sql.includes('from chat_chunks')) return rows;
+          if (sql.includes('from chat_chunks')) {
+            if (sql.includes('summary_vector_embed')) return []; // Stage 5: header lane inert in this fixture
+            return rows;
+          }
           if (sql.includes('from canon_facts')) return [];
           return [];
         },
@@ -735,6 +775,46 @@ function countFactBullets(block) {
   const blended = await run(makeRows(true));
   assert(!baseline.includes('<memory turns="10">'), 'without a keyword hit the mediocre vector match is NOT injected');
   assert(blended.includes('<memory turns="10">'), 'the keyword blend promotes the mediocre vector match into the injected set');
+}
+
+// --- 8. Stage 5: the header lane can ADD recall the content lane missed ---
+{
+  // A chunk the content lane never fetched (ordinal 30 — no row in the content window at all)
+  // but whose summary embedding is the closest match of all. mergeLanes fuses the two windows
+  // (the header-only row joins with its header distance), the blend keeps it unchanged (no
+  // keyword), and mean+1sd over the fused pool injects it. Without the header lane the chunk
+  // simply does not exist in the window — this proves the header lane is wired end to end into
+  // buildAutoRecallParts's chunk path, not just unit-tested.
+  const spread = [0.15, 0.18, 0.22, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
+  const chunkRows = spread.map((distance, i) => ({ ordinal: i + 1, summary: null, content: `c${i + 1}`, distance, kw_score: 0 }));
+  const headerRows = [{ ordinal: 30, summary: 's30', content: 'header-only chunk', distance: 0.05, kw_score: 0 }];
+  const run = (withHeader) =>
+    buildAutoRecallPrompt(
+      {
+        async query(sql) {
+          if (sql.includes('from chat_chunks')) {
+            if (sql.includes('summary_vector_embed')) return withHeader ? headerRows : [];
+            return chunkRows;
+          }
+          if (sql.includes('from canon_facts')) return [];
+          return [];
+        },
+      },
+      fakeSettings(
+        new Map([
+          ['chat_memory_auto_recall_chunk_top_k', '8'],
+          ['chat_memory_auto_recall_cutoff_mode', 'mean+1sd'],
+        ]),
+      ),
+      createStubEmbeddingProvider(8),
+      'user-1',
+      'chat-1',
+      [{ role: 'user', content: 'hi' }],
+    );
+  const withoutHeader = await run(false);
+  const withHeader = await run(true);
+  assert(!withoutHeader.includes('<memory turns="30">'), 'without the header lane the chunk is not recalled at all');
+  assert(withHeader.includes('<memory turns="30">'), 'the header lane recalls a chunk the content lane never fetched');
 }
 
 // --- Sanity: the exported constants are what the wiring depends on ---

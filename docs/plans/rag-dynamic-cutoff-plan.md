@@ -392,3 +392,57 @@ memory focus; tools and lorebook untouched).
 references `content_tsv`, and an unapplied migration fails the chunk lane open (empty chunks,
 never a broken turn — the fail-open contract still holds). Same standing hand-apply convention
 as 0091/0092 (both still unapplied as of this addendum).
+
+---
+
+## Stage 5 addendum — header/second vector lane on chat_chunks (implemented 2026-08-17, commit pending)
+
+Status: implemented on top of Stages 1-4. What shipped, and the decisions this stage resolves
+that the Stage-1 doc deliberately left open:
+
+**Best-of scoring (the "best cosine across lanes" mirror).** Canonize's RRF fusion gives each
+item the best cosine seen across its content and header lanes; in distance space that is the
+MIN of the two lanes' decayed distances (`mergeLanes`). The stage runs the Stage-4 chunk query
+twice — once against `vector_embed` (content, migration 0037) and once against
+`summary_vector_embed` (header, migration 0094) — and fuses the two windows in JS BEFORE the
+keyword blend, preserving Canonize's pipeline order (fusion → decay-equivalent → keyword blend →
+pool statistics). Chunks the content lane missed but the header lane found join the merged
+window, so the header lane is additive — it can only add recall, never suppress it (the same
+discipline as the Stage 4 keyword lane).
+
+**The 1.08× dual-confirmation bonus (the second flagged item).** Canonize multiplies an item's
+fused score by 1.08, capped at 1 (`DUAL_BONUS`, `min(1, s × 1.08)` in their rag/rrf.js), when the
+item appeared in BOTH lanes' result lists — two independent representations agreeing
+strengthens the signal. The distance-space inverse uses the bounded-similarity convention the
+Stage 4 blend established: `s' = min(1, 1.08·s)` with `s = 1/(1+d)`, converted back
+`d' = max(0, 1/s' − 1)`. The similarity cap at 1 becomes a distance floor at 0 — any dual match
+at distance ≲ 0.08 clamps to 0 (perfect) — and the transform is strictly monotone, so the bonus
+can re-rank but never invert lane order.
+
+**Per-lane decay ≡ fused-then-decay, and one documented order adaptation.** The decay factor
+depends only on the chunk's ordinal, so `min(d_c, d_h)` after per-lane decay (the SQL's Stage-3
+expression) equals the fused score after decay — best-of commutes exactly. The bonus does NOT
+commute: Canonize boosts the fused score BEFORE decay, while this pipeline applies the bonus to
+the already-decayed best-of distance. That is a slightly weaker bonus for older chunks (the
+factor ≤ 1 shrinks the bonus's absolute effect), monotone and bounded, chosen to keep every
+number the cutoff measures in decayed distance space — the same "all distances are decayed"
+convention Stages 3-4 already established. Documented here rather than silently diverged.
+
+**Scoring + schema.** The header query reuses the exact Stage-4 shape: same decayed-distance
+expression against `summary_vector_embed`, same `KEYWORD_WINDOW_SIZE` window, same
+lane-independent `kw_score` (`ts_rank` over `content_tsv` — the keyword score does not depend on
+which vector lane selected the row, so a header-only chunk still carries its keyword score).
+`summary_vector_embed` is NULL for rows written before 0094 (nothing has embedded summaries
+until now — 0037's comment explicitly deferred this lane); the query skips NULLs, so old chunks
+stay content-lane-only until a future sync pass rewrites them. chatMemorySync.ts embeds
+summaries alongside content from the next sync onward (one extra embed call per sync pass).
+No vector index — `vector(2048)` is too wide to index usefully at household scale, the same
+no-index design as `vector_embed` (0047's comment). No new settings: `DUAL_CONFIRM_BONUS` is a
+plain constant like Stages 3-4's.
+
+**Scope.** Chat lane only; the fact lane's flat `LIMIT factTopK` stays untouched, matching the
+user's direction (RP-chat main memory focus; tools and lorebook out of scope).
+
+**Deploy note.** Migration 0094 must be hand-applied before the header lane query works (it
+references `summary_vector_embed`); unapplied → the chunk query fails open (empty chunks, never
+a broken turn), same contract as 0093. Applied after 0091/0092/0093 in the end-of-work batch.

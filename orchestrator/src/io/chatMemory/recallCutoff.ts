@@ -47,6 +47,21 @@
  * meaningful. Blended back with d' = max(0, 1/s' − 1); the pool statistics in applyCutoff still
  * run on distance, keeping the pipeline's distance-native convention consistently.
  *
+ * Since 2026-08-17 (Stage 5 of the same plan) the module also owns the header/second vector
+ * lane's fusion (their RAG_strategy_v4.md §3 Step 1) as pure exports, `dualBonus(distance)` and
+ * `mergeLanes(content, header)`. Canonize's RRF fusion gives each item the best cosine seen
+ * across its content and header lanes, × 1.08 (capped at 1) when the item matched BOTH lanes
+ * (two independent representations agreeing strengthens the signal). In distance space (lower
+ * is better) best-of is the min of the two lanes' decayed distances, and the bonus is the exact
+ * inverse of Canonize's capped multiplier under the bounded similarity convention the Stage 4
+ * blend established (s = 1/(1+d)): s' = min(1, 1.08·s), d' = max(0, 1/s' − 1) — the cap at 1
+ * becomes a floor at distance 0, so a near-perfect dual match clamps to 0. One documented
+ * order adaptation: Canonize boosts the fused score BEFORE decay, while this pipeline measures
+ * decayed distance throughout (Stage 3's SQL); applying the bonus to the already-decayed
+ * best-of distance is monotone and bounded (a slightly weaker bonus for older chunks), keeping
+ * the pipeline's every-number-is-decimal-distance convention unbroken — see the plan's Stage 5
+ * addendum.
+ *
  * @api-declaration
  * poolSize(max, poolMultiple) -> number — the SQL LIMIT for the candidate pool, Canonize's own
  *   N_C = max(round(P × M), 6) unchanged. Called BEFORE the query runs.
@@ -65,6 +80,15 @@
  *   `scale` is the max contribution, Canonize's telemetry `kw≤`, 0 when the lane is inert). The
  *   caller re-sorts by the blended distances (ascending) before applyCutoff, since the blend can
  *   re-rank.
+ * dualBonus(distance) -> number — Canonize's 1.08× dual-confirmation bonus (Step 1) in distance
+ *   space: the exact inverse of their capped similarity multiplier min(1, 1.08·s) under the
+ *   s = 1/(1+d) convention, so a near-perfect dual match (d <= ~0.08) clamps to 0.
+ * mergeLanes(content, header) -> { rows, dualCount } — Stage 5's fusion of the two vector
+ *   lanes: each chunk's distance becomes the best-of (min) of its two decayed lane distances,
+ *   with dualBonus applied when the chunk appeared in BOTH lanes' windows; header-only chunks
+ *   (content lane missed them) join the merged window with their header distance and any
+ *   keyword score the header query computed. The caller blends, re-sorts, and cuts off the
+ *   merged rows exactly as it did the single-lane window.
  *
  * @contract
  *   assertions:
@@ -110,6 +134,13 @@ export const PAIRS_PER_CHUNK = 2;
  *  decay constants — the plan's Stage-4 scope names no new setting; promoting α to a DB-backed
  *  RagView knob is the same mechanical follow-up Stage 3 documented. */
 export const KEYWORD_BLEND_ALPHA = 0.7;
+
+/** Stage 5 constant, Canonize's own value (RAG_strategy_v4.md §3 Step 1, DUAL_BONUS in their
+ *  rag/rrf.js): the dual-confirmation bonus applied to a chunk's vector score when it matched
+ *  BOTH the content and the header lane — two independent representations agreeing strengthens
+ *  the relevance signal. Kept a plain constant, not a setting, same rationale as the Stage 3/4
+ *  constants (the plan's Stage-5 scope names no new setting). */
+export const DUAL_CONFIRM_BONUS = 1.08;
 
 export interface KeywordBlendRow {
   /** Decayed L2 distance to the query vector (recallForPrompt.ts's chunk `distance` column). */
@@ -169,6 +200,79 @@ export function blendKeyword(
     }),
     scale,
   };
+}
+
+export interface LaneRow {
+  /** Chat-chunk ordinal (the chunk's identity across the two lane queries). */
+  ordinal: number;
+  /** Decayed L2 distance to the query vector from THIS lane (recallForPrompt.ts's `distance`
+   *  column — content lane or summary_vector_embed lane). */
+  distance: number;
+  /** Full-text rank for the same chunk (ts_rank over chat_chunks.content_tsv, migration 0093).
+   *  The keyword score is lane-independent — both lane queries compute it, so a header-only
+   *  chunk can still carry its keyword score. 0/null = no keyword match (blend inert for it). */
+  kwScore?: number | null;
+}
+
+export interface MergeLanesResult {
+  /** The merged window: every content-lane row (distance = best-of the two lanes, with the
+   *  dual-confirmation bonus applied when the chunk matched both), then any header-only rows.
+   *  Callers blend (blendKeyword), re-sort by blended distance, and cut off (applyCutoff)
+   *  exactly as they did a single-lane window. */
+  rows: LaneRow[];
+  /** How many chunks appeared in BOTH lanes' windows and received the dual bonus — telemetry
+   *  (the plan's §11 "log where reasoning happens"). 0 when the header lane is inert. */
+  dualCount: number;
+}
+
+/** Canonize's 1.08× dual-confirmation bonus (RAG_strategy_v4.md §3 Step 1, DUAL_BONUS in their
+ *  rag/rrf.js) in distance space — the exact inverse of their capped similarity multiplier
+ *  `min(1, s × 1.08)` under the bounded-similarity convention the Stage 4 blend established
+ *  (s = 1/(1+d)): s' = min(1, 1.08·s), d' = max(0, 1/s' − 1). The similarity cap at 1 becomes
+ *  a distance floor at 0 — any dual match at distance ≲ 0.08 clamps to 0 (perfect). Strictly
+ *  monotone in `distance`, so it can re-rank but never invert the lane order. */
+export function dualBonus(distance: number): number {
+  const boosted = Math.min(1, (1 / (1 + distance)) * DUAL_CONFIRM_BONUS);
+  return Math.max(0, 1 / boosted - 1);
+}
+
+/** Stage 5's fusion of the content and header vector lanes (Canonize's RRF fusion, Step 1).
+ *  Each chunk's distance becomes the best-of (min) of its two decayed lane distances — the
+ *  distance-space mirror of Canonize's "best cosine seen across lanes" — and chunks that
+ *  appeared in BOTH lanes' windows get the dual-confirmation bonus (dualBonus), since two
+ *  independent representations agreeing strengthens the signal. Rows the content lane missed
+ *  but the header lane found join the merged window with their header distance (and keyword
+ *  score), so the header lane can only ADD recall, never suppress it — same additive-lane
+ *  discipline as the Stage 4 keyword lane.
+ *
+ *  Canonize's order is fusion → decay; this pipeline measures decayed distance throughout
+ *  (Stage 3's SQL decays each lane), and best-of commutes with the decay (the factor depends
+ *  only on the chunk's ordinal), so min(d_c, d_h) after per-lane decay equals the fused score
+ *  after decay. The bonus does NOT commute exactly — applying it to the already-decayed
+ *  best-of is a slightly weaker bonus for older chunks, monotone and bounded, keeping every
+ *  number the cutoff measures in decayed distance space — see the plan's Stage 5 addendum. */
+export function mergeLanes(content: LaneRow[], header: LaneRow[]): MergeLanesResult {
+  if (header.length === 0) {
+    return { rows: content, dualCount: 0 };
+  }
+  const headerByOrdinal = new Map<number, number>();
+  const headerOrdinals = new Set<number>();
+  for (const row of header) {
+    headerByOrdinal.set(row.ordinal, row.distance);
+    headerOrdinals.add(row.ordinal);
+  }
+  let dualCount = 0;
+  const rows = content.map((row) => {
+    const headerDistance = headerByOrdinal.get(row.ordinal);
+    if (headerDistance === undefined) return row;
+    dualCount += 1;
+    return { ...row, distance: dualBonus(Math.min(row.distance, headerDistance)) };
+  });
+  const contentOrdinals = new Set(content.map((row) => row.ordinal));
+  for (const row of header) {
+    if (!contentOrdinals.has(row.ordinal)) rows.push({ ...row, kwScore: row.kwScore ?? 0 });
+  }
+  return { rows, dualCount };
 }
 
 export interface CutoffStats {
