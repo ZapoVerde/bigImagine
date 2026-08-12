@@ -182,12 +182,19 @@ export async function scrapeTurnPresence(
 /** segway.md §2.6's eligibility predicate, shared by the location and character lookups below.
  *  A row is eligible iff it is permanent, OR it is a user-authored row outside the lifecycle
  *  (characters only — status null), OR it is transient with its anchor on this chat's active
- *  swipe path. Inactive rows are never eligible. */
-const ELIGIBLE_TRANSIENT_CLAUSE = `(
+ *  swipe path. Inactive rows are never eligible.
+ *
+ *  Parametric on the chat_id placeholder: every call site's params array puts chat_id at a
+ *  different position, and a hardcoded `$3` previously caused one caller (loadLocationBlock's
+ *  parentRows query) to bind a 3rd param that appeared nowhere in its own SQL text — Postgres
+ *  can't infer a type for a placeholder that's never referenced, which raised 42P18 ("could not
+ *  determine data type of parameter"). Naming the placeholder here makes each call site's
+ *  params array the only source of truth for its own parameter count. */
+const eligibleTransientClause = (chatIdPlaceholder: string) => `(
   status = 'permanent'
   or status is null
   or (status = 'transient' and anchor_swipe_id in (
-    select active_swipe_id from chat_messages where chat_id = $3 and active_swipe_id is not null
+    select active_swipe_id from chat_messages where chat_id = ${chatIdPlaceholder} and active_swipe_id is not null
   ))
 )`;
 
@@ -274,7 +281,7 @@ async function resolveOrCreateLocationRow(
 ): Promise<string> {
   const matched = await session.query<{ location_id: string; status: string | null; parent_location_id: string | null }>(
     `select location_id, status, parent_location_id from locations
-     where user_id = $1 and name = $2 and ${ELIGIBLE_TRANSIENT_CLAUSE}
+     where user_id = $1 and name = $2 and ${eligibleTransientClause('$3')}
      order by (status is null) desc, (status = 'permanent') desc, location_id`,
     [userId, name, chatId],
   );
@@ -433,7 +440,7 @@ async function resolvePresentCharacters(
   for (const name of names) {
     const matched = await session.query<{ character_id: string; status: string | null }>(
       `select character_id, status from characters
-       where user_id = $1 and name = $2 and ${ELIGIBLE_TRANSIENT_CLAUSE}
+       where user_id = $1 and name = $2 and ${eligibleTransientClause('$3')}
        order by (status is null) desc, (status = 'permanent') desc, character_id`,
       [userId, name, chatId],
     );
@@ -499,7 +506,7 @@ export interface LocationBlockResult {
  *  any error, missing scene, or empty list returns { block: '', currentParent: null } — the
  *  caller's empty-block rule then emits nothing, and a turn is never blocked over context.
  *
- *  Lists are eligibility-filtered (segway.md §2.6's ELIGIBLE_TRANSIENT_CLAUSE, scoped to this
+ *  Lists are eligibility-filtered (segway.md §2.6's eligibleTransientClause, scoped to this
  *  chat's active swipe path) so an inactive/alternate-timeline row never pollutes the block.
  *  Parents = eligible rows with parent_location_id null (parent rows AND standalone locations)
  *  plus the current parent by derivation when its row is missing/ineligible — the current parent
@@ -526,7 +533,7 @@ export async function loadLocationBlock(
          join scenes s on s.scene_id = cs.scene_id
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where cs.chat_id = $2
-           and ${ELIGIBLE_TRANSIENT_CLAUSE}
+           and ${eligibleTransientClause('$3')}
          limit 1`,
         [userId, chatId, chatId],
       );
@@ -548,16 +555,16 @@ export async function loadLocationBlock(
         session.query<{ name: string }>(
           `select name from locations
            where user_id = $1 and parent_location_id is null
-             and ${ELIGIBLE_TRANSIENT_CLAUSE}
+             and ${eligibleTransientClause('$2')}
            order by name`,
-          [userId, chatId, chatId],
+          [userId, chatId],
         ),
         currentParent
           ? session.query<{ name: string }>(
               `select name from locations
                where user_id = $1
                  and (parent_location_id = $2 or name like $4)
-                 and ${ELIGIBLE_TRANSIENT_CLAUSE}
+                 and ${eligibleTransientClause('$3')}
                order by name`,
               [userId, parentRowId, chatId, `${currentParent} - %`],
             )
