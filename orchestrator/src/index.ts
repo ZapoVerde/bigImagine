@@ -68,7 +68,8 @@ import { createOrchestratorSettingsStore } from './io/orchestratorSettings.js';
 import { createToolRegistry } from './orchestrator/toolRegistry.js';
 import { loadPlugins } from './orchestrator/pluginLoader.js';
 import { createApiKeyStore } from './server/apiKeyStore.js';
-import { fireLocationImageGeneration, startHttpServer } from './server/httpServer.js';
+import { fireLocationImageGeneration } from './server/locationImages.js';
+import { startHttpServer } from './server/httpServer.js';
 
 function requireEnv(name: string): string {
   const value = process.env[name];

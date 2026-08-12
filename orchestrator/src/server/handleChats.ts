@@ -42,13 +42,15 @@ import { buildChatCompletionChunk } from './openai.js';
 import { readJsonBody, sendJson, writeStreamErrorTerminalFrame, writeStreamHeaders } from './httpUtils.js';
 import {
   buildMacroSnapshot,
-  buildPromptPreview,
   decorateMessageForDisplay,
+} from './promptAssembly.js';
+import { buildPromptPreview } from './promptPreview.js';
+import {
   ensureActiveLocationImage,
   fireLocationImageGeneration,
-  regenerateSwipe,
   resolveChatLocationImage,
-} from './httpServer.js';
+} from './locationImages.js';
+import { regenerateSwipe } from './turnExecution.js';
 import type { HttpServerDeps } from './httpServer.js';
 
 export function isChatPatchBody(value: unknown): value is {
