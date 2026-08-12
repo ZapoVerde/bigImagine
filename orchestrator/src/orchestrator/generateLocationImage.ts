@@ -50,11 +50,12 @@
  * the same clause as httpServer.ts's resolveChatLocationImage — extended with the
  * location_swipe_images association (an active swipe's recorded location is eligible even when
  * the row itself was since re-anchored). An inactive (demoted alternate-timeline) or
- * foreign-chat transient location resolves as not-found rather than spending a real provider
- * call rendering an image for data that can never be displayed. The automatic post-cleanup
- * trigger always passes the chat whose turn just resolved the location, so it's never affected;
- * the manual regenerate_location_image tool is the path this actually guards, since a model can
- * hand back a stale id it's still holding from before a demotion.
+ * foreign-chat auto-registered location (not linked to this chat via location_chat_links,
+ * db/migrations/0096) resolves as not-found rather than spending a real provider call rendering
+ * an image for data that can never be displayed. The automatic post-cleanup trigger always
+ * passes the chat whose turn just resolved the location, so it's never affected; the manual
+ * regenerate_location_image tool is the path this actually guards, since a model can hand back a
+ * stale id it's still holding from before a demotion.
  *
  * @api-declaration
  * LocationImageGenDeps — db (PostgresClient), settings (OrchestratorSettingsStore), imageConnections
@@ -103,6 +104,8 @@ interface LocationRow {
   image_generated_at: string | null;
   image_rendered_input: Record<string, unknown> | null;
   image_render_hash: string | null;
+  /** This chat's anchor for the row, read off location_chat_links (db/migrations/0096) rather
+   *  than a column on locations itself — null for a stateless call or a user-authored row. */
   anchor_swipe_id: string | null;
   status: string | null;
 }
@@ -138,17 +141,17 @@ function inputsMatchSnapshot(row: LocationRow): boolean {
 }
 
 /** segway.md §2.6 eligibility for the bg machinery (endpoint.md §5 + migration 0076): the
- *  standard clause plus "the chat's active swipe has a recorded location_swipe_images
- *  association with this location" — an orphaned row (re-anchored to a newer swipe) still
- *  resolves for the swipe that actually used it, so cycle-back reuse and the restart triggers
- *  stay consistent with the per-swipe association. $3 is the chat id, or null for a stateless
- *  call — which makes both the anchor branch and the association branch match nothing (only
- *  permanent/user-authored rows resolve, the conservative reading). */
+ *  standard clause (user-authored rows always eligible; auto-registered rows eligible iff linked
+ *  to this chat via location_chat_links and not inactive) plus "the chat's active swipe has a
+ *  recorded location_swipe_images association with this location" — an orphaned row (re-anchored
+ *  to a newer swipe) still resolves for the swipe that actually used it, so cycle-back reuse and
+ *  the restart triggers stay consistent with the per-swipe association. $3 is the chat id, or
+ *  null for a stateless call — which makes both the link branch and the association branch match
+ *  nothing (only user-authored rows resolve, the conservative reading). */
 const BG_ELIGIBILITY_CLAUSE = `(
-  status = 'permanent'
-  or status is null
-  or (status = 'transient' and anchor_swipe_id in (
-    select active_swipe_id from chat_messages where chat_id = $3 and active_swipe_id is not null
+  status is null
+  or (status <> 'inactive' and exists (
+    select 1 from location_chat_links where location_id = locations.location_id and chat_id = $3
   ))
   or exists (select 1 from location_swipe_images a
              where a.chat_id = $3 and a.location_id = locations.location_id
@@ -225,12 +228,16 @@ export async function generateLocationImage(
   try {
     // §2.6 eligibility, same clause as resolveChatLocationImage (httpServer.ts) and the get_*
     // tools, extended with the location_swipe_images association: $3 is null for a stateless
-    // call, which makes the transient + association branches match nothing — only
-    // permanent/user-authored rows resolve, the conservative reading.
+    // call, which makes the link + association branches match nothing — only user-authored rows
+    // resolve, the conservative reading. anchor_swipe_id now lives on location_chat_links, so
+    // it's read via a correlated subquery scoped to this chat rather than a column on the row.
     const location = await deps.db.withUserScope(userId, (session) =>
       session.query<LocationRow>(
         `select location_id, visual_description, environment, seed, image_url, image_generated_at,
-                image_rendered_input, image_render_hash, anchor_swipe_id, status
+                image_rendered_input, image_render_hash,
+                (select anchor_swipe_id from location_chat_links
+                 where location_id = locations.location_id and chat_id = $3) as anchor_swipe_id,
+                status
          from locations where location_id = $1 and user_id = $2 and ${BG_ELIGIBILITY_CLAUSE}`,
         [locationId, userId, chatId ?? null],
       ),

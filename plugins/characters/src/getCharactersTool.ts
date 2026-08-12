@@ -12,11 +12,13 @@
  * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter — same clause as
  * get_scenes (plugins/scenes/src/getScenesTool.ts): an inactive character (a demoted alternate
  * timeline) must never be model-visible, or the model could hand its id straight back into
- * add_character_to_scene and undo the sync tick's exclusion. Transient rows surface only when
- * their anchor is provably on the calling chat's active swipe path; with no chat context
- * (ctx.chatId unset) only user-authored/permanent rows surface — the conservative reading. This
- * also shapes the Characters Roster (frontend/src/views/CharactersView.tsx lists via this tool),
- * so auto-registered transient NPCs appear once they promote to permanent canon, not before.
+ * add_character_to_scene and undo the sync tick's exclusion. Auto-registered rows (status is not
+ * null) surface only when linked to the calling chat via character_chat_links (db/migrations/0096)
+ * — with no chat context (ctx.chatId unset) none of them surface. User-authored rows (status is
+ * null) are always eligible. This also shapes the Characters Roster
+ * (frontend/src/views/CharactersView.tsx lists via this tool) — with no chat context it now shows
+ * only user-authored characters, never auto-registered NPCs, a deliberate behavior change (see
+ * plan §6): background NPCs from one story shouldn't pollute a reusable character library.
  *
  * @api-declaration
  * createGetCharactersTool() — returns the get_characters RegisteredTool
@@ -47,15 +49,16 @@ export function createGetCharactersTool(): RegisteredTool {
       },
     },
     handler: async (_args, ctx) => {
-      // segway.md §2.6 eligibility, copied from getScenesTool.ts: transient rows count only when
-      // their anchor is on the calling chat's active swipe path ($2; null chat -> none).
+      // segway.md §2.6 eligibility: user-authored rows (status null) always count; auto-registered
+      // rows count only when linked to the calling chat and not demoted ($2; null chat -> none).
       const rows = await ctx.db.query<CharacterRow>(
         `select character_id, name from characters
          where user_id = $1 and (
-           status = 'permanent' or status is null or
-           (status = 'transient' and anchor_swipe_id in (
-             select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
-           ))
+           status is null or (
+             status <> 'inactive' and exists (
+               select 1 from character_chat_links where character_id = characters.character_id and chat_id = $2
+             )
+           )
          )
          order by name`,
         [ctx.userId, ctx.chatId ?? null],

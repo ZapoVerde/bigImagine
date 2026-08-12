@@ -287,6 +287,7 @@ function LocationsTable({ rows, error }: { rows: LocationAdminRow[] | null; erro
           <tr>
             <th>Location</th>
             <th>Status</th>
+            <th>Chat(s)</th>
             <th>Image</th>
             <th>Updated</th>
           </tr>
@@ -297,6 +298,15 @@ function LocationsTable({ rows, error }: { rows: LocationAdminRow[] | null; erro
               <td className={r.parentName ? 'loc-room-row' : ''}>{r.parentName ? `↳ ${r.name}` : r.name}</td>
               <td>
                 <span className="loc-badge-status">{r.status}</span>
+              </td>
+              <td>
+                {r.status === null ? (
+                  <span className="badge-no">library</span>
+                ) : r.chatTitles.length > 0 ? (
+                  r.chatTitles.join(', ')
+                ) : (
+                  <span className="badge-no">none</span>
+                )}
               </td>
               <td>
                 {r.imageUrl ? (

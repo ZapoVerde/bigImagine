@@ -17,12 +17,12 @@ function assert(cond, message) {
 
 function createFakePool() {
   const locations = [];
-  const chatMessages = []; // {chat_id, active_swipe_id} — §2.6 eligibility
+  const locationChatLinks = []; // {location_id, chat_id, anchor_swipe_id} (migration 0096)
   let counter = 0;
 
   return {
     locations,
-    chatMessages,
+    locationChatLinks,
     async connect() {
       let scopedUserId;
       return {
@@ -34,7 +34,9 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into locations')) {
-            // createLocationTool writes definition between visual_description and environment:
+            // createLocationTool writes definition between visual_description and environment,
+            // and status = null (literal SQL, not a param — a user-created location is exempt
+            // from the auto-registration lifecycle, db/migrations/0096):
             // [userId, name, visual_description, definition, environment, seed]
             const [userId, name, visualDescription, definition, environmentJson, seed] = params;
             assert(scopedUserId === userId, 'create_location is scoped to the requesting user');
@@ -46,7 +48,7 @@ function createFakePool() {
               definition: definition ?? null,
               environment: JSON.parse(environmentJson),
               seed,
-              status: 'permanent', // createLocationTool.ts writes 'permanent' (user-created = canon)
+              status: null, // createLocationTool.ts writes null — user-created, always cross-chat eligible
             };
             locations.push(row);
             return { rows: [{ location_id: row.location_id, name: row.name }] };
@@ -55,13 +57,12 @@ function createFakePool() {
           if (sql.startsWith('select location_id, name, definition from locations')) {
             const [userId, chatId] = params;
             assert(scopedUserId === userId, 'get_locations is scoped to the requesting user');
-            // segway.md §2.6 eligibility, modeled in JS: transient rows count only when their
-            // anchor is on the calling chat's active swipe path ($2; null chat -> none).
-            const activeSwipeIds = new Set(
-              chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id),
-            );
+            // db/migrations/0096 eligibility: user-authored (status null) is always eligible; an
+            // auto-registered row is eligible only when linked to the calling chat and not
+            // demoted to inactive (null chat -> no auto-registered row ever matches).
             const eligible = (l) =>
-              l.status === 'permanent' || l.status === null || (l.status === 'transient' && activeSwipeIds.has(l.anchor_swipe_id));
+              l.status === null ||
+              (l.status !== 'inactive' && locationChatLinks.some((link) => link.location_id === l.location_id && link.chat_id === chatId));
             const rows = locations
               .filter((l) => l.user_id === userId && eligible(l))
               .sort((a, b) => a.name.localeCompare(b.name))
@@ -149,11 +150,10 @@ assert(threw, 'create_location rejects a non-object environment before reaching 
 const crossUser = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
 assert(!crossUser.some((l) => l.locationId === otherUsersLoc.locationId), "another user's location is never visible");
 
-// --- segway.md §2.6: an inactive location must never be model-visible ---------------------------
+// --- db/migrations/0096: chat-linkage eligibility, and inactive is never model-visible -----------
 {
   const chatId = 'chat-live';
-  const liveSwipe = 'swipe-live';
-  pool.chatMessages.push({ chat_id: chatId, active_swipe_id: liveSwipe });
+  const otherChatId = 'chat-other';
   pool.locations.push({
     location_id: 'loc-inactive',
     user_id: userId,
@@ -162,8 +162,8 @@ assert(!crossUser.some((l) => l.locationId === otherUsersLoc.locationId), "anoth
     environment: {},
     seed: null,
     status: 'inactive', // demoted alternate timeline
-    anchor_swipe_id: 'swipe-dead',
   });
+  pool.locationChatLinks.push({ location_id: 'loc-inactive', chat_id: chatId, anchor_swipe_id: 'swipe-dead' });
   pool.locations.push({
     location_id: 'loc-transient',
     user_id: userId,
@@ -172,19 +172,25 @@ assert(!crossUser.some((l) => l.locationId === otherUsersLoc.locationId), "anoth
     environment: {},
     seed: null,
     status: 'transient',
-    anchor_swipe_id: liveSwipe,
   });
+  pool.locationChatLinks.push({ location_id: 'loc-transient', chat_id: chatId, anchor_swipe_id: 'swipe-live' });
 
   const withoutChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
   assert(
     !withoutChat.some((l) => l.locationId === 'loc-inactive') && !withoutChat.some((l) => l.locationId === 'loc-transient'),
-    'with no chat context, an inactive and an unproven-transient location are both excluded',
+    'with no chat context, an inactive and a chat-linked transient location are both excluded',
   );
 
   const inChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session, chatId }));
   assert(
     inChat.some((l) => l.locationId === 'loc-transient') && !inChat.some((l) => l.locationId === 'loc-inactive'),
-    "a transient location on the calling chat's active swipe path is surfaced; an inactive one never is",
+    'a transient location linked to the calling chat is surfaced; an inactive one never is, even when linked',
+  );
+
+  const inOtherChat = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session, chatId: otherChatId }));
+  assert(
+    !inOtherChat.some((l) => l.locationId === 'loc-transient'),
+    "a transient location linked to a DIFFERENT chat is not surfaced — chat-scoping's core invariant",
   );
 }
 

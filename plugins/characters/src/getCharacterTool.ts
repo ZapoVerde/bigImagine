@@ -9,11 +9,11 @@
  * for lossless export per bi_principles.md §7) is never returned verbatim here — it can be large
  * and the editor has no use for it — only whether one is present.
  *
- * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter, same as get_characters:
- * a lookup of an ineligible row (inactive, or transient not provably on the calling chat's active
- * swipe path) reports not-found, so the model can't pull detail on a demoted alternate timeline.
- * The Roster only ever passes ids that the filtered get_characters list returned, so its editor
- * flow is unaffected.
+ * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter, same as
+ * get_characters: a lookup of an ineligible row (inactive, or auto-registered but not linked to the
+ * calling chat via character_chat_links, db/migrations/0096) reports not-found, so the model can't
+ * pull detail on a demoted alternate timeline. The Roster only ever passes ids that the filtered
+ * get_characters list returned, so its editor flow is unaffected.
  *
  * @api-declaration
  * createGetCharacterTool() — returns the get_character RegisteredTool
@@ -70,10 +70,11 @@ export function createGetCharacterTool(): RegisteredTool {
                 spec_version, avatar_path is not null as has_avatar, source_json is not null as has_source_json,
                 created_at, updated_at
          from characters where character_id = $1 and user_id = $2 and (
-           status = 'permanent' or status is null or
-           (status = 'transient' and anchor_swipe_id in (
-             select active_swipe_id from chat_messages where chat_id = $3 and active_swipe_id is not null
-           ))
+           status is null or (
+             status <> 'inactive' and exists (
+               select 1 from character_chat_links where character_id = characters.character_id and chat_id = $3
+             )
+           )
          )`,
         [args.characterId, ctx.userId, ctx.chatId ?? null],
       );

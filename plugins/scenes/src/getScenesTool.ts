@@ -11,11 +11,11 @@
  * Since this is a model-facing lookup surface, it applies docs/plans/vistalyze_integration/segway.md
  * §2.6's eligibility filter to the rows it surfaces: an inactive location/character (a demoted
  * alternate timeline) must recall as absent, never leak into the model's view of the world.
- * Presence characters are eligible iff user-authored (status null), permanent, or transient with
- * their anchor on the calling chat's active swipe path; a scene itself is eligible iff its active
- * location is null or eligible the same way. With no chat context (ctx.chatId unset), the
- * active-path condition can't be proven, so transient rows are excluded — only user-authored and
- * permanent rows surface, the conservative reading of the spec.
+ * Presence characters are eligible iff user-authored (status null) or auto-registered-and-linked to
+ * the calling chat via location_chat_links/character_chat_links (db/migrations/0096) and not
+ * inactive; a scene itself is eligible iff its active location is null or eligible the same way.
+ * With no chat context (ctx.chatId unset), no auto-registered row can be linked, so only
+ * user-authored rows surface — the conservative reading of the spec.
  *
  * @api-declaration
  * createGetScenesTool() — returns the get_scenes RegisteredTool
@@ -48,18 +48,19 @@ export function createGetScenesTool(): RegisteredTool {
       },
     },
     handler: async (_args, ctx) => {
-      // segway.md §2.6: transient rows are eligible only when their anchor is provably on this
-      // chat's active swipe path; `$2` is null for a stateless call, which makes the subquery
-      // match nothing (user-authored/permanent rows still surface — the conservative reading).
-      const eligibleFor = (q: string) =>
-        `(${q}.status = 'permanent' or ${q}.status is null or
-          (${q}.status = 'transient' and ${q}.anchor_swipe_id in (
-            select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
-          )))`;
+      // segway.md §2.6: auto-registered rows are eligible only when linked to this chat via the
+      // relevant chat-links table and not inactive; `$2` is null for a stateless call, which makes
+      // the exists() match nothing (user-authored rows still surface — the conservative reading).
+      const eligibleFor = (q: string, linkTable: 'location_chat_links' | 'character_chat_links', idCol: 'location_id' | 'character_id') =>
+        `(${q}.status is null or (
+          ${q}.status <> 'inactive' and exists (
+            select 1 from ${linkTable} where ${idCol} = ${q}.${idCol} and chat_id = $2
+          )
+        ))`;
       const rows = await ctx.db.query<SceneRow>(
         `select s.scene_id, s.name, s.active_location_id,
                 coalesce(array_agg(sp.character_id) filter (
-                  where sp.character_id is not null and ${eligibleFor('c')}
+                  where sp.character_id is not null and ${eligibleFor('c', 'character_chat_links', 'character_id')}
                 ), '{}') as character_ids
          from scenes s
          left join scene_presence sp on sp.scene_id = s.scene_id
@@ -69,7 +70,7 @@ export function createGetScenesTool(): RegisteredTool {
                 or exists (
                   select 1 from locations l
                   where l.location_id = s.active_location_id and l.user_id = $1
-                    and ${eligibleFor('l')}
+                    and ${eligibleFor('l', 'location_chat_links', 'location_id')}
                 ))
          group by s.scene_id
          order by s.name`,

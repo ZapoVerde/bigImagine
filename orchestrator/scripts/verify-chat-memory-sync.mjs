@@ -31,8 +31,11 @@ function createFakePool() {
   const chatMemorySyncStatus = new Map(); // chat_id -> row (chat_memory_sync_status, migration 0055)
   const canonFacts = []; // { fact_id, chat_id, user_id, status, approved_at } (canon_facts, migration 0058)
   const swipes = []; // { swipe_id, message_id, created_at } (chat_message_swipes, migration 0059)
-  const locations = []; // { location_id, user_id, status, anchor_swipe_id } (locations, migration 0067)
-  const characters = []; // { character_id, user_id, status, anchor_swipe_id } (characters, migration 0067)
+  const locations = []; // { location_id, user_id, status } (locations, migration 0067; status is settled by
+  // the sync tick below — 0096 moved the chat/swipe anchor off the row and onto the link table)
+  const characters = []; // { character_id, user_id, status } (characters, migration 0067)
+  const locationChatLinks = []; // { location_id, chat_id, anchor_swipe_id } (migration 0096)
+  const characterChatLinks = []; // { character_id, chat_id, anchor_swipe_id } (migration 0096)
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
@@ -49,6 +52,8 @@ function createFakePool() {
     swipes,
     locations,
     characters,
+    locationChatLinks,
+    characterChatLinks,
     now,
     async connect() {
       let scopedUserId;
@@ -115,39 +120,35 @@ function createFakePool() {
           }
 
           // segway.md §2.5 settle step: promote the active swipe's rows, demote the alternates'.
+          // db/migrations/0096: the anchor lives on location_chat_links/character_chat_links now,
+          // not on the row — promotion/demotion only ever flips status, never touches the link.
           if (sql.includes("update locations set status = 'permanent'")) {
             const [userId, anchorSwipeId] = params;
-            const promoted = locations.filter((l) => l.user_id === userId && l.status === 'transient' && l.anchor_swipe_id === anchorSwipeId);
-            for (const l of promoted) {
-              l.status = 'permanent';
-              l.anchor_swipe_id = null;
-            }
+            const linkedIds = new Set(locationChatLinks.filter((l) => l.anchor_swipe_id === anchorSwipeId).map((l) => l.location_id));
+            const promoted = locations.filter((l) => l.user_id === userId && l.status === 'transient' && linkedIds.has(l.location_id));
+            for (const l of promoted) l.status = 'permanent';
             return { rows: promoted.map((l) => ({ location_id: l.location_id })) };
           }
           if (sql.includes("update characters set status = 'permanent'")) {
             const [userId, anchorSwipeId] = params;
-            const promoted = characters.filter((c) => c.user_id === userId && c.status === 'transient' && c.anchor_swipe_id === anchorSwipeId);
-            for (const c of promoted) {
-              c.status = 'permanent';
-              c.anchor_swipe_id = null;
-            }
+            const linkedIds = new Set(characterChatLinks.filter((c) => c.anchor_swipe_id === anchorSwipeId).map((c) => c.character_id));
+            const promoted = characters.filter((c) => c.user_id === userId && c.status === 'transient' && linkedIds.has(c.character_id));
+            for (const c of promoted) c.status = 'permanent';
             return { rows: promoted.map((c) => ({ character_id: c.character_id })) };
           }
           if (sql.includes("update locations set status = 'inactive'")) {
             const [userId, messageId, activeSwipeId] = params;
             const alternateIds = new Set(swipes.filter((s) => s.message_id === messageId && s.swipe_id !== activeSwipeId).map((s) => s.swipe_id));
-            const demoted = locations.filter(
-              (l) => l.user_id === userId && l.status === 'transient' && alternateIds.has(l.anchor_swipe_id),
-            );
+            const linkedIds = new Set(locationChatLinks.filter((l) => alternateIds.has(l.anchor_swipe_id)).map((l) => l.location_id));
+            const demoted = locations.filter((l) => l.user_id === userId && l.status === 'transient' && linkedIds.has(l.location_id));
             for (const l of demoted) l.status = 'inactive';
             return { rows: demoted.map((l) => ({ location_id: l.location_id })) };
           }
           if (sql.includes("update characters set status = 'inactive'")) {
             const [userId, messageId, activeSwipeId] = params;
             const alternateIds = new Set(swipes.filter((s) => s.message_id === messageId && s.swipe_id !== activeSwipeId).map((s) => s.swipe_id));
-            const demoted = characters.filter(
-              (c) => c.user_id === userId && c.status === 'transient' && alternateIds.has(c.anchor_swipe_id),
-            );
+            const linkedIds = new Set(characterChatLinks.filter((c) => alternateIds.has(c.anchor_swipe_id)).map((c) => c.character_id));
+            const demoted = characters.filter((c) => c.user_id === userId && c.status === 'transient' && linkedIds.has(c.character_id));
             for (const c of demoted) c.status = 'inactive';
             return { rows: demoted.map((c) => ({ character_id: c.character_id })) };
           }
@@ -701,18 +702,27 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   pool.swipes.push({ swipe_id: activeSwipeId, message_id: settleMessages[7].message_id, created_at: pool.now() });
   pool.swipes.push({ swipe_id: alternateSwipeId, message_id: settleMessages[7].message_id, created_at: pool.now() });
 
-  const promotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: activeSwipeId };
-  const demotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: alternateSwipeId };
-  const permanentLocation = { location_id: randomUUID(), user_id: USER, status: 'permanent', anchor_swipe_id: null };
-  const promotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: activeSwipeId };
-  const demotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient', anchor_swipe_id: alternateSwipeId };
+  const promotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient' };
+  const demotedLocation = { location_id: randomUUID(), user_id: USER, status: 'transient' };
+  const permanentLocation = { location_id: randomUUID(), user_id: USER, status: 'permanent' };
+  const promotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient' };
+  const demotedCharacter = { character_id: randomUUID(), user_id: USER, status: 'transient' };
   pool.locations.push(promotedLocation, demotedLocation, permanentLocation);
   pool.characters.push(promotedCharacter, demotedCharacter);
+  // db/migrations/0096: the chat/swipe anchor lives on the link row, not the location/character row.
+  pool.locationChatLinks.push({ location_id: promotedLocation.location_id, chat_id: settleChatId, anchor_swipe_id: activeSwipeId });
+  pool.locationChatLinks.push({ location_id: demotedLocation.location_id, chat_id: settleChatId, anchor_swipe_id: alternateSwipeId });
+  pool.characterChatLinks.push({ character_id: promotedCharacter.character_id, chat_id: settleChatId, anchor_swipe_id: activeSwipeId });
+  pool.characterChatLinks.push({ character_id: demotedCharacter.character_id, chat_id: settleChatId, anchor_swipe_id: alternateSwipeId });
 
   await runChatMemorySyncTick(deps);
 
-  assert(promotedLocation.status === 'permanent' && promotedLocation.anchor_swipe_id === null, "the archived turn's active-swipe location promotes to permanent with its swipe anchor nulled");
-  assert(promotedCharacter.status === 'permanent' && promotedCharacter.anchor_swipe_id === null, "the archived turn's active-swipe character promotes to permanent too");
+  const promotedLocationLink = pool.locationChatLinks.find((l) => l.location_id === promotedLocation.location_id);
+  const promotedCharacterLink = pool.characterChatLinks.find((c) => c.character_id === promotedCharacter.character_id);
+  assert(promotedLocation.status === 'permanent', "the archived turn's active-swipe location promotes to permanent");
+  assert(promotedCharacter.status === 'permanent', "the archived turn's active-swipe character promotes to permanent too");
+  assert(promotedLocationLink?.anchor_swipe_id === activeSwipeId, "promotion never clears the link row's anchor_swipe_id (that used to sever the row's only FK path back to its chat)");
+  assert(promotedCharacterLink?.anchor_swipe_id === activeSwipeId, "promotion never clears the character link's anchor_swipe_id either");
   assert(demotedLocation.status === 'inactive', "the archived turn's alternate-swipe location demotes to inactive — not deleted");
   assert(demotedCharacter.status === 'inactive', "the archived turn's alternate-swipe character demotes to inactive — not deleted");
   assert(permanentLocation.status === 'permanent', 'a permanent row is untouched by the settle step');

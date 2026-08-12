@@ -450,6 +450,12 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       // permanent and every alternate swipe's rows demote to inactive — never deleted. A message
       // with no active swipe (e.g. a greeting inserted outside the scrape path) anchors nothing,
       // so it's a no-op.
+      //
+      // db/migrations/0096: anchor_swipe_id now lives on location_chat_links/character_chat_links,
+      // not on the row itself, and promotion must NOT clear it (that used to sever the row's only
+      // FK path back to its chat, leaving promoted rows undeletable — the bug this migration
+      // fixed). status is purely "settled vs. still in the live editing window" now; the link row
+      // (and its chat_id) is what keeps the row chat-scoped regardless of status.
       await step('settle_transient_records', async () => {
         let promotedLocations = 0;
         let promotedCharacters = 0;
@@ -458,23 +464,29 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         for (const m of toArchiveRows) {
           if (!m.active_swipe_id) continue;
           const promotedLoc = await session.query<{ location_id: string }>(
-            `update locations set status = 'permanent', anchor_swipe_id = null, updated_at = now()
-             where user_id = $1 and status = 'transient' and anchor_swipe_id = $2
+            `update locations set status = 'permanent', updated_at = now()
+             where user_id = $1 and status = 'transient' and location_id in (
+               select location_id from location_chat_links where anchor_swipe_id = $2
+             )
              returning location_id`,
             [userId, m.active_swipe_id],
           );
           promotedLocations += promotedLoc.length;
           const promotedChar = await session.query<{ character_id: string }>(
-            `update characters set status = 'permanent', anchor_swipe_id = null, updated_at = now()
-             where user_id = $1 and status = 'transient' and anchor_swipe_id = $2
+            `update characters set status = 'permanent', updated_at = now()
+             where user_id = $1 and status = 'transient' and character_id in (
+               select character_id from character_chat_links where anchor_swipe_id = $2
+             )
              returning character_id`,
             [userId, m.active_swipe_id],
           );
           promotedCharacters += promotedChar.length;
           const demotedLoc = await session.query<{ location_id: string }>(
             `update locations set status = 'inactive', updated_at = now()
-             where user_id = $1 and status = 'transient' and anchor_swipe_id in (
-               select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+             where user_id = $1 and status = 'transient' and location_id in (
+               select location_id from location_chat_links where anchor_swipe_id in (
+                 select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+               )
              )
              returning location_id`,
             [userId, m.message_id, m.active_swipe_id],
@@ -482,8 +494,10 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           demotedLocations += demotedLoc.length;
           const demotedChar = await session.query<{ character_id: string }>(
             `update characters set status = 'inactive', updated_at = now()
-             where user_id = $1 and status = 'transient' and anchor_swipe_id in (
-               select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+             where user_id = $1 and status = 'transient' and character_id in (
+               select character_id from character_chat_links where anchor_swipe_id in (
+                 select swipe_id from chat_message_swipes where message_id = $2 and swipe_id <> $3
+               )
              )
              returning character_id`,
             [userId, m.message_id, m.active_swipe_id],
@@ -513,7 +527,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
         const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt)));
         const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
-        // Stage 5 of the CNZ retrieval port (docs/plans/rag-dynamic-cutoff-plan.md): the header
+        // Stage 5 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the header
         // lane — embed each chunk's summary too, into chat_chunks.summary_vector_embed
         // (migration 0094). recallForPrompt.ts's chunk path fuses the content and summary lanes
         // with best-of scoring + Canonize's 1.08× dual-confirmation bonus. Chunks written

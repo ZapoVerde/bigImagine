@@ -88,19 +88,24 @@ function assert(cond, message) {
 }
 
 // --- loadLocationBlock (location.md §5.2) ---------------------------------------------------------
-// Fake pool covering exactly the four query shapes loadLocationBlock issues, with the §2.6
-// eligibility subquery honored via the chat's active swipe ids (mirrors
+// Fake pool covering exactly the four query shapes loadLocationBlock issues, with the eligibility
+// subquery honored via location_chat_links (db/migrations/0096; mirrors
 // verify-location-presence-scraper.mjs's fake).
 function createBlockPool() {
-  const locations = []; // { location_id, user_id, name, parent_location_id, status, anchor_chat_id, anchor_swipe_id }
+  const locations = []; // { location_id, user_id, name, parent_location_id, status }
+  const locationChatLinks = []; // { location_id, chat_id, anchor_swipe_id }
   const scenes = []; // { scene_id, user_id, chat_id, active_location_id }
   const chatSessions = new Map(); // chat_id -> scene_id
-  const chatMessages = []; // { chat_id, active_swipe_id }
+  // db/migrations/0096 eligibility: user-authored (status null) is always eligible; an
+  // auto-registered row is eligible only when linked to the calling chat and not inactive.
+  const eligible = (l, chatId) =>
+    l.status == null ||
+    (l.status !== 'inactive' && locationChatLinks.some((link) => link.location_id === l.location_id && link.chat_id === chatId));
   return {
     locations,
+    locationChatLinks,
     scenes,
     chatSessions,
-    chatMessages,
     async connect() {
       return {
         async query(sql, params = []) {
@@ -111,17 +116,16 @@ function createBlockPool() {
             const scene = scenes.find((sc) => sc.chat_id === chatId);
             if (!scene) return { rows: [] };
             const loc = locations.find((l) => l.location_id === scene.active_location_id && l.user_id === userId);
-            return { rows: loc ? [{ location_id: loc.location_id, name: loc.name }] : [] };
+            return { rows: loc && eligible(loc, chatId) ? [{ location_id: loc.location_id, name: loc.name }] : [] };
           }
           if (sql.includes('parent_location_id = $2 or name like')) {
             const [userId, parentRowId, chatId, prefix] = params;
-            const activeSwipeIds = new Set(chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id));
             const rows = locations
               .filter(
                 (l) =>
                   l.user_id === userId &&
                   (l.parent_location_id === parentRowId || (prefix && l.name.startsWith(prefix.slice(0, -2)))) &&
-                  (l.status === 'permanent' || (l.status === 'transient' && activeSwipeIds.has(l.anchor_swipe_id))),
+                  eligible(l, chatId),
               )
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((l) => ({ name: l.name }));
@@ -129,14 +133,8 @@ function createBlockPool() {
           }
           if (sql.includes('parent_location_id is null')) {
             const [userId, chatId] = params;
-            const activeSwipeIds = new Set(chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id));
             const rows = locations
-              .filter(
-                (l) =>
-                  l.user_id === userId &&
-                  l.parent_location_id === null &&
-                  (l.status === 'permanent' || (l.status === 'transient' && activeSwipeIds.has(l.anchor_swipe_id))),
-              )
+              .filter((l) => l.user_id === userId && l.parent_location_id === null && eligible(l, chatId))
               .sort((a, b) => a.name.localeCompare(b.name))
               .map((l) => ({ name: l.name }));
             return { rows };
@@ -154,27 +152,26 @@ function createBlockPool() {
   };
 }
 
-function seed(pool, { locations, scenes, chatSessions, chatMessages }) {
+// Every seeded location is auto-registered (status 'transient' by default) and, unless the caller
+// passes `unlinked: true`, auto-linked to CHAT via location_chat_links (db/migrations/0096) — the
+// default shape a scraper-created row has in the chat that registered it. Pass `linkChatId` to
+// link to a different chat instead (for cross-chat isolation cases).
+function seed(pool, { locations, scenes, chatSessions }) {
   for (const l of locations) {
-    pool.locations.push({
-      location_id: randomUUID(),
-      user_id: USER,
-      status: 'transient',
-      anchor_chat_id: CHAT,
-      parent_location_id: null,
-      anchor_swipe_id: SWIPE_ACTIVE,
-      ...l,
-    });
+    const { unlinked, linkChatId, ...rest } = l;
+    const row = { location_id: randomUUID(), user_id: USER, status: 'transient', parent_location_id: null, ...rest };
+    pool.locations.push(row);
+    if (!unlinked) {
+      pool.locationChatLinks.push({ location_id: row.location_id, chat_id: linkChatId ?? CHAT, anchor_swipe_id: SWIPE_ACTIVE });
+    }
   }
   for (const sc of scenes) pool.scenes.push({ scene_id: randomUUID(), user_id: USER, chat_id: CHAT, active_location_id: null, ...sc });
   for (const [chatId, sceneId] of Object.entries(chatSessions)) pool.chatSessions.set(chatId, sceneId);
-  for (const m of chatMessages) pool.chatMessages.push({ chat_id: CHAT, ...m });
 }
 
 const USER = 'u-tracker';
 const CHAT = 'c-tracker';
 const SWIPE_ACTIVE = 'swipe-active';
-const SWIPE_STALE = 'swipe-stale';
 
 function settingsStore(overrides = {}) {
   const values = { location_injection_enabled: 'true', location_injection_prompt: '', ...overrides };
@@ -191,7 +188,6 @@ function settingsStore(overrides = {}) {
     locations: [{ name: 'The Tavern' }, { name: 'The Tavern - Kitchen' }, { name: 'The Tavern - Cellar' }, { name: 'Harbor' }],
     scenes: [{ active_location_id: null }],
     chatSessions: { [CHAT]: null },
-    chatMessages: [{ active_swipe_id: SWIPE_ACTIVE }],
   });
   const tavernRow = pool.locations.find((l) => l.name === 'The Tavern');
   const kitchenRow = pool.locations.find((l) => l.name === 'The Tavern - Kitchen');
@@ -221,21 +217,22 @@ function settingsStore(overrides = {}) {
 }
 
 {
-  // Eligibility (§2.6): the stale-timeline row (anchor on a swipe outside this chat's active
-  // path) must not appear in either list; the inactive parent must not appear either.
+  // Eligibility (db/migrations/0096): a row linked only to a DIFFERENT chat must not appear in
+  // either list; an inactive row must not appear even when linked to this chat.
   const pool = createBlockPool();
   const tavern = { name: 'The Tavern' };
-  const staleKitchen = { name: 'The Tavern - Kitchen', anchor_swipe_id: SWIPE_STALE, status: 'transient' };
+  const foreignKitchen = { name: 'The Tavern - Kitchen', linkChatId: 'chat-other' };
+  const inactiveCellar = { name: 'The Tavern - Cellar', status: 'inactive' };
   seed(pool, {
-    locations: [tavern, staleKitchen],
+    locations: [tavern, foreignKitchen, inactiveCellar],
     scenes: [],
     chatSessions: {},
-    chatMessages: [{ active_swipe_id: SWIPE_ACTIVE }],
   });
   const db = createPostgresClient(pool);
   const { block } = await loadLocationBlock({ db, settings: settingsStore() }, USER, CHAT);
   assert(block.includes('The Tavern'), 'the eligible parent is listed');
-  assert(!block.includes('Kitchen'), 'a transient row anchored to a different timeline\'s swipe is excluded (never resurrected into the block)');
+  assert(!block.includes('Kitchen'), 'a transient row linked only to a DIFFERENT chat is excluded — chat-scoping\'s core invariant');
+  assert(!block.includes('Cellar'), 'an inactive row is excluded even when linked to this chat (never resurrected into the block)');
 }
 
 {
@@ -248,7 +245,6 @@ function settingsStore(overrides = {}) {
     locations: [kitchen],
     scenes: [],
     chatSessions: {},
-    chatMessages: [{ active_swipe_id: SWIPE_ACTIVE }],
   });
   const kitchenRow = pool.locations.find((l) => l.name === 'The Tavern - Kitchen');
   const sceneId = randomUUID();
@@ -264,7 +260,7 @@ function settingsStore(overrides = {}) {
   // Fail-open (§1.3): a DB error (or a missing scene) returns '' — the turn is never blocked
   // over context. Missing scene: no rows anywhere.
   const pool = createBlockPool();
-  seed(pool, { locations: [], scenes: [], chatSessions: {}, chatMessages: [] });
+  seed(pool, { locations: [], scenes: [], chatSessions: {} });
   const db = createPostgresClient(pool);
   const { block } = await loadLocationBlock({ db, settings: settingsStore() }, USER, CHAT);
   assert(block === '', 'no scene/locations → empty block, no throw');

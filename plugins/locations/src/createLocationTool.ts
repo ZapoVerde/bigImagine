@@ -10,11 +10,13 @@
  * image_path is cache, not source). Scope for a scene and for canon facts' linked_location_id
  * without any image pipeline.
  *
- * status is written as 'permanent', never left at the migration default ('transient') — a user
- * manually creating a location is the explicit canon signal (bi_principles.md §3,
- * docs/plans/vistalyze_integration/segway.md §2.6), so the row stays eligible for the post-cleanup
- * scraper's name-lookup and for prompt injection. Transient status is reserved for rows the story
- * auto-registers, which are anchored to a turn's swipe and settle through the sync tick.
+ * status is written as null, never left at the migration default ('transient') — a user manually
+ * creating a location is explicitly outside the auto-registration lifecycle entirely (this is the
+ * deliberate, reusable, cross-chat location library, not a per-chat auto-registered row), the same
+ * convention plugins/characters/src/createCharacterTool.ts already uses. The
+ * transient/permanent/inactive lifecycle (db/migrations/0096) is reserved for rows the story
+ * auto-registers, which are linked to their owning chat via location_chat_links and settle through
+ * the sync tick — status='permanent' never means "exempt from chat-scoping," only "settled."
  *
  * @api-declaration
  * createCreateLocationTool() — returns the create_location RegisteredTool
@@ -87,7 +89,7 @@ export function createCreateLocationTool(): RegisteredTool {
       }
       const [row] = await ctx.db.query<LocationRow>(
         `insert into locations (user_id, name, visual_description, definition, environment, seed, status)
-         values ($1, $2, $3, $4, $5, $6, 'permanent')
+         values ($1, $2, $3, $4, $5, $6, null)
          returning location_id, name`,
         [ctx.userId, args.name.trim(), args.visual_description ?? '', args.definition ?? null, JSON.stringify(args.environment ?? {}), args.seed ?? null],
       );

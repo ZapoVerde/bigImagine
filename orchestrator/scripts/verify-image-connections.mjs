@@ -38,7 +38,8 @@ const cipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32
 function createFakePool() {
   const imageConnections = [];
   const locations = [];
-  const chatMessages = []; // {chat_id, active_swipe_id} — §2.6 eligibility
+  const chatMessages = []; // {chat_id, active_swipe_id} — feeds the location_swipe_images association branch
+  const locationChatLinks = []; // {location_id, chat_id, anchor_swipe_id} (migration 0096)
   const swipeImages = new Map(); // `${chatId}:${swipeId}` -> location_swipe_images row (0076)
   const settings = new Map();
   let connCounter = 0;
@@ -50,6 +51,7 @@ function createFakePool() {
     imageConnections,
     locations,
     chatMessages,
+    locationChatLinks,
     swipeImages,
     settings,
     now,
@@ -158,15 +160,19 @@ function createFakePool() {
 
           // --- locations queries (generateLocationImage) ---
           if (sql.includes('from locations where location_id =')) {
-            // §2.6 eligibility, modeled in JS same as verify-locations.mjs: a transient row counts
-            // only when its anchor is on the calling chat's ($3) active swipe path.
+            // db/migrations/0096 eligibility (BG_ELIGIBILITY_CLAUSE), modeled in JS: user-authored
+            // (status null) is always eligible; an auto-registered row is eligible when linked to
+            // the calling chat via location_chat_links and not inactive, OR when the chat's active
+            // swipe has a recorded location_swipe_images association with this location (an
+            // orphaned/re-anchored row still resolves for the swipe that actually used it).
             const chatId = params[2];
-            const activeSwipeIds = new Set(
-              chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id),
-            );
+            const activeSwipeIds = chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id);
             const eligible = (l) =>
-              l.status === 'permanent' || l.status == null || (l.status === 'transient' && activeSwipeIds.has(l.anchor_swipe_id));
+              l.status == null ||
+              (l.status !== 'inactive' && locationChatLinks.some((link) => link.location_id === l.location_id && link.chat_id === chatId)) ||
+              activeSwipeIds.some((swipeId) => swipeImages.get(`${chatId}:${swipeId}`)?.location_id === l.location_id);
             const row = locations.find((l) => l.location_id === params[0] && l.user_id === scopedUserId && eligible(l));
+            const anchorLink = row ? locationChatLinks.find((link) => link.location_id === row.location_id && link.chat_id === chatId) : null;
             return {
               rows: row
                 ? [
@@ -180,7 +186,9 @@ function createFakePool() {
                       image_generated_at: row.image_generated_at,
                       image_rendered_input: row.image_rendered_input,
                       image_render_hash: row.image_render_hash ?? null,
-                      anchor_swipe_id: row.anchor_swipe_id ?? null,
+                      // anchor_swipe_id now lives on location_chat_links, read via the same
+                      // correlated-subquery shape the real query uses.
+                      anchor_swipe_id: anchorLink?.anchor_swipe_id ?? null,
                       status: row.status ?? null,
                     },
                   ]
@@ -438,8 +446,8 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
   assert(result.ok === false && result.error === 'no_active_connection', 'with no active connection the pass fails open (no throw, structured result)');
 }
 
-// --- generateLocationImage: §2.6 eligibility — regenerate_location_image must not render an ---
-// --- inactive or foreign-chat-transient location, even given its id directly. ------------------
+// --- generateLocationImage: db/migrations/0096 eligibility — regenerate_location_image must not
+// --- render an inactive or foreign-chat-transient location, even given its id directly. --------
 {
   const chatId = 'chat-live';
   const liveSwipe = 'swipe-live';
@@ -454,8 +462,8 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     image_generated_at: null,
     image_rendered_input: null,
     status: 'inactive', // demoted alternate timeline
-    anchor_swipe_id: 'swipe-dead',
   });
+  pool.locationChatLinks.push({ location_id: 'loc-inactive', chat_id: chatId, anchor_swipe_id: 'swipe-dead' });
   pool.locations.push({
     location_id: 'loc-transient-live',
     user_id: USER,
@@ -466,8 +474,8 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     image_generated_at: null,
     image_rendered_input: null,
     status: 'transient',
-    anchor_swipe_id: liveSwipe,
   });
+  pool.locationChatLinks.push({ location_id: 'loc-transient-live', chat_id: chatId, anchor_swipe_id: liveSwipe });
 
   const inactiveNoChat = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-inactive');
   assert(inactiveNoChat.ok === false && inactiveNoChat.error === 'location_not_found', 'an inactive location resolves not-found, never rendered, even with no chat context');

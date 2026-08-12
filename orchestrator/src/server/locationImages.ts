@@ -104,10 +104,11 @@ export async function resolveChatLocationImage(
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where s.scene_id = $2
            and (
-             l.status = 'permanent' or l.status is null or
-             (l.status = 'transient' and l.anchor_swipe_id in (
-               select active_swipe_id from chat_messages where chat_id = $3 and active_swipe_id is not null
-             ))
+             l.status is null or (
+               l.status <> 'inactive' and exists (
+                 select 1 from location_chat_links where location_id = l.location_id and chat_id = $3
+               )
+             )
            )
          limit 1`,
         [userId, chatState.scene_id, chatId],
@@ -126,10 +127,11 @@ export async function resolveChatLocationImage(
          from locations l
          where l.user_id = $1
            and (
-             l.status = 'permanent' or l.status is null or
-             (l.status = 'transient' and l.anchor_swipe_id in (
-               select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null
-             )) or
+             l.status is null or (
+               l.status <> 'inactive' and exists (
+                 select 1 from location_chat_links where location_id = l.location_id and chat_id = $2
+               )
+             ) or
              exists (select 1 from location_swipe_images a
                      where a.chat_id = $2 and a.location_id = l.location_id
                        and a.swipe_id in (

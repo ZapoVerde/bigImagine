@@ -21,13 +21,16 @@
  * `scene_presence` is replaced with exactly that roster.
  *
  * Lifecycle columns are the point of the spec, not decoration: every created row is
- * `status = 'transient'` anchored to the turn's active swipe, so orchestrator/chatMemorySync.ts's
- * existing sync tick can promote it to `permanent` when the turn exits the live window or demote
- * it to `inactive` (never delete) when an alternate swipe wins instead — and io/chatSessions.ts's
- * forkChat can resurrect it onto a forked branch. All lookups here are filtered to
- * segway.md §2.6-eligible rows only (permanent, or transient whose anchor is on this chat's
- * active swipe path, or — for characters — user-authored `status is null`), so a name match
- * can never resurrect a different timeline's same-named row.
+ * `status = 'transient'`, linked to the owning chat via `location_chat_links`/
+ * `character_chat_links` (db/migrations/0096) with `anchor_swipe_id` on the link row, so
+ * orchestrator/chatMemorySync.ts's existing sync tick can promote it to `permanent` (settled,
+ * still this chat's — `status` is a sync-progress marker only, never a cross-chat visibility
+ * signal) when the turn exits the live window or demote it to `inactive` (never delete) when an
+ * alternate swipe wins instead — and io/chatSessions.ts's forkChat can link it onto a forked
+ * branch. All lookups here are filtered to eligible rows only (linked to *this* chat and not
+ * `inactive`, or — user-authored — `status is null`), so a name match can never resurrect a
+ * different chat's same-named row, and a row with no chat link left cascades away on its own
+ * (the link table's cleanup trigger).
  *
  * Fail-open (segway.md §1): this module never throws. A missing header, a missing swipe anchor,
  * or any DB failure logs and returns, leaving the turn untouched. Both call sites
@@ -179,22 +182,26 @@ export async function scrapeTurnPresence(
   }
 }
 
-/** segway.md §2.6's eligibility predicate, shared by the location and character lookups below.
- *  A row is eligible iff it is permanent, OR it is a user-authored row outside the lifecycle
- *  (characters only — status null), OR it is transient with its anchor on this chat's active
- *  swipe path. Inactive rows are never eligible.
+/** db/migrations/0096's chat-scoping eligibility predicate, shared by the location and character
+ *  lookups below. A row is eligible iff it is user-authored (status null — always cross-chat
+ *  visible, never linked at all) OR it is linked to *this* chat and not demoted to inactive.
+ *  status no longer carries any cross-chat meaning (transient vs. permanent is purely "still in
+ *  the live editing window" vs. "settled through the sync tick") — only the link table decides
+ *  which chat(s) a row belongs to.
  *
- *  Parametric on the chat_id placeholder: every call site's params array puts chat_id at a
- *  different position, and a hardcoded `$3` previously caused one caller (loadLocationBlock's
- *  parentRows query) to bind a 3rd param that appeared nowhere in its own SQL text — Postgres
- *  can't infer a type for a placeholder that's never referenced, which raised 42P18 ("could not
- *  determine data type of parameter"). Naming the placeholder here makes each call site's
- *  params array the only source of truth for its own parameter count. */
-const eligibleTransientClause = (chatIdPlaceholder: string) => `(
-  status = 'permanent'
-  or status is null
-  or (status = 'transient' and anchor_swipe_id in (
-    select active_swipe_id from chat_messages where chat_id = ${chatIdPlaceholder} and active_swipe_id is not null
+ *  Parametric on the chat_id placeholder and the id column/link table (locations vs. characters):
+ *  every call site's params array puts chat_id at a different position, and a hardcoded position
+ *  previously caused one caller (loadLocationBlock's parentRows query) to bind a param that
+ *  appeared nowhere in its own SQL text — Postgres can't infer a type for a placeholder that's
+ *  never referenced, which raised 42P18 ("could not determine data type of parameter"). Naming
+ *  the placeholder here makes each call site's params array the only source of truth for its own
+ *  parameter count. idColumn/linkTable are left unqualified against the outer query's single
+ *  locations/characters table — every call site here either queries that table alone or joins it
+ *  under a name no other joined table shares, so no aliasing is needed. */
+const eligibleClause = (idColumn: 'location_id' | 'character_id', linkTable: 'location_chat_links' | 'character_chat_links', chatIdPlaceholder: string) => `(
+  status is null
+  or (status <> 'inactive' and exists (
+    select 1 from ${linkTable} where ${idColumn} = ${linkTable}.${idColumn} and ${linkTable}.chat_id = ${chatIdPlaceholder}
   ))
 )`;
 
@@ -281,7 +288,7 @@ async function resolveOrCreateLocationRow(
 ): Promise<string> {
   const matched = await session.query<{ location_id: string; status: string | null; parent_location_id: string | null }>(
     `select location_id, status, parent_location_id from locations
-     where user_id = $1 and name = $2 and ${eligibleTransientClause('$3')}
+     where user_id = $1 and name = $2 and ${eligibleClause('location_id', 'location_chat_links', '$3')}
      order by (status is null) desc, (status = 'permanent') desc, location_id`,
     [userId, name, chatId],
   );
@@ -302,17 +309,20 @@ async function resolveOrCreateLocationRow(
         }
       }
     }
-    // Re-anchor a transient match to the turn that's using it now (see the doc above); leave
-    // permanent/user-authored rows alone.
+    // Re-anchor a transient match's link to the turn that's using it now (see the doc above);
+    // leave permanent/user-authored rows alone. The match is always linked to this exact chat_id
+    // already (that's what made it eligible above), so this always affects exactly one link row.
+    if (matched[0].status === 'transient') {
+      await session.query('update location_chat_links set anchor_swipe_id = $1 where location_id = $2 and chat_id = $3', [
+        swipeId,
+        matched[0].location_id,
+        chatId,
+      ]);
+    }
     await session.query(
-      matched[0].status === 'transient'
-        ? `update locations set environment = environment || $3::jsonb, anchor_swipe_id = $4, parent_location_id = coalesce(parent_location_id, $5), updated_at = now()
-           where location_id = $1 and user_id = $2`
-        : `update locations set environment = environment || $3::jsonb, parent_location_id = coalesce(parent_location_id, $4), updated_at = now()
-           where location_id = $1 and user_id = $2`,
-      matched[0].status === 'transient'
-        ? [matched[0].location_id, userId, environment, swipeId, effectiveParentId]
-        : [matched[0].location_id, userId, environment, effectiveParentId],
+      `update locations set environment = environment || $3::jsonb, parent_location_id = coalesce(parent_location_id, $4), updated_at = now()
+       where location_id = $1 and user_id = $2`,
+      [matched[0].location_id, userId, environment, effectiveParentId],
     );
     return matched[0].location_id;
   }
@@ -331,10 +341,11 @@ async function resolveOrCreateLocationRow(
     visual_description: string | null;
     definition: string | null;
   }>(
-    `select image_url, image_rendered_input, image_render_hash, seed, visual_description, definition
-     from locations
-     where user_id = $1 and name = $2 and anchor_chat_id = $3 and image_url is not null
-     order by image_generated_at desc nulls last
+    `select l.image_url, l.image_rendered_input, l.image_render_hash, l.seed, l.visual_description, l.definition
+     from locations l
+     join location_chat_links lcl on lcl.location_id = l.location_id and lcl.chat_id = $3
+     where l.user_id = $1 and l.name = $2 and l.image_url is not null
+     order by l.image_generated_at desc nulls last
      limit 1`,
     [userId, name, chatId],
   );
@@ -347,8 +358,8 @@ async function resolveOrCreateLocationRow(
       : name;
 
   const [created] = await session.query<{ location_id: string }>(
-    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, anchor_chat_id, anchor_swipe_id, parent_location_id)
-     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10, $11, $12)
+    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, parent_location_id)
+     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10)
      returning location_id`,
     [
       userId,
@@ -360,11 +371,14 @@ async function resolveOrCreateLocationRow(
       prior?.image_url ?? null,
       prior?.image_rendered_input ?? null,
       prior?.image_render_hash ?? null,
-      chatId,
-      swipeId,
       parentLocationId,
     ],
   );
+  await session.query('insert into location_chat_links (location_id, chat_id, anchor_swipe_id) values ($1, $2, $3)', [
+    created!.location_id,
+    chatId,
+    swipeId,
+  ]);
   return created!.location_id;
 }
 
@@ -440,29 +454,32 @@ async function resolvePresentCharacters(
   for (const name of names) {
     const matched = await session.query<{ character_id: string; status: string | null }>(
       `select character_id, status from characters
-       where user_id = $1 and name = $2 and ${eligibleTransientClause('$3')}
+       where user_id = $1 and name = $2 and ${eligibleClause('character_id', 'character_chat_links', '$3')}
        order by (status is null) desc, (status = 'permanent') desc, character_id`,
       [userId, name, chatId],
     );
     if (matched[0]) {
       characterIds.push(matched[0].character_id);
       if (matched[0].status === 'transient') {
-        // character_id is a global PK, but name the user_id anyway so the scoping is
-        // self-evident (RLS backstops either way).
-        await session.query('update characters set anchor_swipe_id = $2, updated_at = now() where character_id = $1 and user_id = $3', [
-          matched[0].character_id,
+        // The match is always linked to this exact chat_id already (that's what made it
+        // eligible above), so this always affects exactly one link row.
+        await session.query('update character_chat_links set anchor_swipe_id = $1 where character_id = $2 and chat_id = $3', [
           swipeId,
-          userId,
+          matched[0].character_id,
+          chatId,
         ]);
       }
       continue;
     }
     const [created] = await session.query<{ character_id: string }>(
-      `insert into characters (user_id, name, status, anchor_chat_id, anchor_swipe_id)
-       values ($1, $2, 'transient', $3, $4)
-       returning character_id`,
-      [userId, name, chatId, swipeId],
+      `insert into characters (user_id, name, status) values ($1, $2, 'transient') returning character_id`,
+      [userId, name],
     );
+    await session.query('insert into character_chat_links (character_id, chat_id, anchor_swipe_id) values ($1, $2, $3)', [
+      created!.character_id,
+      chatId,
+      swipeId,
+    ]);
     characterIds.push(created!.character_id);
   }
   return characterIds;
@@ -506,8 +523,8 @@ export interface LocationBlockResult {
  *  any error, missing scene, or empty list returns { block: '', currentParent: null } — the
  *  caller's empty-block rule then emits nothing, and a turn is never blocked over context.
  *
- *  Lists are eligibility-filtered (segway.md §2.6's eligibleTransientClause, scoped to this
- *  chat's active swipe path) so an inactive/alternate-timeline row never pollutes the block.
+ *  Lists are eligibility-filtered (eligibleClause, scoped to this chat's location_chat_links)
+ *  so an inactive/alternate-timeline row never pollutes the block.
  *  Parents = eligible rows with parent_location_id null (parent rows AND standalone locations)
  *  plus the current parent by derivation when its row is missing/ineligible — the current parent
  *  must always be listed; it is the block's anchor. Subs = eligible rows of the current parent
@@ -533,7 +550,7 @@ export async function loadLocationBlock(
          join scenes s on s.scene_id = cs.scene_id
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where cs.chat_id = $2
-           and ${eligibleTransientClause('$3')}
+           and ${eligibleClause('location_id', 'location_chat_links', '$3')}
          limit 1`,
         [userId, chatId, chatId],
       );
@@ -555,7 +572,7 @@ export async function loadLocationBlock(
         session.query<{ name: string }>(
           `select name from locations
            where user_id = $1 and parent_location_id is null
-             and ${eligibleTransientClause('$2')}
+             and ${eligibleClause('location_id', 'location_chat_links', '$2')}
            order by name`,
           [userId, chatId],
         ),
@@ -564,7 +581,7 @@ export async function loadLocationBlock(
               `select name from locations
                where user_id = $1
                  and (parent_location_id = $2 or name like $4)
-                 and ${eligibleTransientClause('$3')}
+                 and ${eligibleClause('location_id', 'location_chat_links', '$3')}
                order by name`,
               [userId, parentRowId, chatId, `${currentParent} - %`],
             )
