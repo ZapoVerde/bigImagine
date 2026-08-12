@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/anthropic.ts
- * @stamp 2026-08-10
+ * @stamp 2026-08-11
  * @architectural-role IO Wrapper — LlmProvider adapter for the Anthropic Messages API
  * @description
  * Translates the vendor-neutral LlmProvider contract onto Anthropic's specific request/response
@@ -17,7 +17,10 @@
  *
  * The response's own `usage.input_tokens`/`output_tokens` are relayed onto LlmTurn.usage
  * unchanged (summed for totalTokens) — bb_principles.md §14's gate is what actually does anything
- * with them, this file just reports what Anthropic reported.
+ * with them, this file just reports what Anthropic reported. In the streaming path
+ * (completeStream), input_tokens arrives on `message_start` and output_tokens on the terminal
+ * `message_delta`; the two are merged once both have been seen, since neither alone is a complete
+ * LlmUsage.
  *
  * @api-declaration
  * createAnthropicLlmProvider(config: AnthropicConfig) — config.apiKey and config.model are
@@ -31,6 +34,7 @@
  */
 
 import { fetchWithRetry } from '../httpRetry.js';
+import { readSseDataPayloads } from './sse.js';
 import type {
   LlmCompleteOptions,
   LlmMessage,
@@ -137,6 +141,30 @@ function fromAnthropicResponse(content: AnthropicContentBlock[], usage?: LlmUsag
   return { message: { role: 'assistant', content: text }, toolCalls, usage };
 }
 
+/** Shared request body between complete() and completeStream() — the two differ only in the
+ *  stream flag, so both paths send byte-identical prompts (bb_principles.md §17's cache-friendliness
+ *  extends to the streaming path: a streamed request must not reorder/reshape the messages). */
+function buildAnthropicRequest(
+  config: AnthropicConfig,
+  options: LlmCompleteOptions | undefined,
+  system: string | undefined,
+  messages: AnthropicMessage[],
+  tools: ToolDefinition[],
+  stream: boolean,
+): Record<string, unknown> {
+  return {
+    model: options?.model ?? config.model,
+    max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
+    ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+    ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
+    system,
+    messages,
+    tools: tools.length > 0 ? toAnthropicTools(tools) : undefined,
+    tool_choice: options?.forceTool ? { type: 'tool', name: options.forceTool } : undefined,
+    ...(stream ? { stream: true } : {}),
+  };
+}
+
 export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider {
   const baseUrl = config.baseUrl ?? 'https://api.anthropic.com';
   const apiVersion = config.apiVersion ?? '2023-06-01';
@@ -159,16 +187,7 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
           'anthropic-version': apiVersion,
         },
         signal: options?.signal,
-        body: JSON.stringify({
-          model: options?.model ?? config.model,
-          max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
-          ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
-          ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
-          system,
-          messages: anthropicMessages,
-          tools: tools.length > 0 ? toAnthropicTools(tools) : undefined,
-          tool_choice: options?.forceTool ? { type: 'tool', name: options.forceTool } : undefined,
-        }),
+        body: JSON.stringify(buildAnthropicRequest(config, options, system, anthropicMessages, tools, false)),
       });
 
       if (!response.ok) {
@@ -188,6 +207,79 @@ export function createAnthropicLlmProvider(config: AnthropicConfig): LlmProvider
           }
         : undefined;
       return fromAnthropicResponse(payload.content, usage);
+    },
+    async completeStream(
+      messages: LlmMessage[],
+      tools: ToolDefinition[],
+      onDelta: (textDelta: string) => void,
+      options?: LlmCompleteOptions,
+    ): Promise<LlmTurn> {
+      // RP-only by contract (see LlmProvider.completeStream's doc): a non-empty tools array is a
+      // caller bug — this implementation has no tool-call streaming, and silently dropping the
+      // tools would make the turn behave differently than the caller expects.
+      if (tools.length > 0) {
+        throw new Error('anthropic completeStream: tool-call streaming is not supported (RP turns never pass tools)');
+      }
+      const { system, messages: anthropicMessages } = toAnthropicMessages(messages);
+
+      const response = await fetchWithRetry(`${baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-api-key': config.apiKey,
+          'anthropic-version': apiVersion,
+        },
+        signal: options?.signal,
+        body: JSON.stringify(buildAnthropicRequest(config, options, system, anthropicMessages, tools, true)),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`Anthropic API error ${response.status}: ${body}`);
+      }
+      if (!response.body) {
+        throw new Error('Anthropic streaming response had no body');
+      }
+
+      // Anthropic's streaming usage is split across two events: input_tokens arrives on
+      // message_start (the full request accounting, same as the non-streaming response's), and
+      // output_tokens arrives on the terminal message_delta. Neither alone is a complete
+      // LlmUsage; merge them once both have been seen, and fall back to whatever arrived if the
+      // vendor omits one (a real Anthropic response always sends both, but a proxy or mock may not).
+      let text = '';
+      let inputTokens: number | undefined;
+      let outputTokens: number | undefined;
+      for await (const data of readSseDataPayloads(response.body)) {
+        let event: {
+          type?: string;
+          delta?: { type?: string; text?: string };
+          message?: { usage?: { input_tokens?: number } };
+          usage?: { output_tokens?: number };
+        };
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue; // a non-JSON SSE line (keep-alive comment) — skip, it's not a delta
+        }
+        if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && event.delta.text) {
+          text += event.delta.text;
+          onDelta(event.delta.text);
+        } else if (event.type === 'message_start') {
+          inputTokens = event.message?.usage?.input_tokens;
+        } else if (event.type === 'message_delta') {
+          outputTokens = event.usage?.output_tokens;
+        }
+      }
+
+      const usage: LlmUsage | undefined =
+        inputTokens !== undefined || outputTokens !== undefined
+          ? {
+              promptTokens: inputTokens ?? 0,
+              completionTokens: outputTokens ?? 0,
+              totalTokens: (inputTokens ?? 0) + (outputTokens ?? 0),
+            }
+          : undefined;
+      return fromAnthropicResponse([{ type: 'text', text }], usage);
     },
   };
 }

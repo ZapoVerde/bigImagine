@@ -467,6 +467,32 @@ function createFakeChatSessionStore() {
     async listFolders(userId) {
       return [...folders.values()].filter((f) => f.userId === userId);
     },
+    async recordSwipe(userId, chatId, messageId, newContent) {
+      // Minimal mirror of io/chatSessions.ts's recordSwipe (regenerateSwipe's persistence tail) —
+      // the regenerated text becomes the message's newest swipe and active content. Needed for the
+      // swipe route's needs_regenerate outcome, which the pre-streaming suite never exercised.
+      const row = sessions.get(chatId);
+      if (!row || row.userId !== userId) return undefined;
+      const target = (messagesByChat.get(chatId) ?? []).find((m) => m.messageId === messageId);
+      if (!target) return undefined;
+      let swipes = swipesByMessage.get(messageId) ?? [];
+      if (swipes.length === 0) {
+        swipes = [target.content];
+        swipesByMessage.set(messageId, swipes);
+        activeSwipeIdx.set(messageId, 0);
+      }
+      swipes.push(newContent);
+      const idx = swipes.length - 1;
+      activeSwipeIdx.set(messageId, idx);
+      target.content = newContent;
+      return {
+        messageId,
+        role: 'assistant',
+        content: newContent,
+        createdAt: target.createdAt,
+        swipes: { index: idx, count: swipes.length },
+      };
+    },
     async createFolder(userId, init) {
       const folderId = newId('folder');
       const row = { folderId, userId, name: init.name, parentId: init.parentId ?? null };
@@ -3252,6 +3278,279 @@ server.close();
   );
 
   server7.close();
+}
+
+// --- Part 8: RP real-token streaming (docs/plans/rp-streaming-plan.md), end to end ---
+// A dedicated server so the stub's scripted turns belong to these fixtures alone. The stub's
+// completeStream replays each turn's content in several deterministic chunks, so a streamed RP
+// turn produces multiple SSE data: frames that must concatenate to exactly what gets persisted.
+// A separate second server hosts the abortable provider for the mid-stream abort fixture (it
+// needs to yield control between deltas so the test can fire POST /v1/chat/abort mid-flight).
+{
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Collects the SSE data: payloads of a response body into an array, in arrival order. The
+  // OpenAI chunk shape is `{ choices: [{ delta: { content }, finish_reason }] }`; the new
+  // terminal frame is `{ bigimagine_error, aborted, message }`; the terminator is the literal
+  // `[DONE]` line. Content deltas and finish_reason 'stop' are both picked out of the chunks.
+  async function readSseData(res) {
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const payloads = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        for (const line of block.split('\n')) {
+          if (line.startsWith('data: ')) payloads.push(line.slice('data: '.length));
+        }
+      }
+    }
+    return payloads;
+  }
+  function deltaText(payload) {
+    try {
+      return JSON.parse(payload).choices?.[0]?.delta?.content ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function finishReason(payload) {
+    try {
+      return JSON.parse(payload).choices?.[0]?.finish_reason ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function isErrorFrame(payload) {
+    try {
+      const v = JSON.parse(payload);
+      return v && v.bigimagine_error === true;
+    } catch {
+      return false;
+    }
+  }
+
+  const rpKey = 'good-key-rp:44444444-4444-4444-4444-444444444444';
+  const streamedReply = 'The wind carried the smell of rain through the shutters.';
+  const streamLlm = createStubLlmProvider([
+    { message: { role: 'assistant', content: streamedReply }, toolCalls: [] }, // fixture 1: live stream
+    { message: { role: 'assistant', content: 'The tide turned against the harbor wall.' }, toolCalls: [] }, // fixture 2: swipe stream
+    { message: { role: 'assistant', content: 'A first turn with no scene header yet.' }, toolCalls: [] }, // fixture 4a: turn-1 stream
+    { message: { role: 'assistant', content: '' }, toolCalls: [] }, // fixture 4b: the repair reply (empty → raw kept)
+  ]);
+  const pool8 = createFakePool();
+  const db8 = createPostgresClient(pool8);
+  const chats8 = createFakeChatSessionStore();
+  const server8 = startHttpServer({
+    llm: streamLlm,
+    db: db8,
+    tools: createToolRegistry([echoTool]),
+    apiKeys: createApiKeyStore(rpKey),
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chats8,
+    adminApiKey: 'unused-in-part-8',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmConnections: createFakeLlmConnectionStore([
+      {
+        id: 'conn-rp-8',
+        name: 'deepseek',
+        kind: 'openai-compatible',
+        model: 'deepseek-v4-flash',
+        apiKey: 'sk-test-rp',
+        baseUrl: 'https://example.invalid/deepseek',
+        supportsVision: false,
+        providerOrder: null,
+        allowFallbacks: true,
+        quantizations: null,
+        isActive: true,
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => server8.once('listening', resolve));
+  const base8 = `http://127.0.0.1:${server8.address().port}`;
+  const userId8 = '44444444-4444-4444-4444-444444444444';
+  const auth8 = { 'content-type': 'application/json', authorization: 'Bearer good-key-rp' };
+
+  // --- Fixture 1: a non-first-turn RP send with stream:true produces multiple live chunks that
+  // concatenate to the persisted reply, then a stop chunk and [DONE] ---
+  {
+    const chat = await chats8.createChat(userId8, { title: 'Streaming RP', kind: 'rp' });
+    // priorMessageCount = 2 → firstLlmTurn false → the turn streams live (no header repair).
+    await chats8.appendMessages(userId8, chat.chatId, [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'an earlier reply' },
+    ]);
+    const res = await fetch(`${base8}/v1/chat/completions`, {
+      method: 'POST',
+      headers: auth8,
+      body: JSON.stringify({
+        messages: [
+          { role: 'user', content: 'start' },
+          { role: 'assistant', content: 'an earlier reply' },
+          { role: 'user', content: 'continue' },
+        ],
+        chat_id: chat.chatId,
+        stream: true,
+      }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'an RP stream:true send returns an SSE response');
+    const payloads = await readSseData(res);
+    const deltas = payloads.map(deltaText).filter((d) => d !== null);
+    assert(deltas.length >= 2, 'the streamed reply arrives as multiple live chunks, not one big delta');
+    assert(deltas.join('') === streamedReply, 'the concatenated streamed deltas equal the reply');
+    assert(finishReason(payloads[payloads.length - 2]) === 'stop', 'a stop-finish-reason chunk precedes the terminator');
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the stream ends with the [DONE] terminator');
+    assert(payloads.every((p) => !isErrorFrame(p)), 'a successful stream carries no bigimagine_error frame');
+    const detail = await chats8.getChat(userId8, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(last.role === 'assistant' && last.content === streamedReply, 'the persisted assistant message equals the streamed text');
+  }
+
+  // --- Fixture 2: the swipe route's needs_regenerate outcome streams the same way and persists
+  // via recordSwipe once the stream ends ---
+  {
+    const chat = await chats8.createChat(userId8, { title: 'Streaming swipe RP', kind: 'rp' });
+    await chats8.appendMessages(userId8, chat.chatId, [{ role: 'user', content: 'start' }]);
+    const [assistantMsg] = await chats8.appendMessages(userId8, chat.chatId, [{ role: 'assistant', content: 'original reply' }]);
+    const res = await fetch(`${base8}/v1/chats/${chat.chatId}/messages/${assistantMsg.messageId}/swipe`, {
+      method: 'POST',
+      headers: auth8,
+      body: JSON.stringify({ direction: 'next', stream: true }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'an RP needs_regenerate swipe with stream:true returns an SSE response');
+    const payloads = await readSseData(res);
+    const deltas = payloads.map(deltaText).filter((d) => d !== null);
+    assert(deltas.length >= 2, 'the swipe stream arrives as multiple live chunks');
+    assert(deltas.join('') === 'The tide turned against the harbor wall.', 'the swipe streamed text equals the regenerated reply');
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the swipe stream ends with [DONE]');
+    const detail = await chats8.getChat(userId8, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(last.content === 'The tide turned against the harbor wall.', 'recordSwipe persisted the streamed regenerated text');
+  }
+
+  // --- Fixture 3: turn 1 of a new RP chat stays buffered — exactly one content chunk, matching
+  // what gets persisted (the header-repair case is deliberately not streamed live) ---
+  {
+    const chat = await chats8.createChat(userId8, { title: 'First turn RP', kind: 'rp' });
+    // priorMessageCount = 1 → firstLlmTurn true. The streamed turn yields raw text with no scene
+    // header; ensureFirstTurnHeader's repair is scripted to reply empty, so it keeps the raw text
+    // (fail-open) — the point under test is the buffering, not the repair's content.
+    await chats8.appendMessages(userId8, chat.chatId, [{ role: 'user', content: 'begin' }]);
+    const res = await fetch(`${base8}/v1/chat/completions`, {
+      method: 'POST',
+      headers: auth8,
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'begin' }, { role: 'user', content: 'continue' }],
+        chat_id: chat.chatId,
+        stream: true,
+      }),
+    });
+    assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'a turn-1 RP stream:true send returns an SSE response');
+    const payloads = await readSseData(res);
+    const deltas = payloads.map(deltaText).filter((d) => d !== null);
+    assert(deltas.length === 1, 'turn 1 is buffered: exactly one content chunk reaches the client, not the live deltas');
+    assert(deltas[0] === 'A first turn with no scene header yet.', 'the single buffered chunk is the (header-repaired) persisted reply');
+    const detail = await chats8.getChat(userId8, chat.chatId);
+    const last = detail.messages[detail.messages.length - 1];
+    assert(last.role === 'assistant' && last.content === deltas[0], 'the persisted turn-1 message matches the single streamed chunk');
+  }
+
+  // --- Fixture 4: a mid-stream abort (POST /v1/chat/abort) surfaces as the bigimagine_error/
+  // aborted:true terminal frame and leaves nothing persisted ---
+  {
+    const abortKey = 'good-key-abort:55555555-5555-5555-5555-555555555555';
+    const abortableLlm = {
+      name: 'abortable',
+      supportsVision: false,
+      async completeStream(_messages, _tools, onDelta, options) {
+        // Yield control twice: once before the first delta (so the test can see bytes hit the
+        // wire and commit the SSE headers), and once after — the abort POST lands in between and
+        // fires the AbortController runStreamingRpTurn registered under the chat_id. The signal
+        // the core passed into this call is the same controller the Stop button aborts.
+        await sleep(30);
+        onDelta('partial text ');
+        await sleep(80);
+        if (options?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+        onDelta('the rest');
+        return { message: { role: 'assistant', content: 'partial text the rest' }, toolCalls: [] };
+      },
+    };
+    const chatsAbort = createFakeChatSessionStore();
+    const serverAbort = startHttpServer({
+      llm: abortableLlm,
+      db: createPostgresClient(createFakePool()),
+      tools: createToolRegistry([echoTool]),
+      apiKeys: createApiKeyStore(abortKey),
+      accessIdentity: createFakeAccessIdentityResolver(),
+      chats: chatsAbort,
+      adminApiKey: 'unused-in-part-8',
+      credentials: createFakeCredentialStore(),
+      settings: createFakeSettingsStore(),
+      llmConnections: createFakeLlmConnectionStore(),
+      imageConnections: createFakeImageConnectionStore(),
+      modelName: 'bigbrain',
+      port: 0,
+    });
+    await new Promise((resolve) => serverAbort.once('listening', resolve));
+    const baseAbort = `http://127.0.0.1:${serverAbort.address().port}`;
+    const userIdAbort = '55555555-5555-5555-5555-555555555555';
+    const authAbort = { 'content-type': 'application/json', authorization: 'Bearer good-key-abort' };
+    const chat = await chatsAbort.createChat(userIdAbort, { title: 'Abort RP', kind: 'rp' });
+    await chatsAbort.appendMessages(userIdAbort, chat.chatId, [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'earlier' },
+    ]);
+    const streamPromise = (async () => {
+      const res = await fetch(`${baseAbort}/v1/chat/completions`, {
+        method: 'POST',
+        headers: authAbort,
+        body: JSON.stringify({
+          messages: [
+            { role: 'user', content: 'start' },
+            { role: 'assistant', content: 'earlier' },
+            { role: 'user', content: 'go on' },
+          ],
+          chat_id: chat.chatId,
+          stream: true,
+        }),
+      });
+      assert(res.status === 200 && res.headers.get('content-type')?.includes('text/event-stream'), 'the abort fixture stream starts as SSE');
+      return readSseData(res);
+    })();
+    // Let the first delta hit the wire (headers committed), then Stop the turn server-side.
+    await sleep(60);
+    const abortRes = await fetch(`${baseAbort}/v1/chat/abort`, {
+      method: 'POST',
+      headers: authAbort,
+      body: JSON.stringify({ chat_id: chat.chatId }),
+    });
+    assert(abortRes.status === 200, 'POST /v1/chat/abort reports the in-flight turn was stopped');
+    const payloads = await streamPromise;
+    const deltas = payloads.map(deltaText).filter((d) => d !== null);
+    assert(deltas.join('') === 'partial text ', 'the deltas relayed before the abort stay relayed (they are already on the wire)');
+    const errorFrame = payloads.find(isErrorFrame);
+    assert(errorFrame && JSON.parse(errorFrame).aborted === true, 'a mid-stream abort emits the bigimagine_error/aborted:true terminal frame');
+    assert(payloads[payloads.length - 1] === '[DONE]', 'the terminal frame is followed by [DONE]');
+    const detail = await chatsAbort.getChat(userIdAbort, chat.chatId);
+    const assistantMessages = detail.messages.filter((m) => m.role === 'assistant');
+    assert(
+      assistantMessages.length === 1 && assistantMessages[0].content === 'earlier',
+      'nothing from the aborted turn is persisted (only the pre-existing assistant message remains)',
+    );
+    serverAbort.close();
+  }
+
+  server8.close();
 }
 
 if (process.exitCode) {

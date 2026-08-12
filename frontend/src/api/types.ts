@@ -70,6 +70,18 @@ export interface ChatCompletionResponse {
   choices: { index: number; message: { role: string; content: string }; finish_reason: string }[];
 }
 
+// The streaming abort/error terminal frame (docs/plans/rp-streaming-plan.md Contracts): one extra
+// `data: ...` line sent before [DONE], only when the in-flight stream is aborted (Stop button /
+// dropped client) or fails after the SSE headers already committed (so an HTTP status change is
+// no longer possible). Never present on a successful stream — an OpenAI-compatible client that has
+// never heard of this field simply never sees it. The stream does not end at this frame; [DONE]
+// still follows, so the caller resolves on [DONE] either way and decides what to show.
+export interface StreamingTerminalFrame {
+  bigimagine_error: true;
+  aborted: boolean;
+  message: string;
+}
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;

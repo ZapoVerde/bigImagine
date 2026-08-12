@@ -31,6 +31,7 @@ import {
   updateChat,
   uploadAttachment,
 } from '../api/client';
+import type { SwipeResult } from '../api/client';
 import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import type {
@@ -361,6 +362,10 @@ export default function ChatView({
   // What runTurn's currently running tool is doing, polled from GET /v1/chat/status while
   // `sending` is true (client.ts's getChatTurnStatus) — null renders as the old plain "…" bubble.
   const [turnStatus, setTurnStatus] = useState<string | null>(null);
+  // An RP turn is streaming its reply live (rp-streaming-plan.md): the placeholder pushed by
+  // send() is being filled by onDelta, so the static "…" pending bubble is suppressed while this
+  // is true — the live text is the status.
+  const [liveStreaming, setLiveStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
@@ -962,6 +967,9 @@ export default function ChatView({
     setStagedFiles([]);
     stagedImages.forEach((img) => URL.revokeObjectURL(img.previewUrl));
     setStagedImages([]);
+    // Hoisted out of the try so the catch can tell whether a failed send left its streaming
+    // placeholder behind (see the placeholder-drop below). Only true for RP chats.
+    let streaming = false;
     try {
       let session = activeChat;
       if (!session) {
@@ -973,15 +981,62 @@ export default function ChatView({
         setActiveChat(session);
       }
       const chatId = session.chatId;
-      const statusTimer = window.setInterval(async () => {
-        setTurnStatus(await getChatTurnStatus(chatId, apiKey));
-      }, 1000);
-      try {
-        await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
-      } finally {
-        window.clearInterval(statusTimer);
-        setTurnStatus(null);
+      // RP chats stream their turns live (rp-streaming-plan.md): the status poll is not started
+      // (the live text IS the status), an assistant placeholder is pushed and filled by onDelta,
+      // and the post-send refresh below reconciles the placeholder against the canonical row —
+      // the same reconcile-after-optimistic-append shape the user-message push above uses.
+      // chat-kind turns (tool-calling) keep the buffered path byte-for-byte, and an RP chat whose
+      // turn-1 reply is header-repaired server-side arrives as a single chunk (still SSE, still
+      // resolved the same way).
+      streaming = session.kind === 'rp';
+      let statusTimer: number | undefined;
+      if (!streaming) {
+        statusTimer = window.setInterval(async () => {
+          setTurnStatus(await getChatTurnStatus(chatId, apiKey));
+        }, 1000);
       }
+      try {
+        if (streaming) {
+          setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
+          setLiveStreaming(true);
+          await chatCompletion(
+            toWireMessages(nextMessages),
+            apiKey,
+            chatId,
+            attachments,
+            images,
+            (delta) => {
+              // Append into the placeholder pushed above. It is always the last message while
+              // this send is in flight — sending/swipingId guards block anything else appending —
+              // so a tail-append is safe; the post-send refresh reconciles it either way.
+              setMessages((prev) => {
+                const tail = prev[prev.length - 1];
+                if (!tail || tail.role !== 'assistant') return prev;
+                return [...prev.slice(0, -1), { ...tail, content: tail.content + delta }];
+              });
+            },
+            (frame) => {
+              // Abort/error terminal frame (client.ts's StreamingTerminalFrame). An abort is the
+              // expected Stop outcome: the partial text was never persisted, so the refresh below
+              // shows the true state — the user message stands with no reply, which resendMode()
+              // already presents as the Resend recovery path. A genuine upstream failure after
+              // streaming began surfaces as an error banner instead.
+              if (!frame.aborted) setError(frame.message);
+            },
+          );
+        } else {
+          await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
+        }
+      } finally {
+        if (statusTimer !== undefined) {
+          window.clearInterval(statusTimer);
+          setTurnStatus(null);
+        }
+        setLiveStreaming(false);
+      }
+      // Reconcile: for a streamed turn the placeholder is replaced by the server's canonical row
+      // (dropped entirely if the stream aborted and nothing was persisted); for a buffered turn
+      // this is the same refetch as before.
       await refreshActiveMessages(session.chatId);
     } catch (err) {
       if (err instanceof ApiError && err.status === 499) {
@@ -993,6 +1048,17 @@ export default function ChatView({
         if (activeChat) await refreshActiveMessages(activeChat.chatId).catch(() => {});
       } else {
         setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
+        // A streamed send that failed without streaming (bad request, auth, upstream error before
+        // the first chunk) left its empty placeholder behind — drop it so the list reflects
+        // reality (nothing was persisted). Our placeholder is the only assistant message without
+        // a messageId, so a tail-check is unambiguous; buffered sends never pushed one.
+        if (streaming) {
+          setMessages((prev) => {
+            const tail = prev[prev.length - 1];
+            if (tail && tail.role === 'assistant' && !tail.messageId) return prev.slice(0, -1);
+            return prev;
+          });
+        }
       }
     } finally {
       setSending(false);
@@ -1044,17 +1110,56 @@ export default function ChatView({
       setLocationImage({ locationId: prevImage.locationId, name: prevImage.name, definition: prevImage.definition, imageUrl: prevImage.imageUrl });
     }
     try {
-      const result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
-      if ('message' in result) {
-        setMessages((prev) =>
-          prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes } : m)),
+      // RP chats stream a needs_regenerate swipe live (rp-streaming-plan.md): the request gains
+      // stream: true and each delta appends into the regenerating message in place; prev/next
+      // cycling (no LLM call) is untouched.
+      const streamingSwipe = willRegenerate && activeChat.kind === 'rp';
+      let abortedStream = false;
+      let result: SwipeResult;
+      if (streamingSwipe) {
+        result = await swipeMessage(
+          activeChat.chatId,
+          messageId,
+          'next',
+          apiKey,
+          (delta) => {
+            setMessages((prev) =>
+              prev.map((m) => (m.messageId === messageId ? { ...m, content: m.content + delta } : m)),
+            );
+          },
+          (frame) => {
+            // Abort is the expected Stop outcome (partial text was never recordSwipe'd — the
+            // refresh below restores the true state); a genuine upstream failure shows a banner.
+            if (frame.aborted) abortedStream = true;
+            else setError(frame.message);
+          },
         );
-        // A switch happened (regeneration or variant cycle) — the active swipe changed, so the
-        // location state may have too: re-read it. For a regen the new location is pending until
-        // its render lands, so the reverted previous background stays up and the poll swaps in
-        // the replacement the moment it's ready; for a cycle the server's own trigger
-        // (ensureActiveLocationImage) restarts a dropped render and this read picks it up.
-        void refreshLocationImage(activeChat.chatId);
+      } else {
+        result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
+      }
+      if ('message' in result) {
+        if (abortedStream) {
+          // Stopped mid-regeneration — nothing was written, so refresh to the true state and
+          // restore the swiped-from background (same net effect as the 499 catch below).
+          if (activeChat) await refreshActiveMessages(activeChat.chatId).catch(() => {});
+          if (reverted) setLocationImage(swipedFrom);
+        } else {
+          setMessages((prev) =>
+            prev.map((m) => (m.messageId === messageId ? { ...m, content: result.message.content, resolvedContent: result.message.resolvedContent, swipes: result.message.swipes } : m)),
+          );
+          if (streamingSwipe) {
+            // The regenerated variant is recordSwipe'd server-side by the time [DONE] arrived —
+            // refresh the canonical row so swipes metadata (index/count) and any display copy
+            // match what's stored, rather than trusting the minimal streamed return.
+            await refreshActiveMessages(activeChat.chatId).catch(() => {});
+          }
+          // A switch happened (regeneration or variant cycle) — the active swipe changed, so the
+          // location state may have too: re-read it. For a regen the new location is pending until
+          // its render lands, so the reverted previous background stays up and the poll swaps in
+          // the replacement the moment it's ready; for a cycle the server's own trigger
+          // (ensureActiveLocationImage) restarts a dropped render and this read picks it up.
+          void refreshLocationImage(activeChat.chatId);
+        }
       }
       // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
     } catch (err) {
@@ -1606,7 +1711,7 @@ export default function ChatView({
               </div>
             );
           })}
-          {sending && <div className="chat-bubble assistant pending">{turnStatus ?? '…'}</div>}
+          {sending && !liveStreaming && <div className="chat-bubble assistant pending">{turnStatus ?? '…'}</div>}
           {/* Mobile bottom slack (ChatView.css): the scrollable content otherwise ends at the
               last entry, which pins its bottom to the top of the input row — the expandable
               rerun/edit bar could never be pulled up to mid-screen. This spacer extends the

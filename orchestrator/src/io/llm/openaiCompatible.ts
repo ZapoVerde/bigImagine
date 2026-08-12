@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/openaiCompatible.ts
- * @stamp 2026-08-10
+ * @stamp 2026-08-11
  * @architectural-role IO Wrapper — LlmProvider adapter for any OpenAI-shaped chat completions
  * API (OpenRouter, DeepSeek's native endpoint, and most other current providers converge on
  * this shape)
@@ -17,7 +17,8 @@
  * this file just reports what the upstream API reported. DeepSeek's extra
  * `prompt_cache_hit_tokens` is relayed as LlmUsage.cacheReadTokens the same way (see the
  * parsing below); prompt_tokens already includes the cached portion, so promptTokens needs no
- * adjustment for it.
+ * adjustment for it. The streaming path (completeStream) reads the same usage fields off the
+ * terminal chunk that stream_options.include_usage requests.
  *
  * A user message carrying LlmMessage.images gets `content` reshaped from a plain string into the
  * documented OpenAI vision block array (`text` + one `image_url` per image, base64 data URI) —
@@ -47,6 +48,7 @@
  */
 
 import { fetchWithRetry } from '../httpRetry.js';
+import { readSseDataPayloads } from './sse.js';
 import type {
   LlmCompleteOptions,
   LlmMessage,
@@ -161,6 +163,63 @@ function fromOaiResponse(
   return { message: { role: 'assistant', content: message.content ?? '' }, toolCalls, usage };
 }
 
+/** Shared request body between complete() and completeStream() — the two differ only in the
+ *  stream flag (and stream_options, which only exists on the streaming path), so both paths send
+ *  byte-identical prompts (bb_principles.md §17's cache-friendliness extends to the streaming
+ *  path: a streamed request must not reorder/reshape the messages). */
+function buildOaiRequest(
+  config: OpenAiCompatibleConfig,
+  options: LlmCompleteOptions | undefined,
+  messages: OaiMessage[],
+  tools: ToolDefinition[],
+  stream: boolean,
+): Record<string, unknown> {
+  return {
+    model: options?.model ?? config.model,
+    max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
+    ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
+    ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
+    messages,
+    tools: tools.length > 0 ? toOaiTools(tools) : undefined,
+    tool_choice: options?.forceTool
+      ? { type: 'function', function: { name: options.forceTool } }
+      : undefined,
+    // DeepSeek-specific, harmless elsewhere: reasoning models reject a forced tool_choice
+    // while "thinking" — ST's own DeepSeek integration (st-source/src/endpoints/backends/
+    // chat-completions.js) hits the same conflict and disables thinking the same way.
+    ...(options?.forceTool ? { thinking: { type: 'disabled' } } : {}),
+    ...(config.provider
+      ? {
+          provider: {
+            ...(config.provider.order ? { order: config.provider.order } : {}),
+            allow_fallbacks: config.provider.allowFallbacks,
+            ...(config.provider.quantizations ? { quantizations: config.provider.quantizations } : {}),
+          },
+        }
+      : {}),
+    ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+  };
+}
+
+/** Parse an OpenAI-shaped streaming usage object (the final chunk, when include_usage is on) into
+ *  LlmUsage — mirrors the non-streaming usage parsing in complete() exactly, DeepSeek's
+ *  prompt_cache_hit_tokens included. */
+function usageFromStreamChunk(usage: {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  prompt_cache_hit_tokens?: number;
+}): LlmUsage {
+  return {
+    promptTokens: usage.prompt_tokens,
+    completionTokens: usage.completion_tokens,
+    totalTokens: usage.total_tokens,
+    ...(usage.prompt_cache_hit_tokens !== undefined
+      ? { cacheReadTokens: usage.prompt_cache_hit_tokens }
+      : {}),
+  };
+}
+
 /** GET {baseUrl}/models — the live catalog behind the "dynamic model picker": whatever a
  *  client's own model dropdown shows (Open WebUI included) comes from this, not a value baked
  *  into config. Standard on OpenAI-compatible APIs; OpenRouter's listing in particular needs no
@@ -246,30 +305,7 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
           authorization: `Bearer ${config.apiKey}`,
         },
         signal: options?.signal,
-        body: JSON.stringify({
-          model: options?.model ?? config.model,
-          max_tokens: options?.maxTokens ?? config.maxTokens ?? 16384,
-          ...(options?.temperature !== undefined ? { temperature: options.temperature } : {}),
-          ...(options?.topP !== undefined ? { top_p: options.topP } : {}),
-          messages: toOaiMessages(messages),
-          tools: tools.length > 0 ? toOaiTools(tools) : undefined,
-          tool_choice: options?.forceTool
-            ? { type: 'function', function: { name: options.forceTool } }
-            : undefined,
-          // DeepSeek-specific, harmless elsewhere: reasoning models reject a forced tool_choice
-          // while "thinking" — ST's own DeepSeek integration (st-source/src/endpoints/backends/
-          // chat-completions.js) hits the same conflict and disables thinking the same way.
-          ...(options?.forceTool ? { thinking: { type: 'disabled' } } : {}),
-          ...(config.provider
-            ? {
-                provider: {
-                  ...(config.provider.order ? { order: config.provider.order } : {}),
-                  allow_fallbacks: config.provider.allowFallbacks,
-                  ...(config.provider.quantizations ? { quantizations: config.provider.quantizations } : {}),
-                },
-              }
-            : {}),
-        }),
+        body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, false)),
       });
 
       if (!response.ok) {
@@ -291,21 +327,69 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
       };
       const choice = payload.choices[0];
       if (!choice) throw new Error('OpenAI-compatible API returned no choices');
-      const usage = payload.usage
-        ? {
-            promptTokens: payload.usage.prompt_tokens,
-            completionTokens: payload.usage.completion_tokens,
-            totalTokens: payload.usage.total_tokens,
-            // DeepSeek's prompt_tokens already includes the cached portion (verified against its
-            // API reference), so promptTokens is unchanged — this is purely the hit/miss split for
-            // the Prompt Inspector's receipt. Undefined (a provider that doesn't report it) stays
-            // undefined, never zero: "no cache accounting", not "zero cache hit".
-            ...(payload.usage.prompt_cache_hit_tokens !== undefined
-              ? { cacheReadTokens: payload.usage.prompt_cache_hit_tokens }
-              : {}),
-          }
-        : undefined;
+      const usage = payload.usage ? usageFromStreamChunk(payload.usage) : undefined;
       return fromOaiResponse(choice.message, choice.finish_reason, usage);
+    },
+    async completeStream(
+      messages: LlmMessage[],
+      tools: ToolDefinition[],
+      onDelta: (textDelta: string) => void,
+      options?: LlmCompleteOptions,
+    ): Promise<LlmTurn> {
+      // RP-only by contract (see LlmProvider.completeStream's doc): a non-empty tools array is a
+      // caller bug — this implementation has no tool-call streaming, and silently dropping the
+      // tools would make the turn behave differently than the caller expects.
+      if (tools.length > 0) {
+        throw new Error('openai-compatible completeStream: tool-call streaming is not supported (RP turns never pass tools)');
+      }
+      const response = await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${config.apiKey}`,
+        },
+        signal: options?.signal,
+        body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, true)),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`OpenAI-compatible API error ${response.status}: ${body}`);
+      }
+      if (!response.body) {
+        throw new Error('OpenAI-compatible streaming response had no body');
+      }
+
+      let text = '';
+      let usage: LlmUsage | undefined;
+      for await (const data of readSseDataPayloads(response.body)) {
+        if (data === '[DONE]') break;
+        let chunk: {
+          choices?: { delta?: { content?: string | null } }[];
+          usage?: {
+            prompt_tokens: number;
+            completion_tokens: number;
+            total_tokens: number;
+            prompt_cache_hit_tokens?: number;
+          };
+        };
+        try {
+          chunk = JSON.parse(data);
+        } catch {
+          continue; // a non-JSON SSE line (keep-alive comment) — skip
+        }
+        // Usage arrives on the terminal chunk (stream_options.include_usage), the one whose
+        // choices array is empty — a delta chunk never carries it, so the two can't collide.
+        if (chunk.usage) {
+          usage = usageFromStreamChunk(chunk.usage);
+        }
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) {
+          text += delta;
+          onDelta(delta);
+        }
+      }
+      return fromOaiResponse({ content: text }, undefined, usage);
     },
     listModels: () => listOpenAiCompatibleModels(config),
     listProviders: (modelId: string) => listOpenAiCompatibleModelProviders(config, modelId),

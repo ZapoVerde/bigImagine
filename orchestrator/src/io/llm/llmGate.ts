@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/llmGate.ts
- * @stamp 2026-07-28
+ * @stamp 2026-08-11
  * @architectural-role IO Wrapper — the one seam bb_principles.md §14 requires every LLM call to
  * pass through
  * @description
@@ -11,6 +11,13 @@
  * deps.llm with this exactly once, at boot, so every plugin's closed-over llm reference and every
  * chat's per-profile override (both ultimately built from the same seam) are gated automatically —
  * no call site needed to change (bb_principles.md §14's own "no dozen files touched" reasoning).
+ *
+ * The returned object also mirrors the base's completeStream when it exists (docs/plans/
+ * rp-streaming-plan.md): same lane admission and agent_routine preflight, but with deliberately
+ * narrower retry semantics — a failure after the first onDelta of an attempt is never retried,
+ * since the user has already seen that text and a second overlapping generation would duplicate
+ * or garble it. Undefined on the gated object when the base has no streaming capability, the same
+ * "undefined means no capability, not broken" convention as listModels.
  *
  * Every call reads its {taskId, kind, userId} from callContext.ts's ambient AsyncLocalStorage —
  * set once per turn by runTurnInner, or once per standalone call by whatever wraps a system call
@@ -194,8 +201,7 @@ async function preflightAgentRoutineCheck(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   jobId: string,
-): Promise<void> {
-  const enabled = (await settings.get('agent_routines_enabled')) === 'true';
+): Promise<void> {  const enabled = (await settings.get('agent_routines_enabled')) === 'true';
   if (!enabled) throw new Error('agent_routines_enabled is off — this routine will not run until re-enabled in Settings');
 
   const job = await loadJobCaps(db, jobId);
@@ -252,6 +258,72 @@ async function reactToBreach(db: PostgresClient, settings: OrchestratorSettingsS
   }
 }
 
+interface GateCallConfig {
+  lane: LlmLane;
+  maxConcurrent: number;
+  maxRetries: number;
+  retryBaseMs: number;
+  retryMaxMs: number;
+}
+
+/** The per-call setup shared by complete() and completeStream(): refuse an agent_routine call that
+ *  fails preflight (logging the refusal), then resolve this call's lane and its settings-driven
+ *  concurrency/retry knobs. Throws on refusal; returns the config on success — silence plus a
+ *  config means "go ahead." */
+async function resolveGateCallConfig(
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  ctx: NonNullable<ReturnType<typeof getCallContext>>,
+): Promise<GateCallConfig> {
+  if (ctx.kind === 'agent_routine') {
+    try {
+      await preflightAgentRoutineCheck(db, settings, ctx.taskId);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      await logCall(db, {
+        userId: ctx.userId,
+        kind: ctx.kind,
+        taskId: ctx.taskId,
+        jobId: ctx.taskId,
+        outcome: 'refused',
+        promptTokens: null,
+        completionTokens: null,
+        totalTokens: null,
+        durationMs: null,
+        reason,
+        requestId: randomUUID(),
+        attempt: 0,
+      });
+      throw err;
+    }
+  }
+
+  // Lane isolation: 'interactive' is a live turn the household is waiting on; 'agent_routine'
+  // and 'background' (system-kind: cleanup repairs, chat-memory sync, title generation) admit
+  // independently (llmQueue.ts) so a background loop's burst — e.g. the cleanup repair
+  // runaway that saturated this lane on 2026-08-08 — can never starve a user's send.
+  const lane: LlmLane = ctx.kind === 'agent_routine' ? 'agent_routine' : ctx.kind === 'system' ? 'background' : 'interactive';
+  const maxConcurrent = Number(
+    (await settings.get(
+      lane === 'agent_routine'
+        ? 'llm_gate_max_concurrent_agent_routine'
+        : lane === 'background'
+          ? 'llm_gate_max_concurrent_background'
+          : 'llm_gate_max_concurrent',
+    )) ??
+      (lane === 'agent_routine'
+        ? DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE
+        : lane === 'background'
+          ? DEFAULT_MAX_CONCURRENT_BACKGROUND
+          : DEFAULT_MAX_CONCURRENT_INTERACTIVE),
+  );
+  const maxRetries = Number((await settings.get('llm_gate_max_retries')) ?? DEFAULT_MAX_RETRIES);
+  const retryBaseMs = Number((await settings.get('llm_gate_retry_base_ms')) ?? DEFAULT_RETRY_BASE_MS);
+  const retryMaxMs = Number((await settings.get('llm_gate_retry_max_ms')) ?? DEFAULT_RETRY_MAX_MS);
+
+  return { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs };
+}
+
 export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, settings: OrchestratorSettingsStore): LlmProvider {
   return {
     name: base.name,
@@ -265,51 +337,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
         );
       }
 
-      if (ctx.kind === 'agent_routine') {
-        try {
-          await preflightAgentRoutineCheck(db, settings, ctx.taskId);
-        } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
-          await logCall(db, {
-            userId: ctx.userId,
-            kind: ctx.kind,
-            taskId: ctx.taskId,
-            jobId: ctx.taskId,
-            outcome: 'refused',
-            promptTokens: null,
-            completionTokens: null,
-            totalTokens: null,
-            durationMs: null,
-            reason,
-            requestId: randomUUID(),
-            attempt: 0,
-          });
-          throw err;
-        }
-      }
-
-      // Lane isolation: 'interactive' is a live turn the household is waiting on; 'agent_routine'
-      // and 'background' (system-kind: cleanup repairs, chat-memory sync, title generation) admit
-      // independently (llmQueue.ts) so a background loop's burst — e.g. the cleanup repair
-      // runaway that saturated this lane on 2026-08-08 — can never starve a user's send.
-      const lane: LlmLane = ctx.kind === 'agent_routine' ? 'agent_routine' : ctx.kind === 'system' ? 'background' : 'interactive';
-      const maxConcurrent = Number(
-        (await settings.get(
-          lane === 'agent_routine'
-            ? 'llm_gate_max_concurrent_agent_routine'
-            : lane === 'background'
-              ? 'llm_gate_max_concurrent_background'
-              : 'llm_gate_max_concurrent',
-        )) ??
-          (lane === 'agent_routine'
-            ? DEFAULT_MAX_CONCURRENT_AGENT_ROUTINE
-            : lane === 'background'
-              ? DEFAULT_MAX_CONCURRENT_BACKGROUND
-              : DEFAULT_MAX_CONCURRENT_INTERACTIVE),
-      );
-      const maxRetries = Number((await settings.get('llm_gate_max_retries')) ?? DEFAULT_MAX_RETRIES);
-      const retryBaseMs = Number((await settings.get('llm_gate_retry_base_ms')) ?? DEFAULT_RETRY_BASE_MS);
-      const retryMaxMs = Number((await settings.get('llm_gate_retry_max_ms')) ?? DEFAULT_RETRY_MAX_MS);
+      const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx);
 
       const requestId = randomUUID();
       let turn: LlmTurn | undefined;
@@ -367,5 +395,93 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
 
       return turn;
     },
+    // Streaming passthrough — present only when the base provider can actually stream, the same
+    // "undefined means no capability, not broken" convention as listModels above (bb_principles.md
+    // §6; docs/plans/rp-streaming-plan.md). Retry semantics are deliberately narrower than
+    // complete()'s: once even one delta has been relayed to the caller, a subsequent failure is
+    // NOT retried — the user has already seen (and may be reading) that text, and a second
+    // overlapping generation would duplicate or garble it. Retry only applies to a failure that
+    // happens before the first onDelta call of that attempt; after that point the error propagates
+    // and the caller (runStreamingRpTurn) decides what the client sees. Usage is logged once per
+    // attempt when the stream resolves or fails, exactly like complete()'s single post-call log.
+    ...(base.completeStream
+      ? {
+          async completeStream(
+            messages: LlmMessage[],
+            tools: ToolDefinition[],
+            onDelta: (textDelta: string) => void,
+            options?: LlmCompleteOptions,
+          ): Promise<LlmTurn> {
+            const ctx = getCallContext();
+            if (!ctx) {
+              throw new Error(
+                'llmGate: completeStream() called with no call context set — every LLM call must run inside runWithCallContext (bb_principles.md §14)',
+              );
+            }
+
+            const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx);
+
+            const requestId = randomUUID();
+            let turn: LlmTurn | undefined;
+            for (let attempt = 0; ; attempt++) {
+              const callStart = Date.now();
+              let relayedAnyDelta = false;
+              try {
+                turn = await withLaneSlot(lane, maxConcurrent, () => {
+                  if (options?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError');
+                  return base.completeStream!(messages, tools, (delta) => {
+                    relayedAnyDelta = true;
+                    onDelta(delta);
+                  }, options);
+                });
+                await logCall(db, {
+                  userId: ctx.userId,
+                  kind: ctx.kind,
+                  taskId: ctx.taskId,
+                  jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
+                  outcome: 'ok',
+                  promptTokens: turn.usage?.promptTokens ?? null,
+                  completionTokens: turn.usage?.completionTokens ?? null,
+                  totalTokens: turn.usage?.totalTokens ?? null,
+                  durationMs: Date.now() - callStart,
+                  reason: null,
+                  requestId,
+                  attempt,
+                });
+                break;
+              } catch (err) {
+                const reason = err instanceof Error ? err.message : String(err);
+                await logCall(db, {
+                  userId: ctx.userId,
+                  kind: ctx.kind,
+                  taskId: ctx.taskId,
+                  jobId: ctx.kind === 'agent_routine' ? ctx.taskId : null,
+                  outcome: 'error',
+                  promptTokens: null,
+                  completionTokens: null,
+                  totalTokens: null,
+                  durationMs: Date.now() - callStart,
+                  reason,
+                  requestId,
+                  attempt,
+                });
+
+                // The streaming retry rule: retry only a failure that happened before this
+                // attempt's first onDelta. Once any delta was relayed, a retry would duplicate
+                // text the user already saw — propagate instead.
+                const willRetry = isRetryableLlmError(err) && attempt < maxRetries && !relayedAnyDelta;
+                if (!willRetry) throw err;
+                await sleepAbortable(computeBackoffMs(attempt, retryBaseMs, retryMaxMs), options?.signal);
+              }
+            }
+
+            if (ctx.kind === 'agent_routine') {
+              await reactToBreach(db, settings, ctx.taskId);
+            }
+
+            return turn;
+          },
+        }
+      : {}),
   };
 }

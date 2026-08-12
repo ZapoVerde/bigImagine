@@ -52,6 +52,10 @@ async function withMockedFetch(responses, fn) {
     capturedRequests.push({ body: JSON.parse(init.body) });
     const response = responses[callIndex++];
     if (!response) throw new Error('mock fetch called more times than scripted responses provided');
+    // A real Response (streaming path) is passed through untouched so completeStream reads
+    // response.body as a live ReadableStream; a plain object (non-streaming path) is wrapped the
+    // way the existing fixtures expect.
+    if (response instanceof Response) return response;
     return { ok: true, json: async () => response, text: async () => JSON.stringify(response) };
   };
   try {
@@ -59,6 +63,16 @@ async function withMockedFetch(responses, fn) {
   } finally {
     globalThis.fetch = originalFetch;
   }
+}
+
+/** Build a mock SSE Response from raw SSE text — the byte-level framing the adapters'
+ *  completeStream parses for real, so the fixtures exercise the same parsing path a live
+ *  vendor stream would. */
+function sseResponse(events) {
+  return new Response(events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join(''), {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
 }
 
 // RunTurnOptions now requires an embeddings provider (loop.ts threads it into every tool ctx).
@@ -423,6 +437,126 @@ await withMockedFetch([{ content: [{ type: 'text', text: 'ok' }] }], async (requ
       sent[0].content[0].text === '',
     'Anthropic: an empty messages array emits one empty user turn (shape-level placeholder only)',
   );
+});
+
+// --- Streaming (completeStream, docs/plans/rp-streaming-plan.md) ---
+// Anthropic: text_delta events drive onDelta in order; usage is merged from message_start's
+// input_tokens and the terminal message_delta's output_tokens.
+await withMockedFetch(
+  [
+    sseResponse([
+      { type: 'message_start', message: { usage: { input_tokens: 12, output_tokens: 0 } } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello ' } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'streaming ' } },
+      { type: 'content_block_delta', delta: { type: 'text_delta', text: 'world' } },
+      { type: 'message_delta', usage: { output_tokens: 34 } },
+      { type: 'message_stop' },
+    ]),
+  ],
+  async (requests) => {
+    const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+    const deltas = [];
+    const turn = await llm.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d));
+    assert(
+      deltas.join('') === 'Hello streaming world' && turn.message.content === 'Hello streaming world',
+      'Anthropic completeStream: text_delta events reach onDelta in order and concatenate to the full reply',
+    );
+    assert(
+      turn.usage?.promptTokens === 12 && turn.usage?.completionTokens === 34 && turn.usage?.totalTokens === 46,
+      'Anthropic completeStream: usage merged from message_start (input) + message_delta (output)',
+    );
+    assert(requests[0].body.stream === true, 'Anthropic completeStream: request carries stream: true');
+  },
+);
+
+// OpenAI-compatible: delta.content drives onDelta in order; usage comes off the terminal chunk
+// (stream_options.include_usage) whose choices array is empty; [DONE] terminates cleanly.
+await withMockedFetch(
+  [
+    sseResponse([
+      { id: 'x', choices: [{ delta: { content: 'Hello ' } }] },
+      { id: 'x', choices: [{ delta: { content: 'streaming ' } }] },
+      { id: 'x', choices: [{ delta: { content: 'world' } }] },
+      { id: 'x', choices: [], usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 } },
+      { id: 'x', choices: [{ delta: {} }] },
+    ]),
+  ],
+  async (requests) => {
+    const llm = createOpenAiCompatibleLlmProvider({
+      apiKey: 'test-key',
+      model: 'test-model',
+      baseUrl: 'https://example.invalid/v1',
+    });
+    const deltas = [];
+    const turn = await llm.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d));
+    assert(
+      deltas.join('') === 'Hello streaming world' && turn.message.content === 'Hello streaming world',
+      'OpenAI-compatible completeStream: delta.content reaches onDelta in order and concatenates to the full reply',
+    );
+    assert(
+      turn.usage?.promptTokens === 5 && turn.usage?.completionTokens === 7 && turn.usage?.totalTokens === 12,
+      'OpenAI-compatible completeStream: usage parsed off the terminal include_usage chunk',
+    );
+    assert(requests[0].body.stream === true, 'OpenAI-compatible completeStream: request carries stream: true');
+    assert(
+      requests[0].body.stream_options?.include_usage === true,
+      'OpenAI-compatible completeStream: request carries stream_options.include_usage',
+    );
+  },
+);
+
+// DeepSeek-style cache accounting on the streaming path: prompt_cache_hit_tokens relays onto
+// cacheReadTokens exactly as the non-streaming path does.
+await withMockedFetch(
+  [
+    sseResponse([
+      { id: 'x', choices: [{ delta: { content: 'ok' } }] },
+      {
+        id: 'x',
+        choices: [],
+        usage: { prompt_tokens: 9, completion_tokens: 7, total_tokens: 16, prompt_cache_hit_tokens: 4 },
+      },
+    ]),
+  ],
+  async () => {
+    const llm = createOpenAiCompatibleLlmProvider({
+      apiKey: 'test-key',
+      model: 'test-model',
+      baseUrl: 'https://example.invalid/v1',
+    });
+    const turn = await llm.completeStream([{ role: 'user', content: 'hi' }], [], () => {});
+    assert(
+      turn.usage?.cacheReadTokens === 4 && turn.usage?.promptTokens === 9,
+      'OpenAI-compatible completeStream: prompt_cache_hit_tokens relays onto cacheReadTokens',
+    );
+  },
+);
+
+// A non-empty tools array throws on both adapters — the capability is RP-only by contract.
+await withMockedFetch([sseResponse([{ type: 'message_stop' }])], async () => {
+  const llm = createAnthropicLlmProvider({ apiKey: 'test-key', model: 'test-model' });
+  let threw = false;
+  try {
+    await llm.completeStream([{ role: 'user', content: 'hi' }], [{ name: 'x', description: 'y', parameters: {} }], () => {});
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'Anthropic completeStream: a non-empty tools array throws, never silently misbehaves');
+});
+
+await withMockedFetch([sseResponse([{ id: 'x', choices: [{ delta: {} }] }])], async () => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+  });
+  let threw = false;
+  try {
+    await llm.completeStream([{ role: 'user', content: 'hi' }], [{ name: 'x', description: 'y', parameters: {} }], () => {});
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'OpenAI-compatible completeStream: a non-empty tools array throws, never silently misbehaves');
 });
 
 if (process.exitCode) {

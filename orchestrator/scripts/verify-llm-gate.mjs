@@ -115,6 +115,32 @@ function createFakeBase(turns) {
   };
 }
 
+/** A fake base with streaming capability: completeStream replays a scripted sequence of
+ *  (delta | Error) steps per call, where a thrown Error aborts that call mid-stream (after
+ *  whatever deltas preceded it in the script). */
+function createFakeStreamingBase(scripts) {
+  let callIndex = 0;
+  const calls = [];
+  return {
+    name: 'fake-streaming',
+    supportsVision: false,
+    calls,
+    async completeStream(messages, tools, onDelta) {
+      const script = scripts[callIndex++];
+      if (!script) throw new Error('fake streaming base called more times than scripted');
+      calls.push({ messages, tools, deltas: [] });
+      let text = '';
+      for (const step of script) {
+        if (step instanceof Error) throw step;
+        text += step;
+        calls[calls.length - 1].deltas.push(step);
+        onDelta(step);
+      }
+      return { message: { role: 'assistant', content: text }, toolCalls: [], usage: { promptTokens: 5, completionTokens: text.length, totalTokens: 5 + text.length } };
+    },
+  };
+}
+
 // --- no call context at all -> throws before ever reaching the base provider ---
 {
   const jobs = new Map();
@@ -336,6 +362,77 @@ function createFakeBase(turns) {
     jobs.get('job-6').status === 'capped',
     'the one failed attempt plus the one successful attempt together reach the 2-call cap — retries are not free',
   );
+}
+
+// --- Streaming (completeStream, docs/plans/rp-streaming-plan.md) ---
+
+// A completeStream failure before any delta is relayed retries per the existing backoff config;
+// the caller sees one resolved promise with all deltas from the successful attempt.
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({ llm_gate_max_retries: '3', llm_gate_retry_base_ms: '1', llm_gate_retry_max_ms: '2' });
+  const base = createFakeStreamingBase([
+    [new Error('fetch failed')], // attempt 0: dies before any delta
+    [new Error('fetch failed')], // attempt 1: dies before any delta
+    ['third time lucky'],        // attempt 2: succeeds
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings);
+  assert(typeof gated.completeStream === 'function', 'gated provider mirrors completeStream when the base has one');
+
+  const deltas = [];
+  const turn = await runWithCallContext({ taskId: 'chat-stream-1', kind: 'chat', userId: 'u1' }, () =>
+    gated.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d)),
+  );
+  assert(turn.message.content === 'third time lucky', 'a pre-first-delta failure is retried and the stream resolves once a later attempt succeeds');
+  assert(deltas.join('') === 'third time lucky', 'the caller sees only the successful attempt\'s deltas');
+  assert(pool.llmCalls.length === 3, 'every attempt (2 failures + 1 success) gets its own llm_calls row');
+  assert(
+    pool.llmCalls.map((c) => c.outcome).join(',') === 'error,error,ok',
+    'the two failed attempts are logged as error, the final one as ok',
+  );
+}
+
+// A failure injected AFTER the first delta has fired propagates immediately with NO retry —
+// the user has already seen the relayed text, and a second generation would duplicate it.
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({ llm_gate_max_retries: '3', llm_gate_retry_base_ms: '1', llm_gate_retry_max_ms: '2' });
+  const base = createFakeStreamingBase([
+    ['partial text ', new Error('connection dropped mid-stream')],
+    ['should never be reached'],
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings);
+
+  let threw = false;
+  const deltas = [];
+  try {
+    await runWithCallContext({ taskId: 'chat-stream-2', kind: 'chat', userId: 'u1' }, () =>
+      gated.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d)),
+    );
+  } catch (err) {
+    threw = err.message === 'connection dropped mid-stream';
+  }
+  assert(threw, 'a post-first-delta failure propagates immediately, never silently retried');
+  assert(base.calls.length === 1, 'exactly one attempt reaches the base provider — no retry after the first delta');
+  assert(deltas.join('') === 'partial text ', 'the deltas already relayed stay relayed (the caller decides what the client sees)');
+  assert(pool.llmCalls.length === 1 && pool.llmCalls[0].outcome === 'error', 'the failed stream is logged once, as error');
+}
+
+// A gated provider over a base with no completeStream has no completeStream — the
+// "undefined means no capability, not broken" convention, so the caller's fallback to
+// complete() is what runStreamingRpTurn uses.
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings({ agent_routines_enabled: 'true' });
+  const base = createFakeBase([{ message: { role: 'assistant', content: 'hi' }, toolCalls: [] }]);
+  const gated = createGatedLlmProvider(base, db, settings);
+  assert(gated.completeStream === undefined, 'gated provider has no completeStream when the base lacks one');
 }
 
 if (process.exitCode) {

@@ -172,6 +172,7 @@ import { longestCommonPrefixLength } from '../util/commonPrefix.js';
 import { computeSectionStability, type SectionStabilityResult } from '../util/sectionStability.js';
 import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
+import { runStreamingRpTurn } from '../orchestrator/streamingTurn.js';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
 import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
@@ -398,6 +399,30 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
     'content-length': Buffer.byteLength(payload),
   });
   res.end(payload);
+}
+
+// The SSE response headers both streaming routes (handleChatCompletions's RP branch and the
+// swipe route's needs_regenerate stream) write — same framing the existing non-RP fake-stream
+// branch has always used, so any OpenAI-compatible client parses both identically.
+function writeStreamHeaders(res: ServerResponse): void {
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+}
+
+// The SSE abort/error terminal frame (docs/plans/rp-streaming-plan.md Contracts) — one extra
+// data: line before [DONE], usable only once streaming has begun (headers committed, so an HTTP
+// status code is no longer an option). Emitted identically by both streaming routes. A success
+// completion never emits this: it keeps today's stop-finish chunk + [DONE], so an OpenAI-
+// compatible client that has never heard of bigimagine_error simply never sees it.
+function writeStreamErrorTerminalFrame(res: ServerResponse, aborted: boolean, message: string): void {
+  res.write(
+    `data: ${JSON.stringify({ bigimagine_error: true, aborted, message })}\n\n`,
+  );
+  res.write('data: [DONE]\n\n');
+  res.end();
 }
 
 // Where the built frontend/ SPA lands at Docker build time (Dockerfile: npm run build
@@ -1454,6 +1479,14 @@ async function regenerateSwipe(
   chatId: string,
   detail: ChatDetail,
   messageId: string,
+  // Real token-level streaming for the RP lane (docs/plans/rp-streaming-plan.md) — same gate as
+  // handleChatCompletions's streaming branch: only session.kind === 'rp' streams, and the swipe
+  // route only passes stream: true when the client asked for it (body.stream, default false).
+  // When streaming, the caller (the swipe route) is responsible for writing SSE frames from
+  // onDelta; this function still owns the LLM call + persistence exactly as today, returning the
+  // accumulated reply so the caller can finish its stream.
+  stream = false,
+  onDelta?: (textDelta: string) => void,
 ): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
   const { db, settings, chats } = deps;
   const { session } = detail;
@@ -1504,36 +1537,70 @@ async function regenerateSwipe(
 
   let reply: string;
   let focusedNoteId: string | undefined;
-  try {
-    const turnResult = await runTurn({
-      userId,
-      taskId: chatId,
-      messages: trimmed,
-      systemPrompt,
-      model: session.params.model,
-      sampling: { temperature: session.params.temperature, topP: session.params.top_p, maxTokens: session.params.max_tokens },
-      llm: turnLlm,
-      db,
-      tools: sessionTools,
-      anchorMessageId,
-      embeddings: deps.embeddings,
-    });
-    reply = turnResult.content;
-    focusedNoteId = turnResult.focusedNoteId;
-    // Attached only after a successful resolve — a thrown/aborted turn leaves the entry without
-    // usage/price, matching reply's "absent if the call failed" contract exactly.
-    traceEntry.usage = turnResult.usage;
-    traceEntry.price = turnPrice;
-  } catch (err) {
-    if (isAbortError(err)) {
-      // The user hit Stop — not a failure. Nothing is written (the persisted user message simply
-      // has no reply yet, which the frontend already presents as the Resend recovery path), so
-      // the client gets a 499 to swallow quietly instead of an alarming 500.
-      log.info(`swipe regenerate aborted for chat ${chatId}`);
-      return { ok: false, aborted: true, error: 'turn aborted' };
+  // Streaming RP swipe (rp-streaming-plan.md): run through the shared core, relaying each delta to
+  // the caller's onDelta for immediate SSE flush. The abort handling matches the buffered path
+  // below exactly — the route decides what the client sees (499 vs terminal frame) based on
+  // whether headers were already written. A non-RP or non-streaming swipe keeps runTurn.
+  const streamingRp = session.kind === 'rp' && stream === true;
+  if (streamingRp) {
+    // stream=true implies the caller (the swipe route) passed onDelta — this is a programming
+    // error if it didn't, not a runtime degradation path; fail loudly per conventions §11.
+    if (!onDelta) throw new Error('regenerateSwipe: stream=true requires an onDelta callback');
+    try {
+      const turnResult = await runStreamingRpTurn({
+        userId,
+        taskId: chatId,
+        messages: trimmed,
+        systemPrompt,
+        model: session.params.model,
+        sampling: { temperature: session.params.temperature, topP: session.params.top_p, maxTokens: session.params.max_tokens },
+        llm: turnLlm,
+        db,
+        onDelta,
+      });
+      reply = turnResult.content;
+      traceEntry.usage = turnResult.usage;
+      traceEntry.price = turnPrice;
+    } catch (err) {
+      if (isAbortError(err)) {
+        log.info(`swipe regenerate aborted for chat ${chatId}`);
+        return { ok: false, aborted: true, error: 'turn aborted' };
+      }
+      log.error(`swipe regenerate failed for chat ${chatId}`, err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    log.error(`swipe regenerate failed for chat ${chatId}`, err);
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } else {
+    try {
+      const turnResult = await runTurn({
+        userId,
+        taskId: chatId,
+        messages: trimmed,
+        systemPrompt,
+        model: session.params.model,
+        sampling: { temperature: session.params.temperature, topP: session.params.top_p, maxTokens: session.params.max_tokens },
+        llm: turnLlm,
+        db,
+        tools: sessionTools,
+        anchorMessageId,
+        embeddings: deps.embeddings,
+      });
+      reply = turnResult.content;
+      focusedNoteId = turnResult.focusedNoteId;
+      // Attached only after a successful resolve — a thrown/aborted turn leaves the entry without
+      // usage/price, matching reply's "absent if the call failed" contract exactly.
+      traceEntry.usage = turnResult.usage;
+      traceEntry.price = turnPrice;
+    } catch (err) {
+      if (isAbortError(err)) {
+        // The user hit Stop — not a failure. Nothing is written (the persisted user message simply
+        // has no reply yet, which the frontend already presents as the Resend recovery path), so
+        // the client gets a 499 to swallow quietly instead of an alarming 500.
+        log.info(`swipe regenerate aborted for chat ${chatId}`);
+        return { ok: false, aborted: true, error: 'turn aborted' };
+      }
+      log.error(`swipe regenerate failed for chat ${chatId}`, err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
   const updated = await chats.recordSwipe(userId, chatId, messageId, reply);  if (!updated) {
@@ -1784,60 +1851,143 @@ async function handleChatCompletions(
 
   let reply: string;
   let focusedNoteId: string | null | undefined;
-  try {
-    const turnResult = await runTurn({
-      userId,
-      // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
-      // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
-      // one per turn is fine there, since kind stays 'chat' (never capped, only metered) and
-      // nothing needs it to be stable across calls the way an agent_routine's job_id must be.
-      taskId: body.chat_id ?? randomUUID(),
-      messages: messagesForLlm,
-      systemPrompt,
-      model,
-      sampling: {
-        temperature: sessionParams.temperature,
-        topP: sessionParams.top_p,
-        maxTokens: sessionParams.max_tokens,
-      },
-      llm: turnLlm,
-      db,
-      tools: sessionTools,
-      anchorMessageId,
-      embeddings: deps.embeddings,
-    });
-    reply = turnResult.content;
-    focusedNoteId = turnResult.focusedNoteId;
-    if (mainTraceEntry) {
-      mainTraceEntry.usage = turnResult.usage;
-      mainTraceEntry.price = turnPrice;
-    }
-  } catch (err) {
-    // Surfaced to the client rather than falling through to startHttpServer's generic top-level
-    // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
-    // upstream response) should be diagnosable from the chat itself, not just the server log.
-    if (isAbortError(err)) {
-      // The user hit Stop (POST /v1/chat/abort). Not an error: the upstream call was cancelled,
-      // nothing was appended, and the frontend treats 499 as the expected "turn stopped" outcome.
-      log.info(`runTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
-      sendJson(res, 499, { error: 'turn aborted' });
+  // Real token-level streaming for the RP lane (docs/plans/rp-streaming-plan.md): when an RP chat
+  // asks for stream: true, the turn runs through runStreamingRpTurn instead of runTurn and every
+  // delta is relayed to the client as it arrives. The chat-kind lane (tool-calling turns, Open
+  // WebUI) is untouched and keeps the buffered runTurn path byte-for-byte.
+  const streamingRp = sessionKind === 'rp' && body.stream === true;
+  // Echoed back in every SSE chunk's model field (the OpenAI-compatible framing). Declared here,
+  // before the streaming branch, because its onDelta closure reads it during the turn.
+  const echoedModel = model ?? turnDefaultModel;
+  // First LLM turn of a new RP chat (≤1 pre-turn message: empty chat, a seeded greeting only, or
+  // a user message left by a failed first attempt): the reply's scene header may be repaired by
+  // ensureFirstTurnHeader (below) after the LLM resolves but before persistence. Declared here,
+  // before the streaming branch, because its onDelta closure reads it during the turn — turn 1 is
+  // deliberately NOT streamed live (rp-streaming-plan.md Edge Cases), so the client never sees
+  // raw pre-repair text that wouldn't match what actually gets saved.
+  const firstLlmTurn = sessionKind === 'rp' && priorMessageCount <= 1;
+  // SSE headers are deliberately deferred until the first delta (plan Contracts: "no headers sent
+  // yet, respond with 499/500 as today") — so a zero-delta failure still surfaces as a normal
+  // HTTP status instead of a committed-200 terminal frame.
+  let streamHeadersSent = false;
+  const sseId = `chatcmpl-${randomUUID()}`;
+  const taskId = body.chat_id ?? randomUUID();
+  // A dropped client connection cancels the in-flight LLM call (plan Edge Cases) instead of
+  // burning tokens on a stream nobody is reading — fires the same abort path as the explicit
+  // Stop button. Detached when the streaming branch ends (every outcome) so a close event that
+  // fires after this turn finished can't abort the next turn registered under the same chat_id.
+  const onClientClose = () => {
+    if (streamingRp) abortTurn(taskId);
+  };
+  req.on('close', onClientClose);
+
+  if (streamingRp) {
+    try {
+      const turnResult = await runStreamingRpTurn({
+        userId,
+        taskId,
+        messages: messagesForLlm,
+        systemPrompt,
+        model,
+        sampling: {
+          temperature: sessionParams.temperature,
+          topP: sessionParams.top_p,
+          maxTokens: sessionParams.max_tokens,
+        },
+        llm: turnLlm,
+        db,
+        onDelta: (delta) => {
+          // Turn 1 is deliberately NOT streamed live (plan Edge Cases): ensureFirstTurnHeader may
+          // rewrite the reply after the stream resolves, so relaying raw pre-repair text would show
+          // the client something that doesn't match what gets saved. The core still accumulates
+          // it; the header-repaired text is sent as a single chunk once persistence completes.
+          if (firstLlmTurn) return;
+          if (!streamHeadersSent) {
+            writeStreamHeaders(res);
+            streamHeadersSent = true;
+          }
+          res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: delta }, null))}\n\n`);
+        },
+      });
+      reply = turnResult.content;
+      if (mainTraceEntry) {
+        mainTraceEntry.usage = turnResult.usage;
+        mainTraceEntry.price = turnPrice;
+      }
+    } catch (err) {
+      if (!streamHeadersSent) {
+        // Nothing has been streamed yet — today's exact behavior, no SSE at all (plan Contracts).
+        if (isAbortError(err)) {
+          log.info(`runStreamingRpTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
+          req.off('close', onClientClose);
+          sendJson(res, 499, { error: 'turn aborted' });
+          return;
+        }
+        log.error(`runStreamingRpTurn failed for user ${userId}`, err);
+        req.off('close', onClientClose);
+        sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      // Streaming had already begun: headers are committed, so the failure/abort surfaces as the
+      // terminal frame before [DONE] instead of an HTTP status change (plan Contracts). Nothing
+      // is persisted — the client that sees this frame knows the turn didn't complete.
+      log.error(`runStreamingRpTurn failed for user ${userId} after streaming began`, err);
+      writeStreamErrorTerminalFrame(res, isAbortError(err), err instanceof Error ? err.message : String(err));
+      req.off('close', onClientClose);
       return;
     }
-    log.error(`runTurn failed for user ${userId}`, err);
-    sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
-    return;
+  } else {
+    try {
+      const turnResult = await runTurn({
+        userId,
+        // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
+        // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
+        // one per turn is fine there, since kind stays 'chat' (never capped, only metered) and
+        // nothing needs it to be stable across calls the way an agent_routine's job_id must be.
+        taskId,
+        messages: messagesForLlm,
+        systemPrompt,
+        model,
+        sampling: {
+          temperature: sessionParams.temperature,
+          topP: sessionParams.top_p,
+          maxTokens: sessionParams.max_tokens,
+        },
+        llm: turnLlm,
+        db,
+        tools: sessionTools,
+        anchorMessageId,
+        embeddings: deps.embeddings,
+      });
+      reply = turnResult.content;
+      focusedNoteId = turnResult.focusedNoteId;
+      if (mainTraceEntry) {
+        mainTraceEntry.usage = turnResult.usage;
+        mainTraceEntry.price = turnPrice;
+      }
+    } catch (err) {
+      // Surfaced to the client rather than falling through to startHttpServer's generic top-level
+      // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
+      // upstream response) should be diagnosable from the chat itself, not just the server log.
+      if (isAbortError(err)) {
+        // The user hit Stop (POST /v1/chat/abort). Not an error: the upstream call was cancelled,
+        // nothing was appended, and the frontend treats 499 as the expected "turn stopped" outcome.
+        log.info(`runTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
+        sendJson(res, 499, { error: 'turn aborted' });
+        return;
+      }
+      log.error(`runTurn failed for user ${userId}`, err);
+      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
   }
-  const echoedModel = model ?? turnDefaultModel;
 
-  if (body.chat_id) {
-    // First LLM turn of a new RP chat (≤1 pre-turn message: empty chat, a seeded greeting only,
-    // or a user message left by a failed first attempt): repair the scene header synchronously
-    // when the raw reply lacks one, so the scrape below has a header to resolve a location from
-    // and the bg pass fires on turn 1 — the async cleanup subloop would otherwise add the header
-    // only after this reply was already persisted and scraped, and nothing re-scrapes (see
-    // orchestrator/ensureFirstTurnHeader.ts). One small LLM call, first turn only, fail-open:
-    // a failed repair stores and sends the raw reply, byte-identical to before.
-    const firstLlmTurn = sessionKind === 'rp' && priorMessageCount <= 1;
+  if (body.chat_id) {    // Repair the scene header synchronously when the raw reply lacks one, so the scrape below has
+    // a header to resolve a location from and the bg pass fires on turn 1 — the async cleanup
+    // subloop would otherwise add the header only after this reply was already persisted and
+    // scraped, and nothing re-scrapes (see orchestrator/ensureFirstTurnHeader.ts). One small LLM
+    // call, first turn only, fail-open: a failed repair stores and sends the raw reply,
+    // byte-identical to before.
     if (firstLlmTurn && reply) {
       reply = await ensureFirstTurnHeader(
         { settings: deps.settings },
@@ -1921,13 +2071,35 @@ async function handleChatCompletions(
     }
   }
 
+  if (streamingRp) {
+    // The stream has resolved and persistence above completed. The final SSE frames are written
+    // only now, after persistence succeeds — so a client that sees [DONE] can trust the message is
+    // already saved, the same guarantee the non-streaming path gives via its single response
+    // (rp-streaming-plan.md Logic). Turn 1 (buffered by onDelta above) gets its one whole-reply
+    // chunk here, post header-repair.
+    if (!streamHeadersSent) writeStreamHeaders(res);
+    if (firstLlmTurn) {
+      res.write(
+        `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: reply }, null))}\n\n`,
+      );
+    }
+    res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, {}, 'stop'))}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+    req.off('close', onClientClose);
+    if (scrapedLocationId) {
+      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+      // sent — never awaited inline (a provider round-trip has no place blocking the reply).
+      // turnLlm is the connection this very turn ran on — the describer uses it too (the same
+      // "the room's description is written by the story's own voice" default VLZ uses).
+      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+    }
+    return;
+  }
+
   if (body.stream) {
     const id = `chatcmpl-${randomUUID()}`;
-    res.writeHead(200, {
-      'content-type': 'text/event-stream',
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    });
+    writeStreamHeaders(res);
     res.write(
       `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, { role: 'assistant', content: reply }, null))}\n\n`,
     );
@@ -3437,6 +3609,11 @@ async function handleChatRoutes(
         sendJson(res, 400, { error: 'expected { direction: "prev" | "next" }' });
         return;
       }
+      // rp-streaming-plan.md: the swipe route accepts the same optional stream flag the completions
+      // route does (default false — omitted is identical to false, fully backward compatible).
+      // Only an RP chat's needs_regenerate outcome streams; prev/next cycling (pure content swaps,
+      // no LLM call) and non-RP swipes are unaffected and stay plain JSON.
+      const stream = (body as Record<string, unknown>)?.stream === true;
 
       // Swiping only ever touches the chat's current last message (this module's own preamble) —
       // enforced here, not left to cycleSwipe/recordSwipe, since an id belonging to an earlier
@@ -3479,11 +3656,57 @@ async function handleChatRoutes(
         sendJson(res, 200, { status: 'no_further_swipe' });
         return;
       }
-      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId);
+      // Streaming branch, same shape as handleChatCompletions's: SSE headers deferred until the
+      // first delta, deltas relayed live via onDelta, and the failure/abort outcome decided by
+      // whether any bytes were already committed. A dropped client connection cancels the LLM call
+      // (plan Edge Cases) — detached on every exit so a late close can't abort the next turn.
+      const streamingRp = detail.session.kind === 'rp' && stream === true;
+      const sseId = `chatcmpl-${randomUUID()}`;
+      let streamHeadersSent = false;
+      const onClientClose = () => {
+        if (streamingRp) abortTurn(chatId);
+      };
+      if (streamingRp) req.on('close', onClientClose);
+      const onDelta = (delta: string) => {
+        if (!streamHeadersSent) {
+          writeStreamHeaders(res);
+          streamHeadersSent = true;
+        }
+        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
+      };
+      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta);
       if (!result.ok) {
+        if (streamingRp && streamHeadersSent) {
+          // Streaming had already begun: headers are committed, so surface the failure/abort as
+          // the terminal frame before [DONE] instead of an HTTP status change (plan Contracts).
+          // Nothing was persisted (recordSwipe never ran) — the client that sees this frame knows
+          // the regeneration didn't complete.
+          log.error(`swipe regenerate failed for chat ${chatId} after streaming began`, result.error);
+          writeStreamErrorTerminalFrame(res, result.aborted === true, result.error);
+          req.off('close', onClientClose);
+          return;
+        }
         // 499 = the user stopped this regeneration (POST /v1/chat/abort) — same contract as the
         // main turn's aborted response, so the frontend treats both the same way.
+        req.off('close', onClientClose);
         sendJson(res, result.aborted ? 499 : 500, { error: result.error });
+        return;
+      }
+      if (streamingRp) {
+        // The stream resolved and recordSwipe persisted the regenerated swipe above. The final SSE
+        // frames go out only now — a client that sees [DONE] can trust the swipe is already saved
+        // (plan Logic), the same guarantee the non-streaming response gives.
+        if (!streamHeadersSent) writeStreamHeaders(res);
+        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, {}, 'stop'))}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+        req.off('close', onClientClose);
+        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+        // sent — a provider round-trip has no place in the request path, so the trigger rides the
+        // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
+        if (result.locationId) {
+          res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
+        }
         return;
       }
       sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });

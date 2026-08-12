@@ -121,6 +121,27 @@ export interface LlmProvider {
     tools: ToolDefinition[],
     options?: LlmCompleteOptions,
   ): Promise<LlmTurn>;
+  /** Optional capability: token-level streaming of a completion, for turns guaranteed to produce a
+   *  single plain-text final reply and no tool calls — the RP lane (server/httpServer.ts's
+   *  sessionKind === 'rp' branch strips tools to an empty registry, so every RP completion is one
+   *  text-only final answer). onDelta is called zero or more times, in arrival order, before the
+   *  promise resolves; it is never called after resolution or rejection. Resolves with the same
+   *  LlmTurn shape complete() returns for the fully-accumulated text (full content, empty
+   *  toolCalls, usage from whatever terminal field the vendor reports it on).
+   *
+   *  Undefined means "this connection has no streaming implementation", not "broken" — the same
+   *  convention listModels/listProviders already use on this interface (bb_principles.md §6:
+   *  graceful degradation to a single whole-reply delta via complete() is the caller's fallback).
+   *
+   *  Throws when called with a non-empty tools array — this capability is RP-only by contract,
+   *  not a general tool-streaming implementation; a caller passing tools gets an explicit error
+   *  rather than silently misbehaving. */
+  completeStream?(
+    messages: LlmMessage[],
+    tools: ToolDefinition[],
+    onDelta: (textDelta: string) => void,
+    options?: LlmCompleteOptions,
+  ): Promise<LlmTurn>;
   /** Optional capability: the live model catalog behind a dynamic model picker (server/httpServer.ts's
    *  GET /v1/models). Not every provider has one worth exposing this way — undefined means "fall
    *  back to a single static entry," not "provider is broken." Keeping this on LlmProvider rather

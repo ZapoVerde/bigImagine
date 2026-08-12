@@ -1,5 +1,6 @@
 import type {
   ChatCompletionResponse,
+  StreamingTerminalFrame,
   ChatDetail,
   ChatLineageNode,
   ChatMemorySettings,
@@ -140,9 +141,22 @@ export async function uploadAttachment(file: File, apiKey: string | null): Promi
   return res.json() as Promise<StagedAttachment>;
 }
 
-/** POST /v1/chat/completions — non-streaming: runTurn resolves the full reply server-side before
- *  anything is sent back, so there's no token stream worth consuming here. chatId ties the turn
- *  to a persisted session (the server applies its params/tools and stores the exchange).
+/** POST /v1/chat/completions. Two modes:
+ *
+ *  Non-streaming (no onDelta — the default, every existing caller): runTurn resolves the full
+ *  reply server-side before anything is sent back. chatId ties the turn to a persisted session
+ *  (the server applies its params/tools and stores the exchange). RP chats in this mode behave
+ *  exactly as they always have — the only change this plan makes to them is that they no longer
+ *  need it.
+ *
+ *  Streaming (onDelta provided): sends `stream: true` and parses the SSE `data:` lines off
+ *  res.body as they arrive, calling onDelta once per content chunk in arrival order, then
+ *  resolves with the same ChatCompletionResponse shape once [DONE] arrives — the server writes
+ *  [DONE] only after the message is persisted, so the caller can trust the streamed text is
+ *  already saved. The abort/error terminal frame (bigimagine_error) is reported through
+ *  onTerminalFrame (the caller decides what to show, per rp-streaming-plan.md Edge Cases); the
+ *  stream still ends with [DONE] and resolves normally either way. Passing onDelta implies
+ *  stream: true; the body is byte-identical to the non-streaming call otherwise.
  *
  *  Deliberately omits `model` from the body: httpServer.ts's handleChatCompletions treats
  *  body.model as a real per-request override (`options.model ?? config.model` in the LLM
@@ -165,20 +179,118 @@ export async function chatCompletion(
   chatId?: string,
   attachments?: StagedAttachment[],
   images?: { mimeType: string; base64: string }[],
+  onDelta?: (textDelta: string) => void,
+  onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
 ): Promise<ChatCompletionResponse> {
+  const streaming = !!onDelta;
   const res = await fetch('/v1/chat/completions', {
     method: 'POST',
     headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
     body: JSON.stringify({
       messages,
-      stream: false,
+      stream: streaming,
       ...(chatId ? { chat_id: chatId } : {}),
       ...(attachments?.length ? { attachments } : {}),
       ...(images?.length ? { images } : {}),
     }),
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.json() as Promise<ChatCompletionResponse>;
+  if (!streaming) return res.json() as Promise<ChatCompletionResponse>;
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('text/event-stream')) {
+    // Defensive fallback for a proxy/server that buffered the whole reply instead of streaming
+    // (principle §6's graceful degradation at the HTTP boundary): surface it as one whole-reply
+    // delta so the caller's live-fill still shows the text, then resolve normally.
+    const buffered = (await res.json()) as ChatCompletionResponse;
+    const bufferedContent = buffered.choices?.[0]?.message?.content ?? '';
+    if (bufferedContent) onDelta(bufferedContent);
+    return buffered;
+  }
+  const { id, created, model, content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame);
+  return {
+    id,
+    object: 'chat.completion',
+    created,
+    model,
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+  };
+}
+
+/** Reads a streaming SSE response to completion: relays every content delta to onDelta in arrival
+ *  order, reports the abort/error terminal frame through onTerminalFrame (the stream does not end
+ *  there — [DONE] still follows), and resolves once [DONE] arrives. The wire format is the
+ *  server's OpenAI-compatible framing: `data: {chunk json}` blocks separated by blank lines,
+ *  `data: {bigimagine_error frame}` when the turn was aborted or failed mid-stream, and a final
+ *  `data: [DONE]` terminator. Chunk JSON carries id/created/model on every frame (captured here
+ *  from the first one seen) and `choices[0].delta.content` per text piece; non-JSON or comment
+ *  lines are ignored. */
+async function consumeSseCompletionStream(
+  res: Response,
+  onDelta: (textDelta: string) => void,
+  onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
+): Promise<{ id: string; created: number; model: string; content: string }> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new ApiError(0, 'streaming response has no body');
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let id = '';
+  let created = 0;
+  let model = '';
+  const contentParts: string[] = [];
+
+  const handleDataPayload = (payload: string): boolean => {
+    // Returns true once the stream is done ([DONE] seen); false to keep reading.
+    const trimmed = payload.trim();
+    if (trimmed === '[DONE]') return true;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return false; // keep-alive or comment line — nothing to do
+    }
+    if (typeof parsed !== 'object' || parsed === null) return false;
+    const chunk = parsed as {
+      id?: string;
+      created?: number;
+      model?: string;
+      bigimagine_error?: unknown;
+      choices?: { delta?: { content?: unknown }; finish_reason?: string }[];
+    };
+    if (chunk.bigimagine_error === true) {
+      // Abort/error terminal frame — report it and keep reading; [DONE] follows and ends the
+      // stream normally so the caller's resolve-on-[DONE] shape holds either way.
+      onTerminalFrame?.(parsed as StreamingTerminalFrame);
+      return false;
+    }
+    if (chunk.id) id = chunk.id;
+    if (chunk.created) created = chunk.created;
+    if (chunk.model) model = chunk.model;
+    const deltaContent = chunk.choices?.[0]?.delta?.content;
+    if (typeof deltaContent === 'string') {
+      contentParts.push(deltaContent);
+      onDelta(deltaContent);
+    }
+    return false;
+  };
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line.startsWith('data: ')) {
+        if (handleDataPayload(line.slice('data: '.length))) {
+          // [DONE] seen — stop reading the body entirely; the turn is persisted server-side.
+          await reader.cancel().catch(() => {});
+          return { id, created: created || Math.floor(Date.now() / 1000), model, content: contentParts.join('') };
+        }
+      }
+    }
+  }
+  return { id, created: created || Math.floor(Date.now() / 1000), model, content: contentParts.join('') };
 }
 
 /** GET /v1/chat/status — polled by ChatView while `sending` is true, alongside the still-in-flight
@@ -410,18 +522,44 @@ export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier
 /** Swipe capability on the last LLM response — messageId must be the chat's current last message.
  *  'prev'/'next' mostly just swap to an already-stored variant (no LLM call); 'next' past the
  *  newest stored variant triggers a fresh in-place regeneration instead — this is also what
- *  "Rerun" is now, so the Rerun button just calls this with direction: 'next'. */
-export function swipeMessage(
+ *  "Rerun" is now, so the Rerun button just calls this with direction: 'next'.
+ *
+ *  Streaming regeneration (onDelta provided): only meaningful for the direction 'next'
+ *  needs_regenerate case, where the request body gains `stream: true` and the response is the
+ *  same SSE chunk framing as chatCompletion's streaming mode (see consumeSseCompletionStream) —
+ *  there is no SwipeResult JSON on the wire. The streamed text is recordSwipe'd server-side by
+ *  the time [DONE] arrives, so the caller should refresh the canonical row afterward; the
+ *  returned minimal message carries the accumulated content for immediate display. prev/next
+ *  cycling (no LLM call) is unaffected — passing onDelta there is a no-op on the response shape. */
+export async function swipeMessage(
   chatId: string,
   messageId: string,
   direction: 'prev' | 'next',
   apiKey: string | null,
+  onDelta?: (textDelta: string) => void,
+  onTerminalFrame?: (frame: StreamingTerminalFrame) => void,
 ): Promise<SwipeResult> {
-  return jsonRequest<SwipeResult>(
-    `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`,
-    apiKey,
-    { method: 'POST', body: { direction } },
-  );
+  const path = `/v1/chats/${encodeURIComponent(chatId)}/messages/${encodeURIComponent(messageId)}/swipe`;
+  if (!onDelta) {
+    return jsonRequest<SwipeResult>(path, apiKey, { method: 'POST', body: { direction } });
+  }
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
+    body: JSON.stringify({ direction, stream: true }),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('text/event-stream')) {
+    // Defensive fallback (principle §6 at the HTTP boundary): a buffered SwipeResult JSON — only
+    // possible if a proxy or the server decided not to stream; surface it as one whole-reply
+    // delta, matching chatCompletion's equivalent fallback.
+    const buffered = (await res.json()) as SwipeResult;
+    if ('message' in buffered && buffered.message?.content) onDelta(buffered.message.content);
+    return buffered;
+  }
+  const { content } = await consumeSseCompletionStream(res, onDelta, onTerminalFrame);
+  return { message: { messageId, role: 'assistant', content, createdAt: new Date().toISOString() } };
 }
 
 /** Branches a new chat from this one at fromMessageId (inclusive) — docs/chat-memory.md. Returns
