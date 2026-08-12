@@ -1342,7 +1342,11 @@ export default function ChatView({
     if (!activeChat) return;
     try {
       const forked = await forkChat(activeChat.chatId, messageId, apiKey);
-      onOpenChat?.(forked.chatId, forked.title);
+      if (activeChat.kind === 'rp') {
+        onOpenRp?.(forked.chatId, forked.title);
+      } else {
+        onOpenChat?.(forked.chatId, forked.title);
+      }
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to fork chat');
     }

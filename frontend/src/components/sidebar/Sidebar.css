@@ -237,16 +237,11 @@
 .sidebar-row-delete {
   background: none;
   border: none;
-  color: var(--color-text-faint);
+  color: var(--color-text-muted);
   cursor: pointer;
   font-size: var(--font-size-base);
   padding: 0 0.2rem;
-  visibility: hidden;
-}
-
-.sidebar-row:hover .sidebar-row-delete,
-.sidebar-group-name:hover .sidebar-row-delete {
-  visibility: visible;
+  flex-shrink: 0;
 }
 
 .sidebar-row-delete:hover {
