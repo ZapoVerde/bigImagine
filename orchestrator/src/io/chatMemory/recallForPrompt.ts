@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/recallForPrompt.ts
- * @stamp 2026-08-08
+ * @stamp 2026-08-15
  * @architectural-role IO Wrapper — CNZ-style silent per-turn recall, injected at prompt assembly
  * @description
  * The read-path twin of the recall_chat_history / recall_canon_facts tools, but CNZ-shaped:
@@ -45,6 +45,15 @@
  * (httpServer.ts's buildChatMemorySystemPrompt) — the query uses the full untrimmed history so
  * the user's last entry is always the newest pair, exactly CNZ's `allPairs.slice(-horizonPairs)`.
  *
+ * Since 2026-08-15 the chunk lane's fixed LIMIT is distribution-aware (docs/plans/
+ * rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port): the query fetches a candidate
+ * pool sized by the Pool Multiple setting (chat_memory_auto_recall_pool_multiple), then
+ * io/chatMemory/recallCutoff.ts — the ported rag/cutoff.js pool-statistics stage — decides how
+ * many of those candidates are actually worth injecting (mean/σ threshold in raw distance
+ * space, Min floor / Max ceiling). A quiet turn with no real archive match now injects fewer
+ * chunks instead of always exactly top-k; the decision and its statistics are logged per call.
+ * The canon_facts lane is deliberately untouched (that's Stage 2).
+ *
  * @api-declaration
  * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
  * buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages) ->
@@ -65,6 +74,7 @@ import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { DbSession } from '../postgres.js';
 import type { LlmMessage } from '../llm/types.js';
 import { toPgVectorLiteral } from '../../util/pgvector.js';
+import { applyCutoff, poolSize, type CutoffMode } from './recallCutoff.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
@@ -76,8 +86,26 @@ export const AUTO_RECALL_PAIRS = 3;
 /** How many full-turn chunks to pull. CNZ's chat lane defaults to 2-8 with a distributional
  *  cutoff; "a number of full turn text" (user) — a fixed handful, content verbatim, is the
  *  basics-shaped version of that. Same default/fallback split as AUTO_RECALL_PAIRS: the live
- *  value is chat_memory_auto_recall_chunk_top_k. */
+ *  value is chat_memory_auto_recall_chunk_top_k, now understood as the **Max** ceiling the
+ *  dynamic cutoff clamps to (migration 0091, recallCutoff.ts). */
 export const AUTO_RECALL_CHUNK_TOP_K = 4;
+
+/** The Min floor for the dynamic chunk cutoff (migration 0091) — how many chunks are injected
+ *  at minimum even when the distribution says nothing clears the threshold. Canonize's own
+ *  `ragChatMin` default (2) unchanged. The live value is chat_memory_auto_recall_chunk_min. */
+const DEFAULT_CHUNK_MIN = 2;
+
+/** Pool Multiple P (migration 0091) — candidate pool = P × Max (min 6, recallCutoff.poolSize),
+ *  Canonize's `ragPoolMultiple` default (2). The live value is
+ *  chat_memory_auto_recall_pool_multiple; parsed as a float, not an integer (Canonize's own P is
+ *  not restricted to whole numbers either). */
+const DEFAULT_POOL_MULTIPLE = 2;
+
+/** Cutoff Mode (migration 0091) — how strict the threshold is: 'mean' keeps everything above the
+ *  pool's mean distance, 'mean+1sd'/'mean+2sd' demand results stand below mean − 1/2×σ (distance
+ *  space, where lower is better). Canonize's `ragCutoffMode` default ('mean'). The live value is
+ *  chat_memory_auto_recall_cutoff_mode; an unrecognized string falls back to 'mean'. */
+const DEFAULT_CUTOFF_MODE: CutoffMode = 'mean';
 
 const DEFAULT_FACT_TOP_K = 8;
 
@@ -93,10 +121,20 @@ const MAX_FACT_TOP_K = 50;
  *  setting UI will present a much smaller range. */
 const MAX_CHUNK_TOP_K = 12;
 
+/** Sanity cap for the computed pool size (migration 0091). A corrupt chat_memory_auto_recall_
+ *  pool_multiple (e.g. a stray '9999') must not turn into an unbounded `SELECT ... LIMIT`
+ *  against chat_chunks — cap the pool the same way MAX_CHUNK_TOP_K caps the Max setting. 40 is
+ *  generous relative to MAX_CHUNK_TOP_K's 12: the pool is a statistics sample, never injected
+ *  verbatim, so it can be a few multiples of the ceiling without ever shipping that many rows. */
+const MAX_POOL_SIZE = 40;
+
 interface ChunkRow {
   ordinal: number;
   summary: string;
   content: string;
+  /** Raw L2 distance to the query vector (`vector_embed <-> $query`), selected so the cutoff
+   *  can measure the pool's distribution (recallCutoff.ts) before deciding how many to keep. */
+  distance: number;
 }
 
 interface CanonFactRow {
@@ -195,11 +233,14 @@ export function buildAutoRecallParts(
 ): Promise<AutoRecallParts> {
   return (async () => {
     try {
-      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw] = await Promise.all([
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw] = await Promise.all([
         settings.get('chat_memory_auto_recall_enabled'),
         settings.get('chat_memory_auto_recall_pairs'),
         settings.get('chat_memory_auto_recall_chunk_top_k'),
         settings.get('canon_recall_top_k'),
+        settings.get('chat_memory_auto_recall_chunk_min'),
+        settings.get('chat_memory_auto_recall_pool_multiple'),
+        settings.get('chat_memory_auto_recall_cutoff_mode'),
       ]);
 
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
@@ -216,6 +257,24 @@ export function buildAutoRecallParts(
           ? Math.min(parsedChunkTopK, MAX_CHUNK_TOP_K)
           : AUTO_RECALL_CHUNK_TOP_K;
 
+      // The dynamic cutoff's three knobs (migration 0091, recallCutoff.ts), same parse-with-
+      // fallback shape as every other setting here. min clamps to the Max (chunkTopK) at read
+      // time so a misconfigured min > max can never make the floor step exceed the ceiling.
+      const parsedChunkMin = chunkMinRaw ? parseInt(chunkMinRaw, 10) : NaN;
+      const chunkMin =
+        Number.isFinite(parsedChunkMin) && parsedChunkMin > 0
+          ? Math.min(parsedChunkMin, chunkTopK)
+          : Math.min(DEFAULT_CHUNK_MIN, chunkTopK);
+
+      const parsedPoolMultiple = poolMultipleRaw ? parseFloat(poolMultipleRaw) : NaN;
+      const poolMultiple =
+        Number.isFinite(parsedPoolMultiple) && parsedPoolMultiple > 0 ? parsedPoolMultiple : DEFAULT_POOL_MULTIPLE;
+
+      const cutoffMode: CutoffMode =
+        cutoffModeRaw === 'mean' || cutoffModeRaw === 'mean+1sd' || cutoffModeRaw === 'mean+2sd'
+          ? cutoffModeRaw
+          : DEFAULT_CUTOFF_MODE;
+
       const parsedFactTopK = factTopKRaw ? parseInt(factTopKRaw, 10) : NaN;
       const factTopK =
         Number.isFinite(parsedFactTopK) && parsedFactTopK > 0 ? Math.min(parsedFactTopK, MAX_FACT_TOP_K) : DEFAULT_FACT_TOP_K;
@@ -226,13 +285,19 @@ export function buildAutoRecallParts(
       const [vector] = await embeddings.embed([query]);
       if (!vector) return { chunks: [], facts: [] };
 
-      const [chunks, facts] = await Promise.all([
+      // The chunk lane fetches a candidate *pool* (Pool Multiple × Max, capped — recallCutoff's
+      // poolSize) rather than exactly Max rows: the cutoff needs the pool's distribution to
+      // decide how many of its leading rows are worth injecting. The canon_facts lane stays a
+      // flat LIMIT factTopK — untouched until Stage 2.
+      const pool = Math.min(poolSize(chunkTopK, poolMultiple), MAX_POOL_SIZE);
+
+      const [chunkRows, facts] = await Promise.all([
         session.query<ChunkRow>(
-          `select ordinal, summary, content
+          `select ordinal, summary, content, vector_embed <-> $3 as distance
            from chat_chunks
            where user_id = $1 and chat_id = $2
            order by vector_embed <-> $3
-           limit ${chunkTopK}`,
+           limit ${pool}`,
           [userId, chatId, toPgVectorLiteral(vector)],
         ),
         session.query<CanonFactRow>(
@@ -253,6 +318,25 @@ export function buildAutoRecallParts(
           [userId, chatId, toPgVectorLiteral(vector), factTopK],
         ),
       ]);
+
+      // Decide how many pool rows clear the threshold, then keep exactly that many (the rows
+      // arrive best-first, so a leading slice is the right cut). Telemetry per call — the seam
+      // where a "nothing worth recalling" turn becomes visible instead of silently injecting
+      // mediocre matches (bi_principles.md §11).
+      const { keepCount, stats } = applyCutoff(chunkRows.map((r) => r.distance), {
+        min: chunkMin,
+        max: chunkTopK,
+        cutoffMode,
+      });
+      const chunks = chunkRows.slice(0, keepCount);
+      log.info('buildAutoRecallParts: chunk cutoff applied', {
+        userId,
+        chatId,
+        min: chunkMin,
+        max: chunkTopK,
+        keepCount,
+        ...stats,
+      });
 
       return { chunks, facts };
     } catch (err) {

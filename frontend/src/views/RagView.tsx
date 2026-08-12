@@ -59,6 +59,9 @@ export default function RagView() {
   const [selectedAutoRecallEnabled, setSelectedAutoRecallEnabled] = useState(true);
   const [selectedAutoRecallPairs, setSelectedAutoRecallPairs] = useState('');
   const [selectedAutoRecallChunkTopK, setSelectedAutoRecallChunkTopK] = useState('');
+  const [selectedAutoRecallMin, setSelectedAutoRecallMin] = useState('');
+  const [selectedAutoRecallPoolMultiple, setSelectedAutoRecallPoolMultiple] = useState('');
+  const [selectedAutoRecallCutoffMode, setSelectedAutoRecallCutoffMode] = useState<'mean' | 'mean+1sd' | 'mean+2sd'>('mean');
   const [selectedCanonRecallTopK, setSelectedCanonRecallTopK] = useState('');
   const [retrievalStatus, setRetrievalStatus] = useState('');
 
@@ -87,6 +90,9 @@ export default function RagView() {
     setSelectedAutoRecallEnabled(settings.autoRecallEnabled);
     setSelectedAutoRecallPairs(settings.autoRecallPairs === null ? '' : String(settings.autoRecallPairs));
     setSelectedAutoRecallChunkTopK(settings.autoRecallChunkTopK === null ? '' : String(settings.autoRecallChunkTopK));
+    setSelectedAutoRecallMin(settings.autoRecallMin === null ? '' : String(settings.autoRecallMin));
+    setSelectedAutoRecallPoolMultiple(settings.autoRecallPoolMultiple === null ? '' : String(settings.autoRecallPoolMultiple));
+    setSelectedAutoRecallCutoffMode(settings.autoRecallCutoffMode === null ? 'mean' : settings.autoRecallCutoffMode);
   }
 
   function applyCanonSettings(settings: CanonSettings) {
@@ -201,6 +207,17 @@ export default function RagView() {
     const autoRecallChunkTopK = Number(selectedAutoRecallChunkTopK);
     if (selectedAutoRecallChunkTopK && autoRecallChunkTopK !== chatMemorySettings.autoRecallChunkTopK) {
       memoryPatch.auto_recall_chunk_top_k = autoRecallChunkTopK;
+    }
+    const autoRecallMin = Number(selectedAutoRecallMin);
+    if (selectedAutoRecallMin && autoRecallMin !== chatMemorySettings.autoRecallMin) {
+      memoryPatch.auto_recall_chunk_min = autoRecallMin;
+    }
+    const autoRecallPoolMultiple = Number(selectedAutoRecallPoolMultiple);
+    if (selectedAutoRecallPoolMultiple && autoRecallPoolMultiple !== chatMemorySettings.autoRecallPoolMultiple) {
+      memoryPatch.auto_recall_pool_multiple = autoRecallPoolMultiple;
+    }
+    if (selectedAutoRecallCutoffMode !== (chatMemorySettings.autoRecallCutoffMode ?? 'mean')) {
+      memoryPatch.auto_recall_cutoff_mode = selectedAutoRecallCutoffMode;
     }
     if (selectedInjectBridgePrompt !== chatMemorySettings.injectBridgePrompt) memoryPatch.inject_bridge_prompt = selectedInjectBridgePrompt;
     if (selectedInjectPlotPrompt !== chatMemorySettings.injectPlotPrompt) memoryPatch.inject_plot_prompt = selectedInjectPlotPrompt;
@@ -450,7 +467,7 @@ export default function RagView() {
         <div className="status">How many trailing turn-pairs are embedded as the recall query (the knob behind AUTO_RECALL_PAIRS).</div>
         <br />
         <label>
-          Full-turn chunks injected
+          Chunk Max (full-turn chunks injected)
           <br />
           <input
             type="number"
@@ -461,7 +478,60 @@ export default function RagView() {
             placeholder="4"
           />
         </label>
-        <div className="status">How many archived full-turn chunks the silent recall injects (AUTO_RECALL_CHUNK_TOP_K, capped at 12).</div>
+        <div className="status">
+          The Max ceiling for archived full-turn chunks the silent recall injects (AUTO_RECALL_CHUNK_TOP_K, capped at 12) —
+          the most the dynamic cutoff will ever keep.
+        </div>
+        <br />
+        <label>
+          Chunk Min
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedAutoRecallMin}
+            onChange={(e) => setSelectedAutoRecallMin(e.target.value)}
+            placeholder="2"
+          />
+        </label>
+        <div className="status">
+          The Min floor: how many chunks are injected at minimum even when the pool distribution says nothing clears the
+          threshold (chat_memory_auto_recall_chunk_min). Clamped to the Max at read time.
+        </div>
+        <br />
+        <label>
+          Pool Multiple
+          <br />
+          <input
+            type="number"
+            min="1"
+            step="0.5"
+            value={selectedAutoRecallPoolMultiple}
+            onChange={(e) => setSelectedAutoRecallPoolMultiple(e.target.value)}
+            placeholder="2"
+          />
+        </label>
+        <div className="status">
+          The candidate pool the cutoff measures is Pool Multiple × Max (min 6, capped at 40) —
+          chat_memory_auto_recall_pool_multiple, Canonize's own ragPoolMultiple.
+        </div>
+        <br />
+        <label>
+          Cutoff Mode
+          <br />
+          <select
+            value={selectedAutoRecallCutoffMode}
+            onChange={(e) => setSelectedAutoRecallCutoffMode(e.target.value as 'mean' | 'mean+1sd' | 'mean+2sd')}
+          >
+            <option value="mean">Mean</option>
+            <option value="mean+1sd">Mean + 1 SD</option>
+            <option value="mean+2sd">Mean + 2 SD</option>
+          </select>
+        </label>
+        <div className="status">
+          How strict the threshold is, in raw distance space where lower is better: Mean keeps everything closer than the
+          pool's mean distance; the +SD modes demand results stand below mean − 1/2×σ (chat_memory_auto_recall_cutoff_mode).
+        </div>
         <br />
         <label>
           Canon facts injected

@@ -1329,6 +1329,9 @@ export async function adminSetChatMemorySettings(
     auto_recall_enabled?: boolean;
     auto_recall_pairs?: number;
     auto_recall_chunk_top_k?: number;
+    auto_recall_chunk_min?: number;
+    auto_recall_pool_multiple?: number;
+    auto_recall_cutoff_mode?: string;
     inject_bridge_prompt?: string;
     inject_plot_prompt?: string;
     inject_auto_recall_prompt?: string;

@@ -88,6 +88,22 @@
  * was already a key; it is read by the same module. Unset or corrupt values fall back to the
  * built-in defaults, same fail-open shape as every other numeric setting here.
  *
+ * chat_memory_auto_recall_chunk_min / chat_memory_auto_recall_pool_multiple /
+ * chat_memory_auto_recall_cutoff_mode (io/chatMemory/recallCutoff.ts, migration 0091,
+ * docs/plans/rag-dynamic-cutoff-plan.md — Stage 1 of the CNZ retrieval port) are the RAG dynamic
+ * cutoff's three knobs, read live on every RP prompt assembly alongside the 0077 trio, no
+ * restart. auto_recall_chunk_top_k is now the **Max** ceiling the cutoff clamps to; chunk_min is
+ * the Min floor (default '2' — how many chunks are injected at minimum even when the distribution
+ * says nothing clears the threshold; Canonize's own ragChatMin default), pool_multiple is the
+ * candidate-pool sizing factor P (default '2' — the pool the cutoff measures is P × Max, min 6,
+ * Canonize's ragPoolMultiple; parsed as a float, not an integer, since P is not restricted to
+ * whole numbers), and cutoff_mode is the strictness selector, one of 'mean' | 'mean+1sd' |
+ * 'mean+2sd' in raw L2 distance space where lower is better (default 'mean'). The last two carry
+ * no chunk_ prefix deliberately — Stage 2 reuses them unchanged for the canon_facts query, the
+ * same per-channel Min/Max + shared Pool Multiple/Cutoff Mode split Canonize's own settings use.
+ * Unset or corrupt values fall back to the built-in defaults, same fail-open shape as every
+ * other setting here.
+ *
  * canon_recall_top_k/canon_extraction_prompt (docs/canonize-plan.md §6, plugins/canonize,
  * migration 0048) are the Canonize feature's two settings: canon_recall_top_k (integer-as-text,
  * default '8' — how many facts recall_canon_facts returns) is read live by the recall tool on
@@ -223,6 +239,9 @@ export const SETTING_NAMES = [
   'chat_memory_auto_recall_enabled',
   'chat_memory_auto_recall_pairs',
   'chat_memory_auto_recall_chunk_top_k',
+  'chat_memory_auto_recall_chunk_min',
+  'chat_memory_auto_recall_pool_multiple',
+  'chat_memory_auto_recall_cutoff_mode',
   'chat_memory_inject_bridge_prompt',
   'chat_memory_inject_plot_prompt',
   'chat_memory_inject_auto_recall_prompt',

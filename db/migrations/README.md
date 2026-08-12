@@ -528,3 +528,19 @@ Already applied by hand, not run automatically (see the file for the exact comma
   orchestrator_settings CHECK re-list (67 keys, superset per 0048's warning, in one transaction —
   same pattern 0087 used). No prompt-stack wiring here — that's plan steps 2-4. Hand-applied to the
   live DB.
+- `0091_chat_memory_auto_recall_cutoff.sql` — the RAG dynamic cutoff's three knobs
+  (docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port —
+  `io/chatMemory/recallCutoff.ts`): `chat_memory_auto_recall_chunk_min` (integer-as-text, default
+  `'2'` — the Min floor: how many archived full-turn chunks are injected at minimum even when the
+  pool distribution says nothing clears the threshold; Canonize's own `ragChatMin` default),
+  `chat_memory_auto_recall_pool_multiple` (float-as-text, default `'2'` — Pool Multiple P: the
+  candidate pool the cutoff measures is P × Max, min 6, Canonize's `ragPoolMultiple`; parsed as a
+  float, not an integer), and `chat_memory_auto_recall_cutoff_mode` (enum-as-text, one of
+  `'mean' | 'mean+1sd' | 'mean+2sd'`, default `'mean'` — how strict the threshold is, in raw L2
+  distance space where lower is better). Read live on every RP prompt assembly alongside the 0077
+  trio; unset/corrupt values fall back to the constants (same fail-open shape). Deliberately no
+  `chunk_`/`fact_` prefix on pool_multiple/cutoff_mode — Stage 2 reuses those two shared knobs
+  unchanged for the `canon_facts` query, mirroring Canonize's own per-channel Min/Max + shared
+  Pool Multiple/Cutoff Mode settings shape. The key list is the *complete* current vocabulary
+  (all of 0010–0090, 70 keys), not the diff — the CHECK is rebuilt wholesale, so a fresh volume
+  must land on the same constraint the live DB has. Idempotent hand-apply one-shot.

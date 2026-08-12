@@ -1147,6 +1147,15 @@ export interface ChatMemorySettings {
   autoRecallEnabled: boolean;
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;
+  // RAG dynamic-cutoff knobs (migration 0091, io/chatMemory/recallCutoff.ts —
+  // docs/plans/rag-dynamic-cutoff-plan.md, Stage 1 of the CNZ retrieval port) — read live on
+  // every RP prompt assembly alongside the 0077 trio, no restart. autoRecallChunkTopK above is
+  // the **Max** ceiling the cutoff clamps to; these three are the Min floor, the Pool Multiple P
+  // (candidate pool = P × Max, min 6), and the strictness mode in raw-distance space where lower
+  // is better. null = unset (use the built-in default).
+  autoRecallMin: number | null;
+  autoRecallPoolMultiple: number | null;
+  autoRecallCutoffMode: 'mean' | 'mean+1sd' | 'mean+2sd' | null;
 }
 
 export async function getChatMemorySettings(store: OrchestratorSettingsStore): Promise<ChatMemorySettings> {
@@ -1164,6 +1173,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     autoRecallEnabledRaw,
     autoRecallPairsRaw,
     autoRecallChunkTopKRaw,
+    autoRecallChunkMinRaw,
+    autoRecallPoolMultipleRaw,
+    autoRecallCutoffModeRaw,
     injectBridgePrompt,
     injectPlotPrompt,
     injectAutoRecallPrompt,
@@ -1183,6 +1195,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_auto_recall_enabled'),
     store.get('chat_memory_auto_recall_pairs'),
     store.get('chat_memory_auto_recall_chunk_top_k'),
+    store.get('chat_memory_auto_recall_chunk_min'),
+    store.get('chat_memory_auto_recall_pool_multiple'),
+    store.get('chat_memory_auto_recall_cutoff_mode'),
     store.get('chat_memory_inject_bridge_prompt'),
     store.get('chat_memory_inject_plot_prompt'),
     store.get('chat_memory_inject_auto_recall_prompt'),
@@ -1211,6 +1226,12 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     autoRecallEnabled: autoRecallEnabledRaw !== 'false',
     autoRecallPairs: autoRecallPairsRaw ? Number(autoRecallPairsRaw) : null,
     autoRecallChunkTopK: autoRecallChunkTopKRaw ? Number(autoRecallChunkTopKRaw) : null,
+    autoRecallMin: autoRecallChunkMinRaw ? Number(autoRecallChunkMinRaw) : null,
+    autoRecallPoolMultiple: autoRecallPoolMultipleRaw ? Number(autoRecallPoolMultipleRaw) : null,
+    autoRecallCutoffMode:
+      autoRecallCutoffModeRaw === 'mean' || autoRecallCutoffModeRaw === 'mean+1sd' || autoRecallCutoffModeRaw === 'mean+2sd'
+        ? autoRecallCutoffModeRaw
+        : null,
     injectBridgePrompt: injectBridgePrompt || DEFAULT_INJECT_BRIDGE_PROMPT,
     injectBridgePromptIsDefault: !injectBridgePrompt,
     injectPlotPrompt: injectPlotPrompt || DEFAULT_INJECT_PLOT_PROMPT,
@@ -1238,6 +1259,9 @@ export interface SetChatMemorySettingsBody {
   autoRecallEnabled?: boolean;
   autoRecallPairs?: number;
   autoRecallChunkTopK?: number;
+  autoRecallMin?: number;
+  autoRecallPoolMultiple?: number;
+  autoRecallCutoffMode?: string;
   injectBridgePrompt?: string;
   injectPlotPrompt?: string;
   injectAutoRecallPrompt?: string;
@@ -1265,6 +1289,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     auto_recall_enabled,
     auto_recall_pairs,
     auto_recall_chunk_top_k,
+    auto_recall_chunk_min,
+    auto_recall_pool_multiple,
+    auto_recall_cutoff_mode,
     inject_bridge_prompt,
     inject_plot_prompt,
     inject_auto_recall_prompt,
@@ -1285,6 +1312,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     auto_recall_enabled === undefined &&
     auto_recall_pairs === undefined &&
     auto_recall_chunk_top_k === undefined &&
+    auto_recall_chunk_min === undefined &&
+    auto_recall_pool_multiple === undefined &&
+    auto_recall_cutoff_mode === undefined &&
     inject_bridge_prompt === undefined &&
     inject_plot_prompt === undefined &&
     inject_auto_recall_prompt === undefined &&
@@ -1306,6 +1336,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (auto_recall_enabled !== undefined && typeof auto_recall_enabled !== 'boolean') return undefined;
   if (auto_recall_pairs !== undefined && (typeof auto_recall_pairs !== 'number' || auto_recall_pairs <= 0)) return undefined;
   if (auto_recall_chunk_top_k !== undefined && (typeof auto_recall_chunk_top_k !== 'number' || auto_recall_chunk_top_k <= 0)) return undefined;
+  if (auto_recall_chunk_min !== undefined && (typeof auto_recall_chunk_min !== 'number' || auto_recall_chunk_min <= 0)) return undefined;
+  if (auto_recall_pool_multiple !== undefined && (typeof auto_recall_pool_multiple !== 'number' || auto_recall_pool_multiple <= 0)) return undefined;
+  if (auto_recall_cutoff_mode !== undefined && typeof auto_recall_cutoff_mode !== 'string') return undefined;
   if (inject_bridge_prompt !== undefined && typeof inject_bridge_prompt !== 'string') return undefined;
   if (inject_plot_prompt !== undefined && typeof inject_plot_prompt !== 'string') return undefined;
   if (inject_auto_recall_prompt !== undefined && typeof inject_auto_recall_prompt !== 'string') return undefined;
@@ -1325,6 +1358,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     autoRecallEnabled: auto_recall_enabled as boolean | undefined,
     autoRecallPairs: auto_recall_pairs as number | undefined,
     autoRecallChunkTopK: auto_recall_chunk_top_k as number | undefined,
+    autoRecallMin: auto_recall_chunk_min as number | undefined,
+    autoRecallPoolMultiple: auto_recall_pool_multiple as number | undefined,
+    autoRecallCutoffMode: auto_recall_cutoff_mode as string | undefined,
     injectBridgePrompt: inject_bridge_prompt as string | undefined,
     injectPlotPrompt: inject_plot_prompt as string | undefined,
     injectAutoRecallPrompt: inject_auto_recall_prompt as string | undefined,
@@ -1347,6 +1383,9 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.autoRecallEnabled !== undefined) await store.set('chat_memory_auto_recall_enabled', body.autoRecallEnabled ? 'true' : 'false');
   if (body.autoRecallPairs !== undefined) await store.set('chat_memory_auto_recall_pairs', String(body.autoRecallPairs));
   if (body.autoRecallChunkTopK !== undefined) await store.set('chat_memory_auto_recall_chunk_top_k', String(body.autoRecallChunkTopK));
+  if (body.autoRecallMin !== undefined) await store.set('chat_memory_auto_recall_chunk_min', String(body.autoRecallMin));
+  if (body.autoRecallPoolMultiple !== undefined) await store.set('chat_memory_auto_recall_pool_multiple', String(body.autoRecallPoolMultiple));
+  if (body.autoRecallCutoffMode !== undefined) await store.set('chat_memory_auto_recall_cutoff_mode', body.autoRecallCutoffMode);
   if (body.injectBridgePrompt !== undefined) await store.set('chat_memory_inject_bridge_prompt', body.injectBridgePrompt);
   if (body.injectPlotPrompt !== undefined) await store.set('chat_memory_inject_plot_prompt', body.injectPlotPrompt);
   if (body.injectAutoRecallPrompt !== undefined) await store.set('chat_memory_inject_auto_recall_prompt', body.injectAutoRecallPrompt);

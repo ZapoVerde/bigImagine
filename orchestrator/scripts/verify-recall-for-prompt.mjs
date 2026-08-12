@@ -1,5 +1,5 @@
 // Proves io/chatMemory/recallForPrompt.ts — the CNZ-style auto-recall block that
-// buildChatMemorySystemPrompt's 'rp' branch appends at prompt-assembly time. Three things to
+// buildChatMemorySystemPrompt's 'rp' branch appends at prompt-assembly time. Four things to
 // pin down here (verify-server.mjs only smoke-covers the read via its empty-row stubs):
 //   1. buildAutoRecallQuery's turn-pairing: the last AUTO_RECALL_PAIRS pairs, a trailing lone
 //      user message (the just-sent entry) counts as its own pair, leading assistants are
@@ -8,6 +8,10 @@
 //      for canon rows, the "Recalled from earlier..." header only when something matched.
 //   3. The fail-open contract: an embedding failure or a DB throw must resolve to '' — never
 //      reject, never break the caller's Promise.all.
+//   4. The RAG dynamic cutoff (migration 0091, recallCutoff.ts): the chunks SQL fetches a
+//      candidate pool (Pool Multiple × Max, capped at 40) and the settings-driven threshold
+//      decides how many of its leading rows actually get injected. The pure math itself is
+//      pinned by verify-recall-cutoff.mjs; this file proves the settings → pool → slice wiring.
 
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
@@ -102,7 +106,7 @@ function fakeSettings(value) {
 {
   const session = createFakeSession({
     chunkRows: [
-      { ordinal: 7, summary: 'old scene', content: 'User: x\nAssistant: y' },
+      { ordinal: 7, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1 },
     ],
     factRows: [
       { fact_id: 'f1', category: 'plot', summary: 'the heist', detail: 'planned for Tuesday' },
@@ -146,7 +150,7 @@ function fakeSettings(value) {
 {
   // Corrupt canon_recall_top_k must fall back to the default, never reach `limit NaN`.
   const session = createFakeSession({
-    chunkRows: [{ ordinal: 1, summary: null, content: 't' }],
+    chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1 }],
   });
   const block = await buildAutoRecallPrompt(
     session,
@@ -197,7 +201,7 @@ function fakeSettings(value) {
 // --- 4. The three retrieval knobs (migration 0077) drive the read path ---
 {
   // enabled='false' must short-circuit before any embedding/DB call (the master switch).
-  const session = createFakeSession({ chunkRows: [{ ordinal: 1, summary: null, content: 't' }] });
+  const session = createFakeSession({ chunkRows: [{ ordinal: 1, summary: null, content: 't', distance: 0.1 }] });
   const seen = [];
   const probingEmbeddings = {
     name: 's',
@@ -263,7 +267,14 @@ function fakeSettings(value) {
     seenQueries[0] === 'User: p2u Assistant: p2a User: p3u Assistant: p3a',
     'auto_recall_pairs=2 keeps only the last 2 turn-pairs in the query',
   );
-  assert(seenSql.some((sql) => /from chat_chunks[\s\S]*limit 2/.test(sql)), 'auto_recall_chunk_top_k=2 becomes the chunks SQL limit');
+  assert(
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 6/.test(sql)),
+    'auto_recall_chunk_top_k=2 sizes the candidate pool (poolSize(2, 2) = 6), not a direct LIMIT 2',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('as distance')),
+    'the chunks query selects the raw distance so the cutoff can measure the pool',
+  );
 }
 {
   // A corrupt chunk top-k falls back to the constant default, never a NaN limit.
@@ -285,8 +296,8 @@ function fakeSettings(value) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 4/.test(sql)),
-    'a corrupt auto_recall_chunk_top_k falls back to the default limit (4), not NaN',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 8/.test(sql)),
+    'a corrupt auto_recall_chunk_top_k falls back to the default Max (4) → pool 8, never NaN',
   );
 }
 {
@@ -309,14 +320,184 @@ function fakeSettings(value) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(
-    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 12/.test(sql)),
-    'an oversized auto_recall_chunk_top_k clamps to the MAX_CHUNK_TOP_K cap (12)',
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 24/.test(sql)),
+    'an oversized auto_recall_chunk_top_k clamps to the MAX_CHUNK_TOP_K cap (12) → pool 24',
+  );
+}
+
+// --- 5. The RAG dynamic cutoff (migration 0091, recallCutoff.ts): the pool + threshold drive
+// what actually gets injected ---
+function countChunkBlocks(block) {
+  return (block.match(/<memory turns=/g) || []).length;
+}
+
+{
+  // A distance-spread pool where mean and mean+1sd return visibly different counts (the plan's
+  // own wiring test): top_k=8 → pool = poolSize(8, 2) = 16; mean keeps the cluster clamped to
+  // Max (8), mean+1sd keeps only the clearly-matched tail (4). Settings flow into the cutoff.
+  const spread = [0.15, 0.18, 0.22, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
+  const chunkRows = spread.map((distance, i) => ({ ordinal: i + 1, summary: null, content: `c${i}`, distance }));
+  const makeSession = () => ({
+    async query(sql) {
+      if (sql.includes('from chat_chunks')) return chunkRows;
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  });
+  const meanBlock = await buildAutoRecallPrompt(
+    makeSession(),
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_top_k', '8'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const sdBlock = await buildAutoRecallPrompt(
+    makeSession(),
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_top_k', '8'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean+1sd'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countChunkBlocks(meanBlock) === 8,
+    `mean mode injects the strong cluster clamped to Max (got ${countChunkBlocks(meanBlock)})`,
+  );
+  assert(
+    countChunkBlocks(sdBlock) === 4,
+    `mean+1sd injects visibly fewer chunks (got ${countChunkBlocks(sdBlock)})`,
+  );
+}
+{
+  // A flat pool (no signal) collapses to the Chunk Min floor — the cutoff actually cuts.
+  const flat = Array.from({ length: 16 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `f${i}`, distance: 0.5 }));
+  const session = {
+    async query(sql) {
+      if (sql.includes('from chat_chunks')) return flat;
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_min', '3'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countChunkBlocks(block) === 3,
+    `a flat pool collapses to the Chunk Min floor (3), not the full pool (got ${countChunkBlocks(block)})`,
+  );
+}
+{
+  // A min above the Max clamps to the Max at read time — it can never bypass the cutoff by
+  // being larger than the pool (top_k=2 → pool 6; min=6 would bypass, clamped min=2 floors).
+  const flat = Array.from({ length: 6 }, (_, i) => ({ ordinal: i + 1, summary: null, content: `g${i}`, distance: 0.5 }));
+  const session = {
+    async query(sql) {
+      if (sql.includes('from chat_chunks')) return flat;
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_top_k', '2'],
+        ['chat_memory_auto_recall_chunk_min', '6'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countChunkBlocks(block) === 2,
+    `a min above the Max clamps to the Max (2) — the floor can never exceed the ceiling (got ${countChunkBlocks(block)})`,
+  );
+}
+{
+  // Pool Multiple drives the SQL pool: P=5 with top_k=2 → poolSize(2, 5) = 10 → LIMIT 10.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_top_k', '2'],
+        ['chat_memory_auto_recall_pool_multiple', '5'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 10/.test(sql)),
+    'chat_memory_auto_recall_pool_multiple=5 sizes the pool (poolSize(2, 5) = 10)',
+  );
+}
+{
+  // The pool caps at MAX_POOL_SIZE (40): top_k=999 clamps to 12, P=5 → poolSize(12, 5) = 60 → 40.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['chat_memory_auto_recall_chunk_top_k', '999'],
+        ['chat_memory_auto_recall_pool_multiple', '5'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    seenSql.some((sql) => /from chat_chunks[\s\S]*limit 40/.test(sql)),
+    'the candidate pool is capped at MAX_POOL_SIZE (40), never an unbounded LIMIT',
   );
 }
 
 // --- Sanity: the exported constants are what the wiring depends on ---
 assert(AUTO_RECALL_PAIRS === 3, 'AUTO_RECALL_PAIRS mirrors Canonize ragClassifierHistory (3)');
-assert(AUTO_RECALL_CHUNK_TOP_K === 4, 'AUTO_RECALL_CHUNK_TOP_K is the fixed full-turn count (4)');
+assert(AUTO_RECALL_CHUNK_TOP_K === 4, 'AUTO_RECALL_CHUNK_TOP_K is the default Max for the dynamic cutoff (4)');
 
 console.log('\nrecall-for-prompt verification passed');
 if (process.exitCode) process.exit(process.exitCode);

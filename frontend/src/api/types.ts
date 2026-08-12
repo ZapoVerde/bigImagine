@@ -454,6 +454,12 @@ export interface ChatMemorySettings {
   autoRecallEnabled: boolean;
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;
+  // RAG dynamic-cutoff knobs (migration 0091, orchestrator io/chatMemory/recallCutoff.ts) —
+  // autoRecallChunkTopK above is the Max ceiling; these are the Min floor, the Pool Multiple P,
+  // and the strictness mode in raw-distance space where lower is better.
+  autoRecallMin: number | null;
+  autoRecallPoolMultiple: number | null;
+  autoRecallCutoffMode: 'mean' | 'mean+1sd' | 'mean+2sd' | null;
 }
 
 // orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's two knobs:
