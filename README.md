@@ -1,104 +1,124 @@
 # BigImagine
 
-A self-hosted, single-user interactive fiction and roleplay platform, forked from the bigBrain
-core engine and re-pointed at narrative instead of household data. It is meant to fully replace a
-personal SillyTavern installation — native relational storage and `pgvector` semantic recall
-standing in for ST's flat JSON files, regex keyword lorebooks, and DOM-injected extensions — once
-it earns that replacement on its own merits.
+A self-hosted, single-user interactive fiction and roleplay platform. It's running today as a
+working replacement for a personal SillyTavern installation, and the goal is to replace it
+entirely: native relational storage and `pgvector` semantic recall standing in for ST's flat JSON
+files, regex keyword lorebooks, and DOM-injected extensions.
 
-Three previously separate SillyTavern extensions become native, relational features rather than
-bolted-on extensions:
+The platform exists to build and maintain the canonical record of a story — its characters,
+scenes, locations, canon facts, and rules — in a central relational store, not scattered across
+flat files and browser-side extension state. Reasoning and judgment happen in exactly one place,
+the LLM, invoked server-side; everything else moves and displays data. Three ideas that started
+life as separate SillyTavern extensions are native, relational features of that store instead of
+bolted-on scripts:
 
-- **Canonize** → approved canon facts, with human-in-the-loop proposal review.
-- **Vistalyze** → locations, with cached generated background imagery.
-- **Triggeryze** → rules and status effects, with conditional context injection.
+- **Canonize** — approved canon facts, with human-in-the-loop proposal review before anything
+  becomes established world state.
+- **Vistalyze** — locations, with cached generated background imagery.
+- **Triggeryze** — rules and status effects, with conditional context injection. Not built as its
+  own general system yet, though its trigger→action model is already doing real work in two
+  hardwired places (see "Not yet built" below).
 
-Read before touching code:
-- `docs/bi_principles.md` — design intent, read first
-- `docs/spec.md` — the target architecture for the narrative engine (status-tagged: **(built)**,
-  **(designed)**, **(parked)** — see the note on status below)
-- `docs/conventions.md` — module preamble format and file-organization rules
-- `docs/verification.md` — the verify-script testing philosophy (no unit-test framework)
-- `docs/bootstrap.md` — orientation for a new session; still bigBrain's own workspace/stacks/
-  secrets setup, largely reusable as-is (see below)
+## What it does
 
-## Status: fork in progress, narrative engine not yet built
+- **Roleplay chat** — live SSE streaming turns, swipe/regenerate sharing one turn-execution core,
+  in-stream header/body/footer repair as a reply streams in (with a status pill showing progress),
+  branch/fork with a visual lineage map, and mobile UI (PWA-installable, edge-grip drawers,
+  swipe navigation) built mobile-first rather than mobile-tolerated.
+- **Canonize** — canon facts proposed from play and approved before they become established world
+  state (`plugins/canonize`: propose/approve/reject/recall), extended by a chat-memory bridge and
+  curators that auto-approve arc-tagged plot/place/thing/concept/person facts through the same
+  pipeline.
+- **Vistalyze (as `locations`)** — location tracking with a parent/sub-location model, and
+  cache-first background image generation across five providers (ComfyUI, fal.ai, OpenAI Images,
+  Pollinations, Runware). The active location renders as the chat background and stays live in
+  every turn's prompt.
+- **Character Roster** — create/update/delete, drag-and-drop V2/V3 PNG/JSON import and lossless
+  export (`cardCodec.ts` ports SillyTavern's own PNG encoder, so cards round-trip losslessly
+  between the two platforms), plus Chub.ai search, browsing, and import.
+- **Lorebooks** — a full ST-World-Info-compatible system built from scratch: vector-recall
+  discovery instead of keyword matching, ported gating semantics (probability, sticky/cooldown/
+  delay, inclusion groups, budget), a management page, chat-sidebar panel, and import/export hub
+  with Chub-embedded-lorebook support.
+- **Chat memory / RAG recall** — dual-lane: general chat sessions keep a rolling digest; roleplay
+  sessions run a bridge (scene/events/plot, adapted from SillyTavern-Canonize's hookseeker prompt)
+  plus world-memory and people curators, injecting three independently-orderable markers every
+  turn. A RAG settings view exposes every retrieval knob and every prompt involved as editable
+  text.
+- **Prompt Inspector** — a live per-turn debugging view: a loss-tolerant tag-tree of the assembled
+  prompt, cache-coverage badges, per-subsection stability stats, and a token/cost receipt per call.
+- **Prompt stacks** — CRUD-managed prompt assembly presets, per-slot HTML-style tag wrapping, slot
+  grouping, clone-with-dedup, selectable per chat.
+- **Notes, documents, web search, timers/scheduled routines, push notifications, math/date tools**
+  — notes with pin/archive + semantic ingestion; save/clip-to-git-repo documents with chunked
+  embeddings and semantic search; Brave-backed web search; `set_timer`/`cancel_timer` background
+  jobs; ntfy push notifications; calculation/date utilities.
+- **LLM-agnostic orchestration** — named connection profiles swappable per chat, a single metering
+  gate with retry/backoff and per-provider prompt-caching handling, no vendor-specific logic
+  anywhere in prompts or tools.
+- **Runtime config in Postgres** — active LLM profile/model, timezone, and every tunable prompt
+  editable from Settings; no redeploy needed.
 
-This repo is a fork of bigBrain, not yet a working roleplay platform. What's happened so far is
-subtraction, not addition: the household-specific plugins (recipes, meal planning, shopping lists/
-analytics, calendar, Notion sync, weather) have been removed, but the narrative-specific schema and
-plugins `docs/spec.md` describes — `characters`, `scenes`, `scene_presence`, `canon_facts`,
-`locations`, `rules`, `status_effects`, and the Canonize/Vistalyze/Triggeryze plugins themselves —
-do not exist yet. Neither does the single-user conversion: the database schema underneath is still
-bigBrain's original multi-user, Row-Level-Security-enforced design (`docs/spec.md` §3 describes
-pruning this, but that pruning hasn't happened yet).
+## What it's trying to be
 
-In other words: `docs/spec.md` is a target, not a build log — its own header says so. Everything
-below marked **(inherited)** is real, running code carried over unmodified from bigBrain. Everything
-marked **(designed)** is `docs/spec.md`'s plan and has no code behind it yet.
+Every client — the chat UI, a future mobile shell, an export tool — talks to the platform through
+a stable API, never through direct access to the database or the reasoning layer, so the interface
+layer stays replaceable. The reasoning layer is meant to be equally replaceable: prompts, tool
+manifests, and orchestration logic are written against capabilities (structured output, function
+calling, prompt caching), not a named vendor, so swapping the model behind a scene — or the whole
+platform — is a configuration change, not a rewrite. And a character's canonical representation
+must always be round-trippable to the community V2/V3 card spec, so the database is a working
+copy, never a trap for creative effort already put into a character.
+
+Full design intent is in `docs/bi_principles.md`; the target architecture (schema, agentic loop
+sequencing) is in `docs/spec.md`.
 
 ## Layout
 
-- `orchestrator/` — the reasoning/orchestration layer (tool manifest, LLM client, agentic loop)
-  **(inherited)**
-- `plugins/*` — microservice plugins, one per domain, registered as orchestrator tools
-  **(inherited)**
-- `frontend/` — the native tabbed UI **(inherited)**
-- `backup/` — offsite backup sidecar, still shaped for bigBrain's household scale **(inherited,
-  unreviewed for single-user)**
-- `db/migrations/` — Postgres+pgvector schema, still bigBrain's multi-user/RLS design
-  **(inherited)**
-- `docker-compose.yml` — the Dockge-managed stack definition **(inherited)**
+- `orchestrator/` — the reasoning/orchestration layer (tool manifest, LLM client, agentic loop,
+  HTTP server split into per-concern handlers under `orchestrator/src/server/`)
+- `plugins/*` — microservice plugins, one per domain, registered as orchestrator tools:
+  `canonize`, `characters`, `chat-memory`, `context-stack-presets`, `document-ingestion`,
+  `documents`, `locations`, `math-utils`, `notes`, `notifications`, `prompt-presets`, `scenes`,
+  `temporal`, `web`
+- `frontend/` — the native tabbed UI: chat, canon queue, characters/Chub browsing,
+  locations/backgrounds, lorebooks, prompt stacks, prompt inspector, RAG settings, branch map
+- `backup/` — offsite backup sidecar
+- `db/migrations/` — Postgres+pgvector schema, 75 migrations as of this writing
+  (`db/migrations/README.md` is a well-maintained running log of every migration)
+- `docker-compose.yml` / `stacks/bigimagine/` — dedicated infra with its own Postgres instance
 
-## What's actually running today (inherited from bigBrain)
+## Not yet built
 
-Everything here is household/multi-user infrastructure that happens to also be useful for a
-narrative platform, kept because ripping it out wasn't necessary to start narrative work:
+- **Triggeryze as a general, user-authorable system** — no `rules`/`status_effects` table, no
+  plugin, no way for a user to define an arbitrary rule and have it conditionally injected into a
+  scene. Its trigger→action model is already live in two hardwired, single-purpose forms though:
+  in-stream cleanup (`cleanupHeuristics.ts`, `cleanupLoop.ts`, explicitly documented as a direct
+  port of Triggeryze's `actions/text.js` ruleset shape — same regex-trigger/action semantics, user-
+  editable rules and prompts, just scoped to cleaning a reply rather than general-purpose) and
+  location handling (`locationAndPresenceScraper.ts`, a fixed header-format contract rather than a
+  registrable rule). Neither lets another feature register its own trigger — that's the gap
+  between what exists and Triggeryze as spec'd.
+- **The Director Pass** — LLM-driven speaker selection for multi-character scenes. RP chats are
+  currently single-character (`chat_sessions.character_id` is one nullable FK, not a roster).
+- **A unified Inspector Canvas** — one HUD surface merging on-scene character cards, active
+  location, active rules/statuses, and the canon-approval queue. Today these are separate views
+  (`CanonQueueView.tsx`, `CharactersView.tsx`, the Canvas split-panel) rather than one surface.
+- **Single-user conversion** — the schema is still a multi-user, Row-Level-Security design; RLS
+  policies are still being added to new tables, not removed.
 
-- **Chat** — persisted chat history, folders, branching, prompt presets, per-chat model override,
-  Canvas (a split-screen panel that opens when a tool call touches something canvas-worthy — the
-  same mechanism the Inspector Canvas below is meant to generalize).
-- **Chat memory** — rolling summarization, RAG recall, session sync (`plugins/chat-memory`) —
-  adapted from Canonize once already; needs its own BigImagine-framed pass (`docs/spec.md` §4.1,
-  §8).
-- **Notes** — freeform notes with pin/archive lifecycle, semantic ingestion.
-- **Documents** — save/clip content into a per-user git repo, chunked embeddings, semantic search
-  (`plugins/documents`, `plugins/document-ingestion`).
-- **Web search** — Brave Search-backed tool (`plugins/web`).
-- **Timers & scheduled routines** — `set_timer`/`cancel_timer`, background job dispatch
-  (`plugins/temporal`) — infrastructure the narrative engine's own background passes (fact
-  extraction, rule evaluation) are expected to reuse, not infrastructure specific to households.
-- **Push notifications** — ntfy-backed (`plugins/notifications`).
-- **Math/date utilities** — calculation and date-math tools (`plugins/math-utils`).
-- **LLM-agnostic orchestration** — named connection profiles, swappable per chat, no vendor-specific
-  logic in prompts or tools.
-- **Runtime settings in Postgres** — active LLM profile/model, timezone; no redeploy needed to
-  change (`bi_principles.md` §13).
+`docs/spec.md` has the full target architecture, but its **(built)**/**(designed)** tags and its
+`docs/canonize-plan.md` references are stale — cross-check anything it claims against actual code
+or `git log`. Same goes for `docs/plans/*.md`: several status headers say "planned, not yet
+implemented" for work that has since shipped.
 
-## What's designed but not built (`docs/spec.md`)
+## Read before touching code
 
-The actual roleplay engine — the part that makes this BigImagine rather than a renamed bigBrain:
-
-- **Canonize** — `propose_canon_fact`/`approve_canon_fact`/`reject_canon_fact`/`recall_canon_facts`;
-  semantic-search canon replacing keyword lorebooks entirely.
-- **Vistalyze** — `set_active_location`/`generate_location_image`; cache-first image generation
-  against a configurable backend (local ComfyUI/Automatic1111 or a cloud API).
-- **Triggeryze** — `apply_status_effect`/`clear_status_effect`/`evaluate_rules`; conditional context
-  injection with mandatory expiry.
-- **The Director Pass** — LLM-driven speaker selection for multi-character scenes, never a
-  round-robin.
-- **Character Roster** — drag-and-drop V2/V3 PNG/JSON import and lossless export, URL/text import
-  with LLM-fallback extraction.
-- **Inspector Canvas** — on-scene character cards, active location metadata, active rules/statuses,
-  and the canon-approval queue.
-- **Single-user conversion** — dropping RLS/multi-tenancy and field-level encryption, since there's
-  no household member to scope against or protect data from (`docs/spec.md` §3).
-
-Full detail, including the schema and the agentic loop's exact sequencing, is in `docs/spec.md`.
-
-## What was pruned from bigBrain
-
-Removed already, not just planned: `plugins/recipes` (recipes & meal planning),
-`plugins/shopping-analytics`, `plugins/calendar` (Cozi/Outlook/Google Calendar sync), Notion
-two-way list sync, `plugins/weather`. None of this is narrative-relevant, and none of it is coming
-back.
+- `docs/bi_principles.md` — design intent, read first
+- `docs/spec.md` — target architecture (see staleness caveat above)
+- `docs/conventions.md` — module preamble format and file-organization rules
+- `docs/verification.md` — the verify-script testing philosophy (no unit-test framework)
+- `docs/bootstrap.md` — orientation for a new session
+- `docs/chat-memory.md` — the dual-lane chat memory design
+- `docs/lorebook-plan.md` — the lorebook system
+- `docs/plans/*.md` — per-feature build plans (status headers unreliable, see above)
