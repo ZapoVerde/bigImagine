@@ -168,12 +168,9 @@ import { log } from '../io/logger.js';
 import { getPromptTrace, clearPromptTrace, recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { longestCommonPrefixLength } from '../util/commonPrefix.js';
 import { computeSectionStability, type SectionStabilityResult } from '../util/sectionStability.js';
-import { recordClientLogBatch, type ClientLogEntry } from '../io/clientLogSink.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { runStreamingRpTurn } from '../orchestrator/streamingTurn.js';
-import { getTurnStatus } from '../orchestrator/turnStatus.js';
 import { abortTurn, isAbortError } from '../orchestrator/turnAbort.js';
-import { getCleanupJobs, getCleanupStatus, runCleanupNow } from '../orchestrator/cleanupLoop.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { buildAutoRecallParts, formatAutoRecallBlock, buildAutoRecallQuery, AUTO_RECALL_PAIRS } from '../io/chatMemory/recallForPrompt.js';
 import { resolveLorebook } from '../orchestrator/resolveLorebook.js';
@@ -215,7 +212,6 @@ import type { ApiKeyStore } from './apiKeyStore.js';
 import {
   getChatBackgroundSettings,
   getChatLegibilitySettings,
-  getCleanupSettings,
   getHouseholdTimezone,
   getPersonaSettings,
   getScreenLockSettings,
@@ -224,11 +220,9 @@ import {
   listProvidersForConnection,
   parseCreateConnectionBody,
   parseCreateImageConnectionBody,
-  parseSetCleanupSettingsBody,
   parseSetCredentialBody,
   parseUpdateConnectionBody,
   parseUpdateImageConnectionBody,
-  setCleanupSettings,
   setCredential,
   testConnection,
   testImageConnection,
@@ -276,6 +270,19 @@ import {
   handlePiaProxyUrlSet,
 } from './handleAdminMisc.js';
 import { handleAdminLorebookRoutes } from './handleAdminLorebooks.js';
+import { handleClientLogs } from './handleClientLogs.js';
+import { handleFolderRoutes } from './handleFolders.js';
+import {
+  handleChatAbort,
+  handleChatTurnStatus,
+} from './handleTurnControl.js';
+import {
+  handleCleanupJobs,
+  handleCleanupRunNow,
+  handleCleanupSettingsGet,
+  handleCleanupSettingsSet,
+  handleCleanupStatus,
+} from './handleCleanup.js';
 import {
   buildChatCompletion,
   buildChatCompletionChunk,
@@ -2036,34 +2043,6 @@ async function handleUploadAttachment(
   sendJson(res, status, body);
 }
 
-const MAX_CLIENT_LOG_ENTRIES = 200;
-
-// Deliberately unauthenticated, same posture as GET /healthz — not /v1/whoami, which does 401
-// without a valid key. The errors most worth capturing here are exactly the ones that happen
-// before whoami() resolves (a broken unlock flow, a crash during initial mount). authenticate()
-// still runs, best-effort, so a userId gets attached whenever one's already resolvable; abuse
-// surface is bounded by readJsonBody's existing size cap, the entries-per-request cap below, and
-// fileLogBuffer's own on-disk ring cap regardless of how much gets posted.
-async function handleClientLogs(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let body: unknown;
-  try {
-    body = await readJsonBody(req);
-  } catch (err) {
-    sendJson(res, err instanceof JsonBodyTooLargeError ? 413 : 400, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return;
-  }
-  const entries = (body as { entries?: unknown })?.entries;
-  if (!Array.isArray(entries)) {
-    sendJson(res, 400, { error: 'expected { entries: [...] }' });
-    return;
-  }
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  const accepted = entries.slice(0, MAX_CLIENT_LOG_ENTRIES) as ClientLogEntry[];
-  recordClientLogBatch(accepted, { userId });
-  sendJson(res, 202, { accepted: accepted.length });
-}
 
 async function handleAdminCredentialsList(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const credentials = await listCredentials(deps.credentials);
@@ -2887,58 +2866,6 @@ async function handleChatRoutes(
   sendJson(res, 404, { error: 'not found' });
 }
 
-async function handleFolderRoutes(
-  req: IncomingMessage,
-  res: ServerResponse,
-  deps: HttpServerDeps,
-  userId: string,
-  url: URL,
-): Promise<void> {
-  const rest = url.pathname.slice('/v1/folders'.length); // '' | '/<id>'
-
-  if (rest === '' || rest === '/') {
-    if (req.method === 'GET') {
-      sendJson(res, 200, { folders: await deps.chats.listFolders(userId) });
-      return;
-    }
-    if (req.method === 'POST') {
-      const body = (await readJsonBody(req)) as { name?: string; parent_id?: string };
-      if (typeof body.name !== 'string' || !body.name.trim()) {
-        sendJson(res, 400, { error: 'expected { name: non-empty string, parent_id? }' });
-        return;
-      }
-      const folder = await deps.chats.createFolder(userId, {
-        name: body.name.trim(),
-        parentId: typeof body.parent_id === 'string' ? body.parent_id : undefined,
-      });
-      sendJson(res, 201, folder);
-      return;
-    }
-    sendJson(res, 404, { error: 'not found' });
-    return;
-  }
-
-  const folderId = decodeURIComponent(rest.slice(1));
-  if (req.method === 'POST') {
-    const body = (await readJsonBody(req)) as { name?: string; parent_id?: string | null };
-    const updated = await deps.chats.updateFolder(userId, folderId, {
-      name: typeof body.name === 'string' ? body.name : undefined,
-      parentId: body.parent_id !== undefined ? body.parent_id : undefined,
-    });
-    if (!updated) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    sendJson(res, 200, updated);
-    return;
-  }
-  if (req.method === 'DELETE') {
-    const deleted = await deps.chats.deleteFolder(userId, folderId);
-    sendJson(res, deleted ? 200 : 404, deleted ? { deleted: true } : { error: 'not found' });
-    return;
-  }
-  sendJson(res, 404, { error: 'not found' });
-}
 
 async function handleWhoAmI(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
@@ -3001,155 +2928,7 @@ async function handleScreenLockSettingsGet(req: IncomingMessage, res: ServerResp
   sendJson(res, 200, await getScreenLockSettings(deps.settings));
 }
 
-// A lightweight side channel for a chat still mid-flight (docs/bootstrap.md: /v1/chat/completions
-// is a single blocking POST, not a stream) — the frontend polls this while waiting, to show which
-// tool loop.ts's runTurn is currently running (orchestrator/turnStatus.ts). taskId for a
-// persisted-session turn is always its chat_id (httpServer.ts's own handleChatCompletions), so
-// that's what this keys on; no status ever existing (not yet started, already finished, or a
-// stateless Open WebUI turn with no chat_id) is a normal, empty response, not an error.
-async function handleChatTurnStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  if (!userId) {
-    sendJson(res, 401, { error: 'missing or unrecognized API key' });
-    return;
-  }
-  const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
-  sendJson(res, 200, { status: chatId ? (getTurnStatus(chatId) ?? null) : null });
-}
 
-// The Stop button's server side (orchestrator/turnAbort.ts): abort every LLM task currently in
-// flight for this chat — the interactive turn runTurn is running AND any cleanup-loop repair
-// churning on the same chat (the stop is meant to kill the chat's whole active LLM spend at
-// once). 200 means at least one task was aborted; 404 means nothing was in flight (turn already
-// finished, or never started — a no-op, not an error). Ownership-checked via chats.getChat so a
-// user can only stop their own chat's work, unlike the read-only /v1/chat/status side channel.
-async function handleChatAbort(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  if (!userId) {
-    sendJson(res, 401, { error: 'missing or unrecognized API key' });
-    return;
-  }
-  let body: { chat_id?: string };
-  try {
-    body = (await readJsonBody(req)) as { chat_id?: string };
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-  if (typeof body.chat_id !== 'string' || !body.chat_id) {
-    sendJson(res, 400, { error: 'expected { chat_id: string }' });
-    return;
-  }
-  const chat = await deps.chats.getChat(userId, body.chat_id);
-  if (!chat) {
-    sendJson(res, 404, { error: 'unknown chat_id' });
-    return;
-  }
-  const aborted = abortTurn(body.chat_id);
-  if (!aborted) {
-    sendJson(res, 404, { error: 'no turn in flight for this chat' });
-    return;
-  }
-  sendJson(res, 200, { aborted: true });
-}
-
-// The async cleanup subloop's (cleanupLoop.ts) read surface for the chat's floating status pill —
-// the TRG-style unchanged | thinking | modified | ⚠flagged state of the newest eligible message,
-// plus how many messages are still pending. Polled by the frontend the same way it polls
-// /v1/chat/status; the loop's per-message jobs in cleanup_jobs are the source of truth.
-async function handleCleanupStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  if (!userId) {
-    sendJson(res, 401, { error: 'missing or unrecognized API key' });
-    return;
-  }
-  const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
-  if (!chatId) {
-    sendJson(res, 400, { error: 'expected a ?chat_id= query parameter' });
-    return;
-  }
-  const status = await getCleanupStatus(deps.db, userId, chatId);
-  if (!status) {
-    sendJson(res, 404, { error: 'unknown chat_id' });
-    return;
-  }
-  sendJson(res, 200, status);
-}
-
-// The Cleanup page's run-now: one immediate pass over one chat (the poll tick keeps every other
-// enabled chat). Fire-and-forget like fireLocationImageGeneration — the request returns at once
-// and the caller polls GET /v1/cleanup/status for the results; the loop is fail-open throughout,
-// so there's no partial-success error shape to surface.
-async function handleCleanupRunNow(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  if (!userId) {
-    sendJson(res, 401, { error: 'missing or unrecognized API key' });
-    return;
-  }
-  let body: { chat_id?: string };
-  try {
-    body = (await readJsonBody(req)) as { chat_id?: string };
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-  if (typeof body.chat_id !== 'string' || !body.chat_id) {
-    sendJson(res, 400, { error: 'expected { chat_id: string }' });
-    return;
-  }
-  void runCleanupNow({ db: deps.db, llm: deps.llm, settings: deps.settings, chats: deps.chats }, userId, body.chat_id);
-  sendJson(res, 202, { started: true });
-}
-
-// The Cleanup page's "recent activity" read: the newest cleanup_jobs rows for one chat (the page
-// picks the chat via a selector), each with a short content preview and the fail-open notes.
-// User-scoped by cleanup_jobs' own RLS (via chat_messages.user_id) — a user only ever sees their
-// own chats' jobs, same as /v1/cleanup/status.
-async function handleCleanupJobs(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
-  if (!userId) {
-    sendJson(res, 401, { error: 'missing or unrecognized API key' });
-    return;
-  }
-  const url = new URL(req.url ?? '', 'http://placeholder');
-  const chatId = url.searchParams.get('chat_id');
-  if (!chatId) {
-    sendJson(res, 400, { error: 'expected a ?chat_id= query parameter' });
-    return;
-  }
-  const limitRaw = url.searchParams.get('limit');
-  const limit = limitRaw ? Math.min(Math.max(Number(limitRaw) || 20, 1), 100) : 20;
-  sendJson(res, 200, { jobs: await getCleanupJobs(deps.db, userId, chatId, limit) });
-}
-
-// Admin-gated counterpart of the cleanup setup surface: the four header/footer config keys +
-// the slop-rules table, read/written as one block (adminServer.ts's get/parse/set trio). The
-// subloop re-reads both live every tick (cleanupLoop.ts), so a save takes effect on the next
-// poll — no restart, same shape as notification/canon settings above.
-async function handleCleanupSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  sendJson(res, 200, await getCleanupSettings(deps.settings, deps.db));
-}
-
-async function handleCleanupSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
-  let raw: unknown;
-  try {
-    raw = await readJsonBody(req);
-  } catch {
-    sendJson(res, 400, { error: 'expected a JSON request body' });
-    return;
-  }
-
-  const parsed = parseSetCleanupSettingsBody(raw);
-  if (!parsed) {
-    sendJson(res, 400, {
-      error: 'expected at least one of { header_regex?, header_prompt?, footer_regex?, footer_prompt?, slop_rules?: [...] }',
-    });
-    return;
-  }
-
-  await setCleanupSettings(deps.settings, deps.db, parsed);
-  sendJson(res, 200, await getCleanupSettings(deps.settings, deps.db));
-}
 
 async function handleRequest(
   req: IncomingMessage,
