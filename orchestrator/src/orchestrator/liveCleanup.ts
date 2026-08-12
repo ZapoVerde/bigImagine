@@ -732,14 +732,17 @@ async function runLlmPass(
 
 /** One CleanupRegionOutcome per region for finalizeCleanupResult: 'flagged' for a region whose
  *  repair was needed but produced nothing, 'done' otherwise; changed only when a patch actually
- *  landed (deployed). 'error' when an unexpected failure left a region unsettled — notes carry
- *  which. */
+ *  landed (deployed). 'error' when an unexpected failure left a region still 'in-flux' — that
+ *  state is never a valid terminal outcome, so it must not be reported as settled 'done' work
+ *  (finishStream's catch swallows a non-abort failure and returns here with whatever regions
+ *  never reached a terminal state — see finishStream above). */
 function buildOutcomes(ctx: LiveCleanupContext): CleanupRegionOutcome[] {
   const regionOutcome = (region: CleanupRegion, state: CleanupRegionState, fallbackNotes: string): CleanupRegionOutcome => ({
     region,
-    status: state === 'flagged' ? 'flagged' : 'done',
+    status: state === 'in-flux' ? 'error' : state === 'flagged' ? 'flagged' : 'done',
     changed: state === 'deployed',
-    notes: state === 'not-called' ? `no ${region} steps needed` : fallbackNotes,
+    notes:
+      state === 'not-called' ? `no ${region} steps needed` : state === 'in-flux' ? `${region} left unsettled by an unexpected finishStream failure` : fallbackNotes,
   });
   return [
     regionOutcome('header', ctx.headerState, `header:${ctx.headerState}`),

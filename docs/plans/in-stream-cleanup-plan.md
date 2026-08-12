@@ -122,9 +122,11 @@ send-equals-swipe core, the same way streaming itself did.
   mirroring `relayedText`'s reset, so offsets never diverge from what the client accumulated.
   `runStreamingRpTurn` does **not** run `finishStream` or persistence itself: it returns the
   composed buffer + live region outcomes alongside the existing `{content, usage}`, and the
-  caller drives `finishStream` → `appendMessages`/`recordSwipe` → `finalizeCleanupResult` —
-  turn 1's `ensureFirstTurnHeader` must run between the stream and `finishStream`, which only
-  the caller can sequence.
+  caller drives `appendMessages`/`recordSwipe` → `finishStream` → `finalizeCleanupResult` — the
+  raw reply must be durable before any further LLM-calling cleanup work is attempted, so a
+  finishStream failure never costs the turn its already-streamed reply. Turn 1's
+  `ensureFirstTurnHeader` must run between the stream and the persist call, which only the caller
+  can sequence.
 - `orchestrator/src/server/handleChatCompletions.ts` — modified — passes `onCleanupEvent` through
   to `runStreamingRpTurn`, translating each event into a `bigimagine_cleanup` (status) or
   `bigimagine_patch` (content) SSE frame, interleaved with the existing delta frames. After the

@@ -512,11 +512,22 @@ export async function handleChatCompletions(
         );
         firstTurnHeaderRepaired = reply !== rawReply;
       }
-      // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream runs BEFORE
-      // persistence — its end-of-stream repairs (tail body, footer, deferred 'llm' pass) patch the
-      // composed buffer, and every patch was already relayed to the client via SSE frames; the
-      // composed text is what finalizeCleanupResult writes as the next swipe, with the raw reply
-      // kept as swipe #0 (the same durable shape the poll tick produces). Turn 1: baseText is
+      // The raw reply is persisted BEFORE the cleanup handoff runs, matching regenerateSwipe's
+      // ordering exactly (recordSwipe, then finishStream) — finishStream fires independent LLM
+      // calls (tail body, footer, deferred 'llm' pass) that can take a while and, in principle,
+      // fail unexpectedly; the reply the user already watched stream to their screen must be
+      // durable either way, not held hostage to cleanup succeeding. The user message (if this was
+      // a genuinely new turn) is already persisted above, before runTurn ran — only the assistant
+      // reply is appended here now. Stage 2 (segway.md §4) then scrapes the turn's header block
+      // into trusted scene state, anchored to the new message's active swipe — fail-open inside
+      // the scraper, so it can never block or degrade the turn.
+      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
+      assistantMessage = insertedAssistant;
+      // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream's end-of-stream
+      // repairs (tail body, footer, deferred 'llm' pass) patch the composed buffer, and every
+      // patch was already relayed to the client via SSE frames; the composed text is what
+      // finalizeCleanupResult writes as the next swipe, with the raw reply already durable as
+      // swipe #0 above (the same durable shape the poll tick produces). Turn 1: baseText is
       // ensureFirstTurnHeader's output and the header region is attributed from its own result.
       if (cleanupHandoff) {
         try {
@@ -532,8 +543,8 @@ export async function handleChatCompletions(
           cleanupOutcomes = fsResult.outcomes;
         } catch (err) {
           if (isAbortError(err)) {
-            // A Stop landed during the end-of-stream repairs: the raw reply is still persisted
-            // below, but no composed swipe and no job rows — the message stays due and the poll
+            // A Stop landed during the end-of-stream repairs: the raw reply is already persisted
+            // above, but no composed swipe and no job rows — the message stays due and the poll
             // tick catches it, same as the tick's own abort path.
             log.info(`live cleanup handoff aborted for user ${userId}`, { chatId: body.chat_id });
           } else {
@@ -541,12 +552,6 @@ export async function handleChatCompletions(
           }
         }
       }
-      // The user message (if this was a genuinely new turn) is already persisted above, before
-      // runTurn ran — only the assistant reply is appended here now. Stage 2 (segway.md §4) then
-      // scrapes the turn's header block into trusted scene state, anchored to the new message's
-      // active swipe — fail-open inside the scraper, so it can never block or degrade the turn.
-      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [{ role: 'assistant', content: reply, messageId: assistantMessageId }]);
-      assistantMessage = insertedAssistant;
       // The composed text (if the live path ran) becomes the next swipe, exactly the poll tick's
       // writeback — same finalizeCleanupResult, so the message is indistinguishable in
       // cleanup_jobs from one the tick caught. Fail-open inside; then the in-flight guard drops.
