@@ -112,6 +112,13 @@
  * Director Pass wiring. Both were added to 0010's CHECK constraint together in 0048, the same
  * widen-both-sides shape 0043's own entry documents.
  *
+ * canon_recall_min (migration 0092, docs/plans/rag-dynamic-cutoff-plan.md Stage 2) is the
+ * canon_facts lane's Min floor for the RAG dynamic cutoff: the per-channel pair of
+ * canon_recall_top_k (which Stage 1 established as that lane's Max), integer-as-text, default
+ * '2'. Read live by recallForPrompt.ts's buildAutoRecallParts alongside the Max; the two shared
+ * knobs from 0091 (pool_multiple/cutoff_mode) apply to the fact lane unchanged, the
+ * per-channel Min/Max + shared Pool Multiple/Cutoff Mode split the Stage-1 naming anticipated.
+ *
  * screen_lock_password/screen_lock_timeout_minutes (migration 0050) back the idle-timeout re-lock
  * overlay (ScreenLockOverlay.tsx, ported from SillyTavern-Playground's lockScreen.js) —
  * screen_lock_password isn't a secret by §12's own test (it protects nothing the real household-
@@ -248,6 +255,7 @@ export const SETTING_NAMES = [
   'chat_memory_auto_recall_chunk_prompt',
   'chat_memory_inject_recent_history_prompt',
   'canon_recall_top_k',
+  'canon_recall_min',
   'canon_extraction_prompt',
   'screen_lock_password',
   'screen_lock_timeout_minutes',

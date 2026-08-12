@@ -63,6 +63,7 @@ export default function RagView() {
   const [selectedAutoRecallPoolMultiple, setSelectedAutoRecallPoolMultiple] = useState('');
   const [selectedAutoRecallCutoffMode, setSelectedAutoRecallCutoffMode] = useState<'mean' | 'mean+1sd' | 'mean+2sd'>('mean');
   const [selectedCanonRecallTopK, setSelectedCanonRecallTopK] = useState('');
+  const [selectedCanonRecallMin, setSelectedCanonRecallMin] = useState('');
   const [retrievalStatus, setRetrievalStatus] = useState('');
 
   // Read-only — set from the one active row in adminListConnections(), purely to label the Chat
@@ -98,6 +99,7 @@ export default function RagView() {
   function applyCanonSettings(settings: CanonSettings) {
     setCanonSettingsState(settings);
     setSelectedCanonRecallTopK(String(settings.recallTopK));
+    setSelectedCanonRecallMin(settings.recallMin === null ? '' : String(settings.recallMin));
   }
 
   // Whatever proves the key works — every admin GET this tab needs on first load. Shared unlock
@@ -234,6 +236,10 @@ export default function RagView() {
     const canonRecallTopK = Number(selectedCanonRecallTopK);
     if (selectedCanonRecallTopK && canonRecallTopK !== canonSettings.recallTopK) {
       canonPatch.recall_top_k = canonRecallTopK;
+    }
+    const canonRecallMin = Number(selectedCanonRecallMin);
+    if (selectedCanonRecallMin && canonRecallMin !== canonSettings.recallMin) {
+      canonPatch.recall_min = canonRecallMin;
     }
     if (Object.keys(memoryPatch).length === 0 && Object.keys(canonPatch).length === 0) return;
 
@@ -534,7 +540,7 @@ export default function RagView() {
         </div>
         <br />
         <label>
-          Canon facts injected
+          Canon facts Max (approved facts injected)
           <br />
           <input
             type="number"
@@ -544,10 +550,23 @@ export default function RagView() {
             placeholder="8"
           />
         </label>
+        <label>
+          Canon facts Min
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedCanonRecallMin}
+            onChange={(e) => setSelectedCanonRecallMin(e.target.value)}
+            placeholder="2"
+          />
+        </label>
         <div className="status">
           How many approved canon facts both the silent recall and the recall_canon_facts tool return (canon_recall_top_k,
-          read live on every recall call). The extraction pass that proposes new facts is Director Pass work — see
-          docs/canonize-plan.md §2.
+          read live on every recall call). Since the RAG dynamic cutoff (migrations 0091/0092) this is the fact lane's
+          per-channel Max: the recall fetches a candidate pool (Pool Multiple × Max above) and keeps only the facts that
+          clear the cutoff's distance threshold, never fewer than Canon facts Min (canon_recall_min) nor more than this
+          Max. The extraction pass that proposes new facts is Director Pass work — see docs/canonize-plan.md §2.
         </div>
         <br />
         <hr />

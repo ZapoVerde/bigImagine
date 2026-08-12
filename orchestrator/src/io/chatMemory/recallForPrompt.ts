@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/recallForPrompt.ts
- * @stamp 2026-08-15
+ * @stamp 2026-08-16
  * @architectural-role IO Wrapper — CNZ-style silent per-turn recall, injected at prompt assembly
  * @description
  * The read-path twin of the recall_chat_history / recall_canon_facts tools, but CNZ-shaped:
@@ -25,13 +25,17 @@
  *     default AUTO_RECALL_CHUNK_TOP_K)
  *  2. canon_facts — approved rows only, deduped to most-recent-approved per arc_tag/entity_key,
  *     top-k from the live canon_recall_top_k setting (default 8) — the same dedup query
- *     recallCanonFactsTool.ts runs, just scoped to "now" (no as_of filter)
+ *     recallCanonFactsTool.ts runs, just scoped to "now" (no as_of filter). Since 2026-08-16
+ *     (Stage 2) this lane runs the same dynamic cutoff as the chunk lane, sharing the 0091
+ *     Pool Multiple/Cutoff Mode knobs, with canon_recall_min as its per-channel Min floor.
  *
- * All three retrieval knobs are live settings read on every call (chat_memory_auto_recall_enabled,
- * chat_memory_auto_recall_pairs, chat_memory_auto_recall_chunk_top_k — migration 0077); the
- * exported AUTO_RECALL_* constants are the fallback defaults when a setting is unset or corrupt,
- * same fail-open shape as canon_recall_top_k. `enabled === 'false'` silences the silent path
- * without touching the recall tools, which stay in the RP allow-list.
+ * The retrieval knobs are all live settings read on every call (chat_memory_auto_recall_enabled,
+ * chat_memory_auto_recall_pairs, chat_memory_auto_recall_chunk_top_k / _chunk_min,
+ * chat_memory_auto_recall_pool_multiple, chat_memory_auto_recall_cutoff_mode, canon_recall_top_k /
+ * canon_recall_min — migrations 0077/0091/0092); the exported AUTO_RECALL_* constants are the
+ * fallback defaults when a setting is unset or corrupt, same fail-open shape as
+ * canon_recall_top_k. `enabled === 'false'` silences the silent path without touching the recall
+ * tools, which stay in the RP allow-list.
  *
  * Both are scoped to this chat_id inside the caller's already-open withUserScope session (RLS
  * applies user_id, chat_id narrows to "this conversation" — same trusted-identity scoping as the
@@ -52,7 +56,13 @@
  * many of those candidates are actually worth injecting (mean/σ threshold in raw distance
  * space, Min floor / Max ceiling). A quiet turn with no real archive match now injects fewer
  * chunks instead of always exactly top-k; the decision and its statistics are logged per call.
- * The canon_facts lane is deliberately untouched (that's Stage 2).
+ *
+ * Since 2026-08-16 (Stage 2 of the same plan) the canon_facts lane gets the identical treatment:
+ * the shared Pool Multiple and Cutoff Mode knobs from Stage 1 apply unchanged, the per-channel
+ * Max is the existing canon_recall_top_k, and the new per-channel Min floor is canon_recall_min
+ * (default '2', migration 0092) — the same per-channel Min/Max + shared Pool/Cutoff split
+ * Canonize's own settings use, exactly as the Stage-1 naming anticipated. Facts are deduped per
+ * arc/entity by the existing CTE before the cutoff measures their pool.
  *
  * @api-declaration
  * buildAutoRecallQuery(messages, pairCount?) -> string — the embedded query text (pure).
@@ -109,6 +119,12 @@ const DEFAULT_CUTOFF_MODE: CutoffMode = 'mean';
 
 const DEFAULT_FACT_TOP_K = 8;
 
+/** The Min floor for the dynamic cutoff on the canon_facts lane (migration 0092, Stage 2 of the
+ *  CNZ retrieval port) — how many facts are injected at minimum even when the pool distribution
+ *  says nothing clears the threshold. Canonize's own `ragChatMin` default (2) unchanged, same as
+ *  the chunk lane's DEFAULT_CHUNK_MIN. The live value is canon_recall_min. */
+const DEFAULT_FACT_MIN = 2;
+
 /** Sanity cap so a corrupt canon_recall_top_k value can't balloon the injected block: facts are
  *  already deduped per arc/entity, so beyond ~50 the marginal recall value is nil while the
  *  token cost is real. recallCanonFactsTool.ts has no clamp (a tool call is one-off and
@@ -142,6 +158,10 @@ interface CanonFactRow {
   category: string;
   summary: string;
   detail: string;
+  /** Raw L2 distance to the query vector (`vector_embed <-> $query`), selected so the cutoff
+   *  can measure the fact pool's distribution (recallCutoff.ts) before deciding how many to
+   *  keep — the Stage-2 counterpart of ChunkRow.distance. */
+  distance: number;
 }
 
 /** Raw retrieval result — the unformatted parts the narrator stack's component markers render
@@ -233,15 +253,17 @@ export function buildAutoRecallParts(
 ): Promise<AutoRecallParts> {
   return (async () => {
     try {
-      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw] = await Promise.all([
-        settings.get('chat_memory_auto_recall_enabled'),
-        settings.get('chat_memory_auto_recall_pairs'),
-        settings.get('chat_memory_auto_recall_chunk_top_k'),
-        settings.get('canon_recall_top_k'),
-        settings.get('chat_memory_auto_recall_chunk_min'),
-        settings.get('chat_memory_auto_recall_pool_multiple'),
-        settings.get('chat_memory_auto_recall_cutoff_mode'),
-      ]);
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw] =
+        await Promise.all([
+          settings.get('chat_memory_auto_recall_enabled'),
+          settings.get('chat_memory_auto_recall_pairs'),
+          settings.get('chat_memory_auto_recall_chunk_top_k'),
+          settings.get('canon_recall_top_k'),
+          settings.get('chat_memory_auto_recall_chunk_min'),
+          settings.get('chat_memory_auto_recall_pool_multiple'),
+          settings.get('chat_memory_auto_recall_cutoff_mode'),
+          settings.get('canon_recall_min'),
+        ]);
 
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
       // the RP allow-list either way — this knob only silences the silent path (CNZ's own
@@ -279,17 +301,28 @@ export function buildAutoRecallParts(
       const factTopK =
         Number.isFinite(parsedFactTopK) && parsedFactTopK > 0 ? Math.min(parsedFactTopK, MAX_FACT_TOP_K) : DEFAULT_FACT_TOP_K;
 
+      // The fact lane's per-channel Min (migration 0092, Stage 2) — same parse-with-fallback
+      // shape as chunkMin, clamped to the fact Max (factTopK) at read time so a misconfigured
+      // min > max can never make the floor step exceed the ceiling.
+      const parsedFactMin = factMinRaw ? parseInt(factMinRaw, 10) : NaN;
+      const factMin =
+        Number.isFinite(parsedFactMin) && parsedFactMin > 0
+          ? Math.min(parsedFactMin, factTopK)
+          : Math.min(DEFAULT_FACT_MIN, factTopK);
+
       const query = buildAutoRecallQuery(messages, pairs);
       if (!query) return { chunks: [], facts: [] };
 
       const [vector] = await embeddings.embed([query]);
       if (!vector) return { chunks: [], facts: [] };
 
-      // The chunk lane fetches a candidate *pool* (Pool Multiple × Max, capped — recallCutoff's
-      // poolSize) rather than exactly Max rows: the cutoff needs the pool's distribution to
-      // decide how many of its leading rows are worth injecting. The canon_facts lane stays a
-      // flat LIMIT factTopK — untouched until Stage 2.
+      // Both lanes fetch a candidate *pool* (Pool Multiple × Max, capped — recallCutoff's
+      // poolSize) rather than exactly Max rows: the cutoff needs each pool's distribution to
+      // decide how many of its leading rows are worth injecting. The shared Pool Multiple and
+      // Cutoff Mode apply to both lanes unchanged (the Stage-1 naming anticipated this); the
+      // per-channel Max (chunkTopK / factTopK) and Min (chunkMin / factMin) differ per lane.
       const pool = Math.min(poolSize(chunkTopK, poolMultiple), MAX_POOL_SIZE);
+      const factPool = Math.min(poolSize(factTopK, poolMultiple), MAX_POOL_SIZE);
 
       const [chunkRows, facts] = await Promise.all([
         session.query<ChunkRow>(
@@ -311,18 +344,18 @@ export function buildAutoRecallParts(
              from candidates
              order by coalesce(arc_tag, entity_key, fact_id::text), approved_at desc
            )
-           select fact_id, category, summary, detail
+           select fact_id, category, summary, detail, vector_embed <-> $3 as distance
            from ranked
            order by vector_embed <-> $3
            limit $4`,
-          [userId, chatId, toPgVectorLiteral(vector), factTopK],
+          [userId, chatId, toPgVectorLiteral(vector), factPool],
         ),
       ]);
 
-      // Decide how many pool rows clear the threshold, then keep exactly that many (the rows
-      // arrive best-first, so a leading slice is the right cut). Telemetry per call — the seam
-      // where a "nothing worth recalling" turn becomes visible instead of silently injecting
-      // mediocre matches (bi_principles.md §11).
+      // Decide how many pool rows clear the threshold in each lane, then keep exactly that many
+      // (the rows arrive best-first, so a leading slice is the right cut). Telemetry per call —
+      // the seam where a "nothing worth recalling" turn becomes visible instead of silently
+      // injecting mediocre matches (bi_principles.md §11).
       const { keepCount, stats } = applyCutoff(chunkRows.map((r) => r.distance), {
         min: chunkMin,
         max: chunkTopK,
@@ -338,7 +371,22 @@ export function buildAutoRecallParts(
         ...stats,
       });
 
-      return { chunks, facts };
+      const factCutoff = applyCutoff(facts.map((f) => f.distance), {
+        min: factMin,
+        max: factTopK,
+        cutoffMode,
+      });
+      const keptFacts = facts.slice(0, factCutoff.keepCount);
+      log.info('buildAutoRecallParts: fact cutoff applied', {
+        userId,
+        chatId,
+        min: factMin,
+        max: factTopK,
+        keepCount: factCutoff.keepCount,
+        ...factCutoff.stats,
+      });
+
+      return { chunks, facts: keptFacts };
     } catch (err) {
       // Fail-open: a retrieval error must never break the turn. Log and continue empty.
       log.warn('buildAutoRecallParts: retrieval failed, continuing without recalled context', { userId, chatId, err });

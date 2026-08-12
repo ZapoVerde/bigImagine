@@ -462,12 +462,16 @@ export interface ChatMemorySettings {
   autoRecallCutoffMode: 'mean' | 'mean+1sd' | 'mean+2sd' | null;
 }
 
-// orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's two knobs:
+// orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's knobs:
 // recallTopK (how many approved canon facts recall_canon_facts / the RP auto-recall inject, read
 // live on every recall call, no restart) and extractionPrompt (the background extraction pass's
 // template — "default + bespoke" override per bi_principles.md §18, empty clears to built-in).
+// Since migration 0092 (rag-dynamic-cutoff-plan.md Stage 2) recallTopK doubles as the fact
+// lane's per-channel Max for the dynamic cutoff, with recallMin (canon_recall_min, default 2)
+// as its Min floor; both are read live by buildAutoRecallParts.
 export interface CanonSettings {
   recallTopK: number;
+  recallMin: number | null;
   extractionPrompt: string;
   extractionPromptIsDefault: boolean;
 }

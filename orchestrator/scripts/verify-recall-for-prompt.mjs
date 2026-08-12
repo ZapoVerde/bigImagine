@@ -8,10 +8,12 @@
 //      for canon rows, the "Recalled from earlier..." header only when something matched.
 //   3. The fail-open contract: an embedding failure or a DB throw must resolve to '' — never
 //      reject, never break the caller's Promise.all.
-//   4. The RAG dynamic cutoff (migration 0091, recallCutoff.ts): the chunks SQL fetches a
-//      candidate pool (Pool Multiple × Max, capped at 40) and the settings-driven threshold
-//      decides how many of its leading rows actually get injected. The pure math itself is
-//      pinned by verify-recall-cutoff.mjs; this file proves the settings → pool → slice wiring.
+//   4. The RAG dynamic cutoff (migrations 0091/0092, recallCutoff.ts): both lanes' SQL fetches
+//      a candidate pool (Pool Multiple × Max, capped at 40) and the settings-driven threshold
+//      decides how many leading rows actually get injected — chunks per chat_memory_auto_recall_
+//      chunk_min/chunk_top_k, facts per canon_recall_min/canon_recall_top_k, sharing the 0091
+//      Pool Multiple/Cutoff Mode knobs. The pure math itself is pinned by verify-recall-cutoff.
+//      mjs; this file proves the settings → pool → slice wiring on both lanes.
 
 import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
@@ -109,8 +111,8 @@ function fakeSettings(value) {
       { ordinal: 7, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1 },
     ],
     factRows: [
-      { fact_id: 'f1', category: 'plot', summary: 'the heist', detail: 'planned for Tuesday' },
-      { fact_id: 'f2', category: 'person', summary: 'Mara', detail: null },
+      { fact_id: 'f1', category: 'plot', summary: 'the heist', detail: 'planned for Tuesday', distance: 0.1 },
+      { fact_id: 'f2', category: 'person', summary: 'Mara', detail: null, distance: 0.2 },
     ],
   });
   const block = await buildAutoRecallPrompt(
@@ -492,6 +494,172 @@ function countChunkBlocks(block) {
   assert(
     seenSql.some((sql) => /from chat_chunks[\s\S]*limit 40/.test(sql)),
     'the candidate pool is capped at MAX_POOL_SIZE (40), never an unbounded LIMIT',
+  );
+}
+
+// --- 6. Stage 2: the same dynamic cutoff wired onto the canon_facts lane ---
+// The shared 0091 knobs (Pool Multiple, Cutoff Mode) apply unchanged; the per-channel Max is
+// canon_recall_top_k and the new Min floor is canon_recall_min (migration 0092). Facts are
+// deduped per arc/entity by the query CTE before the cutoff measures their pool.
+function countFactBullets(block) {
+  return (block.match(/- \[/g) || []).length;
+}
+
+{
+  // The plan's own wiring test for the fact lane: a distance-spread pool where mean and
+  // mean+1sd return visibly different fact counts. canon_recall_top_k=8 → fact pool =
+  // poolSize(8, 2) = 16; mean keeps the cluster clamped to Max (8), mean+1sd keeps only the
+  // clearly-matched tail (4).
+  const spread = [0.15, 0.18, 0.22, 0.25, 0.30, 0.35, 0.38, 0.42, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80];
+  const factRows = spread.map((distance, i) => ({
+    fact_id: `f${i + 1}`,
+    category: 'plot',
+    summary: `fact ${i + 1}`,
+    detail: null,
+    distance,
+  }));
+  const makeSession = () => ({
+    async query(sql) {
+      if (sql.includes('from canon_facts')) return factRows;
+      if (sql.includes('from chat_chunks')) return [];
+      return [];
+    },
+  });
+  const meanBlock = await buildAutoRecallPrompt(
+    makeSession(),
+    fakeSettings(
+      new Map([
+        ['canon_recall_top_k', '8'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const sdBlock = await buildAutoRecallPrompt(
+    makeSession(),
+    fakeSettings(
+      new Map([
+        ['canon_recall_top_k', '8'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean+1sd'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countFactBullets(meanBlock) === 8,
+    `mean mode injects the fact cluster clamped to Max (got ${countFactBullets(meanBlock)})`,
+  );
+  assert(
+    countFactBullets(sdBlock) === 4,
+    `mean+1sd injects visibly fewer facts (got ${countFactBullets(sdBlock)})`,
+  );
+}
+{
+  // A flat fact pool (no signal) collapses to the Canon facts Min floor.
+  const flat = Array.from({ length: 16 }, (_, i) => ({
+    fact_id: `ff${i}`,
+    category: 'plot',
+    summary: `flat ${i}`,
+    detail: null,
+    distance: 0.5,
+  }));
+  const session = {
+    async query(sql) {
+      if (sql.includes('from canon_facts')) return flat;
+      if (sql.includes('from chat_chunks')) return [];
+      return [];
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['canon_recall_min', '3'],
+        ['chat_memory_auto_recall_cutoff_mode', 'mean'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countFactBullets(block) === 3,
+    `a flat fact pool collapses to the Canon facts Min floor (3), not the full pool (got ${countFactBullets(block)})`,
+  );
+}
+{
+  // A fact Min above the fact Max clamps to the Max at read time (canon_recall_top_k=2 →
+  // fact pool 6; min=6 would bypass, clamped min=2 floors).
+  const flat = Array.from({ length: 6 }, (_, i) => ({
+    fact_id: `fg${i}`,
+    category: 'plot',
+    summary: `g ${i}`,
+    detail: null,
+    distance: 0.5,
+  }));
+  const session = {
+    async query(sql) {
+      if (sql.includes('from canon_facts')) return flat;
+      if (sql.includes('from chat_chunks')) return [];
+      return [];
+    },
+  };
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(
+      new Map([
+        ['canon_recall_top_k', '2'],
+        ['canon_recall_min', '6'],
+      ]),
+    ),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    countFactBullets(block) === 2,
+    `a fact Min above the Max clamps to the Max (2) — the floor can never exceed the ceiling (got ${countFactBullets(block)})`,
+  );
+}
+{
+  // The fact lane's SQL: the query selects the raw distance, and its LIMIT is the fact pool
+  // (canon_recall_top_k=2 → poolSize(2, 2) = 6) bound as the $4 parameter — not a flat LIMIT 2.
+  const seenSql = [];
+  const seenParams = [];
+  const session = {
+    async query(sql, params) {
+      seenSql.push(sql);
+      if (params) seenParams.push(params);
+      if (sql.includes('from canon_facts')) return [];
+      if (sql.includes('from chat_chunks')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(new Map([['canon_recall_top_k', '2']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const factSql = seenSql.find((sql) => sql.includes('from canon_facts'));
+  const factParams = seenParams.find((params, i) => seenSql[i].includes('from canon_facts'));
+  assert(
+    factParams && factParams[3] === 6,
+    'canon_recall_top_k=2 sizes the fact candidate pool ($4 bound to poolSize(2, 2) = 6)',
+  );
+  assert(
+    factSql && factSql.includes('as distance'),
+    'the canon_facts query selects the raw distance so the cutoff can measure the fact pool',
   );
 }
 

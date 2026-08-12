@@ -1096,7 +1096,7 @@ export async function adminGetCanonSettings(adminKey: string | null): Promise<Ca
 }
 
 export async function adminSetCanonSettings(
-  patch: { recall_top_k?: number; extraction_prompt?: string },
+  patch: { recall_top_k?: number; recall_min?: number; extraction_prompt?: string },
   adminKey: string | null,
 ): Promise<CanonSettings> {
   const res = await fetch('/v1/admin/canon-settings', {

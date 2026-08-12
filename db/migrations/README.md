@@ -544,3 +544,10 @@ Already applied by hand, not run automatically (see the file for the exact comma
   Pool Multiple/Cutoff Mode settings shape. The key list is the *complete* current vocabulary
   (all of 0010–0090, 70 keys), not the diff — the CHECK is rebuilt wholesale, so a fresh volume
   must land on the same constraint the live DB has. Idempotent hand-apply one-shot.
+- `0092_canon_recall_min.sql` — Stage 2 of the CNZ retrieval port: the canon_facts lane's Min
+  floor, `canon_recall_min` (integer-as-text, default `'2'` — how many approved facts
+  `buildAutoRecallParts` injects at minimum even when the pool distribution says nothing clears
+  the threshold, the per-channel pair of the existing `canon_recall_top_k` Max). Same wholesale
+  CHECK rebuild as 0091 (complete vocabulary, all of 0010–0091, 71 keys); the two shared knobs
+  from 0091 (pool_multiple/cutoff_mode) apply to the fact lane unchanged. Read live by
+  recallForPrompt.ts; unset/corrupt → `DEFAULT_FACT_MIN`. Idempotent hand-apply one-shot.
