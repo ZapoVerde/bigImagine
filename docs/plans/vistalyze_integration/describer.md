@@ -57,7 +57,7 @@ One call, shaped like `ensureFirstTurnHeader.ts`'s single-call pattern:
 * **Prompt**: the `location_describer_prompt` orchestrator setting (migration 0078), expanded with
   `{{location_name}}` and `{{context}}`. Empty setting = the built-in default
   (`DEFAULT_LOCATION_DESCRIBER_PROMPT`), the same "empty override means built-in" fallback as
-  every other prompt key (bi_principles.md §18).
+  every other prompt key (bi_principles.md §17).
 * **Gate**: `runWithCallContext({ taskId: chatId, kind: 'system', userId })` (bi_principles.md §14)
   — the LLM provider is the turn's own gated provider where the caller has one (the post-turn
   fire passes `turnLlm`, the same connection the story ran on — VLZ's "describer defaults to the
@@ -104,7 +104,7 @@ a reply missing one half leaves that column as-is:
 `Name:` is deliberately ignored — the header location is the authoritative name and is never
 overridden.
 
-## 5. Settings surface (bi_principles.md §18)
+## 5. Settings surface (bi_principles.md §17)
 
 | Key | Default | Meaning |
 |-----|---------|---------|

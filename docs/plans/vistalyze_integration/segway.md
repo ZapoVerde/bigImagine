@@ -5,7 +5,7 @@
 plugin tool files. (The cleanup-pass portion this doc describes is itself superseded — see
 `cleanup_prompt.md`'s banner and `turn-loop-plan.md`'s.)
 **Scope**: Secondary LLM Cleanup Pass (built last round, already shipped), Post-Cleanup Heuristic Extraction for both Locations and People/Presence, and the full transient → permanent/inactive lifecycle those records go through — `docs/plans/vistalyze_integration/location_status.md`'s design, generalized to characters per the explicit direction that it applies to people too.
-**Governing Principles**: `bi_principles.md` §1 (Relational Record), §2 (LLM Reasons), §3 (Explicit User Signal Outranks Inferred Signal), §4 (Scene Scoping), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts).
+**Governing Principles**: `bi_principles.md` §1 (Relational Record), §2 (LLM Reasons), §3 (Explicit User Signal Outranks Inferred Signal), §4 (Scene Scoping), §8 (Four Kinds of Code), §11 (Observability), §17 (Surfaced Prompts).
 
 ---
 

@@ -6,9 +6,9 @@
  * alongside recallChunkLane.ts.
  * @description
  * The Stage 2 counterpart of recallChunkLane.ts (docs/plans/completed/rag-dynamic-cutoff-plan.md, Stage 2
- * addendum): fetches this chat's non-rejected canon facts (`status <> 'rejected'` — the
- * plot-arc-recall-plan.md §15 flag: sync-authored `proposed` rows are eligible for silent
- * injection the moment they exist, see the function's own comment; deduped to most-recent-per
+ * addendum): fetches this chat's non-rejected canon facts (`status <> 'rejected'` — a
+ * sync-authored `proposed` row is already live per bi_principles.md §15, so it's eligible for
+ * silent injection the moment it exists, see the function's own comment; deduped to most-recent-per
  * arc_tag/entity_key — the same CTE recallCanonFactsTool.ts runs, scoped to "now" rather than an
  * as_of point in time), sized by the shared Pool Multiple against the fact lane's own Max
  * (canon_recall_top_k), then applies recallCutoff.ts's dynamic cutoff — the same pure function
@@ -58,14 +58,14 @@ export interface FactLaneOptions {
 /** Fetch this chat's non-rejected, deduped canon facts and cut the pool down to what's worth
  *  injecting. `vector` is the caller's already-embedded recall query.
  *
- *  Status filter is deliberately `status <> 'rejected'`, not `status = 'approved'` — the
- *  silent-injection paths treat `proposed` vs. `approved` as "created this sync cycle" vs.
- *  "survived to the next one" (promote_canon_facts runs unconditionally at the top of every
- *  sync tick, so no human review gate exists for sync-authored facts). This is the
- *  docs/plans/plot-arc-recall-plan.md principle flag (§15 read literally describes a manual
- *  review gate this codebase never built); recallCanonFactsTool.ts (the explicit tool-call
- *  path) keeps its own `status = 'approved'` filter on purpose. A future rejection feature
- *  is respected automatically because the filter is written as "not rejected", not removed. */
+ *  Status filter is deliberately `status <> 'rejected'`, not `status = 'approved'` — per
+ *  bi_principles.md §15, a `proposed` row is already live, not a pending review item; `approved`
+ *  vs. `proposed` only distinguishes "created this sync cycle" from "survived to the next one"
+ *  (promote_canon_facts runs unconditionally at the top of every sync tick — there is no human
+ *  review gate for sync-authored facts). recallCanonFactsTool.ts (the explicit tool-call path)
+ *  currently keeps its own `status = 'approved'` filter — see that file's comment. A future
+ *  rejection feature is respected automatically here because the filter is written as
+ *  "not rejected", not removed. */
 export async function recallFactLane(
   session: DbSession,
   userId: string,

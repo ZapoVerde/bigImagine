@@ -165,8 +165,8 @@ function fromOaiResponse(
 
 /** Shared request body between complete() and completeStream() — the two differ only in the
  *  stream flag (and stream_options, which only exists on the streaming path), so both paths send
- *  byte-identical prompts (bb_principles.md §17's cache-friendliness extends to the streaming
- *  path: a streamed request must not reorder/reshape the messages). */
+ *  byte-identical prompts (cache-friendliness extends to the streaming path: a streamed request
+ *  must not reorder/reshape the messages). */
 function buildOaiRequest(
   config: OpenAiCompatibleConfig,
   options: LlmCompleteOptions | undefined,

@@ -24,9 +24,9 @@
  *  1. recallChunkLane.ts — chat_chunks, this chat's archived full-turn texts (the CNZ "chat
  *     lane"). Owns the content + header vector fetch, temporal decay, the keyword blend, and the
  *     dynamic cutoff for this lane (Stages 1/3/4/5 of docs/plans/completed/rag-dynamic-cutoff-plan.md).
- *  2. recallFactLane.ts — canon_facts, non-rejected rows only (the plot-arc-recall-plan.md §15
- *     flag: sync-authored `proposed` rows are eligible for silent injection the moment they
- *     exist), deduped to most-recent per arc_tag/entity_key, with the same dynamic cutoff
+ *  2. recallFactLane.ts — canon_facts, non-rejected rows only (bi_principles.md §15: a
+ *     sync-authored `proposed` row is already live, eligible for silent injection the moment it
+ *     exists), deduped to most-recent per arc_tag/entity_key, with the same dynamic cutoff
  *     (Stage 2 of the same plan).
  *  3. recallPlotLane.ts — the plot-arc lane (docs/plans/plot-arc-recall-plan.md): the ranked,
  *     bounded replacement for the old unconditional plot-threads read. Individual plot beats

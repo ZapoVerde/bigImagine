@@ -3,8 +3,12 @@
  * @stamp 2026-08-06
  * @architectural-role IO Wrapper — semantic search over a chat's approved canon
  * @description
- * The read side of the canon gate (bi_principles.md §15/§16): only status = 'approved' rows are
- * ever candidates — a proposal or a rejection is never selectable into a prompt. Scoping is
+ * Only status = 'approved' rows are ever candidates for this explicit tool call — a proposal or a
+ * rejection is never selectable here. This is narrower than the silent-injection paths
+ * (recallFactLane.ts/recallPlotLane.ts), which per bi_principles.md §15 treat a `proposed` row as
+ * already live and select anything that isn't `rejected`; §15 no longer frames `approved` as a
+ * truth gate, so this tool's `= 'approved'` filter needs its own standing reason to keep, not just
+ * inherited status quo — open question, not yet settled. Scoping is
  * trusted chat identity, never message content (bi_principles.md §4): every canon fact now
  * belongs to exactly one chat (db/migrations/0058_canon_facts_chat_scoped.sql), so recall is
  * scoped to ctx.chatId, not to args.

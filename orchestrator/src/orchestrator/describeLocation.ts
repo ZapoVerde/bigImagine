@@ -25,7 +25,7 @@
  * the render stays a §5.1.2 cache hit).
  *
  * The call itself mirrors ensureFirstTurnHeader.ts's single-call pattern: config read from the
- * settings store (empty override = built-in default, bi_principles.md §18), the prompt recorded
+ * settings store (empty override = built-in default, bi_principles.md §17), the prompt recorded
  * to the trace before the call, one gated llm.complete under runWithCallContext (bi_principles.md
  * §14), the reply parsed for the Definition:/Visuals: markers (VLZ extractMarkerData's tolerant
  * label scan — Name: is ignored because the header name is authoritative and never overridden),
@@ -105,7 +105,7 @@ interface ContextMessage {
 const describeInFlight = new Set<string>();
 
 /** The settings resolution behind the pass: empty prompt = built-in default (bi_principles.md
- *  §18), empty/corrupt history-pairs = 1 (same fail-open shape as every numeric setting). */
+ *  §17), empty/corrupt history-pairs = 1 (same fail-open shape as every numeric setting). */
 async function resolveDescriberConfig(settings: OrchestratorSettingsStore): Promise<{
   prompt: string;
   historyPairs: number;

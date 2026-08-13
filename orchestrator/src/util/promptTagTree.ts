@@ -10,7 +10,7 @@
  * dropped, reordered, or hidden, so a broken tag only changes which level its text displays at.
  * This is the "rolls back up to the next level up" contract from docs/plans/completed/prompt-inspector-tag-tree.md
  * §2. Display-only: the tree is computed from text that was already sent to the model and never
- * feeds back into any assembly path (bi_principles.md §17).
+ * feeds back into any assembly path.
  *
  * Matching rules (see the spec for the worked examples):
  *   - parse the JOINED text, not per-item — a pair may span prompt-stack slots;

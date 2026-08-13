@@ -171,7 +171,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   current tick freshly produced. It can start smaller than Canonize's own default of 40 because
   the key-ideas digest already persists its own state forward as `chat_memory_entries` rows across
   syncs — the horizon here is a revision window layered on top of that persistence, not the sole
-  source of continuity. See `docs/chat-memory.md` and `docs/bi_principles.md` §18 (every prompt,
+  source of continuity. See `docs/chat-memory.md` and `docs/bi_principles.md` §17 (every prompt,
   and prompt-adjacent behavior knob, surfaced in Settings for manual tuning).
 - `0050_screen_lock_settings.sql` — widens `orchestrator_settings.key` with `screen_lock_password`
   and `screen_lock_timeout_minutes`: an idle-timeout re-lock overlay
@@ -314,7 +314,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   prompt text (docs/plans/vistalyze_integration/cleanup_prompt.md §2.3): the banned-construction/AI-cliché
   slop list, the location/date/time header-reconstruction rule, and the `<details>` inner-thoughts
   formatting rule, with `{{message}}` embedded where the raw turn goes. The builtin is the
-  read-only default on the Prompt Stacks page; per bi_principles.md §18 the user duplicates it to
+  read-only default on the Prompt Stacks page; per bi_principles.md §17 the user duplicates it to
   customize — the slop list is just the slot's `customContent` textarea, no separate table or UI.
   Companion to 0057's `chat_sessions.cleanup_preset_id` column; null (unset) chat references keep
   cleanup off. Guarded on the preset name so re-runs can't double-seed after a duplicate.
@@ -352,7 +352,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   on every matched turn even on a no-op merge, which would make a timestamp-based check always
   miss and defeat the cache-first commitment. Widens
   `orchestrator_settings.key`'s CHECK with `image_prompt_template` (the master prompt template
-  synthesizeImagePrompt.ts expands, `''` = built-in default per bi_principles.md §18).
+  synthesizeImagePrompt.ts expands, `''` = built-in default per bi_principles.md §17).
 - `0069_chat_background_settings.sql` — widens `orchestrator_settings.key`'s CHECK with
   `chat_background_parallax` (docs/plans/vistalyze_integration/parallax_fade_teststep.md §2.2): the
   toggle for the ChatView location-background's parallax pan, read live by the frontend via
@@ -419,7 +419,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   (nullable — the describer's "Definition:" output, the logical half; the "Visuals:" half lands in
   the existing `visual_description`), plus two orchestrator_settings keys:
   `location_describer_prompt` (the full describer prompt template; empty = the built-in default in
-  `orchestrator/src/orchestrator/describeLocation.ts`, bi_principles.md §18) and
+  `orchestrator/src/orchestrator/describeLocation.ts`, bi_principles.md §17) and
   `location_describer_history_pairs` (integer-as-text, default `'1'` — how many trailing turn-pairs
   the describer reads as narrative context). Read live on every describe pass, no restart; unset or
   corrupt values fall back to the built-in defaults (same fail-open shape as every numeric setting).
@@ -433,7 +433,8 @@ Already applied by hand, not run automatically (see the file for the exact comma
   reconstructible afterwards since previous output / running threads have moved on) and
   `canon_facts.sync_id` — `on delete set null`, not cascade: unlike chat_chunks/chat_memory_entries
   (pure derived state, reconstructible from the source transcript, so 0036's self-healing cascade
-  is right for them), an approved canon fact is a durable record (bi_principles.md §15), so a
+  is right for them), a canon fact is a durable record the moment it's proposed (bi_principles.md
+  §15), so a
   truncated-away sync point de-attributes its facts rather than deleting them — the same `set null`
   reasoning 0054 originally used for `canon_facts.chat_id`, and the reason a fork's copied facts
   (which keep the parent's sync_id) survive the parent's sync point dying. Nullable — facts
@@ -491,7 +492,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   (2026-08-14). Adds `context_stack_slots.tag_enabled` (boolean, `not null default false`) —
   when ON, the slot's friendly name (marker label / slot label, sanitized: trim, newlines→space,
   strip `<`/`>`) wraps its assembled content as `<Name>\n...\n</Name>`, a hint to the LLM, not
-  real HTML. Default OFF keeps existing stacks byte-identical (§17 prompt-cache contract).
+  real HTML. Default OFF keeps existing stacks byte-identical (preserving the prompt-cache contract).
   Assembly-relevant (unlike 0060's purely cosmetic `label`): `assemblePromptStack.ts`'s
   `PromptStackSlot` gains `tagEnabled`/`label`, and the per-turn narrator path wraps with the same
   shared helper so the real prompt and the inspector agree. Hand-applied to the live DB.
@@ -503,7 +504,7 @@ Already applied by hand, not run automatically (see the file for the exact comma
   equality (opener/closer need no flags). `<Name>` attaches to the first rendered member,
   `</Name>` to the last; disabled/empty members stay inside the group positionally. Names are
   sanitized like 0085's (trim, collapse whitespace, strip `<`/`>`); empty name emits no tags and
-  breaks a run. Default NULL keeps existing stacks byte-identical (§17 cache contract). Editor
+  breaks a run. Default NULL keeps existing stacks byte-identical (preserving the cache contract). Editor
   gives each group a stable name-derived color from a palette that excludes red — red is reserved
   for the coverage warning (enabled slot with no enclosing tags). Hand-applied to the live DB
   (2026-08-14).

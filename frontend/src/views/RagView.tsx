@@ -560,7 +560,7 @@ export default function RagView() {
         </div>
         <br />
         <label>
-          Canon facts Max (approved facts injected)
+          Canon facts Max (non-rejected facts injected)
           <br />
           <input
             type="number"
@@ -583,8 +583,10 @@ export default function RagView() {
           />
         </label>
         <div className="status">
-          How many approved canon facts both the silent recall and the recall_canon_facts tool return (canon_recall_top_k,
-          read live on every recall call). Since the RAG dynamic cutoff (migrations 0091/0092) this is the fact lane's
+          How many canon facts the silent recall returns (canon_recall_top_k, read live on every recall call). The
+          silent recall injects any non-rejected fact (bi_principles.md §15: a proposed fact is already live); the
+          explicit recall_canon_facts tool call keeps its own narrower approved-only filter. Since the RAG dynamic
+          cutoff (migrations 0091/0092) this is the fact lane's
           per-channel Max: the recall fetches a candidate pool (Pool Multiple × Max above) and keeps only the facts that
           clear the cutoff's distance threshold, never fewer than Canon facts Min (canon_recall_min) nor more than this
           Max. The extraction pass that proposes new facts is Director Pass work — see docs/canonize-plan.md §2.

@@ -142,8 +142,8 @@ function fromAnthropicResponse(content: AnthropicContentBlock[], usage?: LlmUsag
 }
 
 /** Shared request body between complete() and completeStream() — the two differ only in the
- *  stream flag, so both paths send byte-identical prompts (bb_principles.md §17's cache-friendliness
- *  extends to the streaming path: a streamed request must not reorder/reshape the messages). */
+ *  stream flag, so both paths send byte-identical prompts (cache-friendliness extends to the
+ *  streaming path: a streamed request must not reorder/reshape the messages). */
 function buildAnthropicRequest(
   config: AnthropicConfig,
   options: LlmCompleteOptions | undefined,

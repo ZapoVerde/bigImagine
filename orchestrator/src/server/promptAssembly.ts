@@ -246,7 +246,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // <locations> block, eligibility-filtered + current-parent scoped), so a preset carrying that
 // marker emits it verbatim in its own slot order. The tool stays live for the model to call
 // mid-turn when it does have a scene_id.
-// docs/bi_principles.md §18 ("every prompt is surfaced for manual tuning"): one labeled item per
+// docs/bi_principles.md §17 ("every prompt is surfaced for manual tuning"): one labeled item per
 // enabled, non-empty slot, in preset order — the same population assemblePromptStack itself would
 // emit, just not yet collapsed into one joined string. Both assembleNarratorSystemText (the real
 // per-turn call) and buildPromptPreview (the read-only inspector below) call this, so a preview
@@ -256,7 +256,7 @@ async function loadPromptStackSlots(db: PostgresClient, userId: string, presetId
 // don't have them) feeds the recent_history marker when that slot is enabled — the 2026-08-10 user
 // direction: the active context (last sent turn + active turns) renders INSIDE the stack, wrapped
 // by the preset's own HTML tags, and is NOT also appended as messages. The rendering is
-// deterministic (formatRecentHistoryTurns, bi_principles §17) so an unchanged window produces
+// deterministic (formatRecentHistoryTurns) so an unchanged window produces
 // identical bytes and the byte-prefix cache survives; the volatile block sits wherever the preset
 // placed the slot, which is the author's cache-management control.
 export async function buildNarratorStackItems(

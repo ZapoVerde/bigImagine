@@ -332,7 +332,7 @@ section exposes:
   `DEFAULT_PEOPLE_CURATOR_PROMPT`, `DEFAULT_INJECT_BRIDGE_PROMPT`, `DEFAULT_INJECT_PLOT_PROMPT`,
   `DEFAULT_INJECT_AUTO_RECALL_PROMPT`, `DEFAULT_AUTO_RECALL_CHUNK_PROMPT`, each exported from its
   own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
-  the default rather than needing a separate reset action. `docs/bi_principles.md` §18 makes this
+  the default rather than needing a separate reset action. `docs/bi_principles.md` §17 makes this
   default-plus-bespoke shape a platform-wide requirement, not a one-off pattern local to this
   feature: any prompt driving an internal LLM call must be surfaced here or somewhere else in
   Settings. The key-ideas digest prompt is mutually

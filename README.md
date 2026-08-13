@@ -12,8 +12,7 @@ the LLM, invoked server-side; everything else moves and displays data. Three ide
 life as separate SillyTavern extensions are native, relational features of that store instead of
 bolted-on scripts:
 
-- **Canonize** — approved canon facts, with human-in-the-loop proposal review before anything
-  becomes established world state.
+- **Canonize** — canon facts, live the moment they're proposed, with a human review queue.
 - **Vistalyze** — locations, with cached generated background imagery.
 - **Triggeryze** — rules and status effects, with conditional context injection. Not built as its
   own general system yet, though its trigger→action model is already doing real work in two

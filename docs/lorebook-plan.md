@@ -177,7 +177,7 @@ out of sync with the log.
   entry ids + which were skipped and why (probability roll, cooldown, group loss, budget cut).
   Deterministic given its inputs — critically, `turnSeed` (derived from the assistant `message_id`
   being generated, not `Math.random()`) makes the probability roll (§5) reproducible and keeps this
-  function pure per §17, not a hidden source of prompt-cache-breaking nondeterminism. Discovery
+  function pure per §8, not a hidden source of prompt-cache-breaking nondeterminism. Discovery
   already happened in the IO step above; this function only ever narrows a candidate set, never
   looks at message text.
 - **IO Wrapper** `writeLorebookActivationLog(chatId, messageId, activatedEntryIds)` — called after
@@ -247,19 +247,20 @@ untouched and still pure.
 A dedicated slot, not folded into the existing `canon_facts` marker — `chat-memory.md`'s own system
 already spans five separate markers (`canon_facts`, `memory_recall`, `bridge`, `plot_threads`,
 `auto_recall`) for what it calls one umbrella system, so a sixth for a genuinely distinct source
-follows precedent rather than breaking it. More concretely: `canon_facts` rows carry a trust chain
-(`0051`... `canon_facts` are LLM-*proposed*, then human-*approved*, per §15) that lorebook entries
-don't — they're directly authored or imported, no approval step — and merging the two into one text
+follows precedent rather than breaking it. More concretely: `canon_facts` rows carry a provenance
+lorebook entries lack (`0051`... `canon_facts` are LLM-*proposed*, live immediately, then firmed
+up to `approved` at the next sync per §15) — lorebook entries are directly authored or imported,
+no extraction step at all — and merging the two into one text
 block would hide that distinction from anyone reading the assembled prompt. It would also cost the
 Prompt Inspector's per-slot tag boundary (`0085`/`0086`'s `<Name>...</Name>` wrapping): a dedicated
 slot gets its own `<Lorebook>` tag in the inspector, so "is Lorebook on for this chat" (§2) stays a
 visible, inspectable fact rather than silently changing the size of the `canon_facts` block. Costs
 nothing structurally — one more field key doesn't change `assemblePromptStack`'s pure-function shape
-or hurt §17's caching.
+or hurt its caching.
 
 **Non-goal for v1:** ST's per-entry `position`/`depth` (inject *this* entry N messages back into
 history, independent of every other entry) has no equivalent in BigImagine's fixed-ordered-slot
-assembler (§17) — there's one `lorebook` slot, not one slot per entry. `position`/`depth` stay on
+assembler — there's one `lorebook` slot, not one slot per entry. `position`/`depth` stay on
 `lorebook_entries` (already present since 0051) purely for import/export round-trip fidelity; they
 are not read by the evaluator or the assembler in v1. If deep depth-placement fidelity turns out to
 matter, `0086`'s slot-group mechanism is the extension point to revisit, not a special case bolted
@@ -281,7 +282,7 @@ verbatim original; export reverses it losslessly per §7 of `bi_principles.md`.
 
 `frontend/src/components/lorebook/LorebookPanel.tsx`, wired into `ChatView.tsx` the same way
 `CanvasPanel` already is: same mobile-full-pane-swap class pattern (`mobile-show-lorebook`, not a
-desktop-only fixed-right-edge panel — the draft's "collapsible panel on the right edge" breaks §19 on
+desktop-only fixed-right-edge panel — the draft's "collapsible panel on the right edge" breaks §18 on
 a phone unless it follows this existing swap pattern), a toggle button next to the existing Canvas
 toggle, offered on any chat per §5 of `bi_principles.md`, not just `'rp'` chats.
 

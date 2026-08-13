@@ -108,7 +108,7 @@
  * migration 0048) are the Canonize feature's two settings: canon_recall_top_k (integer-as-text,
  * default '8' — how many facts recall_canon_facts returns) is read live by the recall tool on
  * every call; canon_extraction_prompt is the background extraction call's prompt template
- * (bi_principles.md §18 — empty override means "use the built-in default"), read by the future
+ * (bi_principles.md §17 — empty override means "use the built-in default"), read by the future
  * Director Pass wiring. Both were added to 0010's CHECK constraint together in 0048, the same
  * widen-both-sides shape 0043's own entry documents.
  *
@@ -207,7 +207,7 @@
  * match. The header prompt resolves {{history, x}} (last x turn pairs) and {{message}}; the
  * footer prompt resolves {{message}} only. Empty regex = the loop's built-in default pattern;
  * empty prompt = the built-in default repair text — same "empty override means built-in"
- * fallback shape as every other prompt key (bi_principles.md §18). Written by the admin-gated
+ * fallback shape as every other prompt key (bi_principles.md §17). Written by the admin-gated
  * cleanup-settings endpoint, read live by the subloop, no restart.
  *
  * location_describer_prompt/location_describer_history_pairs (migration 0078,
@@ -216,7 +216,7 @@
  * description (BigImagine's analogue of SillyTavern-Vistalyze's Step 3 Describer), fired in the
  * same decoupled chain as the image render and awaited before it. describer_prompt is the full
  * prompt template ({{location_name}}, {{context}}; empty = the built-in default in
- * describeLocation.ts — same §18 fallback as every prompt key), describer_history_pairs is how
+ * describeLocation.ts — same §17 fallback as every prompt key), describer_history_pairs is how
  * many trailing turn-pairs form the narrative context (integer-as-text, default '1', VLZ's
  * describerHistory). Read live on every pass, no restart, editable from the Settings tab's Image
  * Generation fieldset.
@@ -227,7 +227,7 @@
  * orchestrator/liveReasoning.ts at the start of every RP streaming turn, no restart. Either one
  * blank = detection disabled (the plan's "both prefix and suffix must be defined" guard, the
  * same shape as cleanup_header_regex's empty-override meaning). Editable from the Cleanup page's
- * setup block alongside the header/footer regex fields, per the plan's §13/§18 alignment with
+ * setup block alongside the header/footer regex fields, per the plan's §13/§17 alignment with
  * the cleanup config's existing scope.
  *
  * @api-declaration

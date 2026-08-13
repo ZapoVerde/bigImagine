@@ -58,7 +58,7 @@
  *   shape
  * getImageSettings(store) — { template, templateIsDefault, describerPrompt, describerPromptIsDefault,
  *   describerHistoryPairs } for the image subsystem's settings (endpoint.md §2.2 + describer.md;
- *   bi_principles.md §18 — '' = built-in default for the two prompts, '' = built-in 1 for the pairs)
+ *   bi_principles.md §17 — '' = built-in default for the two prompts, '' = built-in 1 for the pairs)
  * parseSetImageSettingsBody(raw) — validates { template?, describer_prompt?, describer_history_pairs? },
  *   at least one present; undefined on any malformed shape
  * setImageSettings(store, patch) — upserts whichever fields the patch names
@@ -373,7 +373,7 @@ export async function testConnection(connections: LlmConnectionStore, id: string
 // real engine (util/synthesizeImagePrompt.ts) with fixed sample inputs — including the
 // connection's own master positive style prefix — so Test shows what this connection will
 // actually render (parallax_fade_teststep.md §4.2), and the exact prompt sent is returned in the
-// result (bi_principles.md §18 — prompts are surfaced, never hidden).
+// result (bi_principles.md §17 — prompts are surfaced, never hidden).
 //
 // NOTE: testImageConnection genuinely calls the provider adapter. Pollinations needs no network
 // (its URL *is* the render request, io/imageGen/pollinations.ts) — the probe is the URL
@@ -505,7 +505,7 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   return patch;
 }
 
-// --- Image settings (endpoint.md §2.2, bi_principles.md §18) ---
+// --- Image settings (endpoint.md §2.2, bi_principles.md §17) ---
 // The three orchestrator-settings keys this subsystem adds: image_prompt_template, the Master
 // Image Prompt Template synthesizeImagePrompt.ts expands against a location's visual_description/
 // environment; location_describer_prompt, the room-description LLM prompt describeLocation.ts
@@ -1441,7 +1441,7 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
 // edits the whole set and saves; there is no per-rule CRUD surface.
 //
 // The reasoning tag pair (reasoning_open_tag / reasoning_close_tag, migration 0095,
-// docs/plans/reasoning-blocks-plan.md) lives on this same block per the plan's §13/§18
+// docs/plans/reasoning-blocks-plan.md) lives on this same block per the plan's §13/§17
 // alignment with the cleanup config's existing scope — the Cleanup page is the "in-stream
 // transform" surface, and the tags are another one. Like the header regex, an empty value is a
 // deliberate override: the detector disables when either tag is blank (liveReasoning.ts's
@@ -1588,11 +1588,11 @@ export async function setCleanupSettings(
   if (body.reasoningCloseTag !== undefined) await store.set('reasoning_close_tag', body.reasoningCloseTag);
 }
 
-// --- Canon settings (docs/canonize-plan.md §6, bi_principles.md §13/§18) ---
+// --- Canon settings (docs/canonize-plan.md §6, bi_principles.md §13/§17) ---
 // The Canonize feature's knobs: canon_recall_top_k (integer-as-text, default '8' — how many
 // canon facts recall_canon_facts returns, read live on every recall call, no restart) and
 // canon_extraction_prompt (the background extraction call's prompt template — "default + bespoke"
-// override per bi_principles.md §18, empty clears back to the built-in, same shape as the
+// override per bi_principles.md §17, empty clears back to the built-in, same shape as the
 // chat_memory_* prompts above). Since migration 0092 (docs/plans/completed/rag-dynamic-cutoff-plan.md
 // Stage 2) canon_recall_top_k doubles as the fact lane's per-channel **Max** for the dynamic
 // cutoff, with canon_recall_min (default '2') as its Min floor — read live by

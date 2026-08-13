@@ -814,7 +814,7 @@ export async function adminTestImageConnection(id: string, adminKey: string | nu
 }
 
 /** The master image prompt template (endpoint.md §2.2) — read live per generation; an empty
- *  template means "use the built-in default" (bi_principles.md §18). */
+ *  template means "use the built-in default" (bi_principles.md §17). */
 export async function adminGetImageSettings(adminKey: string | null): Promise<ImageSettings> {
   return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey);
 }

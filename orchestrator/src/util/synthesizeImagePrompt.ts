@@ -7,12 +7,12 @@
  * (docs/plans/vistalyze_integration/endpoint.md §4): a pure macro-expansion module that combines a
  * location's visual description, its environment object (time of day, weather, mood, lighting),
  * the active connection's master positive style prefix, and the admin's Master Image Prompt
- * Template (the `image_prompt_template` orchestrator setting, bi_principles.md §18 — empty means
+ * Template (the `image_prompt_template` orchestrator setting, bi_principles.md §17 — empty means
  * this module's built-in default) into the single positive prompt string sent to the image
  * provider. Pure by construction (bi_principles.md §8): identical inputs always produce identical
- * output, no IO, no randomness — the same load-bearing property the prompt-stack assembler has
- * (bi_principles.md §17), so a cache-first generation pass can rely on the synthesized prompt
- * being byte-identical for identical location state.
+ * output, no IO, no randomness — the same property the prompt-stack assembler relies on, so a
+ * cache-first generation pass can rely on the synthesized prompt being byte-identical for
+ * identical location state.
  *
  * The Master Image Prompt Template is expanded with simple `{{macro}}` interpolation, same
  * convention as the rest of the platform (util/interpolateMacros.ts): the five inputs the spec's

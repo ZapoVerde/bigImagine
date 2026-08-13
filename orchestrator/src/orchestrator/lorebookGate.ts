@@ -11,7 +11,7 @@
  * recallLorebookEntries (io/lorebook/); this function is pure: same (candidates,
  * timedEffectState, turnSeed, tokenBudget, chatMessageCount) → same result, no IO, no
  * Math.random — the plan explicitly calls this out as the property that keeps the probability
- * roll reproducible instead of a prompt-cache-breaking nondeterminism (§4, §17).
+ * roll reproducible instead of a prompt-cache-breaking nondeterminism (§4).
  *
  * Gate order (constants > probability > inclusion groups > timed effects > budget trim, per §4):
  *   1. delay — `delay` (N): can't activate until the chat has ≥N messages (§5).

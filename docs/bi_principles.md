@@ -81,7 +81,7 @@ Every module belongs to exactly one of four categories. Mixing them is a defect.
 3. **IO Wrappers** — Call the LLM, read/write the database, call external APIs (image generators, etc.). Contain zero reasoning or derivation logic.
 4. **Orchestrators** — Sequence calls to the other three layers. Decide what runs and in what order; never what the data means. Own no state. Perform no direct IO.
 
-Each file declares its category before its implementation. The prompt stack assembler is the platform's canonical example of a Pure Function — see §17 below for why that specific module's purity is load-bearing, not incidental.
+Each file declares its category before its implementation. The prompt stack assembler is the platform's canonical example of a Pure Function: it renders whatever order and content the DB gives it, with no reasoning, no side effects, and no reads outside its arguments.
 
 ---
 
@@ -136,11 +136,11 @@ This is what makes usage accountable rather than merely visible after the fact, 
 
 ---
 
-## 15. Canon Requires Approval Before It Becomes Truth
+## 15. A Proposed Fact Is Already Live
 
-A fact extracted from a turn — a plot beat, a relationship shift, a world-rule change — is a **proposal**, not canon, until it is explicitly approved. Only approved canon facts are ever injected into a prompt or treated as established world state. An unapproved proposal is inert: visible for review, invisible to the story.
+A fact extracted from a turn — a plot beat, a relationship shift, a world-rule change — is written and immediately in play: available for injection, recall, and editing from the moment it's proposed. `proposed` describes how fresh a fact is, not whether it can be trusted. The following sync cycle firms it up to `approved` — a maturity marker, not a truth gate — without rewriting its content.
 
-This is Principle 3 applied at its highest-stakes point. A hallucinated inference that quietly becomes permanent world truth doesn't just corrupt one turn — it corrupts every future turn built on top of it, and unlike a bad reply, a bad canon fact doesn't announce itself as wrong.
+This mirrors Canonize's additive-sync model: a fact is a fact from the moment it's written, and status only ever moves forward. Gating injection on approval would mean the story silently forgets what just happened for a full sync cycle, which is worse than acting on a fact that turns out to need a correction — corrections are visible and editable; a story that skips a beat because the fact behind it hadn't been rubber-stamped yet is not.
 
 ---
 
@@ -152,15 +152,7 @@ A status effect that doesn't expire, or a canon fact with no way to un-inject it
 
 ---
 
-## 17. The Prompt Stack Assembler is a Pure Function of Scene State
-
-Given identical scene state — the same active characters, location, approved canon, active rules, and recent history — the assembled prompt is always identical. No hidden mutation, no randomness, no side effects during assembly.
-
-This isn't just Principle 8's Pure Functions category applied generically — it's the specific property that makes prompt caching actually work. A cached static prefix only pays off if it's byte-identical across every character's turn in the same scene; a prompt stack that isn't a pure function of its inputs breaks the cache silently and turns a near-free multi-character turn back into a full-price one, with no error to signal that it happened.
-
----
-
-## 18. Every Prompt is Surfaced for Manual Tuning
+## 17. Every Prompt is Surfaced for Manual Tuning
 
 Any prompt string that drives an internal LLM call — a classification pass, a rolling summary, a digest, a director-pass decision — ships with a sensible built-in default, but that default is never the only copy that matters. It is always readable and overridable from the Settings surface, in full, as plain text.
 
@@ -168,7 +160,7 @@ A prompt that only lives in source is a prompt only a rebuild can change. The pe
 
 ---
 
-## 19. The Platform is Mobile-First, Not Mobile-Tolerated
+## 18. The Platform is Mobile-First, Not Mobile-Tolerated
 
 A screen you check a story on is as likely to be a phone as a desktop. Every surface — the cinematic chat view, the Settings surface, the Inspector Canvas — must remain fully usable at phone width: legible without zooming, operable without a mouse-precision tap target, and readable without horizontal scrolling.
 

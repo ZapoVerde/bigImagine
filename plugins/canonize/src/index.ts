@@ -33,7 +33,7 @@ import { createRecallCanonFactsTool } from './recallCanonFactsTool.js';
 export const info = {
   id: 'canonize',
   name: 'Canonize',
-  description: 'Approved Canon Facts with human-in-the-loop proposal review: propose, approve/reject, recall.',
+  description: 'Canon Facts, live the moment proposed, with a human review queue: propose, approve/reject, recall.',
 };
 
 export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]> {

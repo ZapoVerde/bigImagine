@@ -3,10 +3,12 @@
  * @stamp 2026-08-04
  * @architectural-role IO Wrapper — proposes a canon fact
  * @description
- * The write side of the canon gate (bi_principles.md §15, canonize-plan.md §5): embeds
- * summary + detail via the injected embeddings provider and inserts a 'proposed' row. A proposal
- * is inert — never selectable into a prompt, never returned by recall_canon_facts (which filters
- * status = 'approved'); its only consumer is the approval queue. No focusHint: proposals aren't
+ * canonize-plan.md §5: embeds summary + detail via the injected embeddings provider and inserts a
+ * 'proposed' row. Per bi_principles.md §15 a proposed row is already live — eligible for silent
+ * recall (recallFactLane.ts/recallPlotLane.ts) the moment it's written — but it's not yet
+ * returned by the explicit recall_canon_facts tool call, which still filters status = 'approved'
+ * (see that file's own comment); the approval queue is where a human catches and corrects it
+ * before or shortly after that promotion. No focusHint: proposals aren't
  * the kind of thing a Canvas should jump to mid-conversation; the queue is a deliberate,
  * separate visit.
  *

@@ -9,7 +9,7 @@
  * prompt stack — `bridge`, `plot_threads`, `auto_recall` — and each is rendered from a
  * user-editable prompt template exactly the way SillyTavern-Canonize renders its own injections
  * (rag/inject.js + core/summary-prompt.js): a "default + bespoke" settings key (bi_principles
- * §18, empty = built-in default) with `{{variable}}` substitution, including CNZ's `{{#if key}}
+ * §17, empty = built-in default) with `{{variable}}` substitution, including CNZ's `{{#if key}}
  * ... {{/if}}` conditional blocks so a template can be written that reads naturally whether or
  * not a component has content.
  *
@@ -43,7 +43,7 @@
  * renderFusedMemoryBlock(scene, events, arcs, autoRecallBlock) -> string — the deprecated
  *   memory_recall alias: byte-identical to the legacy buildChatMemorySystemPrompt join.
  * formatRecentHistoryTurns(messages, charName, userName) -> string — the live-window turns
- *   rendered as one `Name: content` line per message (deterministic — bi_principles §17), the
+ *   rendered as one `Name: content` line per message (deterministic, no IO or randomness), the
  *   {{turns}} value the recent_history marker renders (2026-08-10 user direction: the active
  *   context, last sent turn + active turns, lives INSIDE the stack inside the preset's own HTML
  *   tags; nothing is appended as messages after it).
@@ -199,8 +199,8 @@ export function renderAutoRecall(
 }
 
 /** The recent_history marker's {{turns}} value — the live-window messages rendered as one
- *  `Name: content` line per message, in order, joined by blank lines. Deterministic (bi_principles
- *  §17: identical window => identical bytes => the stack's stable prefix survives) and as-is (an
+ *  `Name: content` line per message, in order, joined by blank lines. Deterministic (identical
+ *  window => identical bytes => the stack's stable prefix survives) and as-is (an
  *  empty-content turn renders as just the speaker line — the 2026-08-10 user direction: "send it
  *  as it is"; the stack is robust enough to provoke a good response). assistant -> charName,
  *  user -> userName, any other role (system/tool) -> the role name verbatim. */
@@ -214,7 +214,7 @@ export function formatRecentHistoryTurns(messages: LlmMessage[], charName: strin
 }
 
 /** The recent_history marker — {{turns}} (the pre-rendered turn lines), {{char_name}}/{{user_name}}
- *  for bespoke templates. Empty-string override = built-in default (the platform's §18 contract,
+ *  for bespoke templates. Empty-string override = built-in default (the platform's §17 contract,
  *  same `|| undefined` as the bridge/plot/auto-recall templates). */
 export function renderRecentHistory(
   turns: string,

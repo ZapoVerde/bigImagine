@@ -17,7 +17,7 @@
  *   {{sub_locations}}     the newline-joined eligible sub-location names of the current parent
  *   {{current_parent}}    the split parent of the current scene's active location (or null)
  * Anything else in an override template passes through verbatim (author's responsibility, same
- * as every other injected template — bi_principles.md §18).
+ * as every other injected template — bi_principles.md §17).
  *
  * Omission rules (location.md §5.1) — "omission, not noise":
  *   - empty parents list => the caller must not emit a block at all (loadLocationBlock returns

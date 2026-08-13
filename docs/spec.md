@@ -13,7 +13,7 @@ This specification defines the architecture for a self-hosted, single-user inter
 
 The platform bakes in, as native features rather than bolted-on extensions, the functionality of three previously separate SillyTavern extensions:
 
-- **Canonize** → approved Canon Facts, with human-in-the-loop proposal review.
+- **Canonize** → Canon Facts, live the moment they're proposed, with a human review queue.
 - **Vistalyze** → Locations, with cached generated background imagery.
 - **Triggeryze** → Rules and Status Effects, with conditional context injection.
 
@@ -132,7 +132,7 @@ What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the
 +----------------------+
 ```
 
-**Canon Facts (Canonize, native).** `status` is the human-in-the-loop gate (`bi_principles.md` §15): a background extraction step writes `'proposed'` rows after a turn; only an `'approved'` row is ever selected into a prompt or a vector-similarity query. `'rejected'` rows are kept (not deleted) as a record of what was proposed and turned down, so the extraction step's own behavior stays auditable. `vector_embed` enables semantic recall scoped to present characters/location, replacing keyword lorebooks entirely — there is no keyword-match fallback anywhere in this schema. `category` is a MECE curator tag; `arc_tag` (required only for `category = 'plot'`) keeps a continuing plot thread's successive proposals linked without an in-place `UPDATE` — every proposal for the same `arc_tag` gets its own row, kept forever, and `recall_canon_facts` selects only the most-recently-approved row per `arc_tag` at read time (`docs/canonize-plan.md` §3.2).
+**Canon Facts (Canonize, native).** `status` is a maturity marker, not an approval gate (`bi_principles.md` §15): a background extraction step writes `'proposed'` rows after a turn, and those rows are already live — eligible for silent recall and vector-similarity queries the moment they exist. The next sync cycle firms a surviving row up to `'approved'` without rewriting its content; the silent-injection paths (`recallFactLane.ts`, `recallPlotLane.ts`) select any row that isn't `'rejected'`. The one deliberate exception is the explicit `recall_canon_facts` tool call, which still selects only `'approved'` rows (`plugins/canonize/src/recallCanonFactsTool.ts`) — an LLM-invoked lookup surfaces only facts that have survived a sync, while the silent stack injection doesn't wait. `'rejected'` rows are kept (not deleted) as a record of what was proposed and turned down, so the extraction step's own behavior stays auditable. `vector_embed` enables semantic recall scoped to present characters/location, replacing keyword lorebooks entirely — there is no keyword-match fallback anywhere in this schema. `category` is a MECE curator tag; `arc_tag` (required only for `category = 'plot'`) keeps a continuing plot thread's successive proposals linked without an in-place `UPDATE` — every proposal for the same `arc_tag` gets its own row, kept forever, and `recall_canon_facts` selects only the most-recently-approved row per `arc_tag` at read time (`docs/canonize-plan.md` §3.2).
 
 **Rules & Status Effects (Triggeryze, native).** A `rules` row with `scene_id = null` is a global world rule; a scoped one applies only within its scene. `status_effects` is polymorphic over `target_type`/`target_id` (a character or a location can carry one) rather than two near-identical tables, since the shape — label, description, an optional expiry, an optional event payload — is identical either way. `expires_at` is what keeps `bi_principles.md` §16 (injected context is bounded) mechanically true: an expired status stops being selected into the prompt stack without any cleanup job needing to delete the row.
 
@@ -165,7 +165,7 @@ What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the
 bigBrain's rolling summarization/RAG/digest system was itself adapted from Canonize's pattern once already (`docs/chat-memory.md`), then reshaped around bigBrain's relational store being the canonical world model. BigImagine inherits that same reshaped version, keyed by `scene_id` instead of a household:
 
 - Full-turn recall stays an explicit tool call (`recall_chat_history`) in the 'chat' lane; the 'rp' lane additionally auto-injects it every turn, CNZ-style, per user decision (2026-08-08) — see `docs/chat-memory.md`'s "The RP Read Path". `bi_principles.md` §2 holds everywhere except that one documented carve-out.
-- The per-scene "key ideas" digest and chat-lane RAG chunks replace ST's keyword lorebook the same way approved Canon Facts do (§4 above) — this is a second, complementary recall path (recent-history-shaped) alongside Canon Facts' (fact-shaped) semantic recall, not a duplicate of it.
+- The per-scene "key ideas" digest and chat-lane RAG chunks replace ST's keyword lorebook the same way Canon Facts do (§4 above) — this is a second, complementary recall path (recent-history-shaped) alongside Canon Facts' (fact-shaped) semantic recall, not a duplicate of it.
 - Branching is a new `chat_sessions` row constructed correct from birth, not a divergence-detection system — unchanged rationale from bigBrain, since this platform owns every mutation to its own `chat_messages` exactly as bigBrain does.
 
 `docs/chat-memory.md` itself still describes the household framing and needs its own BigImagine pass; this section is the authoritative narrative-framed summary until that happens.
@@ -196,7 +196,7 @@ User / Narrator          Orchestrator              LLM (Director)          LLM (
 ```
 
 1. **Director Pass (speaker selection).** The LLM evaluates scene state — who's present, what just happened — and picks the next speaker. A judgment call, per `bi_principles.md` §2; never a hardcoded round-robin.
-2. **Context Assembly (the pure function).** Fixed order, always: System Prompt + Global Rules → speaking character's Persona/Scenario → active Location's visual description → approved Canon Facts for present entities → that character's own memory recall → recent on-scene history. Identical scene state always yields an identical stack (`bi_principles.md` §17) — this is what makes step 5 below actually cheap.
+2. **Context Assembly (the pure function).** Fixed order, always: System Prompt + Global Rules → speaking character's Persona/Scenario → active Location's visual description → Canon Facts for present entities → that character's own memory recall → recent on-scene history. Identical scene state always yields an identical stack — this is what makes step 5 below actually cheap.
 3. **Generation.** Because the stack's static prefix (rules, location, canon, history) is identical across every character's turn in the same scene, a caching-capable provider (e.g. DeepSeek Flash) reads that prefix at a steep token discount on every character after the first.
 4. **Background evaluation.** After the reply, rule triggers are evaluated and canon-fact proposals are extracted — both write rows, neither injects anything into the prompt until a human approves it (canon) or a rule's own trigger condition is met (status effects). A rule cascade may prompt Vistalyze to regenerate a location's image if the scene moved somewhere new.
 
@@ -207,8 +207,8 @@ Every LLM call in this loop — director, character generation, fact extraction,
 ### 6. INTERFACE & RENDERING MODEL
 
 - **Default: the cinematic chat view**, always. The active location's image renders as a styled background behind the conversation; message bubbles carry the usual swipe/rerun/edit/delete controls. No story action is ever visible only through a specialist surface (`bi_principles.md` §5).
-- **Avatar & status badges.** Character avatars render alongside their turns, with active Triggeryze status badges and relationship indicators layered on top — sourced directly from `status_effects` and approved `canon_facts`, never a separate display-only copy of that state.
-- **The Inspector Canvas.** A split-screen HUD panel (the same tool-driven `focusHint` mechanism bigBrain's own Canvas uses, generalized beyond notes) showing on-scene character cards, active location metadata, active rules/statuses, and the pending canon-fact approval queue. Opens when a tool call touches something canvas-worthy; approving or rejecting a proposal here is the human-in-the-loop step `bi_principles.md` §15 depends on.
+- **Avatar & status badges.** Character avatars render alongside their turns, with active Triggeryze status badges and relationship indicators layered on top — sourced directly from `status_effects` and `canon_facts`, never a separate display-only copy of that state.
+- **The Inspector Canvas.** A split-screen HUD panel (the same tool-driven `focusHint` mechanism bigBrain's own Canvas uses, generalized beyond notes) showing on-scene character cards, active location metadata, active rules/statuses, and the canon-fact review queue. Opens when a tool call touches something canvas-worthy; a proposed fact is already live per `bi_principles.md` §15, so approving/rejecting here is curation and correction, not a gate the story's truth waits on.
 - **Character Roster.** The management surface for creating, editing, and organizing character cards: drag-and-drop PNG/JSON import (chunk-parsed into `characters` columns plus a verbatim `source_json`), a URL/raw-text importer with LLM-fallback extraction, and an export path that repacks a row back into a spec-compliant V2/V3 PNG — the mechanical proof of `bi_principles.md` §7's portability requirement.
 
 ---
@@ -256,8 +256,8 @@ Every LLM call in this loop — director, character generation, fact extraction,
   and the preset's ordered `slots`, and returns
   the `LlmMessage[]` to send. It never queries the database itself — whatever resolves a turn's
   active preset (an Orchestrator, once `scenes`/`characters` exist) hands it plain data. This is
-  what makes §5 step 2's fixed order into saveable, swappable data without breaking `bi_principles.
-  md` §17's purity requirement: the assembler's own determinism doesn't depend on where `fields`
+  what makes §5 step 2's fixed order into saveable, swappable data without breaking the
+  assembler's purity (`bi_principles.md` §8): its own determinism doesn't depend on where `fields`
   came from.
 - **Deferred (not yet wired):** `scenes.active_context_stack_preset_id` / a per-character override
   — both need the `scenes`/`characters` tables this plugin was built ahead of (`docs/bootstrap.md`).

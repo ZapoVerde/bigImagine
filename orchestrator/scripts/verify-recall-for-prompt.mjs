@@ -979,10 +979,11 @@ function countFactBullets(block) {
   );
 }
 {
-  // Bounding: 5 scored arcs (Min 5 keeps them all) + 2 floor-only arcs, Max 6 → the union-then-
-  // cap keeps exactly 6, and a floor-only arc survives while the second floor arc is cut — the
-  // floor counts toward the Max, never on top of it.
-  const scored = Array.from({ length: 5 }, (_, i) => ({
+  // Bounding: the scored set ALONE already fills Max (6 scored arcs, Min 6 keeps them all via
+  // the cold-pool bypass) + 2 floor-only arcs. This is the real stress case for the floor's
+  // "guarantee of inclusion" — with the scored set already at capacity, the floor arcs must
+  // still land by displacing the weakest scored arcs, not get silently dropped for lack of room.
+  const scored = Array.from({ length: 6 }, (_, i) => ({
     arc_tag: `scored-${i}`,
     summary: `s${i}`,
     detail: '',
@@ -998,7 +999,7 @@ function countFactBullets(block) {
       plotFloorRows: [{ arc_tag: 'floor-a' }, { arc_tag: 'floor-b' }],
       plotHistoryByArc: hist,
     }),
-    fakeSettings(new Map([['chat_memory_plot_recall_top_k', '6'], ['chat_memory_plot_recall_min', '5']])),
+    fakeSettings(new Map([['chat_memory_plot_recall_top_k', '6'], ['chat_memory_plot_recall_min', '6']])),
     createStubEmbeddingProvider(8),
     'user-1',
     'chat-1',
@@ -1006,9 +1007,9 @@ function countFactBullets(block) {
   );
   const tags = parts.plots.map((p) => p.arc_tag);
   assert(tags.length === 6, `with more qualifying arcs than Max, exactly Max arcs are returned (got ${tags.length})`);
-  assert(tags.slice(0, 5).join(',') === 'scored-0,scored-1,scored-2,scored-3,scored-4', 'scored arcs keep their representative-score rank order');
-  assert(tags.includes('floor-a'), 'a floor-only arc survives the union-then-cap (would be cut if Max applied to the scored set alone)');
-  assert(!tags.includes('floor-b'), 'the cap cuts the second floor-only arc — the floor is inclusion up to the cap, not an addition on top');
+  assert(tags.slice(0, 4).join(',') === 'scored-0,scored-1,scored-2,scored-3', 'the highest-scoring arcs keep their representative-score rank order');
+  assert(tags.includes('floor-a') && tags.includes('floor-b'), 'both floor-only arcs survive the cap by displacing the weakest scored arcs — the floor is a genuine guarantee, not just leftover room');
+  assert(!tags.includes('scored-4') && !tags.includes('scored-5'), 'the weakest scored arcs are the ones trimmed to make room for the floor, not the floor arcs themselves');
 }
 {
   // Fail-open: a plot-lane throw must not take the chunk/fact lanes down with it (the lane

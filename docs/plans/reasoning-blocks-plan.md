@@ -97,7 +97,7 @@ Scope).
   "Thought for {duration}" summary label once done.
 - `frontend/src/views/ChatView.css` — modified — styling for the new block (collapsed/expanded
   chevron, muted/italic treatment distinct from the reply body, mobile-width layout per
-  bi_principles.md §19).
+  bi_principles.md §18).
 - Settings UI (`frontend/src/views/CleanupView.tsx` or wherever the header/footer regex fields
   live) — modified — two new fields for the open/close tag pair, same editing pattern as the
   existing header/footer regex inputs.
@@ -263,11 +263,10 @@ auto-expand question).
 - §10 (Size Budget) — a dedicated file rather than growing `liveCleanup.ts` or `streamingTurn.ts`
   past their own budgets, same reasoning `liveCleanup.ts` itself documents for why it's not folded
   into `streamingTurn.ts`.
-- §13 (Runtime Config in DB) / §18 (Surfaced Prompts) — the tag pair is DB-backed and editable from
+- §13 (Runtime Config in DB) / §17 (Surfaced Prompts) — the tag pair is DB-backed and editable from
   Settings, matching `cleanup_header_regex`/`cleanup_footer_regex`'s existing pattern exactly.
-- §17 (Prompt Stack is a Pure Function of Scene State) — excluding `reasoning` from
-  `recent_history` by construction (separate column, never read by the assembler) keeps the
-  assembled stack's cache-prefix byte-identical to today's for any chat that never had reasoning
-  history, and deterministic either way.
-- §19 (Mobile-First) — the reasoning block must collapse/expand cleanly and stay legible at phone
+- Cache-prefix stability — excluding `reasoning` from `recent_history` by construction (separate
+  column, never read by the assembler) keeps the assembled stack's cache-prefix byte-identical to
+  today's for any chat that never had reasoning history, and deterministic either way.
+- §18 (Mobile-First) — the reasoning block must collapse/expand cleanly and stay legible at phone
   width, same bar the existing message bubble and `<details>` spoiler convention already meet.

@@ -10,7 +10,7 @@ the Workshop Library/Architect/Explorer, the picker/import modals, approval gate
 environment editing — the automatic scraper pipeline (segway.md) plus these three surfaces cover
 what a single user actually needs.
 **Governing Principles**: Project Principles §1 (Relational Store is Canonical), §8 (Four Kinds
-of Code), §11 (Log at Reasoning/IO Seams), §13 (Runtime Config in DB), §18 (Surfaced Prompts in
+of Code), §11 (Log at Reasoning/IO Seams), §13 (Runtime Config in DB), §17 (Surfaced Prompts in
 Settings).
 
 ---
@@ -192,7 +192,7 @@ The frontend currently renders the result as one text line (`Rendered a probe im
 see is half a feature. Replace the text line with a **test-step result panel**:
 
 * The generated test image, rendered via `<img src={testResult.imageUrl}>`.
-* The synthesized prompt in a `<code>`/`<pre>` block (bi_principles §18 — prompts are surfaced,
+* The synthesized prompt in a `<code>`/`<pre>` block (bi_principles §17 — prompts are surfaced,
   never hidden), plus latency and the direct CDN link.
 * Keep the failure path: `Probe failed after Xms: <error>`.
 * The image may be a CDN URL that renders immediately; no cache-busting needed for a one-shot

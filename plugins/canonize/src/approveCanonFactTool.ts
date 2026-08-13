@@ -3,10 +3,11 @@
  * @stamp 2026-08-04
  * @architectural-role IO Wrapper — approves a proposed canon fact
  * @description
- * The human-in-the-loop approval step (bi_principles.md §15, canonize-plan.md §5): flips a
- * 'proposed' row to 'approved' and stamps approved_at = now(). This is the exact moment a
- * proposal becomes canon — from here on it's selectable into a prompt by recall_canon_facts and
- * treated as established world state. Scoped via the surrounding RLS session — a fact belonging
+ * The approval step (canonize-plan.md §5): flips a 'proposed' row to 'approved' and stamps
+ * approved_at = now(). Per bi_principles.md §15 the fact was already live before this — approval
+ * is a maturity marker, not a truth gate — but this is the moment it becomes selectable by the
+ * explicit recall_canon_facts tool call, which filters status = 'approved' (see that file's own
+ * comment). Scoped via the surrounding RLS session — a fact belonging
  * to another user (or a missing id) matches zero rows, so the update reports not-found rather
  * than throwing.
  *
@@ -32,7 +33,7 @@ export function createApproveCanonFactTool(): RegisteredTool {
     definition: {
       name: 'approve_canon_fact',
       description:
-        'Approve a proposed canon fact, making it canon. Only approved canon facts are ever injected into a prompt or returned by recall_canon_facts.',
+        'Approve a proposed canon fact. The fact is already in use; this marks it as reviewed and makes it eligible for recall_canon_facts, which only returns approved facts.',
       parameters: {
         type: 'object',
         properties: {

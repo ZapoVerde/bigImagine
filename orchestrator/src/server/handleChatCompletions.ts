@@ -261,7 +261,7 @@ export async function handleChatCompletions(
   // (io/promptTrace.ts) — record-before-the-call, same rule the cleanup subloop's repair prompts
   // follow (cleanupLoop.ts's dispatchStep). runTurn prepends systemPrompt to messagesForLlm; that
   // final array is what the model sees, so that's what the trace records. This is what lets the
-  // inspector show "the last turn that was sent" (bi_principles.md §18) instead of a live
+  // inspector show "the last turn that was sent" (bi_principles.md §17) instead of a live
   // reconstruction of the next one.
   // Persisted chats only — no chat_id is stateless Open WebUI traffic with nothing to trace
   // against. Images ride on LlmMessage.images (util/attachmentContext.ts), never in content, so

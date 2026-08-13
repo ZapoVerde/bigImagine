@@ -18,7 +18,7 @@
  *   3. fetchLorebookTimedEffectState over exactly the candidates recall returned.
  *   4. gateLorebookCandidates, seeded deterministically: turnSeed = deriveTurnSeed(assistantMessageId)
  *      — the assistant message_id being generated, not Math.random() — so the probability roll is
- *      reproducible within the turn and never breaks the byte-prefix cache (§4, §17).
+ *      reproducible within the turn and never breaks the byte-prefix cache (§4).
  *   5. Activated entries are formatted into the flat slot text in the gate's output order
  *      (constants first, then similarity rank — the §5 budget order).
  *

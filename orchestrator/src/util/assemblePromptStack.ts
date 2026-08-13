@@ -4,8 +4,8 @@
  * @architectural-role Pure Function — walks a preset's ordered slots against a scene/character's
  *   fields, producing the LlmMessage[] to send
  * @description
- * This is the "Prompt Stack Assembler" spec.md §5 step 2 and bi_principles.md §17 already name.
- * §17 requires it to be a pure function of scene state so the static prefix stays byte-identical
+ * This is the "Prompt Stack Assembler" spec.md §5 step 2 names. It is a pure function of scene
+ * state (bi_principles.md §8's Pure Functions category) so the static prefix stays byte-identical
  * across every character's turn in a scene (that's what makes prompt caching actually pay off) —
  * so this module never queries context_stack_presets/context_stack_slots itself. Whatever
  * resolves which preset applies to a turn reads the slots and hands the array in here alongside a
@@ -142,8 +142,8 @@ export function slotTagName(slot: Pick<PromptStackSlot, 'slotType' | 'markerKey'
  * A hint to the LLM (a labeled boundary, like the preset-authored tags Comfy 2 already uses),
  * not real HTML — so the name stays verbatim (spaces, punctuation), and the opening/closing tags
  * are generated from the same string so they always match. tagEnabled off (the default) returns
- * the content untouched, byte-identical to pre-0085 assembly (bi_principles.md §17's
- * prompt-cache contract).
+ * the content untouched, byte-identical to pre-0085 assembly (preserving the prompt-cache
+ * contract).
  */
 export function wrapSlotContent(
   content: string,
@@ -162,7 +162,7 @@ export function wrapSlotContent(
  * member" mechanic, derived purely from contiguity + equality so no opener/closer flags are
  * needed: toggle a later slot on and the closer moves; toggle the closer off and the previous
  * member closes the run. An empty/whitespace group_name emits no tags and breaks a run.
- * Default unset (NULL) keeps existing stacks byte-identical (bi_principles.md §17).
+ * Default unset (NULL) keeps existing stacks byte-identical.
  */
 export interface GroupRun {
   /** Sanitized group name, non-empty — the tag both the opener and closer are built from. */

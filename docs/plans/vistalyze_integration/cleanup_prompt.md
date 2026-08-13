@@ -15,7 +15,7 @@
 
 **Status**: Superseded — see banner above; kept as the historical design record.  
 **Scope**: Addition and handling of the secondary LLM Cleanup Pass prompt in the turn loop.  
-**Governing Principles**: `bi_principles.md` §2 (LLM Reasons), §8 (Four Kinds of Code), §11 (Observability), §18 (Surfaced Prompts/Presets).
+**Governing Principles**: `bi_principles.md` §2 (LLM Reasons), §8 (Four Kinds of Code), §11 (Observability), §17 (Surfaced Prompts/Presets).
 
 ---
 
@@ -77,7 +77,7 @@ export interface MacroSnapshot {
 
 ### 2.3 Built-in Cleanup Preset — Where the Prompt is Viewed, Edited & the Slop List Lives
 
-Per `bi_principles.md` §18 (Every Prompt is Surfaced for Manual Tuning), the Cleanup Pass prompt — including the banned-construction/AI-clichés slop list — must ship with a sensible default but must never live only in source.
+Per `bi_principles.md` §17 (Every Prompt is Surfaced for Manual Tuning), the Cleanup Pass prompt — including the banned-construction/AI-clichés slop list — must ship with a sensible default but must never live only in source.
 
 It is surfaced the same way every other prompt in this system already is: as a **named, built-in preset on the Prompt Stacks page** (`frontend/src/views/PromptStacksView.tsx`), seeded by a new migration `db/migrations/0066_cleanup_preset_seed.sql` that follows the exact `is_builtin = true` pattern migration `0042` used for the "Standard" and "Minimal" presets.
 
@@ -120,7 +120,7 @@ When assembling the cleanup prompt:
 3. Character/persona macros (`{{char}}`, `{{user}}`, `{{persona}}`) resolve from the chat's linked character (`characters.name`) and the household persona settings (`persona_name`/`persona_description`), read live per cleanup call — an edit after Apply shows up on the next cleanup. These are fail-soft: a lookup failure degrades them to empty rather than skipping the pass.
 
 ### 3.2 Input Message Array Construction
-The messages array passed to `turnLlm.complete()` during cleanup is the preset slots, each interpolated as above — except that a preset whose text **never references `{{prev_turns, N}}`** keeps the legacy behavior: the last 2 turn pairs prepended as messages ahead of the slots. That fallback exists so presets written before the macro existed don't silently lose the history they were built against; a preset that does reference the macro gets exactly the requested number of pairs as text (and `{{prev_turns, 0}}` is an explicit opt-out). Either way the pair count ultimately lives in the prompt — where the person running the platform can tune it per bi_principles.md §18 — rather than hardcoded in code.
+The messages array passed to `turnLlm.complete()` during cleanup is the preset slots, each interpolated as above — except that a preset whose text **never references `{{prev_turns, N}}`** keeps the legacy behavior: the last 2 turn pairs prepended as messages ahead of the slots. That fallback exists so presets written before the macro existed don't silently lose the history they were built against; a preset that does reference the macro gets exactly the requested number of pairs as text (and `{{prev_turns, 0}}` is an explicit opt-out). Either way the pair count ultimately lives in the prompt — where the person running the platform can tune it per bi_principles.md §17 — rather than hardcoded in code.
 
 ---
 

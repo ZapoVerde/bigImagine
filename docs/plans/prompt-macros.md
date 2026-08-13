@@ -68,15 +68,14 @@ This applies at every stage below, including the variable stage. It falls direct
 things already true of the platform:
 
 - **§4 (scoped by explicit scene state):** a turn's scene state — active characters, location,
-  presence, approved canon — is fixed the moment the Director Pass reads it (`spec.md` §5 step 2).
+  presence, canon — is fixed the moment the Director Pass reads it (`spec.md` §5 step 2).
   Nothing about "now" should change mid-turn just because macro resolution happened to run twice.
-- **§17 (the assembler is a pure function of scene state) + the caching rationale in step 3:** a
-  multi-character scene turn calls the LLM once per speaking character, and the whole point of the
-  fixed-order static prefix is that it's **byte-identical across every one of those calls** so a
-  caching-capable provider only pays full price once. If a macro re-resolved on every character's
-  call, the "static" prefix would silently stop being static, and the cache discount `spec.md` §5
-  step 3 depends on would silently stop applying — with no error to signal it (exactly the failure
-  mode §17's own text warns about).
+- **The assembler's purity (§8) + the caching rationale in step 3:** a multi-character scene turn
+  calls the LLM once per speaking character, and the whole point of the fixed-order static prefix
+  is that it's **byte-identical across every one of those calls** so a caching-capable provider
+  only pays full price once. If a macro re-resolved on every character's call, the "static" prefix
+  would silently stop being static, and the cache discount `spec.md` §5 step 3 depends on would
+  silently stop applying — with no error to signal it.
 
 Concretely: macro resolution is a pass that runs **once**, immediately after the Director Pass
 (`spec.md` §5, between steps 2 and 4), producing a plain key→value snapshot for that turn. That
@@ -143,8 +142,8 @@ it's where the write happens.
 The one constraint carried over from the original assessment, and the reason this is staged behind
 Triggeryze rather than shipped as a standalone macro pair: **the write can never happen inline,
 during prompt assembly.** `{{setvar::x::y}}` in ST fires wherever the text happens to be scanned —
-that's a mutation with no attribution and no gate, which is what conflicted with §15 (canon needs
-approval), §16 (injected context must be attributable), and §17 (no side effects during assembly).
+that's a mutation with no attribution, which conflicts with §16 (injected context must be
+attributable) and the assembler's own purity (§8: no side effects during assembly).
 Routing the write through Triggeryze's own governed path removes that conflict entirely, using the
 same pattern `status_effects` already uses (`apply_status_effect`/`clear_status_effect`, always
 explicit, always in the background step, never inline text):
@@ -187,8 +186,8 @@ boundary already *is* the per-turn boundary §2 asks for. No new caller had to b
 
 What actually shipped:
 
-- `interpolateMacros(text, snapshot)` (`orchestrator/src/util/interpolateMacros.ts`) is the pure
-  function §17 requires — no IO, no clock reads, no RNG calls, no DB reads inside it. Its shape
+- `interpolateMacros(text, snapshot)` (`orchestrator/src/util/interpolateMacros.ts`) is a pure
+  function (§8) — no IO, no clock reads, no RNG calls, no DB reads inside it. Its shape
   ended up simpler than originally planned: it substitutes into one flat string (the chat's
   already-assembled system-prompt text), not into `assemblePromptStack`'s `fields`/`slots`
   arguments separately. `assemblePromptStack` itself is untouched — `apply_prompt_stack_to_chat`

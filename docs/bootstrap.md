@@ -17,8 +17,8 @@ itself: Canonize/Vistalyze/Triggeryze, the Director Pass, single-user conversion
 ## Start here, in order
 
 1. `bi_principles.md` — the foundational rules (e.g. §4 scene-not-content scoping, §8 the four
-   kinds of code, §11 observable-not-silent failures, §15 canon requires approval). These override
-   intuition.
+   kinds of code, §11 observable-not-silent failures, §15 a proposed fact is already live). These
+   override intuition.
 2. `spec.md` — the target architecture for the narrative engine. Status-tagged throughout
    (**(built)**/**(designed)**/**(parked)**) — as of this writing almost everything in it is
    **(designed)**, not built. This is the plan, not the current state.

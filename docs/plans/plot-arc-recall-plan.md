@@ -13,28 +13,23 @@ brings plot recall to actual parity with the CNZ source it was ported from. Fold
 change: a status-filter bug in `recallFactLane.ts` that excludes every category of newly-proposed
 fact (not just plot) from auto-recall for a full sync cycle.
 
-## ⚠ Principle flag — read before implementing
+## Principle flag — resolved 2026-08-13
 
-`bi_principles.md` §15 ("Canon Requires Approval Before It Becomes Truth") states: *"Only approved
-canon facts are ever injected into a prompt or treated as established world state. An unapproved
-proposal is inert: visible for review, invisible to the story."* This plan does the opposite for
-the silent auto-recall paths (`recallFactLane.ts` and the new plot lane): `status = 'proposed'` and
-`status = 'approved'` rows are both eligible for injection, only `status = 'rejected'` is excluded.
+This plan originally flagged a conflict with `bi_principles.md` §15, which at the time read "Canon
+Requires Approval Before It Becomes Truth" and stated that only `approved` facts were ever
+injected. That text was invented — nothing in this codebase ever built the manual review gate it
+described; `promote_canon_facts` runs unconditionally at the start of every sync tick, so
+`proposed` vs. `approved` always meant only "created this sync cycle" vs. "survived to the next
+one," never "unreviewed" vs. "reviewed." §15 has since been rewritten ("A Proposed Fact Is Already
+Live") to say exactly what this plan does: a `proposed` row is already live, and the
+silent-injection paths (`recallFactLane.ts`, `recallPlotLane.ts`) select anything that isn't
+`rejected`. There is no remaining conflict to resolve.
 
-This is a deliberate instruction from the user, given directly in the planning conversation: canon
-promotion here is fully automatic (`promote_canon_facts` runs unconditionally at the start of every
-sync tick, no human review step exists anywhere in this codebase today), so `proposed` vs.
-`approved` functionally means only "created this sync cycle" vs. "survived to the next one" — not
-"unreviewed" vs. "reviewed." §15 as literally written describes a manual review gate that was never
-actually built for the sync-pipeline-authored facts (bridge/curators); this plan follows the system
-as it actually behaves, not the principle's literal text.
-
-This plan does **not** touch `recallCanonFactsTool.ts` (the explicit `recall_canon_facts` tool-call
-path), which has its own comment explicitly citing §15/§16 as the reason for its
-`status = 'approved'` filter (line 149). Changing that is a separate, principle-level decision this
-plan doesn't make. Recommend the user either narrow §15's wording to describe only the tool-call
-path, or confirm the silent-injection paths were always meant to be exempt — either way, the doc and
-the code should say the same thing after this lands.
+`recallCanonFactsTool.ts` (the explicit `recall_canon_facts` tool-call path) still keeps its own
+`status = 'approved'` filter, which is now an open question rather than a settled exception — its
+comment used to cite the old §15/§16 as its rationale, and that rationale no longer exists in the
+form it was written against. See that file's own comment (and `bi_principles.md` §15) for the
+current state of that question; this plan still does not touch it.
 
 ## Files
 
@@ -109,8 +104,8 @@ shape the other two lanes use:
    lines 63-101: first entry + `slice(-3)`, deduplicated when `entries.length <= 4`).
 6. Return the selected arcs as an ordered list of `{ arc_tag, entries: [...] }` cards (order:
    by representative score, recency-floor-only arcs appended after the scored ones — exact
-   ordering is not a contract, just needs to be deterministic for a given input so
-   `bi_principles.md` §17's pure-function-of-scene-state property holds).
+   ordering is not a contract, just needs to be deterministic for a given input so the assembled
+   stack's byte-prefix stays cache-stable).
 
 **Wiring (promptAssembly.ts).** `buildChatMemorySystemPrompt`'s rp branch currently computes
 `plotRows` as its own parallel query alongside `bridgeRows` and `autoRecall`. Replace it with a
@@ -151,7 +146,7 @@ from one line per arc to a small card per arc.
 - Per-arc card size (first + last-3) is **not** a new setting — hardcode it as a named constant
   (e.g. `PLOT_ARC_CARD_SIZE = 3`), matching Canonize's own source, which never made this number
   configurable either. Flagged here as a deliberate choice, not an oversight, in case review
-  expects every knob to be settings-surfaced per §18 — §18 covers *prompts*, this is a structural
+  expects every knob to be settings-surfaced per §17 — §17 covers *prompts*, this is a structural
   constant closer in kind to `AUTO_RECALL_PAIRS`'s own hardcoded-default treatment.
 
 ## Edge Cases
@@ -236,20 +231,19 @@ from one line per arc to a small card per arc.
 
 ## Principles / Conventions in Play
 
-- **§15 (Canon Requires Approval Before It Becomes Truth)** — see the Principle flag section above.
-  This plan deliberately reads as `status <> 'rejected'` on the silent-injection paths, not
-  `status = 'approved'`, per explicit user direction. Flag this during review rather than silently
-  patching it back to `'approved'` — that would just reintroduce the one-sync-cycle lag this plan
-  exists to remove.
+- **§15 (A Proposed Fact Is Already Live)** — see the Principle flag section above. This plan reads
+  as `status <> 'rejected'` on the silent-injection paths, not `status = 'approved'`, which is now
+  what §15 itself says to do. Flag this during review rather than silently patching it back to
+  `'approved'` — that would just reintroduce the one-sync-cycle lag this plan exists to remove.
 - **§16 (Injected Context is Always Attributable and Bounded)** — this plan's whole point. Every
   card traces back to specific `canon_facts` rows (`fact_id`s), and the Max setting is the explicit
   bound that was missing before.
-- **§17 (The Prompt Stack Assembler is a Pure Function of Scene State)** — `recallPlotLane`'s
-  output must be deterministic for identical inputs (same messages, same DB state, same settings).
-  The vector search itself is deterministic given a fixed embedding provider and query text; ensure
-  the arc-ordering tie-break (equal scores) is also deterministic (e.g. `arc_tag` as a secondary
-  sort key), not insertion-order-dependent on whatever Postgres happens to return.
-- **§18 (Every Prompt is Surfaced for Manual Tuning)** — the two numeric bounds and the recency
+- **The assembler's purity (§8)** — `recallPlotLane`'s output must be deterministic for identical
+  inputs (same messages, same DB state, same settings). The vector search itself is deterministic
+  given a fixed embedding provider and query text; ensure the arc-ordering tie-break (equal scores)
+  is also deterministic (e.g. `arc_tag` as a secondary sort key), not insertion-order-dependent on
+  whatever Postgres happens to return.
+- **§17 (Every Prompt is Surfaced for Manual Tuning)** — the two numeric bounds and the recency
   floor are settings, not constants, per this principle's spirit even though they're not literally
   prompt strings — matches how `canon_recall_top_k`/`_min` were already treated as settings rather
   than hardcoded.

@@ -93,7 +93,7 @@ export interface RunStreamingRpTurnOptions {
   /** The full conversation so far, ending in the latest user turn, with the RP system prompt
    *  already included as the leading system message — the caller (httpServer.ts) assembles it
    *  with the exact same assembleSessionTurnContext path a non-streaming turn uses, so a streamed
-   *  and buffered turn send byte-identical prompts (bb_principles.md §17). */
+   *  and buffered turn send byte-identical prompts. */
   messages: LlmMessage[];
   systemPrompt: string;
   /** The gated provider (io/llm/llmGate.ts) — never a raw adapter: every LLM call passes the

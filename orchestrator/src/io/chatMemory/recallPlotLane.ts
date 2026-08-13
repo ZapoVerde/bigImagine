@@ -31,20 +31,21 @@
  *     a thread that's clearly active right now can't drop out purely because its wording didn't
  *     embed close to the query (Canonize's "supplemented by recency-based filler").
  *  4. Cap the final selected-arc count at the Max setting (selection-cutoff arcs and
- *     recency-floor arcs combined, deduplicated) — the floor is a guarantee of inclusion, not
- *     an addition on top of an already-full Max.
+ *     recency-floor arcs combined, deduplicated) — the floor is a genuine guarantee of
+ *     inclusion (up to Max, never past it): floor-only arcs claim their slots first, and the
+ *     weakest scored arcs are trimmed to make room, not the floor arcs.
  *  5. For each selected arc_tag, fetch this chat's full row history for that arc (`status <>
  *     'rejected'`, ordered by `proposed_at`) and reduce to first entry + last three entries,
  *     deduplicated when the arc has four or fewer total entries — direct port of Canonize's
  *     buildExistingThreads (SillyTavern-Canonize core/sync.js:63-101).
  *  6. Return the selected arcs as an ordered list of `{ arc_tag, entries }` cards: scored arcs
  *     in representative-score order (deterministic tie-break on arc_tag), recency-floor-only
- *     arcs appended after them in arc_tag order — deterministic for identical inputs
- *     (bi_principles.md §17).
+ *     arcs appended after them in arc_tag order — deterministic for identical inputs.
  *
  * Status filter `<> 'rejected'` and the fail-open `{ arcs: [] }` contract are shared with
- * recallFactLane.ts (same §15 flag — see that file's own comment; this lane is one of the
- * silent-injection paths the plan deliberately reads as "not rejected", not "approved").
+ * recallFactLane.ts (see that file's own comment): a `proposed` row is already live per
+ * bi_principles.md §15, so this lane and every other silent-injection path read "not rejected",
+ * never "approved".
  *
  * @api-declaration
  * recallPlotLane(session, userId, chatId, vector, opts) -> Promise<{ arcs: PlotArcCard[] }> —
@@ -70,7 +71,7 @@ const MAX_POOL_SIZE = 40;
 
 /** Per-arc card size — first entry + the last three, hardcoded exactly the way Canonize's own
  *  buildExistingThreads never made it configurable (the plan's Contracts: a structural constant
- *  closer in kind to AUTO_RECALL_PAIRS's hardcoded-default treatment than to a §18 prompt). */
+ *  closer in kind to AUTO_RECALL_PAIRS's hardcoded-default treatment than to a §17 prompt). */
 export const PLOT_ARC_CARD_SIZE = 3;
 
 export interface PlotLaneOptions {
@@ -119,7 +120,7 @@ export async function recallPlotLane(
     // one best-scoring row per arc_tag. `distinct on (arc_tag) ... order by arc_tag,
     // vector_embed <-> $3` keeps each arc's lowest-distance (best-relevance) row — an older
     // beat can win over the arc's latest beat when it matches the query better. Outer order is
-    // `distance, arc_tag` — deterministic (bi_principles.md §17), arc_tag as the tie-break so
+    // `distance, arc_tag` — deterministic, arc_tag as the tie-break so
     // equal scores never fall back to insertion-order-dependent Postgres output.
     const poolRows = await session.query<PlotPoolRow>(
       `with candidates as (
@@ -162,14 +163,23 @@ export async function recallPlotLane(
       [userId, chatId, recencyFloorSyncs],
     );
 
-    // Steps 3-4: union scored arcs with floor arcs (deduped), floor-only arcs appended after
-    // the scored ones (deterministic arc_tag order), then cap the combined set at Max — the
-    // floor is a guarantee of inclusion up to the cap, never an addition on top of a full Max.
+    // Steps 3-4: union scored arcs with floor arcs (deduped), then cap the combined set at Max.
+    // The floor is a genuine GUARANTEE of inclusion (up to Max, never past it) — so floor-only
+    // arcs claim their slots first and the weakest scored arcs are the ones trimmed to make
+    // room, not the other way around. Reserving scored slots first (i.e. capping scoredArcs at
+    // Max before ever looking at floorOnlyTags) would silently drop the floor arcs whenever the
+    // scored set alone already reaches Max — exactly the busy-chat case the recency floor exists
+    // for, since that's precisely when a dormant-but-recently-touched arc most needs the floor to
+    // keep it visible.
     const scoredTags = new Set(scoredArcs.map((r) => r.arc_tag));
     const floorOnlyTags = [...new Set(floorArcs.map((r) => r.arc_tag))]
       .filter((t) => !scoredTags.has(t))
       .sort();
-    const combined = [...scoredArcs.map((r) => r.arc_tag), ...floorOnlyTags].slice(0, max);
+    const floorBudget = Math.min(floorOnlyTags.length, max);
+    const combined = [
+      ...scoredArcs.slice(0, max - floorBudget).map((r) => r.arc_tag),
+      ...floorOnlyTags.slice(0, floorBudget),
+    ];
 
     // Step 5: per-arc card history — this chat's full row history for the arc, first + last N.
     const arcs: PlotArcCard[] = [];
@@ -199,8 +209,10 @@ export async function recallPlotLane(
     return { arcs };
   } catch (err) {
     // Fail-open, same contract as every sibling lane: a retrieval error must never break or
-    // stall the turn. Caught internally — the caller's Promise.all must not be rejected by this
-    // lane (recallFactLane/recallChunkLane have the same internal try/catch shape).
+    // stall the turn. Caught internally, unlike recallFactLane/recallChunkLane (which rely on
+    // buildAutoRecallParts's own outer try/catch and so take the whole turn's recall down
+    // together on error) — this lane catches its own errors specifically so a plot-lane failure
+    // can't reject the caller's Promise.all and drag bridgeRows/chunks/facts down with it.
     log.warn('recallPlotLane: retrieval failed, continuing without plot arcs', { userId, chatId, err });
     return { arcs: [] };
   }

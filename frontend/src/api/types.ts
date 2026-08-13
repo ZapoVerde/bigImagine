@@ -270,7 +270,7 @@ export interface ImageConnectionTestResult {
   latencyMs: number;
   imageUrl?: string;
   /** The exact synthesized positive prompt sent to the provider — surfaced so the admin sees what
-   *  the connection will actually render (parallax_fade_teststep.md §4.2, bi_principles §18). */
+   *  the connection will actually render (parallax_fade_teststep.md §4.2, bi_principles §17). */
   prompt?: string;
   error?: string;
 }
@@ -329,7 +329,7 @@ export interface ChatLegibilitySettingsPatch {
 
 // orchestrator/src/server/adminServer.ts ImageSettings — the master image prompt template
 // (endpoint.md §2.2), the location-describer prompt + history-pairs knob (describer.md, migration
-// 0078); '' means "use the built-in default" (bi_principles.md §18).
+// 0078); '' means "use the built-in default" (bi_principles.md §17).
 export interface ImageSettings {
   template: string;
   templateIsDefault: boolean;
@@ -474,9 +474,9 @@ export interface ChatMemorySettings {
 }
 
 // orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's knobs:
-// recallTopK (how many approved canon facts recall_canon_facts / the RP auto-recall inject, read
+// recallTopK (how many canon facts the recall_canon_facts tool / the RP auto-recall inject, read
 // live on every recall call, no restart) and extractionPrompt (the background extraction pass's
-// template — "default + bespoke" override per bi_principles.md §18, empty clears to built-in).
+// template — "default + bespoke" override per bi_principles.md §17, empty clears to built-in).
 // Since migration 0092 (rag-dynamic-cutoff-plan.md Stage 2) recallTopK doubles as the fact
 // lane's per-channel Max for the dynamic cutoff, with recallMin (canon_recall_min, default 2)
 // as its Min floor; both are read live by buildAutoRecallParts.

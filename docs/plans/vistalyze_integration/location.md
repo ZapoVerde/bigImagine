@@ -25,7 +25,7 @@ Location Tracker ruleset (`stacks/sillytavern/st-extensions/SillyTavern-Triggery
 
 **Governing Principles**: `bi_principles.md` §1 (Relational Record), §2 (LLM Reasons), §3 (Explicit
 User Signal Outranks Inferred Signal), §4 (Scene Scoping), §8 (Four Kinds of Code), §11
-(Observability), §18 (Surfaced Prompts/Presets).
+(Observability), §17 (Surfaced Prompts/Presets).
 
 ---
 
@@ -422,7 +422,7 @@ both go through `planCleanup` → `buildRepairPrompt(template, vars)`
   `Parent - Sub`; create a new one if not listed" right where it decides the location name
   (Triggeryze's rule text, bound at its actual enforcement point).
 - Custom `cleanup_header_prompt` overrides may place `{{known_locations}}` anywhere; an override
-  without the token simply gets no block (author's choice, §18). Both callers inherit this
+  without the token simply gets no block (author's choice, §17). Both callers inherit this
   automatically — one seam, both prompts.
 - `RepairVars` (`cleanupHeuristics.ts`) grows the chat/user context the loader needs (it already
   receives history + `userName`; the callers already hold `chatId`).
