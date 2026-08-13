@@ -146,6 +146,9 @@ export async function handleChatCompletions(
   // user turn to insert) — carried forward so point-in-time canon recall still has an anchor to
   // use even when this turn doesn't add a fresh chat_messages row of its own.
   let existingLatestUserMessageId: string | undefined;
+  // The last user message the DB actually holds (role+content), read in the chat_id block below —
+  // used by the isNewTurn decision further down as the identity side of its check (see there).
+  let lastPersistedUserMessage: { content: string } | undefined;
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
@@ -161,6 +164,7 @@ export async function handleChatCompletions(
     sessionPromptStackPresetId = detail.session.promptStackPresetId;
     sessionCleanupEnabledAt = detail.session.cleanupEnabledAt;
     existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
+    lastPersistedUserMessage = [...detail.messages].reverse().find((m) => m.role === 'user');
     if (detail.session.toolNames !== null) {
       sessionTools = filterToolRegistry(tools, detail.session.toolNames);
     }
@@ -248,9 +252,22 @@ export async function handleChatCompletions(
   // triggering user message's id available to mid-turn tool calls, not just to the post-turn
   // appendMessages below — so a genuinely new turn's user message is persisted here, before
   // runTurn runs, rather than only after. A rerun/edit-resend has no new user message to insert
-  // (see isNewTurn's own comment below); it anchors to the existing one instead.
+  // (see below); it anchors to the existing one instead.
+  //
+  // "Genuinely new" is decided two ways, because the count check alone is not robust: a previous
+  // turn whose reply was persisted but whose SSE [DONE] never reached the client (server restart,
+  // proxy timeout, or a post-persistence step throwing mid-stream) leaves the client's optimistic
+  // state one message shorter than the persisted transcript. The next send then ties the count
+  // (its own length equals the DB's), the new user message never gets persisted, and the post-send
+  // refresh silently drops the just-sent bubble. So the count check is joined with an identity
+  // check — the client's latest user text differs from the last one the DB holds. That recovers
+  // the desynced case; the count check still catches exact-duplicate sends (the same text twice in
+  // a row, where content comparison alone would misclassify), and rerun/Resend (byte-identical
+  // history) stays a no-insert either way.
   const latestUserMessage = [...messages].reverse().find((m) => m.role === 'user');
-  const isNewTurn = messages.length > priorMessageCount;
+  const isNewTurn =
+    messages.length > priorMessageCount ||
+    (!!latestUserMessage && !!lastPersistedUserMessage && latestUserMessage.content !== lastPersistedUserMessage.content);
   let anchorMessageId: string | undefined = existingLatestUserMessageId;
   if (body.chat_id && latestUserMessage && isNewTurn) {
     const [inserted] = await chats.appendMessages(userId, body.chat_id, [{ role: 'user', content: latestUserMessage.content }]);
