@@ -24,7 +24,7 @@ function createFakePool() {
   const users = [];
   const chatSessions = new Map(); // chat_id -> { user_id, archived_at }
   const chatMessages = []; // { message_id, chat_id, user_id, role, content, created_at }
-  const chatSyncPoints = []; // { sync_id, chat_id, user_id, ordinal, last_message_id }
+  const chatSyncPoints = []; // { sync_id, chat_id, user_id, ordinal, last_message_id, closed_at }
   const chatChunks = []; // { chat_id, sync_id, user_id, ordinal, content, summary, vector_embed }
   const chatMemoryEntries = new Map(); // `${chat_id}::${topic_key}` -> row
   const householdMemory = []; // { user_id, source_chat_id, content, source }
@@ -75,13 +75,15 @@ function createFakePool() {
             return { rows: users.map((u) => ({ user_id: u })) };
           }
 
-          // findDueChats
+          // findDueChats — the "last sync point" anchor is closed-only now (eager-chunk-sync-plan:
+          // an open, chunk-only point is never a consolidation boundary, so it must not suppress
+          // due-ness).
           if (sql.includes('from chat_sessions cs')) {
             const [threshold] = params;
             const due = [];
             for (const [chatId, sess] of chatSessions) {
               if (sess.user_id !== scopedUserId || sess.archived_at) continue;
-              const chatSyncs = chatSyncPoints.filter((sp) => sp.chat_id === chatId);
+              const chatSyncs = chatSyncPoints.filter((sp) => sp.chat_id === chatId && sp.closed_at);
               const last = chatSyncs.length ? chatSyncs.reduce((a, b) => (b.ordinal > a.ordinal ? b : a)) : undefined;
               const anchor = last ? chatMessages.find((m) => m.message_id === last.last_message_id) : undefined;
               const count = chatMessages.filter(
@@ -163,9 +165,20 @@ function createFakePool() {
             return { rows };
           }
 
+          // runOneChatSync's open-sync-point lookup (eager-chunk-sync-plan: reuse-or-create) —
+          // checked before the closed-only lastSynced branch below (neither matches the other).
+          if (sql.includes('closed_at is null')) {
+            const rows = chatSyncPoints
+              .filter((sp) => sp.chat_id === params[0] && !sp.closed_at)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .slice(0, 1)
+              .map((sp) => ({ sync_id: sp.sync_id, last_message_id: sp.last_message_id, ordinal: sp.ordinal }));
+            return { rows };
+          }
+
           if (sql.includes('select last_message_id, ordinal from chat_sync_points')) {
             const rows = chatSyncPoints
-              .filter((sp) => sp.chat_id === params[0])
+              .filter((sp) => sp.chat_id === params[0] && sp.closed_at)
               .sort((a, b) => b.ordinal - a.ordinal)
               .slice(0, 1)
               .map((sp) => ({ last_message_id: sp.last_message_id, ordinal: sp.ordinal }));
@@ -180,6 +193,7 @@ function createFakePool() {
           if (sql.includes('insert into chat_sync_points')) {
             const [chatId, userId, ordinal, lastMessageId] = params;
             const row = { sync_id: randomUUID(), chat_id: chatId, user_id: userId, ordinal, last_message_id: lastMessageId };
+            if (sql.includes('closed_at')) row.closed_at = now();
             chatSyncPoints.push(row);
             return { rows: [{ sync_id: row.sync_id }] };
           }
@@ -301,6 +315,19 @@ function createFakePool() {
               }
             }
             return { rows: promoted };
+          }
+
+          // The reuse-then-close update (eager-chunk-sync-plan): the tick reuses an open sync
+          // point, stamps its own archiveEnd as last_message_id, and closes it. Checked before
+          // the bridge_prompt update below — different column sets, neither matches the other.
+          if (sql.includes('update chat_sync_points set last_message_id')) {
+            const [syncId, lastMessageId] = params;
+            const sp = chatSyncPoints.find((p) => p.sync_id === syncId);
+            if (sp) {
+              sp.last_message_id = lastMessageId;
+              sp.closed_at = now();
+            }
+            return { rows: [] };
           }
 
           // 0079 sync inspection: the rp lane's bridge-prompt persistence (chatMemorySync.ts
@@ -848,6 +875,69 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   assert(
     pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 5,
     'an rp sync reports 5 entries updated (scene + events + plot + lorebook + people)',
+  );
+}
+
+// --- eager-chunk-sync-plan: the tick reuses-and-closes an eagerly-opened sync point. An open
+// (closed_at null, chunk-only) point is consolidation in progress, not a boundary — so (a) a
+// chat whose only sync point is open is still due, (b) the tick reuses the point's sync_id for
+// its digest/bridge writes and closes it, and (c) its own chunking step is a top-up of only the
+// not-yet-chunked span, never a re-chunk. ---
+{
+  const EAGER_CHAT_ID = randomUUID();
+  pool.chatSessions.set(EAGER_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(EAGER_CHAT_ID, 'EAGER', 12); // 6 turns; the tick archives turns 1-4 (msgs 0-7)
+
+  // Simulate an eager pass that already chunked the whole archive span (msgs 0-7) under an open
+  // sync point — no closed point exists, so findDueChats must still see the chat as due.
+  const msgs = pool.chatMessages.filter((m) => m.chat_id === EAGER_CHAT_ID).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const openSyncId = randomUUID();
+  pool.chatSyncPoints.push({ sync_id: openSyncId, chat_id: EAGER_CHAT_ID, user_id: USER, ordinal: 0, last_message_id: msgs[7].message_id, closed_at: null });
+  pool.chatChunks.push(
+    { chat_id: EAGER_CHAT_ID, sync_id: openSyncId, user_id: USER, ordinal: 0, content: 'EAGER-1..4', summary: 'S1', vector_embed: '[0.1]' },
+    { chat_id: EAGER_CHAT_ID, sync_id: openSyncId, user_id: USER, ordinal: 1, content: 'EAGER-5..8', summary: 'S2', vector_embed: '[0.1]' },
+  );
+
+  await runChatMemorySyncTick(deps);
+
+  const eagerSyncs = pool.chatSyncPoints.filter((sp) => sp.chat_id === EAGER_CHAT_ID);
+  assert(eagerSyncs.length === 1, 'an open sync point is reused, never duplicated, by the consolidating tick');
+  assert(eagerSyncs[0].closed_at != null, 'the consolidating tick closes the reused open sync point');
+  assert(eagerSyncs[0].last_message_id === msgs[7].message_id, "the reused point's last_message_id is the tick's own archiveEnd (eager had it covered exactly)");
+  const eagerChunks = pool.chatChunks.filter((c) => c.chat_id === EAGER_CHAT_ID);
+  assert(eagerChunks.length === 2, 'a fully-covered window gets no extra chunks from the tick');
+  assert(eagerChunks.every((c) => c.sync_id === openSyncId), 'the existing eager chunks stay under the reused sync_id');
+  const eagerStatus = pool.chatMemorySyncStatus.get(EAGER_CHAT_ID);
+  assert(eagerStatus?.last_status === 'ok', 'a chat whose only sync point is open is still due — the tick ran and consolidated it (not skipped)');
+  assert(eagerStatus?.last_chunks_added === 0, 'chunksAdded is 0 when eager already covered the window — a legitimate ok, not an error/skip');
+  assert(eagerStatus?.last_entries_updated === 1, 'the consolidation pass still ran the digest on the fully-covered window');
+}
+
+{
+  const TOPUP_CHAT_ID = randomUUID();
+  pool.chatSessions.set(TOPUP_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(TOPUP_CHAT_ID, 'TOPUP', 12);
+
+  // Eager covered only the first chunk's worth (msgs 0-3); the tick must top up msgs 4-7 under
+  // the SAME sync_id, never re-chunk msgs 0-3 under new ordinals.
+  const msgs = pool.chatMessages.filter((m) => m.chat_id === TOPUP_CHAT_ID).sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const openSyncId = randomUUID();
+  pool.chatSyncPoints.push({ sync_id: openSyncId, chat_id: TOPUP_CHAT_ID, user_id: USER, ordinal: 0, last_message_id: msgs[3].message_id, closed_at: null });
+  pool.chatChunks.push({ chat_id: TOPUP_CHAT_ID, sync_id: openSyncId, user_id: USER, ordinal: 0, content: 'TOPUP-1..4', summary: 'S1', vector_embed: '[0.1]' });
+
+  await runChatMemorySyncTick(deps);
+
+  const topupSyncs = pool.chatSyncPoints.filter((sp) => sp.chat_id === TOPUP_CHAT_ID);
+  assert(topupSyncs.length === 1, 'the top-up tick reuses the open sync point rather than opening a second');
+  assert(topupSyncs[0].closed_at != null, 'the top-up tick closes the point it reused');
+  assert(topupSyncs[0].last_message_id === msgs[7].message_id, "the closed point's last_message_id advances to the tick's own archiveEnd, not the eager-progress value");
+  const topupChunks = pool.chatChunks.filter((c) => c.chat_id === TOPUP_CHAT_ID).sort((a, b) => a.ordinal - b.ordinal);
+  assert(topupChunks.length === 2, 'the tick top-ups exactly the remaining chunk');
+  assert(topupChunks[1].ordinal === 1, 'the top-up chunk continues eager numbering from count(*)');
+  assert(topupChunks.every((c) => c.sync_id === openSyncId), 'top-up chunks land under the same sync_id as eager wrote');
+  assert(
+    topupChunks[1].content.includes('TOPUP-user-5') && topupChunks[1].content.includes('TOPUP-assistant-8') && !topupChunks[1].content.includes('TOPUP-user-1'),
+    'the top-up chunk covers only the not-yet-chunked messages — no re-chunking, no overlapping content',
   );
 }
 

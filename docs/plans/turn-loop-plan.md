@@ -19,14 +19,15 @@
 > the `chatMemorySync.ts` eager-chunking rework without fully specifying it, and left one blocking
 > question open ("what marks a `sync_id` closed") that was never answered here — which is why it
 > was never built, not because anything superseded it. Investigation on 2026-08-13 confirmed
-> nothing in the codebase does eager chunking; the batch-at-sync-tick design `docs/chat-memory.md`
-> documents is still exactly what runs today. `docs/plans/eager-chunk-sync-plan.md` answers the
+> nothing in the codebase did eager chunking at the time; the batch-at-sync-tick design
+> `docs/chat-memory.md` documents was what ran. `docs/plans/eager-chunk-sync-plan.md` answers the
 > open question and is now the authoritative spec for this piece; §5 below is kept for historical
-> framing only.
+> framing only. **Built 2026-08-13 per that spec** (migration 0098, eagerChunkSync.ts, the tick's
+> reuse-or-create/closed-only rework, `npm run verify` green).
 
 *Status: built, verified 2026-08-11 for steps 1–3/5/7 — the live shape of
 `httpServer.ts`'s `handleChatCompletions`/`runTurn`, cited by section throughout. Step 6 (§5's sync
-rework) was never built — see the spun-out banner above. (Step 5's
+rework) was built 2026-08-13 per the spun-out spec above — see the banner. (Step 5's
 original cleanup pass is superseded — see the first banner above.) Phase 1 = one main LLM call
 handling narrator + all present characters, plus an optional unconditional cleanup pass.
 Character-stamped per-character calls are

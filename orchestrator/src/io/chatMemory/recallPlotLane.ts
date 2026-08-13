@@ -146,7 +146,10 @@ export async function recallPlotLane(
     const scoredArcs = poolRows.slice(0, keepCount);
 
     // Step 3: the recency floor — arcs touched in the chat's most recent N sync ticks
-    // (chat_sync_points.ordinal recency, not wall-clock time). A row whose sync_id is null (its
+    // (chat_sync_points.ordinal recency, not wall-clock time). Only *closed* sync points count
+    // (docs/plans/eager-chunk-sync-plan.md): an eagerly-opened, chunk-only point has no
+    // canon_facts rows yet, and consuming a floor slot with it would quietly shrink arc
+    // visibility from N to N−1 real consolidated syncs. A row whose sync_id is null (its
     // originating sync was later deleted — canon_facts_sync_id_fkey ON DELETE SET NULL) can't
     // count toward the floor, but the semantic path above never filtered on sync_id, so it
     // stays rankable — only the floor excludes it, per the plan's Edge Cases.
@@ -156,7 +159,7 @@ export async function recallPlotLane(
        where f.user_id = $1 and f.chat_id = $2 and f.category = 'plot' and f.status <> 'rejected'
          and f.sync_id in (
            select sync_id from chat_sync_points
-           where user_id = $1 and chat_id = $2
+           where user_id = $1 and chat_id = $2 and closed_at is not null
            order by ordinal desc
            limit $3
          )`,

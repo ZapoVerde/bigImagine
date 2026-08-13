@@ -677,24 +677,31 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         );
 
         // Mirrors findDueChats' candidate filter (orchestrator/chatMemorySync.ts): messages past
-        // the last sync point's anchor message — or all of them if never synced. count(*) is
-        // bigint (string via pg), cast to text like the canon counts above.
+        // the last *closed* sync point's anchor message — or all of them if never synced. count(*)
+        // is bigint (string via pg), cast to text like the canon counts above. The closed-only
+        // narrowing matters: an eagerly-opened sync point (closed_at null, docs/plans/
+        // eager-chunk-sync-plan.md) is chunk-progress only, never a consolidation boundary — left
+        // unfiltered, the panel's "unsynced messages" figure would disagree with the tick's own
+        // due-check.
         const [counts] = await session.query<{ unsynced: string }>(
           `select count(*)::text as unsynced
            from chat_messages m
            left join chat_sync_points sp on sp.chat_id = m.chat_id
-             and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = m.chat_id)
+             and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = m.chat_id and closed_at is not null)
            left join chat_messages anchor on anchor.message_id = sp.last_message_id
            where m.chat_id = $1
              and (anchor.created_at is null or m.created_at > anchor.created_at)`,
           [chatId],
         );
 
-        // The per-sync summary list (0079): every sync point this chat has produced, newest
-        // first, with aggregate entry/fact counts — one grouped query, so the 30s panel poll
-        // stays cheap and never ships the heavy detail (full bridge transcripts live in the
-        // on-demand getChatSyncInspection fetch). Capped at the 50 most recent — the panel is an
-        // inspection surface, not an export.
+        // The per-sync summary list (0079): every *closed* sync point this chat has produced,
+        // newest first, with aggregate entry/fact counts — one grouped query, so the 30s panel
+        // poll stays cheap and never ships the heavy detail (full bridge transcripts live in the
+        // on-demand getChatSyncInspection fetch). An open, chunk-only sync point (closed_at null)
+        // has no entries/facts yet and would only show up as a zero-count noise row — it's
+        // excluded, keeping the panel showing exactly the rows it showed before eager chunking
+        // existed (docs/plans/eager-chunk-sync-plan.md). Capped at the 50 most recent — the panel
+        // is an inspection surface, not an export.
         const syncRows = await session.query<{
           sync_id: string;
           ordinal: number;
@@ -708,7 +715,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
            from chat_sync_points sp
            left join chat_memory_entries e on e.sync_id = sp.sync_id
            left join canon_facts f on f.sync_id = sp.sync_id
-           where sp.chat_id = $1
+           where sp.chat_id = $1 and sp.closed_at is not null
            group by sp.sync_id, sp.ordinal, sp.created_at
            order by sp.ordinal desc
            limit 50`,
@@ -1135,8 +1142,13 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         // what keeps the new branch from inheriting a "key idea" digest describing something that
         // happened after the point it branched from.
         const copiedIds = new Set(toCopy.map((m) => m.message_id));
-        const syncPoints = await session.query<{ sync_id: string; ordinal: number; last_message_id: string }>(
-          'select sync_id, ordinal, last_message_id from chat_sync_points where chat_id = $1 order by ordinal',
+        // closed_at is load-bearing now (docs/plans/eager-chunk-sync-plan.md): carry it over
+        // verbatim, or a copied closed point would silently land open (closed_at null) on the
+        // branch — and an open one (a normal state to fork from, given eager chunking can leave a
+        // point open until its tick) must stay open with its already-copied chunks coherent
+        // under it.
+        const syncPoints = await session.query<{ sync_id: string; ordinal: number; last_message_id: string; closed_at: string | null }>(
+          'select sync_id, ordinal, last_message_id, closed_at from chat_sync_points where chat_id = $1 order by ordinal',
           [chatId],
         );
         const eligible = syncPoints.filter((sp) => copiedIds.has(sp.last_message_id));
@@ -1144,9 +1156,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         const syncIdMap = new Map<string, string>();
         for (const sp of eligible) {
           const [inserted] = await session.query<{ sync_id: string }>(
-            `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id) values ($1, $2, $3, $4)
+            `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id, closed_at) values ($1, $2, $3, $4, $5)
              returning sync_id`,
-            [newChatId, userId, sp.ordinal, idMap.get(sp.last_message_id)],
+            [newChatId, userId, sp.ordinal, idMap.get(sp.last_message_id), sp.closed_at],
           );
           syncIdMap.set(sp.sync_id, inserted!.sync_id);
         }

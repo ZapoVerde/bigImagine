@@ -43,6 +43,7 @@ import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, ty
 import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
 import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
+import { maybeEagerChunk } from '../orchestrator/eagerChunkSync.js';
 import { parseStoryHeader, scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
 import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
@@ -688,6 +689,23 @@ export async function handleChatCompletions(
     // existing canvas focus (updateChat's dynamic patch treats "not present" as "leave alone").
     if (focusedNoteId !== undefined) {
       await chats.updateChat(userId, body.chat_id, { canvasNoteId: focusedNoteId });
+    }
+    // Eager chat-memory chunking (docs/plans/eager-chunk-sync-plan.md): the turn pair is now
+    // durably persisted — fire the eager chunk step without awaiting it, so the chunk rows
+    // mostly exist by the time the sync tick runs and the tick's job shrinks to consolidation.
+    // Fire-and-forget, never awaited before the response is sent; maybeEagerChunk catches and
+    // logs its own errors, so nothing here can fail or delay the turn (a missed eager pass just
+    // falls back to the tick's own chunking, the same graceful degradation an app restart
+    // causes). Only the completion of a turn (an assistant reply persisted) triggers it — a
+    // rerun/abort never grew the transcript in a way this matters for, and the eager call
+    // re-derives everything from the DB anyway.
+    if (assistantMessage) {
+      const eagerChatId = body.chat_id;
+      void maybeEagerChunk(
+        { db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
+        userId,
+        eagerChatId,
+      );
     }
   }
 

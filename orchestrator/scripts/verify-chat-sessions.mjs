@@ -30,7 +30,7 @@ function createFakePool() {
   const swipeImages = []; // {chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at}
   const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
   const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
-  const syncPoints = []; // {sync_id, chat_id, user_id, ordinal, last_message_id, created_at, bridge_prompt} (0079)
+  const syncPoints = []; // {sync_id, chat_id, user_id, ordinal, last_message_id, created_at, bridge_prompt, closed_at} (0079)
   const syncEntries = []; // {sync_id, topic_key, content, updated_at} (chat_memory_entries, inspection slice)
   const syncFacts = []; // {sync_id, fact_id, category, arc_tag, entity_key, summary, detail, status, proposed_at} (0079)
   let clock = 1000;
@@ -200,7 +200,7 @@ function createFakePool() {
             // SQL's *result* semantics rather than its row-multiplication mechanics.
             const chatId = params[0];
             const rows = syncPoints
-              .filter((sp) => sp.chat_id === chatId)
+              .filter((sp) => sp.chat_id === chatId && sp.closed_at)
               .sort((a, b) => b.ordinal - a.ordinal)
               .slice(0, 50)
               .map((sp) => ({
@@ -1201,6 +1201,9 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
     last_message_id: messageId,
     created_at: '2026-08-07T13:00:00.000Z',
     bridge_prompt: 'SYSTEM: [TASK — NARRATIVE CHRONICLER]\n\nTRANSCRIPT:\nUser: hi',
+    // A consolidated sync (it has entries/facts) — closed, so the panel's closed-only list shows it
+    // (docs/plans/eager-chunk-sync-plan.md).
+    closed_at: '2026-08-07T13:00:00.000Z',
   });
   pool.syncEntries.push(
     { sync_id: syncId, topic_key: 'scene', content: 'SCENE: A rainy square.', updated_at: '2026-08-07T13:01:00.000Z' },

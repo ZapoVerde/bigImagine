@@ -34,7 +34,11 @@
  * periodic curators every tick, over the same raw transcript: curateWorldMemory.ts (place/thing/
  * concept) and curatePeople.ts (person) — both ported from CNZ the same way the bridge was, both
  * proposing entity_key-tagged canon_facts rows (db/migrations/0064_canon_facts_entity_key.sql).
- * Either branch then writes one new chat_sync_points row plus the chat_chunks rows tied to it. A
+ * Either branch then writes the chat_chunks rows tied to one chat_sync_points row — created fresh
+ * when the eager chunk path hasn't already opened one, reused-and-closed when it has
+ * (docs/plans/eager-chunk-sync-plan.md: an eager chunk pass opens a `closed_at`-null point the
+ * moment a pair rolls off the live window; this tick consolidates the open point's block and
+ * closes it). A
  * mid-pipeline failure rolls the whole transaction back, canon-fact promotion included — the
  * previous sync point is untouched, and the next poll tick just retries from there (self-healing,
  * same "advance state, don't double-count" caution agentRoutineDispatch.ts's own doc explains, just
@@ -300,7 +304,7 @@ async function findDueChats(db: PostgresClient, userId: string, syncEveryMessage
       `select cs.chat_id
        from chat_sessions cs
        left join chat_sync_points sp on sp.chat_id = cs.chat_id
-         and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = cs.chat_id)
+         and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = cs.chat_id and closed_at is not null)
        left join chat_messages anchor on anchor.message_id = sp.last_message_id
        where cs.archived_at is null
          and (
@@ -319,8 +323,12 @@ async function findDueChats(db: PostgresClient, userId: string, syncEveryMessage
  * Consecutive user messages with no assistant reply between them share one boundary — they're still
  * the same open turn, not a new one — and a leading assistant-only message (a seeded greeting) never
  * gets a boundary of its own, so it's never orphaned as its own chunk.
+ *
+ * Exported: eagerChunkSync.ts derives its eligibility in the same turn units through this same
+ * function (docs/plans/eager-chunk-sync-plan.md — the seeded greeting is folded into turn 1 by
+ * this rule, never its own turn, pair, chunk, or live-window slot).
  */
-function findTurnBoundaries(messages: { role: 'user' | 'assistant' }[]): number[] {
+export function findTurnBoundaries(messages: { role: 'user' | 'assistant' }[]): number[] {
   const boundaries: number[] = [];
   let sawAssistantSinceLastBoundary = false;
   for (let i = 0; i < messages.length; i++) {
@@ -407,10 +415,22 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       );
 
       const lastSynced = await session.query<{ last_message_id: string; ordinal: number }>(
-        'select last_message_id, ordinal from chat_sync_points where chat_id = $1 order by ordinal desc limit 1',
+        'select last_message_id, ordinal from chat_sync_points where chat_id = $1 and closed_at is not null order by ordinal desc limit 1',
         [chatId],
       );
       const lastSyncedIdx = lastSynced[0] ? allMessages.findIndex((m) => m.message_id === lastSynced[0]!.last_message_id) : -1;
+
+      // The eager chunk path (docs/plans/eager-chunk-sync-plan.md) may have opened a chunk-only
+      // sync point (`closed_at` null) and chunked some of this window already. At most one open
+      // point can exist by construction (only the eager path opens one, only this tick closes it,
+      // both under the same advisory lock). The tick reuses it (same sync_id for the
+      // digest/bridge/curator writes) and closes it at the end; its own chunking step below must
+      // top up only what eager chunking didn't cover, never re-chunk the open point's span.
+      const [openPoint] = await session.query<{ sync_id: string; last_message_id: string; ordinal: number }>(
+        'select sync_id, last_message_id, ordinal from chat_sync_points where chat_id = $1 and closed_at is null order by ordinal desc limit 1',
+        [chatId],
+      );
+      const openPointIdx = openPoint ? allMessages.findIndex((m) => m.message_id === openPoint.last_message_id) : -1;
 
       // A "turn" starts at a user message and runs through every message after it up to (but not
       // including) the next user message that arrives once at least one assistant reply has landed
@@ -441,6 +461,22 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         role: m.role,
         content: m.content,
       }));
+
+      // The tick's own chunking step is a top-up when an open sync point exists: only the span the
+      // eager path hasn't chunked yet (after the open point's anchor) feeds chunkChatTranscript,
+      // never the whole consolidation span — re-chunking the open point's covered messages would
+      // duplicate their content under new ordinals (unique (chat_id, ordinal) stops two rows
+      // sharing an ordinal, not two ordinals covering the same message). The consolidation span
+      // above (toArchive) stays the digest/bridge/curator boundary — an open point's anchor is
+      // chunking progress, not consolidation progress.
+      const chunkInput: ChatTranscriptMessage[] =
+        openPoint && openPointIdx >= 0
+          ? allMessages.slice(openPointIdx + 1, archiveEndIdx).map((m) => ({
+              messageId: m.message_id,
+              role: m.role,
+              content: m.content,
+            }))
+          : toArchive;
 
       // docs/plans/vistalyze_integration/segway.md §2.5 (location_status.md §3 Steps 1-2, generalized to
       // characters): the transient location/character rows the post-cleanup scraper anchored to
@@ -521,7 +557,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           [chatId],
         );
         const startOrdinal = Number(existingChunkCount?.n ?? '0');
-        return chunkChatTranscript(toArchive, startOrdinal);
+        return chunkChatTranscript(chunkInput, startOrdinal);
       });
 
       const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
@@ -538,8 +574,19 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
 
       const nextOrdinal = (lastSynced[0]?.ordinal ?? -1) + 1;
       const syncId = await step('sync_point', async () => {
+        if (openPoint) {
+          // Reuse-then-close: the point eager chunking opened gets this tick's own consolidation
+          // boundary (archiveEnd) and closes. The last_message_id update only runs on this reuse
+          // path — the fresh insert below already lands the final value, and writing it on a
+          // no-op would risk tripping chat_sync_points' unique (chat_id, last_message_id).
+          await session.query('update chat_sync_points set last_message_id = $2, closed_at = now() where sync_id = $1', [
+            openPoint.sync_id,
+            toArchive[toArchive.length - 1]!.messageId,
+          ]);
+          return openPoint.sync_id;
+        }
         const [syncPoint] = await session.query<{ sync_id: string }>(
-          `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id) values ($1, $2, $3, $4)
+          `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id, closed_at) values ($1, $2, $3, $4, now())
            returning sync_id`,
           [chatId, userId, nextOrdinal, toArchive[toArchive.length - 1]!.messageId],
         );
