@@ -90,11 +90,16 @@ function createFakePool() {
             };
           }
           if (sql.includes('select count(*)::text as unsynced')) {
+            // Mirrors the real query's `and closed_at is not null` anchor (docs/plans/
+            // eager-chunk-sync-plan.md): an eagerly-opened, chunk-only sync point must never be
+            // read as this chat's consolidation boundary, so only closed points are candidates.
             const chatId = params[0];
-            // No chat_sync_points rows exist in this pool (the stub below returns []), so the
-            // anchor is always null and every message counts — exactly what real Postgres returns
-            // for a never-synced chat, which is all these tests exercise.
-            const count = messages.filter((m) => m.chat_id === chatId && m.user_id === scopedUserId).length;
+            const closedPoints = syncPoints.filter((sp) => sp.chat_id === chatId && sp.closed_at);
+            const anchor = closedPoints.length ? closedPoints.reduce((a, b) => (b.ordinal > a.ordinal ? b : a)) : undefined;
+            const anchorMessage = anchor ? messages.find((m) => m.message_id === anchor.last_message_id) : undefined;
+            const count = messages.filter(
+              (m) => m.chat_id === chatId && m.user_id === scopedUserId && (!anchorMessage || m.created_at > anchorMessage.created_at),
+            ).length;
             return { rows: [{ unsynced: String(count) }] };
           }
 
@@ -1254,6 +1259,37 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
     (await store.getChatSyncInspection(USER_A, syncChat.chatId, randomUUID())) === undefined,
     'getChatSyncInspection on a sync that is not this chat\'s returns undefined',
   );
+}
+
+// --- getChatSyncStatus + an open (eager-only) sync point (docs/plans/eager-chunk-sync-plan.md):
+// the Review Panel's own reads carry an independent copy of the closed-only anchor logic
+// findDueChats/lastSynced use — an open, chunk-only point must never be mistaken for the
+// consolidation boundary here either. ---
+{
+  const openChat = await store.createChat(USER_A, { title: 'Open sync point chat' });
+  const inserted = await store.appendMessages(USER_A, openChat.chatId, [
+    { role: 'user', content: 'archived-1' },
+    { role: 'assistant', content: 'archived-2' },
+    { role: 'user', content: 'live-1' },
+    { role: 'assistant', content: 'live-2' },
+  ]);
+  const [m1, , , m4] = inserted;
+
+  // A closed point anchoring right after the first turn, plus an eagerly-opened point (closed_at
+  // null) further ahead, anchored at the chat's very last message — if the open point were ever
+  // read as the anchor, unsyncedMessages would read 0 and the panel would show two sync rows.
+  pool.syncPoints.push(
+    { sync_id: randomUUID(), chat_id: openChat.chatId, user_id: USER_A, ordinal: 0, last_message_id: m1.messageId, created_at: '2026-08-13T00:00:00.000Z', closed_at: '2026-08-13T00:00:00.000Z' },
+    { sync_id: randomUUID(), chat_id: openChat.chatId, user_id: USER_A, ordinal: 1, last_message_id: m4.messageId, created_at: '2026-08-13T00:01:00.000Z', closed_at: null },
+  );
+
+  const sync = await store.getChatSyncStatus(USER_A, openChat.chatId, 32);
+  assert(
+    sync.unsyncedMessages === 3,
+    'unsyncedMessages anchors on the last CLOSED sync point only — the 3 messages after it, not 0 (which reading the open point as the anchor would give)',
+  );
+  assert(sync.syncs.length === 1, "the panel's syncs list includes the closed point only");
+  assert(sync.syncs[0].ordinal === 0, 'the one listed sync is the closed point, not the open one');
 }
 
 if (process.exitCode) {
