@@ -64,6 +64,11 @@ export default function RagView() {
   const [selectedAutoRecallCutoffMode, setSelectedAutoRecallCutoffMode] = useState<'mean' | 'mean+1sd' | 'mean+2sd'>('mean');
   const [selectedCanonRecallTopK, setSelectedCanonRecallTopK] = useState('');
   const [selectedCanonRecallMin, setSelectedCanonRecallMin] = useState('');
+  // Ranked plot-arc lane knobs (migration 0097, io/chatMemory/recallPlotLane.ts) — Max cards,
+  // Min floor, and the recency floor in sync ticks.
+  const [selectedPlotRecallTopK, setSelectedPlotRecallTopK] = useState('');
+  const [selectedPlotRecallMin, setSelectedPlotRecallMin] = useState('');
+  const [selectedPlotRecallFloorSyncs, setSelectedPlotRecallFloorSyncs] = useState('');
   const [retrievalStatus, setRetrievalStatus] = useState('');
 
   // Read-only — set from the one active row in adminListConnections(), purely to label the Chat
@@ -94,6 +99,9 @@ export default function RagView() {
     setSelectedAutoRecallMin(settings.autoRecallMin === null ? '' : String(settings.autoRecallMin));
     setSelectedAutoRecallPoolMultiple(settings.autoRecallPoolMultiple === null ? '' : String(settings.autoRecallPoolMultiple));
     setSelectedAutoRecallCutoffMode(settings.autoRecallCutoffMode === null ? 'mean' : settings.autoRecallCutoffMode);
+    setSelectedPlotRecallTopK(settings.plotRecallTopK === null ? '' : String(settings.plotRecallTopK));
+    setSelectedPlotRecallMin(settings.plotRecallMin === null ? '' : String(settings.plotRecallMin));
+    setSelectedPlotRecallFloorSyncs(settings.plotRecallFloorSyncs === null ? '' : String(settings.plotRecallFloorSyncs));
   }
 
   function applyCanonSettings(settings: CanonSettings) {
@@ -220,6 +228,18 @@ export default function RagView() {
     }
     if (selectedAutoRecallCutoffMode !== (chatMemorySettings.autoRecallCutoffMode ?? 'mean')) {
       memoryPatch.auto_recall_cutoff_mode = selectedAutoRecallCutoffMode;
+    }
+    const plotRecallTopK = Number(selectedPlotRecallTopK);
+    if (selectedPlotRecallTopK && plotRecallTopK !== chatMemorySettings.plotRecallTopK) {
+      memoryPatch.plot_recall_top_k = plotRecallTopK;
+    }
+    const plotRecallMin = Number(selectedPlotRecallMin);
+    if (selectedPlotRecallMin && plotRecallMin !== chatMemorySettings.plotRecallMin) {
+      memoryPatch.plot_recall_min = plotRecallMin;
+    }
+    const plotRecallFloorSyncs = Number(selectedPlotRecallFloorSyncs);
+    if (selectedPlotRecallFloorSyncs && plotRecallFloorSyncs !== chatMemorySettings.plotRecallFloorSyncs) {
+      memoryPatch.plot_recall_floor_syncs = plotRecallFloorSyncs;
     }
     if (selectedInjectBridgePrompt !== chatMemorySettings.injectBridgePrompt) memoryPatch.inject_bridge_prompt = selectedInjectBridgePrompt;
     if (selectedInjectPlotPrompt !== chatMemorySettings.injectPlotPrompt) memoryPatch.inject_plot_prompt = selectedInjectPlotPrompt;
@@ -568,6 +588,56 @@ export default function RagView() {
           per-channel Max: the recall fetches a candidate pool (Pool Multiple × Max above) and keeps only the facts that
           clear the cutoff's distance threshold, never fewer than Canon facts Min (canon_recall_min) nor more than this
           Max. The extraction pass that proposes new facts is Director Pass work — see docs/canonize-plan.md §2.
+        </div>
+        <br />
+        <label>
+          Plot arcs Max (cards injected)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedPlotRecallTopK}
+            onChange={(e) => setSelectedPlotRecallTopK(e.target.value)}
+            placeholder="6"
+          />
+        </label>
+        <div className="status">
+          The Max ceiling for ranked plot-arc cards the silent recall injects (chat_memory_plot_recall_top_k, default 6) —
+          fewer than the fact lane's 8 because each card is a first-entry + last-three-entries block. Each card traces
+          back to specific canon_facts rows (bi_principles.md §16).
+        </div>
+        <br />
+        <label>
+          Plot arcs Min
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedPlotRecallMin}
+            onChange={(e) => setSelectedPlotRecallMin(e.target.value)}
+            placeholder="1"
+          />
+        </label>
+        <div className="status">
+          The Min floor: how many plot-arc cards are injected at minimum even when the pool distribution says nothing
+          clears the threshold (chat_memory_plot_recall_min). Clamped to the Max at read time.
+        </div>
+        <br />
+        <label>
+          Plot recency floor (syncs)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedPlotRecallFloorSyncs}
+            onChange={(e) => setSelectedPlotRecallFloorSyncs(e.target.value)}
+            placeholder="2"
+          />
+        </label>
+        <div className="status">
+          An arc touched in the chat's last N sync ticks (chat_sync_points ordinal recency) stays visible regardless of
+          its similarity score (chat_memory_plot_recall_floor_syncs, default 2) — Canonize's "supplemented by
+          recency-based filler". The floor counts toward the Max, never on top of it.
         </div>
         <br />
         <hr />

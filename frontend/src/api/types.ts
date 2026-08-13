@@ -464,6 +464,13 @@ export interface ChatMemorySettings {
   autoRecallMin: number | null;
   autoRecallPoolMultiple: number | null;
   autoRecallCutoffMode: 'mean' | 'mean+1sd' | 'mean+2sd' | null;
+  // Ranked plot-arc lane knobs (migration 0097, orchestrator io/chatMemory/recallPlotLane.ts) —
+  // plotRecallTopK is the Max ceiling for per-arc cards (default 6), plotRecallMin the Min floor
+  // (default 1), plotRecallFloorSyncs the recency floor (default 2: an arc touched in the chat's
+  // last N sync ticks stays visible regardless of score).
+  plotRecallTopK: number | null;
+  plotRecallMin: number | null;
+  plotRecallFloorSyncs: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts getCanonSettings() — the Canonize feature's knobs:

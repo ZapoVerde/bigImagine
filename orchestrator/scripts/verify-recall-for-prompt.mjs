@@ -33,9 +33,14 @@ import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
   AUTO_RECALL_PAIRS,
   AUTO_RECALL_CHUNK_TOP_K,
+  DEFAULT_PLOT_TOP_K,
+  DEFAULT_PLOT_MIN,
+  DEFAULT_PLOT_FLOOR_SYNCS,
   buildAutoRecallPrompt,
+  buildAutoRecallParts,
   buildAutoRecallQuery,
 } from '../dist/io/chatMemory/recallForPrompt.js';
+import { reduceArcEntries } from '../dist/io/chatMemory/recallPlotLane.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -49,15 +54,33 @@ function assert(cond, message) {
 // --- Fake session: DbSession.query returns T[] directly (postgres.ts), NOT pg's {rows} shape
 // (that unwrap happens inside withUserScope's inTransaction). The fake is a session-shaped
 // object so buildAutoRecallPrompt can be driven without a PostgresClient at all.
-function createFakeSession({ chunkRows = [], headerRows = [], factRows = [], throwOn = null } = {}) {
+// The fake pool matches by SQL substring (the documented verify-script hazard): the plot lane
+// (recallPlotLane.ts) issues THREE canon_facts-shaped queries that must not be confused with the
+// fact lane's — discriminated here by `category = 'plot'` first, then chat_sync_points (the
+// recency-floor query) and `arc_tag = $3` (the per-arc card-history query).
+function createFakeSession({
+  chunkRows = [],
+  headerRows = [],
+  factRows = [],
+  plotPoolRows = [],
+  plotFloorRows = [],
+  plotHistoryByArc = {},
+  throwOn = null,
+} = {}) {
   return {
-    async query(sql) {
+    async query(sql, params) {
       if (sql.includes('from chat_chunks')) {
         if (throwOn === 'chunks') throw new Error('chunks boom');
         // Stage 5: the chunk path issues TWO chat_chunks queries — the content lane
         // (vector_embed <->) and the header lane (summary_vector_embed <->).
         if (sql.includes('summary_vector_embed')) return headerRows;
         return chunkRows;
+      }
+      if (sql.includes("category = 'plot'") && sql.includes('from canon_facts')) {
+        if (throwOn === 'plots') throw new Error('plots boom');
+        if (sql.includes('from chat_sync_points')) return plotFloorRows;
+        if (sql.includes('arc_tag = $3')) return plotHistoryByArc[params?.[2]] ?? [];
+        return plotPoolRows;
       }
       if (sql.includes('from canon_facts')) {
         if (throwOn === 'facts') throw new Error('facts boom');
@@ -586,6 +609,7 @@ function countFactBullets(block) {
   }));
   const makeSession = () => ({
     async query(sql) {
+      if (sql.includes("category = 'plot'") && sql.includes('from canon_facts')) return [];
       if (sql.includes('from canon_facts')) return factRows;
       if (sql.includes('from chat_chunks')) return [];
       return [];
@@ -637,6 +661,7 @@ function countFactBullets(block) {
   }));
   const session = {
     async query(sql) {
+      if (sql.includes("category = 'plot'") && sql.includes('from canon_facts')) return [];
       if (sql.includes('from canon_facts')) return flat;
       if (sql.includes('from chat_chunks')) return [];
       return [];
@@ -672,6 +697,7 @@ function countFactBullets(block) {
   }));
   const session = {
     async query(sql) {
+      if (sql.includes("category = 'plot'") && sql.includes('from canon_facts')) return [];
       if (sql.includes('from canon_facts')) return flat;
       if (sql.includes('from chat_chunks')) return [];
       return [];
@@ -717,8 +743,14 @@ function countFactBullets(block) {
     'chat-1',
     [{ role: 'user', content: 'hi' }],
   );
-  const factSql = seenSql.find((sql) => sql.includes('from canon_facts'));
-  const factParams = seenParams.find((params, i) => seenSql[i].includes('from canon_facts'));
+  // The plot lane also queries canon_facts (its pool query), so pick the FACT lane's query by
+  // its distinct-on-coalesce CTE marker — the fake pool's exact-substring matching hazard the
+  // plan's Files section warns about.
+  const factSqlIndex = seenSql.findIndex(
+    (sql) => sql.includes('from canon_facts') && sql.includes('distinct on (coalesce'),
+  );
+  const factSql = seenSql[factSqlIndex];
+  const factParams = seenParams[factSqlIndex];
   assert(
     factParams && factParams[3] === 6,
     'canon_recall_top_k=2 sizes the fact candidate pool ($4 bound to poolSize(2, 2) = 6)',
@@ -817,9 +849,249 @@ function countFactBullets(block) {
   assert(withHeader.includes('<memory turns="30">'), 'the header lane recalls a chunk the content lane never fetched');
 }
 
+// --- 9. Status filter (plot-arc-recall-plan.md §15 flag): the silent lanes read
+// `status <> 'rejected'`, and the fact lane's dedup tie-break falls back to proposed_at so a
+// freshly-proposed row (no approved_at yet) keeps its per-arc/entity dedup win ---
+{
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes("category = 'plot'") && sql.includes('from canon_facts')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const factSql = seenSql.find((sql) => sql.includes('from canon_facts') && sql.includes('coalesce'));
+  assert(
+    factSql && factSql.includes("f.status <> 'rejected'"),
+    "the fact lane reads status <> 'rejected' — a proposed fact is eligible for silent injection the moment it exists (never a one-sync-cycle lag)",
+  );
+  assert(
+    factSql && factSql.includes('coalesce(approved_at, proposed_at)'),
+    'the fact-lane dedup tie-break falls back to proposed_at when approved_at is null — a fresh proposed row wins its arc/entity over a stale approved row',
+  );
+}
+{
+  // A rejected row must never reach the lanes' queries at all (both lanes filter it in SQL).
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallPrompt(
+    session,
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const plotPoolSql = seenSql.find(
+    (sql) => sql.includes("category = 'plot'") && sql.includes('from canon_facts') && !sql.includes('chat_sync_points') && !sql.includes('arc_tag = $3'),
+  );
+  assert(
+    plotPoolSql && plotPoolSql.includes("f.status <> 'rejected'"),
+    "the plot lane's pool query filters status <> 'rejected' too — a rejected row is the only row for an arc and the arc simply never appears",
+  );
+}
+
+// --- 10. The ranked plot-arc lane (recallPlotLane.ts, migration 0097): selection, recency
+// floor, bounding, and card reduction — exercised through buildAutoRecallParts with the fake
+// pool standing in for the real SQL ---
+{
+  // The per-arc card-history query is a SEPARATE step from arc selection: the pool row that
+  // got the arc selected (its best-scoring beat) is not what the card renders — the card is
+  // built from the arc's full current history (first + last three). Here the matching pool row
+  // says 'old match' but the history has 5 current entries: the card shows f1, f3, f4, f5.
+  const five = [
+    { summary: 'f1', detail: '' },
+    { summary: 'f2', detail: '' },
+    { summary: 'f3', detail: '' },
+    { summary: 'f4', detail: '' },
+    { summary: 'f5', detail: '' },
+  ];
+  const parts = await buildAutoRecallParts(
+    createFakeSession({
+      plotPoolRows: [{ arc_tag: 'heist', summary: 'old match beat', detail: '', distance: 0.1 }],
+      plotHistoryByArc: { heist: five },
+    }),
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(parts.plots.length === 1 && parts.plots[0].arc_tag === 'heist', 'the arc whose best-scoring row matched is selected');
+  assert(
+    parts.plots[0].entries.map((e) => e.summary).join(',') === 'f1,f3,f4,f5',
+    'the card contains the CURRENT first + last-three history (f1, f3, f4, f5), not the matching pool row — selection and card content are separate steps',
+  );
+}
+{
+  // Card reduction, directly on the pure reducer: <= 4 entries keep everything (the plan's
+  // Edge Cases: the `<= 4` branch, NOT `>= 4`, or a 4-entry arc's first item double-counts).
+  assert(reduceArcEntries([1, 2, 3]).join(',') === '1,2,3', '3 entries return all 3, undeduplicated, in original order');
+  assert(reduceArcEntries([1, 2, 3, 4]).join(',') === '1,2,3,4', '4 entries return all 4 — no double-count of the first item');
+  assert(reduceArcEntries([1, 2, 3, 4, 5]).join(',') === '1,3,4,5', '5 entries reduce to first + last three (1, 3, 4, 5)');
+  assert(reduceArcEntries([1]).join(',') === '1', 'a single-entry arc collapses to that one entry');
+}
+{
+  // Recency floor vs. semantic cutoff: two arcs with equally poor scores (pool mean = 0.9 →
+  // nothing clears the threshold → floored to Min 1, so only the first-ranked arc survives the
+  // cutoff). The arc the cutoff dropped comes back ONLY via the recency floor.
+  const plotPoolRows = [
+    { arc_tag: 'a', summary: 'a beat', detail: '', distance: 0.9 },
+    { arc_tag: 'b', summary: 'b beat', detail: '', distance: 0.9 },
+  ];
+  const hist = { a: [{ summary: 'a beat', detail: '' }], b: [{ summary: 'b beat', detail: '' }] };
+  const run = (plotFloorRows) =>
+    buildAutoRecallParts(
+      createFakeSession({ plotPoolRows, plotFloorRows, plotHistoryByArc: hist }),
+      fakeSettings(),
+      createStubEmbeddingProvider(8),
+      'user-1',
+      'chat-1',
+      [{ role: 'user', content: 'hi' }],
+    );
+  const withoutFloor = await run([]);
+  const withFloor = await run([{ arc_tag: 'b' }]);
+  assert(
+    withoutFloor.plots.map((p) => p.arc_tag).join(',') === 'a',
+    'an equally low-score arc with no recent-sync-tick row is not selected by the semantic cutoff alone',
+  );
+  assert(
+    withFloor.plots.map((p) => p.arc_tag).join(',') === 'a,b',
+    'an equally low-score arc with a row from the recent sync ticks is selected via the recency floor (Canonize\'s recency-based filler)',
+  );
+}
+{
+  // Bounding: 5 scored arcs (Min 5 keeps them all) + 2 floor-only arcs, Max 6 → the union-then-
+  // cap keeps exactly 6, and a floor-only arc survives while the second floor arc is cut — the
+  // floor counts toward the Max, never on top of it.
+  const scored = Array.from({ length: 5 }, (_, i) => ({
+    arc_tag: `scored-${i}`,
+    summary: `s${i}`,
+    detail: '',
+    distance: 0.1 + i * 0.01,
+  }));
+  const hist = {};
+  for (const row of [...scored, { arc_tag: 'floor-a' }, { arc_tag: 'floor-b' }]) {
+    hist[row.arc_tag] = [{ summary: `${row.arc_tag} beat`, detail: '' }];
+  }
+  const parts = await buildAutoRecallParts(
+    createFakeSession({
+      plotPoolRows: scored,
+      plotFloorRows: [{ arc_tag: 'floor-a' }, { arc_tag: 'floor-b' }],
+      plotHistoryByArc: hist,
+    }),
+    fakeSettings(new Map([['chat_memory_plot_recall_top_k', '6'], ['chat_memory_plot_recall_min', '5']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const tags = parts.plots.map((p) => p.arc_tag);
+  assert(tags.length === 6, `with more qualifying arcs than Max, exactly Max arcs are returned (got ${tags.length})`);
+  assert(tags.slice(0, 5).join(',') === 'scored-0,scored-1,scored-2,scored-3,scored-4', 'scored arcs keep their representative-score rank order');
+  assert(tags.includes('floor-a'), 'a floor-only arc survives the union-then-cap (would be cut if Max applied to the scored set alone)');
+  assert(!tags.includes('floor-b'), 'the cap cuts the second floor-only arc — the floor is inclusion up to the cap, not an addition on top');
+}
+{
+  // Fail-open: a plot-lane throw must not take the chunk/fact lanes down with it (the lane
+  // catches internally, so buildAutoRecallParts's Promise.all never rejects as a whole).
+  const session = createFakeSession({
+    chunkRows: [{ ordinal: 1, summary: null, content: 'c', distance: 0.1, kw_score: 0 }],
+    factRows: [{ fact_id: 'f1', category: 'plot', summary: 'fact summary', detail: null, distance: 0.1 }],
+    throwOn: 'plots',
+  });
+  const block = await buildAutoRecallPrompt(
+    session,
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(block.includes('<memory turns="1">'), 'a plot-lane failure must not take the chunk lane down with it');
+  assert(block.includes('- [plot] fact summary'), 'a plot-lane failure must not take the fact lane down with it');
+}
+{
+  // The query vector is embedded exactly once per turn and shared across all three lanes —
+  // never one provider round trip per lane (a real cost concern worth pinning).
+  let embedCalls = 0;
+  const countingEmbeddings = {
+    name: 's',
+    dimension: 8,
+    embed: async (texts) => {
+      embedCalls += 1;
+      return texts.map(() => [1, 2, 3, 4, 5, 6, 7, 8]);
+    },
+  };
+  await buildAutoRecallPrompt(
+    createFakeSession(),
+    fakeSettings(),
+    countingEmbeddings,
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(embedCalls === 1, 'the query vector is embedded exactly once per turn, shared across the chunk/fact/plot lanes');
+}
+{
+  // The plot lane's SQL shapes: the pool query keeps one best-scoring row per arc_tag with a
+  // deterministic arc_tag tie-break (bi_principles.md §17); the recency floor reads the chat's
+  // most recent sync ticks by chat_sync_points.ordinal.
+  const seenSql = [];
+  const session = {
+    async query(sql) {
+      seenSql.push(sql);
+      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from canon_facts')) return [];
+      return [];
+    },
+  };
+  await buildAutoRecallParts(
+    session,
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const poolSql = seenSql.find(
+    (sql) => sql.includes("category = 'plot'") && sql.includes('from canon_facts') && !sql.includes('chat_sync_points') && !sql.includes('arc_tag = $3'),
+  );
+  assert(
+    poolSql && poolSql.includes('distinct on (arc_tag)') && poolSql.includes('order by vector_embed <-> $3, arc_tag'),
+    'the plot pool reduces to one best-scoring row per arc_tag with a deterministic arc_tag tie-break',
+  );
+  const floorSql = seenSql.find((sql) => sql.includes('from chat_sync_points'));
+  assert(
+    floorSql && floorSql.includes('order by ordinal desc') && floorSql.includes('limit $3'),
+    'the recency floor reads the chat\'s most recent sync ticks by chat_sync_points.ordinal (limit = floor_syncs)',
+  );
+}
+
 // --- Sanity: the exported constants are what the wiring depends on ---
 assert(AUTO_RECALL_PAIRS === 3, 'AUTO_RECALL_PAIRS mirrors Canonize ragClassifierHistory (3)');
 assert(AUTO_RECALL_CHUNK_TOP_K === 8, 'AUTO_RECALL_CHUNK_TOP_K is the default Max for the dynamic cutoff (8 — CNZ ragChatMax)');
+assert(DEFAULT_PLOT_TOP_K === 6, 'DEFAULT_PLOT_TOP_K is the plot lane Max default (6 — fewer than the fact lane\'s 8, each result is a multi-entry card)');
+assert(DEFAULT_PLOT_MIN === 1, 'DEFAULT_PLOT_MIN is the plot lane Min floor default (1)');
+assert(DEFAULT_PLOT_FLOOR_SYNCS === 2, 'DEFAULT_PLOT_FLOOR_SYNCS is the recency-floor default (2 sync ticks)');
 
 console.log('\nrecall-for-prompt verification passed');
 if (process.exitCode) process.exit(process.exitCode);

@@ -24,20 +24,29 @@
  *  1. recallChunkLane.ts — chat_chunks, this chat's archived full-turn texts (the CNZ "chat
  *     lane"). Owns the content + header vector fetch, temporal decay, the keyword blend, and the
  *     dynamic cutoff for this lane (Stages 1/3/4/5 of docs/plans/completed/rag-dynamic-cutoff-plan.md).
- *  2. recallFactLane.ts — canon_facts, approved rows only, deduped to most-recent-approved per
- *     arc_tag/entity_key, with the same dynamic cutoff (Stage 2 of the same plan).
+ *  2. recallFactLane.ts — canon_facts, non-rejected rows only (the plot-arc-recall-plan.md §15
+ *     flag: sync-authored `proposed` rows are eligible for silent injection the moment they
+ *     exist), deduped to most-recent per arc_tag/entity_key, with the same dynamic cutoff
+ *     (Stage 2 of the same plan).
+ *  3. recallPlotLane.ts — the plot-arc lane (docs/plans/plot-arc-recall-plan.md): the ranked,
+ *     bounded replacement for the old unconditional plot-threads read. Individual plot beats
+ *     ranked by vector distance, one best-scoring row per arc, the same dynamic cutoff, a
+ *     recency floor (arcs touched in the last N sync ticks stay visible regardless of score),
+ *     capped at the plot lane's own Max, each arc rendered as a first-entry + last-three-entries
+ *     card.
  *
- * This file's own job is narrower than it used to be: the two lanes' fetch/scoring pipelines
+ * This file's own job is narrower than it used to be: the three lanes' fetch/scoring pipelines
  * moved into their own modules per bi_principles.md §10's 300-line budget once Stages 3-5 grew
  * the chunk lane substantially. What's left here is settings resolution and orchestration:
- * resolve the live settings into plain numbers, build and embed the query once, call both lanes,
- * and return their combined result. The retrieval knobs are all live settings read on every call
- * (chat_memory_auto_recall_enabled, chat_memory_auto_recall_pairs, chat_memory_auto_recall_
+ * resolve the live settings into plain numbers, build and embed the query once, call all three
+ * lanes, and return their combined result. The retrieval knobs are all live settings read on
+ * every call (chat_memory_auto_recall_enabled, chat_memory_auto_recall_pairs, chat_memory_auto_recall_
  * chunk_top_k / _chunk_min, chat_memory_auto_recall_pool_multiple, chat_memory_auto_recall_
- * cutoff_mode, canon_recall_top_k / canon_recall_min — migrations 0077/0091/0092); the exported
- * AUTO_RECALL_* constants are the fallback defaults when a setting is unset or corrupt, same
- * fail-open shape as canon_recall_top_k. `enabled === 'false'` silences the silent path without
- * touching the recall tools, which stay in the RP allow-list.
+ * cutoff_mode, canon_recall_top_k / canon_recall_min — migrations 0077/0091/0092 — and the plot
+ * lane's chat_memory_plot_recall_top_k / _min / _floor_syncs — migration 0097); the exported
+ * AUTO_RECALL_* and DEFAULT_PLOT_* constants are the fallback defaults when a setting is unset
+ * or corrupt, same fail-open shape as canon_recall_top_k. `enabled === 'false'` silences the
+ * silent path without touching the recall tools, which stay in the RP allow-list.
  *
  * Both lanes are scoped to this chat_id inside the caller's already-open withUserScope session
  * (RLS applies user_id, chat_id narrows to "this conversation" — same trusted-identity scoping
@@ -72,8 +81,10 @@ import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { DbSession } from '../postgres.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { CutoffMode } from './recallCutoff.js';
+import type { PlotArcCard } from './memoryInjection.js';
 import { recallChunkLane, type ChunkRow } from './recallChunkLane.js';
 import { recallFactLane, type CanonFactRow } from './recallFactLane.js';
+import { recallPlotLane } from './recallPlotLane.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
@@ -130,12 +141,40 @@ const MAX_FACT_TOP_K = 50;
  *  setting UI will present a much smaller range. */
 const MAX_CHUNK_TOP_K = 12;
 
+/** The plot-arc lane's Max ceiling (docs/plans/plot-arc-recall-plan.md, migration 0097) — how
+ *  many per-arc cards the silent plot recall injects at most, fewer than the fact lane's 8
+ *  default since each result here is a multi-entry card (first entry + last three), not one
+ *  line. The live value is chat_memory_plot_recall_top_k; unset/corrupt falls back here. */
+export const DEFAULT_PLOT_TOP_K = 6;
+
+/** The plot-arc lane's Min floor — how many arcs are injected at minimum even when the pool
+ *  distribution says nothing clears the threshold (default '1': a single best-match arc is
+ *  enough, tighter than the fact lane's 2 because each card is heavier). The live value is
+ *  chat_memory_plot_recall_min. */
+export const DEFAULT_PLOT_MIN = 1;
+
+/** The plot-arc lane's recency floor — how many of the chat's most recent sync ticks
+ *  (chat_sync_points.ordinal recency) an arc must have been touched in to stay visible
+ *  regardless of its similarity score (default '2': guarantees an arc touched in the last two
+ *  sync ticks stays in the prompt even when its wording didn't embed close to the query —
+ *  Canonize's "supplemented by recency-based filler"). The live value is
+ *  chat_memory_plot_recall_floor_syncs. */
+export const DEFAULT_PLOT_FLOOR_SYNCS = 2;
+
+/** Sanity cap so a corrupt chat_memory_plot_recall_top_k can't balloon the injected block —
+ *  same reasoning as MAX_FACT_TOP_K: beyond ~50 arcs the marginal recall value is nil while the
+ *  token cost (up to four entries per card) is real. */
+const MAX_PLOT_TOP_K = 50;
+
 /** Raw retrieval result — the unformatted parts the narrator stack's component markers render
  *  through their own templates (io/chatMemory/memoryInjection.ts). buildAutoRecallPrompt still
- *  formats them into the legacy labeled block for the deprecated memory_recall alias. */
+ *  formats them into the legacy labeled block for the deprecated memory_recall alias. `plots`
+ *  are the ranked plot-arc cards (recallPlotLane.ts); the legacy block ignores them (plot
+ *  threads render through their own marker / the fused alias separately). */
 export interface AutoRecallParts {
   chunks: ChunkRow[];
   facts: CanonFactRow[];
+  plots: PlotArcCard[];
 }
 
 /** Query-text cleanup in CNZ's spirit: collapse whitespace runs so the embedded query is about
@@ -206,10 +245,12 @@ export function buildAutoRecallPrompt(
 }
 
 /** Raw CNZ-style auto-recall retrieval: query text from the trailing turn-pairs, embedded once,
- *  then the chat's archived full-turn chunks (recallChunkLane) and its approved canon facts
- *  (recallFactLane) in parallel. Fail-open by contract: any error (embedding provider down, DB
- *  hiccup, malformed row) logs a warning and returns empty parts — retrieval must never break or
- *  stall a turn. */
+ *  then the chat's archived full-turn chunks (recallChunkLane), its non-rejected canon facts
+ *  (recallFactLane), and its ranked plot-arc cards (recallPlotLane) in parallel — the one
+ *  embedding call is shared across all three lanes (plot-arc-recall-plan.md's Contracts: never
+ *  embed the same query text twice per turn). Fail-open by contract: any error (embedding
+ *  provider down, DB hiccup, malformed row, any lane throwing) logs a warning and returns empty
+ *  parts — retrieval must never break or stall a turn. */
 export function buildAutoRecallParts(
   session: DbSession,
   settings: OrchestratorSettingsStore,
@@ -220,7 +261,7 @@ export function buildAutoRecallParts(
 ): Promise<AutoRecallParts> {
   return (async () => {
     try {
-      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw] =
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw, plotTopKRaw, plotMinRaw, plotFloorRaw] =
         await Promise.all([
           settings.get('chat_memory_auto_recall_enabled'),
           settings.get('chat_memory_auto_recall_pairs'),
@@ -230,12 +271,15 @@ export function buildAutoRecallParts(
           settings.get('chat_memory_auto_recall_pool_multiple'),
           settings.get('chat_memory_auto_recall_cutoff_mode'),
           settings.get('canon_recall_min'),
+          settings.get('chat_memory_plot_recall_top_k'),
+          settings.get('chat_memory_plot_recall_min'),
+          settings.get('chat_memory_plot_recall_floor_syncs'),
         ]);
 
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
       // the RP allow-list either way — this knob only silences the silent path (CNZ's own
       // enable/disable shape). Unset/any-other-value = on (the shipped default).
-      if (enabledRaw === 'false') return { chunks: [], facts: [] };
+      if (enabledRaw === 'false') return { chunks: [], facts: [], plots: [] };
 
       const parsedPairs = pairsRaw ? parseInt(pairsRaw, 10) : NaN;
       const pairs = Number.isFinite(parsedPairs) && parsedPairs > 0 ? parsedPairs : AUTO_RECALL_PAIRS;
@@ -277,26 +321,55 @@ export function buildAutoRecallParts(
           ? Math.min(parsedFactMin, factTopK)
           : Math.min(DEFAULT_FACT_MIN, factTopK);
 
+      // The plot-arc lane's per-channel Max/Min (migration 0097, plot-arc-recall-plan.md) —
+      // same parse-with-fallback shape, Min clamped to the Max at read time. Each result here
+      // is a multi-entry card (first + last-3 entries), so the Max default (6) is deliberately
+      // below the fact lane's 8 and the Min default (1) below the fact lane's 2.
+      const parsedPlotTopK = plotTopKRaw ? parseInt(plotTopKRaw, 10) : NaN;
+      const plotTopK =
+        Number.isFinite(parsedPlotTopK) && parsedPlotTopK > 0
+          ? Math.min(parsedPlotTopK, MAX_PLOT_TOP_K)
+          : DEFAULT_PLOT_TOP_K;
+      const parsedPlotMin = plotMinRaw ? parseInt(plotMinRaw, 10) : NaN;
+      const plotMin =
+        Number.isFinite(parsedPlotMin) && parsedPlotMin > 0
+          ? Math.min(parsedPlotMin, plotTopK)
+          : Math.min(DEFAULT_PLOT_MIN, plotTopK);
+
+      // The recency floor (migration 0097) — how many of the chat's most recent sync ticks an
+      // arc must have been touched in to stay visible regardless of score.
+      const parsedPlotFloor = plotFloorRaw ? parseInt(plotFloorRaw, 10) : NaN;
+      const plotFloorSyncs =
+        Number.isFinite(parsedPlotFloor) && parsedPlotFloor > 0 ? parsedPlotFloor : DEFAULT_PLOT_FLOOR_SYNCS;
+
       const query = buildAutoRecallQuery(messages, pairs);
-      if (!query) return { chunks: [], facts: [] };
+      if (!query) return { chunks: [], facts: [], plots: [] };
 
       const [vector] = await embeddings.embed([query]);
-      if (!vector) return { chunks: [], facts: [] };
+      if (!vector) return { chunks: [], facts: [], plots: [] };
 
       // The shared Pool Multiple and Cutoff Mode apply to both lanes unchanged (the Stage-1
-      // naming anticipated this); the per-channel Max (chunkTopK / factTopK) and Min (chunkMin /
-      // factMin) differ per lane. Each lane module owns its own fetch/scoring pipeline — see
-      // recallChunkLane.ts and recallFactLane.ts.
-      const [{ chunks }, { facts }] = await Promise.all([
+      // naming anticipated this); the per-channel Max (chunkTopK / factTopK / plotTopK) and Min
+      // (chunkMin / factMin / plotMin) differ per lane, and the plot lane adds its own recency
+      // floor. Each lane module owns its own fetch/scoring pipeline — see recallChunkLane.ts,
+      // recallFactLane.ts, and recallPlotLane.ts.
+      const [{ chunks }, { facts }, { arcs: plots }] = await Promise.all([
         recallChunkLane(session, userId, chatId, vector, query, { min: chunkMin, max: chunkTopK, poolMultiple, cutoffMode }),
         recallFactLane(session, userId, chatId, vector, { min: factMin, max: factTopK, poolMultiple, cutoffMode }),
+        recallPlotLane(session, userId, chatId, vector, {
+          min: plotMin,
+          max: plotTopK,
+          poolMultiple,
+          cutoffMode,
+          recencyFloorSyncs: plotFloorSyncs,
+        }),
       ]);
 
-      return { chunks, facts };
+      return { chunks, facts, plots };
     } catch (err) {
       // Fail-open: a retrieval error must never break the turn. Log and continue empty.
       log.warn('buildAutoRecallParts: retrieval failed, continuing without recalled context', { userId, chatId, err });
-      return { chunks: [], facts: [] };
+      return { chunks: [], facts: [], plots: [] };
     }
   })();
 }

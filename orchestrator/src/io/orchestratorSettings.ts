@@ -119,6 +119,20 @@
  * knobs from 0091 (pool_multiple/cutoff_mode) apply to the fact lane unchanged, the
  * per-channel Min/Max + shared Pool Multiple/Cutoff Mode split the Stage-1 naming anticipated.
  *
+ * chat_memory_plot_recall_top_k / chat_memory_plot_recall_min / chat_memory_plot_recall_floor_syncs
+ * (io/chatMemory/recallPlotLane.ts, migration 0097, docs/plans/plot-arc-recall-plan.md) are the
+ * ranked plot-arc lane's three knobs, read live on every RP prompt assembly by
+ * recallForPrompt.ts's buildAutoRecallParts, no restart. plot_recall_top_k is the Max ceiling
+ * (integer-as-text, default '6' — how many per-arc cards the silent plot recall injects at most,
+ * fewer than the fact lane's 8 default since each result is a multi-entry card, not one line),
+ * plot_recall_min is the Min floor (default '1' — how many arcs are injected at minimum even
+ * when the pool distribution says nothing clears the threshold), and plot_recall_floor_syncs is
+ * the recency floor (default '2' — an arc touched in the chat's last N sync ticks stays visible
+ * regardless of score, Canonize's "supplemented by recency-based filler"). The two shared knobs
+ * from 0091 (pool_multiple/cutoff_mode) apply to the plot lane unchanged, same as the fact
+ * lane. Unset or corrupt values fall back to the DEFAULT_PLOT_* constants in recallForPrompt.ts,
+ * same fail-open shape as every other numeric setting here.
+ *
  * screen_lock_password/screen_lock_timeout_minutes (migration 0050) back the idle-timeout re-lock
  * overlay (ScreenLockOverlay.tsx, ported from SillyTavern-Playground's lockScreen.js) —
  * screen_lock_password isn't a secret by §12's own test (it protects nothing the real household-
@@ -258,6 +272,9 @@ export const SETTING_NAMES = [
   'chat_memory_auto_recall_chunk_min',
   'chat_memory_auto_recall_pool_multiple',
   'chat_memory_auto_recall_cutoff_mode',
+  'chat_memory_plot_recall_top_k',
+  'chat_memory_plot_recall_min',
+  'chat_memory_plot_recall_floor_syncs',
   'chat_memory_inject_bridge_prompt',
   'chat_memory_inject_plot_prompt',
   'chat_memory_inject_auto_recall_prompt',

@@ -1157,6 +1157,16 @@ export interface ChatMemorySettings {
   autoRecallMin: number | null;
   autoRecallPoolMultiple: number | null;
   autoRecallCutoffMode: 'mean' | 'mean+1sd' | 'mean+2sd' | null;
+  // Ranked plot-arc lane knobs (migration 0097, io/chatMemory/recallPlotLane.ts —
+  // docs/plans/plot-arc-recall-plan.md) — read live on every RP prompt assembly alongside the
+  // others, no restart. plotRecallTopK is the **Max** ceiling for per-arc cards (default 6,
+  // fewer than the fact lane's 8 since each card is multi-entry), plotRecallMin is the Min
+  // floor (default 1), plotRecallFloorSyncs is the recency floor (default 2: an arc touched in
+  // the chat's last N sync ticks stays visible regardless of score). The 0091 Pool Multiple /
+  // Cutoff Mode are shared with the plot lane unchanged. null = unset (use the built-in default).
+  plotRecallTopK: number | null;
+  plotRecallMin: number | null;
+  plotRecallFloorSyncs: number | null;
 }
 
 export async function getChatMemorySettings(store: OrchestratorSettingsStore): Promise<ChatMemorySettings> {
@@ -1177,6 +1187,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     autoRecallChunkMinRaw,
     autoRecallPoolMultipleRaw,
     autoRecallCutoffModeRaw,
+    plotRecallTopKRaw,
+    plotRecallMinRaw,
+    plotRecallFloorRaw,
     injectBridgePrompt,
     injectPlotPrompt,
     injectAutoRecallPrompt,
@@ -1199,6 +1212,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_auto_recall_chunk_min'),
     store.get('chat_memory_auto_recall_pool_multiple'),
     store.get('chat_memory_auto_recall_cutoff_mode'),
+    store.get('chat_memory_plot_recall_top_k'),
+    store.get('chat_memory_plot_recall_min'),
+    store.get('chat_memory_plot_recall_floor_syncs'),
     store.get('chat_memory_inject_bridge_prompt'),
     store.get('chat_memory_inject_plot_prompt'),
     store.get('chat_memory_inject_auto_recall_prompt'),
@@ -1233,6 +1249,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
       autoRecallCutoffModeRaw === 'mean' || autoRecallCutoffModeRaw === 'mean+1sd' || autoRecallCutoffModeRaw === 'mean+2sd'
         ? autoRecallCutoffModeRaw
         : null,
+    plotRecallTopK: plotRecallTopKRaw ? Number(plotRecallTopKRaw) : null,
+    plotRecallMin: plotRecallMinRaw ? Number(plotRecallMinRaw) : null,
+    plotRecallFloorSyncs: plotRecallFloorRaw ? Number(plotRecallFloorRaw) : null,
     injectBridgePrompt: injectBridgePrompt || DEFAULT_INJECT_BRIDGE_PROMPT,
     injectBridgePromptIsDefault: !injectBridgePrompt,
     injectPlotPrompt: injectPlotPrompt || DEFAULT_INJECT_PLOT_PROMPT,
@@ -1263,6 +1282,9 @@ export interface SetChatMemorySettingsBody {
   autoRecallMin?: number;
   autoRecallPoolMultiple?: number;
   autoRecallCutoffMode?: string;
+  plotRecallTopK?: number;
+  plotRecallMin?: number;
+  plotRecallFloorSyncs?: number;
   injectBridgePrompt?: string;
   injectPlotPrompt?: string;
   injectAutoRecallPrompt?: string;
@@ -1293,6 +1315,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     auto_recall_chunk_min,
     auto_recall_pool_multiple,
     auto_recall_cutoff_mode,
+    plot_recall_top_k,
+    plot_recall_min,
+    plot_recall_floor_syncs,
     inject_bridge_prompt,
     inject_plot_prompt,
     inject_auto_recall_prompt,
@@ -1316,6 +1341,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     auto_recall_chunk_min === undefined &&
     auto_recall_pool_multiple === undefined &&
     auto_recall_cutoff_mode === undefined &&
+    plot_recall_top_k === undefined &&
+    plot_recall_min === undefined &&
+    plot_recall_floor_syncs === undefined &&
     inject_bridge_prompt === undefined &&
     inject_plot_prompt === undefined &&
     inject_auto_recall_prompt === undefined &&
@@ -1340,6 +1368,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (auto_recall_chunk_min !== undefined && (typeof auto_recall_chunk_min !== 'number' || auto_recall_chunk_min <= 0)) return undefined;
   if (auto_recall_pool_multiple !== undefined && (typeof auto_recall_pool_multiple !== 'number' || auto_recall_pool_multiple <= 0)) return undefined;
   if (auto_recall_cutoff_mode !== undefined && typeof auto_recall_cutoff_mode !== 'string') return undefined;
+  if (plot_recall_top_k !== undefined && (typeof plot_recall_top_k !== 'number' || plot_recall_top_k <= 0)) return undefined;
+  if (plot_recall_min !== undefined && (typeof plot_recall_min !== 'number' || plot_recall_min <= 0)) return undefined;
+  if (plot_recall_floor_syncs !== undefined && (typeof plot_recall_floor_syncs !== 'number' || plot_recall_floor_syncs <= 0)) return undefined;
   if (inject_bridge_prompt !== undefined && typeof inject_bridge_prompt !== 'string') return undefined;
   if (inject_plot_prompt !== undefined && typeof inject_plot_prompt !== 'string') return undefined;
   if (inject_auto_recall_prompt !== undefined && typeof inject_auto_recall_prompt !== 'string') return undefined;
@@ -1362,6 +1393,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     autoRecallMin: auto_recall_chunk_min as number | undefined,
     autoRecallPoolMultiple: auto_recall_pool_multiple as number | undefined,
     autoRecallCutoffMode: auto_recall_cutoff_mode as string | undefined,
+    plotRecallTopK: plot_recall_top_k as number | undefined,
+    plotRecallMin: plot_recall_min as number | undefined,
+    plotRecallFloorSyncs: plot_recall_floor_syncs as number | undefined,
     injectBridgePrompt: inject_bridge_prompt as string | undefined,
     injectPlotPrompt: inject_plot_prompt as string | undefined,
     injectAutoRecallPrompt: inject_auto_recall_prompt as string | undefined,
@@ -1387,6 +1421,9 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.autoRecallMin !== undefined) await store.set('chat_memory_auto_recall_chunk_min', String(body.autoRecallMin));
   if (body.autoRecallPoolMultiple !== undefined) await store.set('chat_memory_auto_recall_pool_multiple', String(body.autoRecallPoolMultiple));
   if (body.autoRecallCutoffMode !== undefined) await store.set('chat_memory_auto_recall_cutoff_mode', body.autoRecallCutoffMode);
+  if (body.plotRecallTopK !== undefined) await store.set('chat_memory_plot_recall_top_k', String(body.plotRecallTopK));
+  if (body.plotRecallMin !== undefined) await store.set('chat_memory_plot_recall_min', String(body.plotRecallMin));
+  if (body.plotRecallFloorSyncs !== undefined) await store.set('chat_memory_plot_recall_floor_syncs', String(body.plotRecallFloorSyncs));
   if (body.injectBridgePrompt !== undefined) await store.set('chat_memory_inject_bridge_prompt', body.injectBridgePrompt);
   if (body.injectPlotPrompt !== undefined) await store.set('chat_memory_inject_plot_prompt', body.injectPlotPrompt);
   if (body.injectAutoRecallPrompt !== undefined) await store.set('chat_memory_inject_auto_recall_prompt', body.injectAutoRecallPrompt);

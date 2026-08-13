@@ -63,12 +63,12 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 // db/migrations/0049_chat_kind.sql — in-fiction details have no business leaking into unrelated
 // chats, or vice versa) and instead gets the hookseeker-parity bridge's own output: the evolving
 // SCENE and EVENTS chat_memory_entries rows (topic_key 'scene'/'events', written by
-// bridgeChatMemory.ts) plus the latest-approved-per-arc_tag 'plot' canon_facts — the same
-// dedup-to-most-recent-per-arc query recallCanonFactsTool.ts uses, just unranked (this is the
-// unconditional "what's the state of every open thread" injection, not a semantic top-k search) —
-// plus buildAutoRecallParts's CNZ-style auto-recall: the last AUTO_RECALL_PAIRS turn-pairs
-// embedded as the query, returning this chat's archived full turns and approved canon facts,
-// injected unconditionally (fail-open — empty parts on error or no match).
+// bridgeChatMemory.ts) plus buildAutoRecallParts's CNZ-style auto-recall — the last
+// AUTO_RECALL_PAIRS turn-pairs embedded as the query, returning this chat's archived full turns,
+// non-rejected canon facts, and ranked plot-arc cards (io/chatMemory/recallPlotLane.ts: the
+// ranked, bounded, recency-floored replacement for the old unconditional latest-per-arc plot
+// dump — see docs/plans/plot-arc-recall-plan.md), all injected unconditionally (fail-open —
+// empty parts on error or no match).
 //
 // The rp branch returns the *structured* RpMemoryContext (scene/events/plotThreads/chunks/facts
 // plus the fused legacy string), not a formatted block — the narrator stack renders each
@@ -87,29 +87,25 @@ export async function buildChatMemorySystemPrompt(
 ): Promise<string | RpMemoryContext> {
   return db.withUserScope(userId, async (session) => {
     if (kind === 'rp') {
-      // docs/chat-memory.md: the always-injected half (scene/events/plot threads) plus the
-      // CNZ-shaped auto-recall (io/chatMemory/recallForPrompt.ts) — the last AUTO_RECALL_PAIRS
-      // turn-pairs become the query, and both the chat's archived full turns and its approved
-      // canon facts are retrieved unconditionally. Fail-open: empty parts when nothing matched or
-      // retrieval errored, so memory can never break a turn. Returned as raw parts — the narrator
-      // stack renders them through the per-component templates (io/chatMemory/memoryInjection.ts).
-      const [bridgeRows, plotRows, autoRecall] = await Promise.all([
+      // docs/chat-memory.md: the always-injected half (scene/events) plus the CNZ-shaped
+      // auto-recall (io/chatMemory/recallForPrompt.ts) — the last AUTO_RECALL_PAIRS turn-pairs
+      // become the query, embedded ONCE and shared across the chunk, fact, and plot lanes; the
+      // chat's archived full turns, its non-rejected canon facts, and its ranked plot-arc cards
+      // are all retrieved unconditionally (plot-arc-recall-plan.md: the plot lane replaces the
+      // old unranked latest-per-arc dump with a ranked, bounded, recency-floored card set).
+      // Fail-open: empty parts when nothing matched or retrieval errored, so memory can never
+      // break a turn. Returned as raw parts — the narrator stack renders them through the
+      // per-component templates (io/chatMemory/memoryInjection.ts).
+      const [bridgeRows, autoRecall] = await Promise.all([
         session.query<{ topic_key: string; content: string }>(
           `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
-          [chatId],
-        ),
-        session.query<{ arc_tag: string; summary: string; detail: string }>(
-          `select distinct on (arc_tag) arc_tag, summary, detail
-           from canon_facts
-           where chat_id = $1 and category = 'plot' and status = 'approved'
-           order by arc_tag, proposed_at desc`,
           [chatId],
         ),
         buildAutoRecallParts(session, settings, embeddings, userId, chatId, messages),
       ]);
       const scene = bridgeRows.find((r) => r.topic_key === 'scene')?.content;
       const events = bridgeRows.find((r) => r.topic_key === 'events')?.content;
-      const plotThreads = plotRows.map((r) => ({ arc_tag: r.arc_tag, summary: r.summary, detail: r.detail }));
+      const plotThreads = autoRecall.plots;
       const fused = renderFusedMemoryBlock(scene, events, plotThreads, formatAutoRecallBlock(autoRecall.chunks, autoRecall.facts));
       return { scene, events, plotThreads, chunks: autoRecall.chunks, facts: autoRecall.facts, fused };
     }

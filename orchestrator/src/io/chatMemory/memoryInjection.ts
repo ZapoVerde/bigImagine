@@ -33,8 +33,8 @@
  *   blocks first, then {{var}} substitution (empty for unknown). Pure.
  * renderBridge(scene, events, template) -> string — {{scene}}/{{events}} via the bridge template.
  * renderPlotThreads(arcs, template) -> string — {{plot}} = canonize-style HTML blocks, one
- *   `<{{arc_tag}}>\nsummary — detail\n</{{arc_tag}}>` per arc joined by blank lines, via the
- *   plot template.
+ *   `<{{arc_tag}}>` card per selected arc (entries blank-line separated inside the wrapper, the
+ *   first + last-three reduction recallPlotLane already applied), via the plot template.
  * renderAutoRecall(chunks, facts, template, chunkTemplate, charName) -> string — chunk blocks
  *   rendered through the chunk template ({{text}}, {{turn_range}}, {{header}}, {{char_name}}),
  *   fact bullets appended as {{facts}}; the injection template receives {{text}} = chunk blocks,
@@ -124,7 +124,7 @@ export const DEFAULT_INJECT_RECENT_HISTORY_PROMPT = `{{#if turns}}{{turns}}{{/if
 export interface RpMemoryContext {
   scene?: string;
   events?: string;
-  plotThreads: PlotArcRow[];
+  plotThreads: PlotArcCard[];
   chunks: ChunkRow[];
   facts: FactRow[];
   /** The legacy fused block (renderFusedMemoryBlock over the parts) — the deprecated
@@ -132,10 +132,15 @@ export interface RpMemoryContext {
   fused: string;
 }
 
-export interface PlotArcRow {
+/** One ranked plot-arc card (io/chatMemory/recallPlotLane.ts, docs/plans/plot-arc-recall-plan.md)
+ *  — replaces the old single-row-per-arc PlotArcRow: each selected arc carries its full card
+ *  history reduced to first entry + last three entries (recallPlotLane.reduceArcEntries), so the
+ *  renderer shows a per-arc card, not one latest line. `detail` is non-optional-empty-string on
+ *  each entry — matches the canon_facts.detail column's own `not null default ''` shape; no new
+ *  optionality introduced. */
+export interface PlotArcCard {
   arc_tag: string;
-  summary: string;
-  detail?: string | null;
+  entries: { summary: string; detail: string }[];
 }
 
 export interface ChunkRow {
@@ -154,9 +159,13 @@ export function renderBridge(scene: string | undefined, events: string | undefin
   return interpolateMemoryTemplate(template, { scene: scene ?? '', events: events ?? '' });
 }
 
-export function renderPlotThreads(arcs: PlotArcRow[], template = DEFAULT_INJECT_PLOT_PROMPT): string {
+/** Render the plot-threads component — {{plot}} = one `<{{arc_tag}}>` card per selected arc,
+ *  each card's entries blank-line separated inside the wrapper (first entry + last three, already
+ *  reduced by recallPlotLane.reduceArcEntries). Single-entry arcs render byte-identically to the
+ *  pre-card shape (`<arc_tag>\nsummary — detail\n</arc_tag>`). */
+export function renderPlotThreads(arcs: PlotArcCard[], template = DEFAULT_INJECT_PLOT_PROMPT): string {
   const plot = arcs
-    .map((a) => `<${a.arc_tag}>\n${a.summary}${a.detail ? ` — ${a.detail}` : ''}\n</${a.arc_tag}>`)
+    .map((a) => `<${a.arc_tag}>\n${a.entries.map((e) => `${e.summary}${e.detail ? ` — ${e.detail}` : ''}`).join('\n\n')}\n</${a.arc_tag}>`)
     .join('\n\n');
   return interpolateMemoryTemplate(template, { plot });
 }
@@ -218,11 +227,13 @@ export function renderRecentHistory(
 
 /** The deprecated `memory_recall` alias — byte-identical to buildChatMemorySystemPrompt's legacy
  *  rp join (scene header, events header, plot threads, then the auto-recall block), so presets
- *  that still carry a memory_recall slot behave exactly as before. */
+ *  that still carry a memory_recall slot behave exactly as before. Plot arcs render as one bullet
+ *  per entry (`- #arc: summary — detail`) — a single-entry arc is byte-identical to the pre-card
+ *  shape; a multi-entry arc lists its card's entries as separate bullets under the shared tag. */
 export function renderFusedMemoryBlock(
   scene: string | undefined,
   events: string | undefined,
-  arcs: PlotArcRow[],
+  arcs: PlotArcCard[],
   autoRecallBlock: string,
 ): string {
   const parts: string[] = [];
@@ -230,7 +241,9 @@ export function renderFusedMemoryBlock(
   if (events) parts.push(`Upcoming scheduled events:\n${events}`);
   if (arcs.length) {
     parts.push(
-      `Open plot threads:\n${arcs.map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`).join('\n')}`,
+      `Open plot threads:\n${arcs
+        .flatMap((a) => a.entries.map((e) => `- #${a.arc_tag}: ${e.summary}${e.detail ? ` — ${e.detail}` : ''}`))
+        .join('\n')}`,
     );
   }
   if (autoRecallBlock) parts.push(autoRecallBlock);

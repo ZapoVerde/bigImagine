@@ -71,12 +71,12 @@ function assert(cond, message) {
   assert(out === 'LOCATION: The kitchen.\nNEXT: Dinner.', 'bespoke bridge template renders with {{scene}}/{{events}}');
 }
 
-// --- renderPlotThreads: per-arc <arc_tag> blocks through the plot template ---
+// --- renderPlotThreads: per-arc <arc_tag> cards through the plot template ---
 {
   const out = renderPlotThreads(
     [
-      { arc_tag: 'a1', summary: 'Find the key', detail: 'the vault' },
-      { arc_tag: 'a2', summary: 'Pay the debt' },
+      { arc_tag: 'a1', entries: [{ summary: 'Find the key', detail: 'the vault' }] },
+      { arc_tag: 'a2', entries: [{ summary: 'Pay the debt', detail: '' }] },
     ],
     DEFAULT_INJECT_PLOT_PROMPT,
   );
@@ -84,7 +84,19 @@ function assert(cond, message) {
     out.includes('The following is a summary of the active plot threads:') &&
       out.includes('<a1>\nFind the key — the vault\n</a1>') &&
       out.includes('<a2>\nPay the debt\n</a2>'),
-    'default plot template renders canonize-style <arc_tag> blocks (CNZ DEFAULT_CNZ_PLOT_CHUNK_TEMPLATE)',
+    'default plot template renders canonize-style <arc_tag> blocks (CNZ DEFAULT_CNZ_PLOT_CHUNK_TEMPLATE); a single-entry card is byte-identical to the pre-card shape',
+  );
+}
+{
+  // A multi-entry card renders all entries blank-line separated inside ONE <arc_tag> wrapper
+  // (the first + last-three reduction was already applied by recallPlotLane).
+  const out = renderPlotThreads(
+    [{ arc_tag: 'a1', entries: [{ summary: 'The heist', detail: 'planned for Tuesday' }, { summary: 'The vault broke open', detail: '' }] }],
+    DEFAULT_INJECT_PLOT_PROMPT,
+  );
+  assert(
+    out.includes('<a1>\nThe heist — planned for Tuesday\n\nThe vault broke open\n</a1>'),
+    'an arc with 2 entries renders both inside one <arc_tag> wrapper, blank-line separated',
   );
 }
 {
@@ -200,7 +212,7 @@ function assert(cond, message) {
   const out = renderFusedMemoryBlock(
     'The kitchen.',
     'Dinner at 7.',
-    [{ arc_tag: 'a1', summary: 'Find the key', detail: 'the vault' }],
+    [{ arc_tag: 'a1', entries: [{ summary: 'Find the key', detail: 'the vault' }] }],
     'Recalled from earlier in this conversation (archived):\n<memory turns="7">\nx\n</memory>',
   );
   assert(
@@ -209,6 +221,19 @@ function assert(cond, message) {
       out.includes('Open plot threads:\n- #a1: Find the key — the vault') &&
       out.includes('Recalled from earlier in this conversation (archived):'),
     'fused alias joins scene/events/plot/auto-recall with the legacy headers',
+  );
+}
+{
+  // A multi-entry card lists its entries as separate bullets under the shared tag.
+  const out = renderFusedMemoryBlock(
+    undefined,
+    undefined,
+    [{ arc_tag: 'a1', entries: [{ summary: 'First', detail: '' }, { summary: 'Second', detail: 'more' }] }],
+    '',
+  );
+  assert(
+    out === 'Open plot threads:\n- #a1: First\n- #a1: Second — more',
+    'fused alias renders each card entry as its own bullet under the arc tag',
   );
 }
 {
