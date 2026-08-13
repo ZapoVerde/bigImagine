@@ -36,9 +36,7 @@ status obvious at a glance instead of requiring a read.
 
 ## Why Reasonix Doesn't Implement Unsupervised
 
-Reasonix has no GitHub access, so it can't recover its own work if a plan goes wrong mid-implementation, and it can't push what it builds. Claude Code commits, pushes, and tags a save point *before* handing a plan to Reasonix — that tag is the actual recovery mechanism, not Reasonix's own state. This isn't optional process; it's the only rollback path that exists.
-
-Commit and push are split the same way after implementation: **Reasonix commits** its own work locally once it's done — that's part of implementing the plan. **Claude Code pushes** that commit to the remote, since Reasonix has no GitHub access to do it itself. Push is also a natural checkpoint to hold at until review has passed.
+Reasonix has no GitHub access, so it can't push what it builds. **Reasonix commits** its own work locally once it's done implementing a plan — that's part of implementing the plan — but never pushes. **Claude Code pushes** that commit to the remote, since Reasonix has no GitHub access to do it itself. Push is also a natural checkpoint to hold at until review has passed — nothing reaches the remote until Claude Code has reviewed the result.
 
 ---
 

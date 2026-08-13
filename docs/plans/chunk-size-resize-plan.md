@@ -110,8 +110,8 @@ must switch to the live `messagesPerChunk`, not just the `/2` arithmetic.
   `chunkPairs`; `getChatMemorySettings`/`setChatMemorySettings`/`parseSetChatMemorySettingsBody`
   read/write `chat_memory_chunk_pairs` (same optional-field, snake_case-wire-key pattern every other
   field in that body already follows). Two new routes: `POST
-  /v1/admin/chat-memory/resize-chunks` (fire-and-forget trigger) and `GET
-  /v1/admin/chat-memory/resize-chunks/status` (reads the status row). See Contracts. Note the route
+  /v1/admin/chat-memory-resize` (fire-and-forget trigger) and `GET
+  /v1/admin/chat-memory-resize-status` (reads the status row). See Contracts. Note the route
   wiring: routes are registered in `orchestrator/src/server/httpServer.ts`'s route table (alongside
   the existing chat-memory routes at lines 582-584), with handlers in
   `orchestrator/src/server/handleAdminDisplaySettings.ts`; the new endpoints follow that split, and
@@ -157,9 +157,10 @@ in both the content-lane and header-lane SQL. `decayFactor`'s TS twin (kept for
 explicit argument rather than reading `PAIRS_PER_CHUNK`, so there is exactly one place per call site
 where "how many pairs is a chunk" gets decided, not two definitions that can drift.
 
-**The resize job.** `chatChunkResize.ts` exports one entry point, `runChunkResize(deps, userId)`,
-called fire-and-forget (not awaited) from the `POST /v1/admin/chat-memory/resize-chunks` handler —
-same non-blocking shape `handleChatCompletions.ts`'s `maybeEagerChunk` call already establishes.
+**The resize job.** `chatChunkResize.ts` exports `runChatChunkResize(deps)` (it enumerates every
+chat itself, so no `userId` parameter), called fire-and-forget (not awaited) from the
+`POST /v1/admin/chat-memory-resize` handler — same non-blocking shape
+`handleChatCompletions.ts`'s `maybeEagerChunk` call already establishes.
 Before starting, it writes `chat_chunk_resize_status` to `running` with `chats_total` set to the
 user's chat count and `chats_done = 0`; on completion (or the first unhandled error) it writes
 `done`/`error` with `finished_at`. Every step logs (`bi_principles.md` §11) — start/end per chat,
@@ -198,8 +199,11 @@ call for that chat serialize instead of racing on `chat_chunks` ordinals):
    the same advance (keeps `findDueChats`'s synced-boundary anchor honest; the regenerated span is a
    superset of the old archive, so the anchor only ever moves forward).
 
-A chat with zero existing `chat_chunks` is skipped (nothing to redo) but still counts toward
-`chats_done`.
+A chat with **no `chat_sync_points` row** (never synced) is skipped untouched — nothing to reuse,
+and the sync tick will chunk it at the live size when it comes due — but still counts toward
+`chats_done`. A chat that has a sync point but zero *existing* `chat_chunks` is NOT skipped on
+that basis alone: per step 2 above, its currently-eligible span is still recomputed and may gain
+newly-archived chunks (the "welcome side effect").
 
 **The warning modal.** Opens only when the user's entered chunk-pairs value differs from the
 currently-saved one. Copy covers, plainly: changing the number alone only affects new archival going
@@ -208,8 +212,8 @@ regenerates every chat's memory chunks, which re-runs a real summarize + embed c
 every archived chunk in every chat, costs real LLM/embedding usage, and can take a while. Three
 buttons: **Cancel** (closes, saves nothing), **Change setting only** (saves `chat_memory_chunk_pairs`
 via the existing settings PATCH, no resize triggered), **Change and re-chunk now** (saves the
-setting, then calls `POST /v1/admin/chat-memory/resize-chunks`). After the third option, `RagView`
-polls `GET /v1/admin/chat-memory/resize-chunks/status` (a plain `setInterval` while `status ===
+setting, then calls `POST /v1/admin/chat-memory-resize`). After the third option, `RagView`
+polls `GET /v1/admin/chat-memory-resize-status` (a plain `setInterval` while `status ===
 'running'`, matching no particular existing poll convention since none exists yet — pick the
 simplest one that works) and renders `chats_done / chats_total` until `done` or `error`.
 
@@ -228,12 +232,13 @@ simplest one that works) and renders `chats_done / chats_total` until `done` or 
   itself; callers supply the resolved value).
 - `decayFactor(ageChunks: number, pairsPerChunk: number): number` — new second parameter, required.
 - `ChunkLaneOptions` (`recallChunkLane.ts`) gains `pairsPerChunk: number`, required.
-- `POST /v1/admin/chat-memory/resize-chunks` — no request body; `202 { started: true }` on success,
-  returned before the backfill itself runs; `409 { error: 'already running' }` if
-  `chat_chunk_resize_status.status === 'running'` (no overlapping resize passes).
-- `GET /v1/admin/chat-memory/resize-chunks/status` — `200 { status, chatsTotal, chatsDone,
-  startedAt, finishedAt, error }` (camelCase response, same convention every other admin GET in this
-  file already uses).
+- `POST /v1/admin/chat-memory-resize` — no request body; `202 { status: 'running' }` on success,
+  returned before the backfill itself runs; `409 { error: 'a chat chunk resize is already running' }`
+  if `chat_chunk_resize_status.status === 'running'` (no overlapping resize passes).
+- `GET /v1/admin/chat-memory-resize-status` — `200 { resize: { status, chatsTotal, chatsDone,
+  startedAt, finishedAt, error } }` (camelCase, wrapped in a `resize` key, matching the flat
+  hyphenated `/v1/admin/chat-memory-*` route naming already used by the other chat-memory admin
+  endpoints in this file, rather than a nested `/chat-memory/...` path).
 - `SetChatMemorySettingsBody.chunkPairs?: number` / wire key `chunk_pairs` — same optional,
   independently-settable shape as every other field in that body; validated `> 0` integer, same as
   `liveWindowPairs` etc.
