@@ -984,6 +984,106 @@ export default function ChatView({
     });
   };
 
+  /** Runs one turn's chatCompletion call against `chatId`, wiring up whatever "something to look
+   *  at while the LLM is working" behavior fits `kind` — a live streaming placeholder (RP) or a
+   *  status poll (buffered) — so no caller has to reinvent it. Shared by send() (a fresh turn)
+   *  and submitEdit()'s resend branch (an edited-then-resent turn): both replace whatever reply
+   *  used to sit here and need the same in-flight feedback while the new one arrives — without
+   *  it, the old reply is just gone with nothing to look at until the whole turn resolves.
+   *  Callers own setSending/setError/refreshActiveMessages; this owns everything turn-local. */
+  async function runChatTurn(
+    wireMessages: ChatMessage[],
+    chatId: string,
+    kind: ChatSessionRow['kind'] | undefined,
+    attachments?: Parameters<typeof chatCompletion>[3],
+    images?: Parameters<typeof chatCompletion>[4],
+  ): Promise<void> {
+    // RP chats stream their turns live (rp-streaming-plan.md): the status poll is not started
+    // (the live text IS the status), an assistant placeholder is pushed and filled by onDelta.
+    // chat-kind turns (tool-calling) keep the buffered path, polled via getChatTurnStatus.
+    const streaming = kind === 'rp';
+    let statusTimer: number | undefined;
+    if (!streaming) {
+      statusTimer = window.setInterval(async () => {
+        setTurnStatus(await getChatTurnStatus(chatId, apiKey));
+      }, 1000);
+    }
+    try {
+      if (streaming) {
+        setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
+        setLiveStreaming(true);
+        // Reasoning blocks (reasoning-blocks-plan.md): a fresh turn starts with an empty live
+        // buffer aimed at the tail placeholder (target null = "the last message, the only
+        // id-less one while a turn streams"). Frames append to it; the block stays open while
+        // the turn streams and collapses when liveReasoningDone flips in the finally below.
+        setLiveReasoning(null);
+        setLiveReasoningDone(false);
+        setLiveReasoningTargetId(null);
+        await chatCompletion(
+          wireMessages,
+          apiKey,
+          chatId,
+          attachments,
+          images,
+          (delta) => {
+            // Append into the placeholder pushed above. It is always the last message while
+            // this turn is in flight — sending/swipingId guards block anything else appending —
+            // so a tail-append is safe; the caller's post-turn refresh reconciles it either way.
+            setMessages((prev) => {
+              const tail = prev[prev.length - 1];
+              if (!tail || tail.role !== 'assistant') return prev;
+              return [...prev.slice(0, -1), { ...tail, content: tail.content + delta }];
+            });
+          },
+          (frame) => {
+            // Abort/error terminal frame (client.ts's StreamingTerminalFrame). An abort is the
+            // expected Stop outcome — the caller's refresh shows the true state. A genuine
+            // upstream failure after streaming began surfaces as an error banner instead.
+            if (!frame.aborted) setError(frame.message);
+          },
+          // In-stream cleanup (in-stream-cleanup-plan.md): the live pill states ride the same
+          // SSE stream as the deltas, and the content patches splice into the placeholder in
+          // onDelta-accumulated coordinates (the tail while this turn is in flight). Patches
+          // never arrive for turn 1 — the server sends the composed text wholesale there, so
+          // there is no already-streamed raw text to correct in place.
+          handleCleanupStatus,
+          (frame) => applyCleanupPatch(frame),
+          // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
+          // the live buffer — deliberately separate from the content accumulation, so the
+          // rendered content stays de-tagged (the server persists the same split).
+          (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
+        );
+      } else {
+        await chatCompletion(wireMessages, apiKey, chatId, attachments, images);
+      }
+    } catch (err) {
+      // A streamed turn that failed without ever streaming (bad request, auth, upstream error
+      // before the first chunk, or a Stop abort) left its empty placeholder behind — drop it so
+      // the list reflects reality (nothing was persisted). It's the only assistant message
+      // without a messageId, so a tail-check is unambiguous; buffered turns never pushed one.
+      if (streaming) {
+        setMessages((prev) => {
+          const tail = prev[prev.length - 1];
+          if (tail && tail.role === 'assistant' && !tail.messageId) return prev.slice(0, -1);
+          return prev;
+        });
+      }
+      throw err;
+    } finally {
+      if (statusTimer !== undefined) {
+        window.clearInterval(statusTimer);
+        setTurnStatus(null);
+      }
+      setLiveStreaming(false);
+      // The stream is over — drop the live pill overrides so the settled poll becomes
+      // authoritative again (cleanupLiveStatus.ts's ambient-hint-then-canonical-record handoff).
+      setCleanupLive(null);
+      // Reasoning: the live block collapses now (thinking → done); the caller's refresh swaps
+      // the buffer for the canonical row's persisted `reasoning`.
+      setLiveReasoningDone(true);
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     const resendLast = resendMode();
@@ -1020,9 +1120,6 @@ export default function ChatView({
     setStagedFiles([]);
     stagedImages.forEach((img) => URL.revokeObjectURL(img.previewUrl));
     setStagedImages([]);
-    // Hoisted out of the try so the catch can tell whether a failed send left its streaming
-    // placeholder behind (see the placeholder-drop below). Only true for RP chats.
-    let streaming = false;
     try {
       let session = activeChat;
       if (!session) {
@@ -1034,89 +1131,15 @@ export default function ChatView({
         setActiveChat(session);
       }
       const chatId = session.chatId;
-      // RP chats stream their turns live (rp-streaming-plan.md): the status poll is not started
-      // (the live text IS the status), an assistant placeholder is pushed and filled by onDelta,
-      // and the post-send refresh below reconciles the placeholder against the canonical row —
-      // the same reconcile-after-optimistic-append shape the user-message push above uses.
-      // chat-kind turns (tool-calling) keep the buffered path byte-for-byte, and an RP chat whose
-      // turn-1 reply is header-repaired server-side arrives as a single chunk (still SSE, still
-      // resolved the same way).
-      streaming = session.kind === 'rp';
-      let statusTimer: number | undefined;
-      if (!streaming) {
-        statusTimer = window.setInterval(async () => {
-          setTurnStatus(await getChatTurnStatus(chatId, apiKey));
-        }, 1000);
-      }
-      try {
-        if (streaming) {
-          setMessages((prev) => [...prev, { role: 'assistant', content: '' }]);
-          setLiveStreaming(true);
-          // Reasoning blocks (reasoning-blocks-plan.md): a fresh turn starts with an empty live
-          // buffer aimed at the tail placeholder (target null = "the last message, the only
-          // id-less one while a send streams"). Frames append to it; the block stays open while
-          // the turn streams and collapses when liveReasoningDone flips in the finally below.
-          setLiveReasoning(null);
-          setLiveReasoningDone(false);
-          setLiveReasoningTargetId(null);
-          await chatCompletion(
-            toWireMessages(nextMessages),
-            apiKey,
-            chatId,
-            attachments,
-            images,
-            (delta) => {
-              // Append into the placeholder pushed above. It is always the last message while
-              // this send is in flight — sending/swipingId guards block anything else appending —
-              // so a tail-append is safe; the post-send refresh reconciles it either way.
-              setMessages((prev) => {
-                const tail = prev[prev.length - 1];
-                if (!tail || tail.role !== 'assistant') return prev;
-                return [...prev.slice(0, -1), { ...tail, content: tail.content + delta }];
-              });
-            },
-            (frame) => {
-              // Abort/error terminal frame (client.ts's StreamingTerminalFrame). An abort is the
-              // expected Stop outcome: the partial text was never persisted, so the refresh below
-              // shows the true state — the user message stands with no reply, which resendMode()
-              // already presents as the Resend recovery path. A genuine upstream failure after
-              // streaming began surfaces as an error banner instead.
-              if (!frame.aborted) setError(frame.message);
-            },
-            // In-stream cleanup (in-stream-cleanup-plan.md): the live pill states ride the same
-            // SSE stream as the deltas, and the content patches splice into the placeholder in
-            // onDelta-accumulated coordinates (the tail while this send is in flight). Patches
-            // never arrive for turn 1 — the server sends the composed text wholesale there, so
-            // there is no already-streamed raw text to correct in place.
-            handleCleanupStatus,
-            (frame) => applyCleanupPatch(frame),
-            // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
-            // the live buffer — deliberately separate from the content accumulation, so the
-            // rendered content stays de-tagged (the server persists the same split).
-            (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
-          );
-        } else {
-          await chatCompletion(toWireMessages(nextMessages), apiKey, chatId, attachments, images);
-        }
-      } finally {
-        if (statusTimer !== undefined) {
-          window.clearInterval(statusTimer);
-          setTurnStatus(null);
-        }
-        setLiveStreaming(false);
-        // The stream is over — drop the live pill overrides so the settled poll becomes
-        // authoritative again (cleanupLiveStatus.ts's ambient-hint-then-canonical-record handoff).
-        setCleanupLive(null);
-        // Reasoning: the live block collapses now (thinking → done); the refresh below swaps the
-        // buffer for the canonical row's persisted `reasoning`, so a reasoning turn shows its
-        // span collapsed, and a reasoning-less one shows nothing (the buffer is dropped).
-        setLiveReasoningDone(true);
-      }
-      // Reconcile: for a streamed turn the placeholder is replaced by the server's canonical row
-      // (dropped entirely if the stream aborted and nothing was persisted); for a buffered turn
-      // this is the same refetch as before. Guarded against a chat switch mid-send (chatIdRef):
-      // the turn belongs to the chat that was open when it started, and refreshing it now would
-      // stomp the transcript of whichever chat the user has since opened.
+      // An RP chat whose turn-1 reply is header-repaired server-side arrives as a single chunk
+      // (still SSE, still resolved the same way as any other streamed turn).
+      await runChatTurn(toWireMessages(nextMessages), chatId, session.kind, attachments, images);
+      // Reconcile: for a streamed turn the placeholder pushed by runChatTurn is replaced by the
+      // server's canonical row (dropped entirely if the stream aborted and nothing was
+      // persisted); for a buffered turn this is the same refetch as before. Guarded against a
+      // chat switch mid-send (chatIdRef): the turn belongs to the chat that was open when it
+      // started, and refreshing it now would stomp the transcript of whichever chat the user has
+      // since opened.
       if (chatIdRef.current === session.chatId) {
         await refreshActiveMessages(session.chatId);
       }
@@ -1134,17 +1157,6 @@ export default function ChatView({
         }
       } else {
         setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
-        // A streamed send that failed without streaming (bad request, auth, upstream error before
-        // the first chunk) left its empty placeholder behind — drop it so the list reflects
-        // reality (nothing was persisted). Our placeholder is the only assistant message without
-        // a messageId, so a tail-check is unambiguous; buffered sends never pushed one.
-        if (streaming) {
-          setMessages((prev) => {
-            const tail = prev[prev.length - 1];
-            if (tail && tail.role === 'assistant' && !tail.messageId) return prev.slice(0, -1);
-            return prev;
-          });
-        }
       }
     } finally {
       setSending(false);
@@ -1335,7 +1347,7 @@ export default function ChatView({
         const kept = idx === -1 ? messages : messages.slice(0, idx);
         const withEdit: DisplayMessage[] = [...kept, { role: 'user', content }];
         setMessages(withEdit);
-        await chatCompletion(toWireMessages(withEdit), apiKey, activeChat.chatId);
+        await runChatTurn(toWireMessages(withEdit), activeChat.chatId, activeChat.kind);
       }
       await refreshActiveMessages(activeChat.chatId);
     } catch (err) {
