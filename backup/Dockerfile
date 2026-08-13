@@ -1,7 +1,7 @@
-# Standalone backup sidecar — never touches BIGBRAIN_FIELD_ENCRYPTION_KEY or any provider
+# Standalone backup sidecar — never touches BIGIMAGINE_FIELD_ENCRYPTION_KEY or any provider
 # credential, only Postgres's own dump and the already-encrypted secrets.enc.env. Kept out of
-# the orchestrator image entirely, same "one thing, isolated" instinct as doc-sandbox in
-# docker-compose.yml.
+# the orchestrator image entirely, same "one thing, isolated" instinct as bigBrain's own backup
+# sidecar — the orchestrator image stays a single service with a single job.
 #
 # postgresql16-client to match pgvector/pgvector:pg16 (docker-compose.yml's postgres service) —
 # pg_dump's format is forward-compatible but not backward-compatible, so this must track the

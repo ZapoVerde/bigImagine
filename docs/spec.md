@@ -43,7 +43,7 @@ Removed wholesale from the forked codebase before any narrative feature work beg
 - **Security & multi-tenancy (aspirational, not yet done)** — the eventual single-user conversion would drop Row-Level Security policies, session user-scoping functions, and Cloudflare Access SSO, with every `user_id` column removed rather than kept unused. **This has not happened and is not scheduled** — every table added since the fork (`characters`, `locations`, `scenes`, `scene_presence`, `canon_facts`, and everything before them) still carries `user_id` under the same `user_scoped` RLS policy bigBrain used, and per `docs/canonize-plan.md` §3.1 this is a deliberate standing deviation, not an oversight. Single-user conversion is a distinct, separately-decided future step — not bundled into "what gets pruned" — and should not be assumed by new schema work.
 - **Field-level encryption** — `unstructured_notes`-style AES-256-GCM wrapping. All narrative text stays plaintext and searchable; there is no household member to protect it from.
 - **Household plugins** — recipes, meal planning, shopping lists/analytics, calendar, Notion sync, Google Calendar OAuth, ntfy push.
-- **Admin overhead** — the encrypted credential vault's multi-user surface, the offsite backup pipeline's household-scale retention logic (a simpler single-user backup, if wanted, is a later decision, not carried over by default).
+- **Admin overhead** — the encrypted credential vault's multi-user surface, the offsite backup pipeline's household-scale retention logic. (BigImagine's own offsite backup has since been added as a standalone sidecar — `docs/plans/completed/bigimagine-backup-plan.md` — a deliberately simpler single-user equivalent, not a resurrection of the pruned pipeline.)
 
 What's kept unmodified: the orchestrator's tool-registry/agentic-loop shape, the LLM gate (`bi_principles.md` §14), the four-kinds-of-code discipline, and the module-preamble convention (`docs/conventions.md`).
 
@@ -274,4 +274,4 @@ Flagged here rather than silently deferred, so a future session doesn't have to 
 
 - **Multi-scene concurrency UX** — the schema supports multiple `scenes` rows, but the frontend's scene-switching interaction hasn't been designed.
 - **`docs/chat-memory.md`'s own BigImagine pass** — §4.1 above is the authoritative narrative-framed summary for now; the source doc still describes bigBrain's household framing.
-- **Single-user backup strategy** — bigBrain's offsite backup pipeline was pruned wholesale (§3); whether BigImagine wants a simpler equivalent is an open, not-yet-raised question.
+- **Single-user backup strategy** — resolved: BigImagine now has its own offsite backup — nightly `pg_dump` + document-store archive + `secrets.enc.env`, age-encrypted and pushed to the shared R2 bucket under a `bigimagine/` object-key prefix — built and deployed per `docs/plans/completed/bigimagine-backup-plan.md`. Restore runbook: `backup/README.md`.

@@ -7,8 +7,19 @@ document is the build plan for giving BigImagine its own offsite backup, riding 
 already built and verified for bigBrain (`bigBrain/backup/`, `docs/plans/completed/dedicated-infra-plan.md`'s
 sibling stack).*
 
-*Status tags follow spec.md's convention: **(built)**, **(designed)**, **(parked)**. Everything
-below is **(designed)** — nothing in this document is implemented yet.*
+*Status tags follow spec.md's convention: **(built)**, **(designed)**, **(parked)**. **(built,
+verified 2026-08-13)** — all of §5's steps are implemented and deployed: `stacks/bigimagine`'s
+`backup` service runs nightly (`15 3 * * *`), its manual-run + retention-prune checks against R2
+under the `bigimagine/` prefix passed, the orchestrator reports `backupConfigured: true`, and the
+`spec.md` §3/§8 flags below now point here as resolved. §7's open questions were answered with the
+plan's defaults: retention `5`, cron `15 3 * * *`, and a full standalone restore runbook (not a
+pointer) in `BigImagine/backup/README.md`. **Update 2026-08-13:** the initial build's residual gap
+(the `bigimagine-character-media` volume — real avatar PNGs with no provider to re-fetch from —
+wasn't in the bundle, since `backup.sh` mirrored bigBrain's script which predates character media)
+is now closed: `backup.sh` tars `/character-media` alongside the document store, the compose
+service mounts the volume, and the restore runbook covers it. Vistalyze's location/scene images
+were considered and excluded on purpose — they're provider CDN URLs already inside
+`postgres.dump`, and the app already treats a dead URL as expected (regenerates on next visit).*
 
 ---
 
