@@ -49,7 +49,7 @@ import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
-import { chunkChatTranscript, MESSAGES_PER_CHUNK, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
+import { chunkChatTranscript, DEFAULT_CHUNK_PAIRS, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
 import { findTurnBoundaries, DEFAULT_LIVE_WINDOW_PAIRS, type ChatMemorySyncDeps } from './chatMemorySync.js';
 
@@ -59,8 +59,6 @@ export type EagerChunkDeps = ChatMemorySyncDeps;
 
 export type EagerChunkResult = { status: 'noop' | 'ok'; chunksAdded: number };
 
-const PAIRS_PER_CHUNK = MESSAGES_PER_CHUNK / 2;
-
 function toPositiveInt(raw: string | undefined, fallback: number): number {
   const parsed = raw ? Number(raw) : NaN;
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -69,15 +67,20 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
 /** Same live settings reads + gated-provider construction resolveSyncSettings (chatMemorySync.ts)
  *  does for the tick: chat_memory_profile names the chunk-summary connection (falling back to the
  *  household's active connection when unset or unknown), chat_memory_chunk_summary_prompt can
- *  override the built-in summarize prompt, chat_memory_live_window_pairs sets the live window. */
+ *  override the built-in summarize prompt, chat_memory_live_window_pairs sets the live window, and
+ *  chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md
+ *  — fallback DEFAULT_CHUNK_PAIRS = today's 4-message chunk, so a changed size is a no-op until a
+ *  value is saved). */
 async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
   llm: LlmProvider;
   chunkSummaryPrompt: string | undefined;
   liveWindowPairs: number;
+  pairsPerChunk: number;
 }> {
-  const [profileName, livePairsRaw, chunkSummaryPrompt] = await Promise.all([
+  const [profileName, livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
     deps.settings.get('chat_memory_profile'),
     deps.settings.get('chat_memory_live_window_pairs'),
+    deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
   ]);
 
@@ -95,23 +98,25 @@ async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
     llm,
     chunkSummaryPrompt: chunkSummaryPrompt || undefined,
     liveWindowPairs: toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS),
+    pairsPerChunk: toPositiveInt(chunkPairsRaw, DEFAULT_CHUNK_PAIRS),
   };
 }
 
 /**
- * The eager chunk step: if at least one whole 2-pair chunk has rolled off this chat's live window
- * since the last chunking, chunk + summarize + embed it against the chat's open sync point
- * (opening one if none exists) and commit. Two phases — a cheap unlocked pre-check first, so the
- * common no-op turn never takes the per-chat advisory lock or loads the transcript; the locked
- * phase re-derives everything under the lock as the authoritative check, guarding the race where a
- * concurrent eager call or sync tick for the same chat changed the counts in between.
+ * The eager chunk step: if at least one whole chunk (pairsPerChunk turn-pairs — the live
+ * chat_memory_chunk_pairs setting, default 2) has rolled off this chat's live window since the
+ * last chunking, chunk + summarize + embed it against the chat's open sync point (opening one if
+ * none exists) and commit. Two phases — a cheap unlocked pre-check first, so the common no-op
+ * turn never takes the per-chat advisory lock or loads the transcript; the locked phase re-derives
+ * everything under the lock as the authoritative check, guarding the race where a concurrent eager
+ * call or sync tick for the same chat changed the counts in between.
  *
  * Never throws: every failure is caught, logged, and turned into a no-op — the sync tick's
  * existing chunking path picks the backlog up the next time the chat is due.
  */
 export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chatId: string): Promise<EagerChunkResult> {
   try {
-    const { llm, chunkSummaryPrompt, liveWindowPairs } = await resolveEagerLlm(deps);
+    const { llm, chunkSummaryPrompt, liveWindowPairs, pairsPerChunk } = await resolveEagerLlm(deps);
 
     // Phase 1 — unlocked, cheap pre-check. floor(messageCount / 2) is the turn-count estimate:
     // exact in every today-case (each turn is one user + one assistant message; a seeded
@@ -125,9 +130,9 @@ export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chat
     const turnCountEstimate = Math.floor(counts.messageCount / 2);
     const eligiblePairsEstimate = Math.max(
       0,
-      turnCountEstimate - liveWindowPairs - counts.chunkCount * PAIRS_PER_CHUNK,
+      turnCountEstimate - liveWindowPairs - counts.chunkCount * pairsPerChunk,
     );
-    if (Math.floor(eligiblePairsEstimate / PAIRS_PER_CHUNK) === 0) {
+    if (Math.floor(eligiblePairsEstimate / pairsPerChunk) === 0) {
       return { status: 'noop', chunksAdded: 0 };
     }
 
@@ -146,27 +151,28 @@ export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chat
         // greeting is never its own turn, pair, chunk, or live-window slot.
         const turnCount = findTurnBoundaries(messages).length;
 
-        // count(*) doubles as the ordinal base (startOrdinal) and, multiplied by PAIRS_PER_CHUNK,
+        // count(*) doubles as the ordinal base (startOrdinal) and, multiplied by pairsPerChunk,
         // as alreadyChunkedPairs — one query, two roles, not interchangeable numbers.
         const [chunkCountRow] = await session.query<{ n: string }>('select count(*)::text as n from chat_chunks where chat_id = $1', [chatId]);
         const startOrdinal = Number(chunkCountRow?.n ?? '0');
 
         const eligiblePairs = Math.max(
           0,
-          turnCount - liveWindowPairs - startOrdinal * PAIRS_PER_CHUNK,
+          turnCount - liveWindowPairs - startOrdinal * pairsPerChunk,
         );
-        const chunksToCreate = Math.floor(eligiblePairs / PAIRS_PER_CHUNK);
+        const chunksToCreate = Math.floor(eligiblePairs / pairsPerChunk);
         if (chunksToCreate === 0) return { status: 'noop', chunksAdded: 0 };
 
         // The span to chunk is the rolled-off-but-unchunked one: after the already-chunked
-        // messages, never into the live window (chunksToCreate * MESSAGES_PER_CHUNK <= eligible
+        // messages, never into the live window (chunksToCreate * messagesPerChunk <= eligible
         // messages by construction). Slicing from message 0 instead would re-chunk content the
         // existing chunks already cover.
-        const coveredMessages = startOrdinal * MESSAGES_PER_CHUNK;
+        const messagesPerChunk = pairsPerChunk * 2;
+        const coveredMessages = startOrdinal * messagesPerChunk;
         const toChunk: ChatTranscriptMessage[] = messages
-          .slice(coveredMessages, coveredMessages + chunksToCreate * MESSAGES_PER_CHUNK)
+          .slice(coveredMessages, coveredMessages + chunksToCreate * messagesPerChunk)
           .map((m) => ({ messageId: m.message_id, role: m.role, content: m.content }));
-        const chunks = chunkChatTranscript(toChunk, startOrdinal);
+        const chunks = chunkChatTranscript(toChunk, startOrdinal, messagesPerChunk);
 
         // The mandatory summarize + embed pair, byte-for-byte the tick's own summarize_embed step
         // (content lane + the 0094 summary lane).

@@ -433,6 +433,12 @@ export interface ChatMemorySettings {
   liveWindowPairs: number | null;
   syncEveryPairs: number | null;
   digestHorizonPairs: number | null;
+  // Chunk size in turn-pairs (migration 0099, docs/plans/chunk-size-resize-plan.md) — read live
+  // by the sync tick, the eager path, the recall decay SQL, and the admin-triggered re-chunk
+  // backfill (orchestrator/chatChunkResize.ts). null = unset (built-in default of 2 pairs = the
+  // classic 4-message chunk); a saved value only affects NEW chunks — existing archives keep
+  // their old size until the resize backfill re-chunks them.
+  chunkPairs: number | null;
   chunkSummaryPrompt: string;
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;
@@ -597,6 +603,20 @@ export interface ChatMemorySyncStatusRow {
   canonProposedCount: number;
   canonApprovedCount: number;
   canonLastProposedAt: string | null;
+}
+
+// orchestrator/src/orchestrator/chatChunkResize.ts getChatChunkResizeStatus() — the singleton
+// progress row of the admin-triggered chunk-size backfill (docs/plans/chunk-size-resize-plan.md).
+// status: 'idle' before any pass / 'running' while one is live (chatsDone/chatsTotal advance per
+// chat) / 'done' or 'error' when it finished; error carries the failure message when status is
+// 'error'. GET /v1/admin/chat-memory-resize-status wraps it as { resize: ChunkResizeStatus }.
+export interface ChunkResizeStatus {
+  status: 'idle' | 'running' | 'done' | 'error';
+  chatsTotal: number;
+  chatsDone: number;
+  startedAt: string | null;
+  finishedAt: string | null;
+  error: string | null;
 }
 
 /** GET /v1/admin/location-render-status — the Backgrounds tab's proof-it-ran table

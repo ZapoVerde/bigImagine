@@ -260,6 +260,7 @@ export const SETTING_NAMES = [
   'chat_memory_live_window_pairs',
   'chat_memory_sync_every_pairs',
   'chat_memory_digest_horizon_pairs',
+  'chat_memory_chunk_pairs',
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
   'chat_memory_household_memory_prompt',

@@ -1117,6 +1117,12 @@ export interface ChatMemorySettings {
   liveWindowPairs: number | null;
   syncEveryPairs: number | null;
   digestHorizonPairs: number | null;
+  // Chunk size in turn-pairs (migration 0099, docs/plans/chunk-size-resize-plan.md) — read live
+  // by the sync tick, the eager path, the recall decay SQL, and the admin-triggered re-chunk
+  // backfill (orchestrator/chatChunkResize.ts). null = unset (built-in default of 2 pairs = the
+  // classic 4-message chunk); a saved value only affects NEW chunks — existing archives keep
+  // their old size until the resize backfill re-chunks them.
+  chunkPairs: number | null;
   chunkSummaryPrompt: string;
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;
@@ -1175,6 +1181,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     liveRaw,
     syncRaw,
     digestHorizonRaw,
+    chunkPairsRaw,
     chunkSummaryPrompt,
     distillPrompt,
     householdMemoryPrompt,
@@ -1200,6 +1207,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_live_window_pairs'),
     store.get('chat_memory_sync_every_pairs'),
     store.get('chat_memory_digest_horizon_pairs'),
+    store.get('chat_memory_chunk_pairs'),
     store.get('chat_memory_chunk_summary_prompt'),
     store.get('chat_memory_distill_prompt'),
     store.get('chat_memory_household_memory_prompt'),
@@ -1226,6 +1234,7 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     liveWindowPairs: liveRaw ? Number(liveRaw) : null,
     syncEveryPairs: syncRaw ? Number(syncRaw) : null,
     digestHorizonPairs: digestHorizonRaw ? Number(digestHorizonRaw) : null,
+    chunkPairs: chunkPairsRaw ? Number(chunkPairsRaw) : null,
     chunkSummaryPrompt: chunkSummaryPrompt || DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT,
     chunkSummaryPromptIsDefault: !chunkSummaryPrompt,
     distillPrompt: distillPrompt || DEFAULT_DISTILL_CHAT_MEMORY_PROMPT,
@@ -1270,6 +1279,7 @@ export interface SetChatMemorySettingsBody {
   liveWindowPairs?: number;
   syncEveryPairs?: number;
   digestHorizonPairs?: number;
+  chunkPairs?: number;
   chunkSummaryPrompt?: string;
   distillPrompt?: string;
   householdMemoryPrompt?: string;
@@ -1303,6 +1313,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     live_window_pairs,
     sync_every_pairs,
     digest_horizon_pairs,
+    chunk_pairs,
     chunk_summary_prompt,
     distill_prompt,
     household_memory_prompt,
@@ -1329,6 +1340,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     live_window_pairs === undefined &&
     sync_every_pairs === undefined &&
     digest_horizon_pairs === undefined &&
+    chunk_pairs === undefined &&
     chunk_summary_prompt === undefined &&
     distill_prompt === undefined &&
     household_memory_prompt === undefined &&
@@ -1356,6 +1368,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (live_window_pairs !== undefined && (typeof live_window_pairs !== 'number' || live_window_pairs <= 0)) return undefined;
   if (sync_every_pairs !== undefined && (typeof sync_every_pairs !== 'number' || sync_every_pairs <= 0)) return undefined;
   if (digest_horizon_pairs !== undefined && (typeof digest_horizon_pairs !== 'number' || digest_horizon_pairs <= 0)) return undefined;
+  if (chunk_pairs !== undefined && (typeof chunk_pairs !== 'number' || chunk_pairs <= 0)) return undefined;
   if (chunk_summary_prompt !== undefined && typeof chunk_summary_prompt !== 'string') return undefined;
   if (distill_prompt !== undefined && typeof distill_prompt !== 'string') return undefined;
   if (household_memory_prompt !== undefined && typeof household_memory_prompt !== 'string') return undefined;
@@ -1381,6 +1394,7 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     liveWindowPairs: live_window_pairs as number | undefined,
     syncEveryPairs: sync_every_pairs as number | undefined,
     digestHorizonPairs: digest_horizon_pairs as number | undefined,
+    chunkPairs: chunk_pairs as number | undefined,
     chunkSummaryPrompt: chunk_summary_prompt as string | undefined,
     distillPrompt: distill_prompt as string | undefined,
     householdMemoryPrompt: household_memory_prompt as string | undefined,
@@ -1409,6 +1423,7 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.liveWindowPairs !== undefined) await store.set('chat_memory_live_window_pairs', String(body.liveWindowPairs));
   if (body.syncEveryPairs !== undefined) await store.set('chat_memory_sync_every_pairs', String(body.syncEveryPairs));
   if (body.digestHorizonPairs !== undefined) await store.set('chat_memory_digest_horizon_pairs', String(body.digestHorizonPairs));
+  if (body.chunkPairs !== undefined) await store.set('chat_memory_chunk_pairs', String(body.chunkPairs));
   if (body.chunkSummaryPrompt !== undefined) await store.set('chat_memory_chunk_summary_prompt', body.chunkSummaryPrompt);
   if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
   if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);

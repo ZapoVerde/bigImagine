@@ -1,15 +1,18 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ApiError,
   adminGetCanonSettings,
   adminGetChatMemorySettings,
+  adminGetChunkResizeStatus,
   adminListConnections,
   adminSetCanonSettings,
   adminSetChatMemorySettings,
+  adminTriggerChunkResize,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import { useChatMemorySyncStatus } from '../hooks/useChatMemorySyncStatus';
-import type { CanonSettings, ChatMemorySettings, ChatMemorySyncStatusRow } from '../api/types';
+import type { CanonSettings, ChatMemorySettings, ChatMemorySyncStatusRow, ChunkResizeStatus } from '../api/types';
+import ChunkResizeWarningModal from '../components/ChunkResizeWarningModal';
 import './RagView.css';
 
 // The RAG management page (docs/chat-memory.md's read/write pipeline in one place, the way
@@ -36,6 +39,7 @@ export default function RagView() {
   const [selectedLiveWindowPairs, setSelectedLiveWindowPairs] = useState('');
   const [selectedSyncEveryPairs, setSelectedSyncEveryPairs] = useState('');
   const [selectedDigestHorizonPairs, setSelectedDigestHorizonPairs] = useState('');
+  const [selectedChunkPairs, setSelectedChunkPairs] = useState('');
   const [selectedChunkSummaryPrompt, setSelectedChunkSummaryPrompt] = useState('');
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
   const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
@@ -52,6 +56,10 @@ export default function RagView() {
   const [selectedInjectRecentHistoryPrompt, setSelectedInjectRecentHistoryPrompt] = useState('');
   const [selectedAutoRecallChunkPrompt, setSelectedAutoRecallChunkPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
+  // The chunk-size backfill's singleton progress row (docs/plans/chunk-size-resize-plan.md) —
+  // polled while 'running'; also read once on unlock so a pass started in another session shows up.
+  const [chunkResizeStatus, setChunkResizeStatus] = useState<ChunkResizeStatus | null>(null);
+  const [chunkResizeModalOpen, setChunkResizeModalOpen] = useState(false);
 
   // --- Retrieval knobs: the RP read path's auto-recall (recallForPrompt.ts, migration 0077)
   // + the canon-facts top-k (recall_canon_facts, live on every recall call). ---
@@ -82,6 +90,7 @@ export default function RagView() {
     setSelectedLiveWindowPairs(settings.liveWindowPairs === null ? '' : String(settings.liveWindowPairs));
     setSelectedSyncEveryPairs(settings.syncEveryPairs === null ? '' : String(settings.syncEveryPairs));
     setSelectedDigestHorizonPairs(settings.digestHorizonPairs === null ? '' : String(settings.digestHorizonPairs));
+    setSelectedChunkPairs(settings.chunkPairs === null ? '' : String(settings.chunkPairs));
     setSelectedChunkSummaryPrompt(settings.chunkSummaryPrompt);
     setSelectedDistillPrompt(settings.distillPrompt);
     setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
@@ -148,6 +157,8 @@ export default function RagView() {
     if (selectedDigestHorizonPairs && digestHorizonPairs !== chatMemorySettings.digestHorizonPairs) {
       patch.digest_horizon_pairs = digestHorizonPairs;
     }
+    const chunkPairs = Number(selectedChunkPairs);
+    if (selectedChunkPairs && chunkPairs !== chatMemorySettings.chunkPairs) patch.chunk_pairs = chunkPairs;
     if (selectedChunkSummaryPrompt !== chatMemorySettings.chunkSummaryPrompt) patch.chunk_summary_prompt = selectedChunkSummaryPrompt;
     if (selectedDistillPrompt !== chatMemorySettings.distillPrompt) patch.distill_prompt = selectedDistillPrompt;
     if (selectedHouseholdMemoryPrompt !== chatMemorySettings.householdMemoryPrompt) {
@@ -172,6 +183,57 @@ export default function RagView() {
     }
     setChatMemoryStatus('Saved — takes effect on the next sync tick, no restart needed.');
   }
+
+  // The chunk-size input's guarded save: a new size only affects NEW chunks, so changing it asks
+  // whether to also fire the one-time re-chunk backfill (ChunkResizeWarningModal). Any other
+  // field's change saves straight through — the modal only appears when chunk-pairs actually
+  // changed. "Change setting only" = the plain save; "Change and re-chunk now" = the plain save,
+  // then trigger the backfill (its progress appears below the fieldset's Save button).
+  async function handleChatMemorySave() {
+    if (!chatMemorySettings) return;
+    const chunkPairs = Number(selectedChunkPairs);
+    const chunkPairsChanged = !!selectedChunkPairs && chunkPairs !== chatMemorySettings.chunkPairs;
+    if (chunkPairsChanged) {
+      setChunkResizeModalOpen(true);
+      return;
+    }
+    await saveChatMemorySettings();
+  }
+
+  // Fire the one-time re-chunk backfill (orchestrator/chatChunkResize.ts, claimed atomically —
+  // 409 when a pass is already live). Fire-and-forget on the server; we optimistically read the
+  // just-claimed 'running' row so the poll below picks up progress immediately.
+  async function triggerChunkResize() {
+    try {
+      await adminTriggerChunkResize(adminKey);
+      setChunkResizeStatus(await adminGetChunkResizeStatus(adminKey));
+      setChatMemoryStatus('');
+    } catch (err) {
+      setChatMemoryStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to start re-chunk');
+    }
+  }
+
+  // Poll the backfill's singleton progress row: once on unlock (a pass may already be running
+  // from another session), then every 2s while one is running, stopping at done/error.
+  useEffect(() => {
+    if (!unlocked) return;
+    let cancelled = false;
+    async function poll() {
+      try {
+        const status = await adminGetChunkResizeStatus(adminKey);
+        if (!cancelled) setChunkResizeStatus(status);
+      } catch {
+        // Best-effort — a failed poll leaves the last-known state; the next tick retries.
+      }
+    }
+    void poll();
+    if (chunkResizeStatus?.status !== 'running') return;
+    const id = setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [unlocked, adminKey, chunkResizeStatus?.status]);
 
   function resetChatMemoryPrompt(
     field:
@@ -374,10 +436,24 @@ export default function RagView() {
             placeholder="24"
           />
         </label>
+        <br />
+        <label>
+          Chunk size (turn pairs)
+          <br />
+          <input
+            type="number"
+            min="1"
+            value={selectedChunkPairs}
+            onChange={(e) => setSelectedChunkPairs(e.target.value)}
+            placeholder="2"
+          />
+        </label>
         <div className="status">
           Live window: how many of the most recent turn pairs stay in full view. Sync every: how many pairs accumulate past
           that before the next chunk/summarize/distill pass runs. Digest horizon: how far back the key-ideas digest re-reads
-          chunk summaries on each sync, not just what's brand new since the last one.
+          chunk summaries on each sync, not just what's brand new since the last one. Chunk size: how many turn-pairs each
+          archived chunk holds (2 = the classic 4-message chunk) — changing it only affects NEW chunks; use
+          "Re-chunk existing archives" below to bring existing archives in line.
         </div>
         <br />
         <label>
@@ -459,8 +535,20 @@ export default function RagView() {
           Reset to default
         </button>
         <br />
-        <button onClick={saveChatMemorySettings}>Save</button>
-        <div className="status">{chatMemoryStatus}</div>
+        <button onClick={handleChatMemorySave}>Save</button>
+        <button type="button" onClick={triggerChunkResize}>
+          Re-chunk existing archives at this size
+        </button>
+        <div className="status">
+          {chatMemoryStatus}
+          {chunkResizeStatus?.status === 'running'
+            ? `${chatMemoryStatus ? ' ' : ''}Re-chunking&hellip; ${chunkResizeStatus.chatsDone}/${chunkResizeStatus.chatsTotal} chats (started ${new Date(chunkResizeStatus.startedAt ?? '').toLocaleString()})`
+            : chunkResizeStatus?.status === 'done'
+              ? `Re-chunked ${chunkResizeStatus.chatsTotal} chats${chatMemoryStatus ? ` — ${chatMemoryStatus}` : ''}.`
+              : chunkResizeStatus?.status === 'error'
+                ? `Re-chunk failed: ${chunkResizeStatus.error ?? 'unknown error'}${chatMemoryStatus ? ` — ${chatMemoryStatus}` : ''}`
+                : ''}
+        </div>
       </fieldset>
 
       <fieldset>
@@ -720,6 +808,21 @@ export default function RagView() {
         </button>
         <SyncStatusTable rows={rows} />
       </fieldset>
+
+      {chunkResizeModalOpen && (
+        <ChunkResizeWarningModal
+          onCancel={() => setChunkResizeModalOpen(false)}
+          onChangeOnly={async () => {
+            setChunkResizeModalOpen(false);
+            await saveChatMemorySettings();
+          }}
+          onChangeAndRechunk={async () => {
+            setChunkResizeModalOpen(false);
+            await saveChatMemorySettings();
+            await triggerChunkResize();
+          }}
+        />
+      )}
     </div>
   );
 }

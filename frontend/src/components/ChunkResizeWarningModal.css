@@ -1,0 +1,63 @@
+.chunk-resize-warning-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.chunk-resize-warning-modal {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  max-width: 30rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.3);
+}
+
+.chunk-resize-warning-modal h2 {
+  margin: 0 0 0.75rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-secondary);
+}
+
+.chunk-resize-warning-modal p {
+  margin: 0 0 1.25rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.chunk-resize-warning-actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.chunk-resize-warning-actions button {
+  padding: 0.5rem 1.2rem;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-medium);
+}
+
+.chunk-resize-warning-actions button:hover {
+  background: var(--color-accent-hover);
+}
+
+.chunk-resize-warning-actions button:last-child {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  border-color: var(--color-accent);
+}
+
+.chunk-resize-warning-actions button:last-child:hover {
+  background: var(--color-accent-hover);
+}

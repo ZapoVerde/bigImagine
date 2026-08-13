@@ -23,6 +23,9 @@
  *   (400 on a malformed body), writes, and reads back the full settings object
  * handleLocationsGet(res, deps) — read-only GET /v1/admin/locations (cross-user roster)
  * handleChatMemorySyncStatusGet / handleLocationRenderStatusGet — read-only proof-it-ran GETs
+ * handleChatMemoryResizePost / handleChatMemoryResizeStatusGet — trigger + poll the chunk-size
+ *   backfill (docs/plans/chunk-size-resize-plan.md); POST claims the singleton status row (409
+ *   while one pass is live) and fires the pass fire-and-forget
  *
  * @contract
  *   assertions:
@@ -32,6 +35,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import {
+  claimChatChunkResize,
+  getChatChunkResizeStatus,
+  runChatChunkResize,
+} from '../orchestrator/chatChunkResize.js';
 import {
   getCanonSettings,
   getChatBackgroundSettings,
@@ -220,7 +228,7 @@ export async function handleChatMemorySettingsSet(req: IncomingMessage, res: Ser
     sendJson(res, 400, {
       error:
         'expected at least one of { profile?, live_window_pairs?: positive number, sync_every_pairs?: positive number, ' +
-        'digest_horizon_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
+        'digest_horizon_pairs?: positive number, chunk_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
     });
     return;
   }
@@ -238,6 +246,41 @@ export async function handleChatMemorySettingsSet(req: IncomingMessage, res: Ser
 // than configuring anything.
 export async function handleChatMemorySyncStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, { chats: await getChatMemorySyncStatus(deps.db) });
+}
+
+// docs/plans/chunk-size-resize-plan.md — the admin-triggered backfill that re-chunks every chat's
+// archived history at the live chat_memory_chunk_pairs size (changing that setting only affects
+// NEW chunks the sync tick / eager path write; this pass brings existing archives in line).
+// POST claims the singleton chat_chunk_resize_status row atomically and fires the pass
+// fire-and-forget — never awaited before the response, the same shape as the eager-chunk call in
+// handleChatCompletions.ts. runChatChunkResize catches its own errors (a failure lands in the
+// status row as 'error', bi_principles.md §11), so the 202 below means "claimed and started",
+// not "finished"; progress is polled via handleChatMemoryResizeStatusGet. A second trigger while
+// one pass is live gets 409 — the claim is a compare-and-swap, so two concurrent triggers can
+// never both win.
+export async function handleChatMemoryResizePost(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  const claimed = await claimChatChunkResize(deps.db);
+  if (!claimed) {
+    sendJson(res, 409, { error: 'a chat chunk resize is already running' });
+    return;
+  }
+  const resizeDeps = {
+    db: deps.db,
+    llm: deps.llm,
+    embeddings: deps.embeddings,
+    settings: deps.settings,
+    llmConnections: deps.llmConnections,
+  };
+  void runChatChunkResize(resizeDeps);
+  sendJson(res, 202, { status: 'running' });
+}
+
+// The resize pass's progress row — read-only, polled by the Settings tab while a pass is running
+// (chats_done/chats_total advance per chat; status flips to 'done'/'error' at the end). The
+// singleton row always exists (migration 0099 seeds it 'idle'), so this answers 200 with
+// { status: 'idle', chatsTotal: 0, chatsDone: 0, ... } before any pass ever ran.
+export async function handleChatMemoryResizeStatusGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { resize: await getChatChunkResizeStatus(deps.db) });
 }
 
 // The Backgrounds tab's proof-it-ran read: which render stages each recent location actually

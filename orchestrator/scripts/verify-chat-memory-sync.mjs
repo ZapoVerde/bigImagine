@@ -583,7 +583,8 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // when findDueChats' rough candidate filter over-selects — normally unreachable since that filter's
 // own threshold (sync_every + live_window) is chosen so the inner check can't disagree. Force the
 // mismatch here by temporarily lowering sync_every_pairs below a full chunk's worth, so a chat can
-// clear the outer filter while still not having a full MESSAGES_PER_CHUNK worth to archive. ---
+// clear the outer filter while still not having a full chunk (pairs_per_chunk × 2 messages) worth
+// to archive. ---
 {
   const SKIP_CHAT_ID = randomUUID();
   pool.chatSessions.set(SKIP_CHAT_ID, { user_id: USER, archived_at: null });

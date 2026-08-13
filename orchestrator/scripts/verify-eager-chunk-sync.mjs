@@ -273,7 +273,7 @@ let ONE_CHAT_ID;
   );
 }
 
-// --- Eligibility units regression (the count(*) * PAIRS_PER_CHUNK conversion): 20 existing
+// --- Eligibility units regression (the count(*) * pairsPerChunk conversion): 20 existing
 // chunks (40 pairs' worth = 80 messages) + a live window of 8 pairs must leave exactly 2 eligible
 // pairs (4 messages), not 64 — the raw chunk count fed straight into the pair arithmetic would
 // re-chunk the already-covered span and reach into the live window. ---

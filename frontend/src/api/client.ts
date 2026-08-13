@@ -5,6 +5,7 @@ import type {
   ChatLineageNode,
   ChatMemorySettings,
   ChatMemorySyncStatusRow,
+  ChunkResizeStatus,
   LocationRenderStatusRow,
   LocationSettings,
   LocationAdminRow,
@@ -1100,6 +1101,23 @@ export async function adminGetChatMemorySyncStatus(adminKey: string | null): Pro
   return body.chats;
 }
 
+/** docs/plans/chunk-size-resize-plan.md — triggers the one-time backfill that re-chunks every
+ *  chat's archived history at the live chat_memory_chunk_pairs size. 202 = claimed and started
+ *  (poll adminGetChunkResizeStatus for progress); 409 = a pass is already running. */
+export async function adminTriggerChunkResize(adminKey: string | null): Promise<void> {
+  const res = await fetch('/v1/admin/chat-memory-resize', { method: 'POST', headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+}
+
+/** The resize pass's singleton progress row — polled by the Settings tab while a pass is
+ *  running (chatsDone/chatsTotal advance per chat; status flips to 'done'/'error' at the end). */
+export async function adminGetChunkResizeStatus(adminKey: string | null): Promise<ChunkResizeStatus> {
+  const res = await fetch('/v1/admin/chat-memory-resize-status', { headers: authHeaders(adminKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const body = (await res.json()) as { resize: ChunkResizeStatus };
+  return body.resize;
+}
+
 /** The Backgrounds tab's data source — read-only confirmation that the bg-gen pipeline
  *  (describer → render) actually ran per location, not a settings/editing endpoint. No POST
  *  counterpart. */
@@ -1341,6 +1359,7 @@ export async function adminSetChatMemorySettings(
     live_window_pairs?: number;
     sync_every_pairs?: number;
     digest_horizon_pairs?: number;
+    chunk_pairs?: number;
     chunk_summary_prompt?: string;
     distill_prompt?: string;
     household_memory_prompt?: string;

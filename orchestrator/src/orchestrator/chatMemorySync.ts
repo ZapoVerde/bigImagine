@@ -106,7 +106,7 @@ import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
-import { chunkChatTranscript, MESSAGES_PER_CHUNK, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
+import { chunkChatTranscript, DEFAULT_CHUNK_PAIRS, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
 import { distillChatMemory, type ChatMemoryEntryDraft } from '../io/chatMemory/distillChatMemory.js';
 import { classifyHouseholdMemory } from '../io/chatMemory/classifyHouseholdMemory.js';
@@ -227,6 +227,8 @@ interface SyncSettings {
   liveWindowMessages: number;
   syncEveryMessages: number;
   digestHorizonChunks: number;
+  /** Live chat_memory_chunk_pairs (fallback DEFAULT_CHUNK_PAIRS) — turn-pairs per archived chunk. */
+  pairsPerChunk: number;
 }
 
 function toPositiveInt(raw: string | undefined, fallback: number): number {
@@ -240,6 +242,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     livePairsRaw,
     syncEveryPairsRaw,
     digestHorizonPairsRaw,
+    chunkPairsRaw,
     chunkSummaryPrompt,
     distillPrompt,
     householdMemoryPrompt,
@@ -252,6 +255,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     deps.settings.get('chat_memory_live_window_pairs'),
     deps.settings.get('chat_memory_sync_every_pairs'),
     deps.settings.get('chat_memory_digest_horizon_pairs'),
+    deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
     deps.settings.get('chat_memory_distill_prompt'),
     deps.settings.get('chat_memory_household_memory_prompt'),
@@ -274,7 +278,9 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
   const livePairs = toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
   const syncEveryPairs = toPositiveInt(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
   const digestHorizonPairs = toPositiveInt(digestHorizonPairsRaw, DEFAULT_DIGEST_HORIZON_PAIRS);
-  const pairsPerChunk = MESSAGES_PER_CHUNK / 2;
+  // Live chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md) — the chunker's
+  // message count is this × 2. Fallback DEFAULT_CHUNK_PAIRS = today's hardcoded 4-message chunk.
+  const pairsPerChunk = toPositiveInt(chunkPairsRaw, DEFAULT_CHUNK_PAIRS);
 
   return {
     llm,
@@ -288,6 +294,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     liveWindowMessages: livePairs * 2,
     syncEveryMessages: syncEveryPairs * 2,
     digestHorizonChunks: Math.ceil(digestHorizonPairs / pairsPerChunk),
+    pairsPerChunk,
   };
 }
 
@@ -444,7 +451,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       const unsyncedBoundaries = turnBoundaries.filter((idx) => idx > lastSyncedIdx);
       const unsynced = allMessages.slice(lastSyncedIdx + 1);
 
-      const pairsPerChunk = MESSAGES_PER_CHUNK / 2;
+      const pairsPerChunk = sync.pairsPerChunk;
       const liveWindowPairs = sync.liveWindowMessages / 2;
       const eligibleTurns = unsyncedBoundaries.length - liveWindowPairs;
       const turnsToArchive = eligibleTurns - (eligibleTurns % pairsPerChunk);
@@ -557,7 +564,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           [chatId],
         );
         const startOrdinal = Number(existingChunkCount?.n ?? '0');
-        return chunkChatTranscript(chunkInput, startOrdinal);
+        return chunkChatTranscript(chunkInput, startOrdinal, pairsPerChunk * 2);
       });
 
       const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {

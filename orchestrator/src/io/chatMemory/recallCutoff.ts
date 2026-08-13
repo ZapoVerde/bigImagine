@@ -28,7 +28,9 @@
  *
  * Since 2026-08-17 (Stage 3 of the same plan) the module also owns Canonize's temporal-decay
  * factor (their RAG_strategy_v4.md §3 Step 2, "chat channel only") as a pure export,
- * `decayFactor(ageChunks)`. The factor itself is Canonize's formula unchanged; the DISTANCE-SPACE
+ * `decayFactor(ageChunks, pairsPerChunk)` — pairsPerChunk is the live chat_memory_chunk_pairs
+ * setting (default 2), so the same archive re-decays correctly after a chunk-size change. The
+ * factor itself is Canonize's formula unchanged; the DISTANCE-SPACE
  * adaptation is the caller's: recallForPrompt.ts divides each chunk's raw distance by the factor
  * in SQL (older chunks get a larger distance — worse), mirroring Canonize's `s_vec = s_vec ×
  * factor` in a space where lower is better. The plan's Background flagged this distance-space
@@ -70,10 +72,11 @@
  *   telemetry line. distances must be ascending (closest/best first) — the order the SQL query
  *   already returns; keepCount counts leading rows under the threshold, floored to min, clamped
  *   to max, and never exceeding what the pool actually holds.
- * decayFactor(ageChunks) -> number — Canonize's temporal-decay factor (Step 2): how much a chunk
- *   `ageChunks` chunks behind the conversation's newest archived chunk survives to the cutoff.
- *   age 0 (the newest chunk) returns 1 (no decay); the factor falls off as 1 − 0.025·ln(2·age+1)
- *   and floors at 0.70 so ancient-but-relevant chunks are never buried entirely.
+ * decayFactor(ageChunks, pairsPerChunk) -> number — Canonize's temporal-decay factor (Step 2):
+ *   how much a chunk `ageChunks` chunks behind the conversation's newest archived chunk survives
+ *   to the cutoff. age 0 (the newest chunk) returns 1 (no decay); the factor falls off as
+ *   1 − 0.025·ln(pairsPerChunk·age + 1) and floors at 0.70 so ancient-but-relevant chunks are
+ *   never buried entirely.
  * blendKeyword(window, alpha?) -> { rows, scale } — Canonize's Step 3 anchored keyword blend in
  *   distance space (see the Stage-4 paragraph above): each row's kwScore re-ranks it within the
  *   window (index-aligned output rows carry the blended distance and the keyword contribution;
@@ -109,14 +112,16 @@ export function poolSize(max: number, poolMultiple: number): number {
 
 /** Canonize's temporal-decay factor (RAG_strategy_v4.md §3 Step 2, chat channel only), their
  *  formula unchanged. `ageChunks` is how many chunks behind the conversation's newest archived
- *  chunk the row is; each chunk covers PAIRS_PER_CHUNK turn-pairs, so the age enters Canonize's
- *  ln(age + 1) in pair units (2·ageChunks + 1) — the faithful unit mapping, not an extra
- *  tuning knob. age 0 → factor 1 (no decay); the floor (0.70) stops ancient-but-relevant chunks
- *  from being buried entirely. The caller divides the row's raw distance by this factor
- *  (distance space: lower is better), so the factor must be reproduced verbatim in the chunk
- *  query's SQL — verify-recall-for-prompt.mjs asserts the SQL shape to catch drift. */
-export function decayFactor(ageChunks: number): number {
-  return Math.max(DECAY_FACTOR_FLOOR, 1 - DECAY_COEFFICIENT * Math.log(PAIRS_PER_CHUNK * ageChunks + 1));
+ *  chunk the row is; each chunk covers `pairsPerChunk` turn-pairs (the live
+ *  chat_memory_chunk_pairs setting, docs/plans/chunk-size-resize-plan.md), so the age enters
+ *  Canonize's ln(age + 1) in pair units (pairsPerChunk·ageChunks + 1) — the faithful unit
+ *  mapping, not an extra tuning knob. age 0 → factor 1 (no decay); the floor (0.70) stops
+ *  ancient-but-relevant chunks from being buried entirely. The caller divides the row's raw
+ *  distance by this factor (distance space: lower is better), so the factor must be reproduced
+ *  verbatim in the chunk query's SQL — verify-recall-for-prompt.mjs asserts the SQL shape to
+ *  catch drift. */
+export function decayFactor(ageChunks: number, pairsPerChunk: number): number {
+  return Math.max(DECAY_FACTOR_FLOOR, 1 - DECAY_COEFFICIENT * Math.log(pairsPerChunk * ageChunks + 1));
 }
 
 /** Stage 3 constants, Canonize's own values (RAG_strategy_v4.md §3 Step 2) — kept plain
@@ -124,9 +129,6 @@ export function decayFactor(ageChunks: number): number {
  *  SQL mirror in recallForPrompt.ts's chunk query must stay in sync with these. */
 export const DECAY_FACTOR_FLOOR = 0.7;
 export const DECAY_COEFFICIENT = 0.025;
-/** Turn-pairs per chunk — chunkChatTranscript's MESSAGES_PER_CHUNK (4 messages = 2 pairs),
- *  the age-unit mapping between chunk ordinals and Canonize's pair-counted age. */
-export const PAIRS_PER_CHUNK = 2;
 
 /** Stage 4 constant, Canonize's own value (RAG_strategy_v4.md §3 Step 3): the keyword blend
  *  weight α — at 0.7 the keyword lane can contribute at most 30% of the strongest vector

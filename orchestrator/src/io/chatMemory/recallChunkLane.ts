@@ -76,6 +76,10 @@ export interface ChunkLaneOptions {
   max: number;
   poolMultiple: number;
   cutoffMode: CutoffMode;
+  /** Turn-pairs per chunk (the live chat_memory_chunk_pairs setting,
+   *  docs/plans/chunk-size-resize-plan.md) — the age-unit mapping between chunk ordinals and
+   *  Canonize's pair-counted age in the decay SQL (bound as $5). */
+  pairsPerChunk: number;
 }
 
 /** Fetch, fuse, blend, and cut this chat's archived chunks down to what's worth injecting.
@@ -90,7 +94,7 @@ export async function recallChunkLane(
   query: string,
   opts: ChunkLaneOptions,
 ): Promise<{ chunks: ChunkRow[] }> {
-  const { min, max, poolMultiple, cutoffMode } = opts;
+  const { min, max, poolMultiple, cutoffMode, pairsPerChunk } = opts;
   const pool = Math.min(poolSize(max, poolMultiple), MAX_POOL_SIZE);
   const keywordWindow = Math.max(pool, KEYWORD_WINDOW_SIZE);
 
@@ -99,19 +103,19 @@ export async function recallChunkLane(
     // Canonize's temporal-decay factor (recallCutoff.ts `decayFactor`) — a chunk `ageChunks`
     // chunks behind the newest archived chunk gets distance × 1/factor, so older-but-relevant
     // chunks rank (and are measured by the cutoff) as if farther away. The expression mirrors
-    // decayFactor() verbatim — keep in sync (verify-recall-for-prompt.mjs asserts the SQL
-    // shape). `now` is the newest chunk ordinal for this chat (scalar subquery, index-assisted
-    // by chat_chunks_by_chat), so the freshest chunk has age 0 → factor 1 → no decay. Stage 4
-    // adds the keyword lane: every row is scored with ts_rank over the content_tsv generated
-    // column (migration 0093) for the OR of the query text's lexemes (ts_rank over a NULL
-    // tsquery is NULL, coalesced to 0 when the query has none — the lane is inert, not an
-    // error, for the empty-lexeme case), and the fetch is the KEYWORD_WINDOW window rather than
-    // the pool alone, so blendKeyword has room to promote lexical matches before the window is
-    // cut to the pool the cutoff measures.
+    // decayFactor() verbatim with pairsPerChunk bound as $5 — keep in sync
+    // (verify-recall-for-prompt.mjs asserts the SQL shape). `now` is the newest chunk ordinal
+    // for this chat (scalar subquery, index-assisted by chat_chunks_by_chat), so the freshest
+    // chunk has age 0 → factor 1 → no decay. Stage 4 adds the keyword lane: every row is
+    // scored with ts_rank over the content_tsv generated column (migration 0093) for the OR of
+    // the query text's lexemes (ts_rank over a NULL tsquery is NULL, coalesced to 0 when the
+    // query has none — the lane is inert, not an error, for the empty-lexeme case), and the
+    // fetch is the KEYWORD_WINDOW window rather than the pool alone, so blendKeyword has room
+    // to promote lexical matches before the window is cut to the pool the cutoff measures.
     session.query<ChunkRow>(
       `select ordinal, summary, content,
               (vector_embed <-> $3)
-                / greatest(0.70, 1.0 - 0.025 * ln(2 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
+                / greatest(0.70, 1.0 - 0.025 * ln($5 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
                 as distance,
               coalesce(ts_rank(content_tsv, (select string_agg(lexeme, ' | ')::tsquery from unnest(to_tsvector('english', $4)))), 0)
                 as kw_score
@@ -119,7 +123,7 @@ export async function recallChunkLane(
        where user_id = $1 and chat_id = $2
        order by distance
        limit ${keywordWindow}`,
-      [userId, chatId, toPgVectorLiteral(vector), query],
+      [userId, chatId, toPgVectorLiteral(vector), query, pairsPerChunk],
     ),
     // Stage 5: the header lane — same shape against chat_chunks.summary_vector_embed
     // (migration 0094), skipping rows that predate it (NULL = never embedded; the content lane
@@ -130,7 +134,7 @@ export async function recallChunkLane(
     session.query<ChunkRow>(
       `select ordinal, summary, content,
               (summary_vector_embed <-> $3)
-                / greatest(0.70, 1.0 - 0.025 * ln(2 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
+                / greatest(0.70, 1.0 - 0.025 * ln($5 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
                 as distance,
               coalesce(ts_rank(content_tsv, (select string_agg(lexeme, ' | ')::tsquery from unnest(to_tsvector('english', $4)))), 0)
                 as kw_score
@@ -138,7 +142,7 @@ export async function recallChunkLane(
        where user_id = $1 and chat_id = $2 and summary_vector_embed is not null
        order by distance
        limit ${keywordWindow}`,
-      [userId, chatId, toPgVectorLiteral(vector), query],
+      [userId, chatId, toPgVectorLiteral(vector), query, pairsPerChunk],
     ),
   ]);
 

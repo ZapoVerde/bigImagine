@@ -18,7 +18,7 @@
 // addendum — because a literal distance-space subtraction collapses when the best match is a
 // near-duplicate.
 
-import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, PAIRS_PER_CHUNK, blendKeyword, KEYWORD_BLEND_ALPHA, dualBonus, mergeLanes, DUAL_CONFIRM_BONUS } from '../dist/io/chatMemory/recallCutoff.js';
+import { poolSize, applyCutoff, decayFactor, DECAY_FACTOR_FLOOR, DECAY_COEFFICIENT, blendKeyword, KEYWORD_BLEND_ALPHA, dualBonus, mergeLanes, DUAL_CONFIRM_BONUS } from '../dist/io/chatMemory/recallCutoff.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -100,28 +100,34 @@ function assert(cond, message) {
   assert(r.keepCount === 3, 'a Min above the pool size never exceeds the pool\'s own row count');
 }
 
-// --- Stage 3: temporal-decay factor (Canonize's Step 2 formula, age in chunk units × 2 pairs) ---
+// --- Stage 3: temporal-decay factor (Canonize's Step 2 formula, age in chunk units × the live
+// chunk size in pairs — pairsPerChunk is now the live chat_memory_chunk_pairs setting, default 2) ---
 function closeTo(a, b, tol = 1e-9) {
   return Math.abs(a - b) <= tol;
 }
 
 {
-  // Canonize: factor = max(0.70, 1 − 0.025·ln(agePairs + 1)); agePairs = 2·ageChunks.
+  // Canonize: factor = max(0.70, 1 − 0.025·ln(agePairs + 1)); agePairs = pairsPerChunk·ageChunks.
   // ageChunks 0 (newest chunk) → ln(1) = 0 → factor 1 (no decay).
-  assert(decayFactor(0) === 1, 'the newest chunk (age 0) gets factor 1 — no decay');
-  // ageChunks 1 → agePairs 3 → 1 − 0.025·ln(3) = 1 − 0.027465...
-  assert(closeTo(decayFactor(1), 1 - 0.025 * Math.log(3)), 'age 1 chunk decays by Canonize\'s ln(3) term (0.97253)');
+  assert(decayFactor(0, 2) === 1, 'the newest chunk (age 0) gets factor 1 — no decay');
+  // ageChunks 1 at the default 2 pairs → agePairs 3 → 1 − 0.025·ln(3) = 1 − 0.027465...
+  assert(closeTo(decayFactor(1, 2), 1 - 0.025 * Math.log(3)), 'age 1 chunk decays by Canonize\'s ln(3) term (0.97253)');
   // ageChunks 50 → agePairs 101 → 1 − 0.025·ln(101) = 1 − 0.11538...
-  assert(closeTo(decayFactor(50), 1 - 0.025 * Math.log(101)), 'age 50 chunk decays by Canonize\'s ln(101) term (0.88462)');
+  assert(closeTo(decayFactor(50, 2), 1 - 0.025 * Math.log(101)), 'age 50 chunk decays by Canonize\'s ln(101) term (0.88462)');
+  // The pair-denominated signature: decay is a function of p·age (ln(p·age + 1)), so a 1-pair
+  // chunk at age 2 decays exactly like a 2-pair chunk at age 1 — the size the archive was
+  // chunked at, not a global constant.
+  assert(closeTo(decayFactor(2, 1), 1 - 0.025 * Math.log(3)), 'pairsPerChunk scales age: 1-pair chunk age 2 = 2-pair chunk age 1');
+  assert(closeTo(decayFactor(1, 3), 1 - 0.025 * Math.log(4)), '3-pair chunks decay per ln(3·1 + 1) = ln(4)');
   // The 0.70 floor: ancient chunks stop decaying, never buried entirely.
-  assert(decayFactor(1e9) === 0.7, 'ancient chunks floor at 0.70 (never buried entirely)');
+  assert(decayFactor(1e9, 2) === 0.7, 'ancient chunks floor at 0.70 (never buried entirely)');
   // Monotonic non-increasing — older never decays LESS than newer.
   assert(
-    decayFactor(5) <= decayFactor(2) && decayFactor(2) <= decayFactor(0),
+    decayFactor(5, 2) <= decayFactor(2, 2) && decayFactor(2, 2) <= decayFactor(0, 2),
     'the factor is monotone non-increasing with age',
   );
   // The constants are Canonize's own, exported so the SQL mirror can be checked against them.
-  assert(DECAY_FACTOR_FLOOR === 0.7 && DECAY_COEFFICIENT === 0.025 && PAIRS_PER_CHUNK === 2, 'Stage 3 constants are Canonize\'s own (0.70 / 0.025 / 2)');
+  assert(DECAY_FACTOR_FLOOR === 0.7 && DECAY_COEFFICIENT === 0.025, 'Stage 3 constants are Canonize\'s own (0.70 / 0.025)');
 }
 
 // --- Stage 4: anchored keyword blend (Canonize's Step 3, adapted to distance space via the

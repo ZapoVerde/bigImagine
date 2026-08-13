@@ -85,6 +85,7 @@ import type { PlotArcCard } from './memoryInjection.js';
 import { recallChunkLane, type ChunkRow } from './recallChunkLane.js';
 import { recallFactLane, type CanonFactRow } from './recallFactLane.js';
 import { recallPlotLane } from './recallPlotLane.js';
+import { DEFAULT_CHUNK_PAIRS } from './chunkChatTranscript.js';
 import { log } from '../logger.js';
 
 /** How many trailing turn-pairs form the query — mirrors Canonize's own `ragClassifierHistory`
@@ -261,7 +262,7 @@ export function buildAutoRecallParts(
 ): Promise<AutoRecallParts> {
   return (async () => {
     try {
-      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw, plotTopKRaw, plotMinRaw, plotFloorRaw] =
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw, plotTopKRaw, plotMinRaw, plotFloorRaw, chunkPairsRaw] =
         await Promise.all([
           settings.get('chat_memory_auto_recall_enabled'),
           settings.get('chat_memory_auto_recall_pairs'),
@@ -274,6 +275,7 @@ export function buildAutoRecallParts(
           settings.get('chat_memory_plot_recall_top_k'),
           settings.get('chat_memory_plot_recall_min'),
           settings.get('chat_memory_plot_recall_floor_syncs'),
+          settings.get('chat_memory_chunk_pairs'),
         ]);
 
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
@@ -342,6 +344,14 @@ export function buildAutoRecallParts(
       const plotFloorSyncs =
         Number.isFinite(parsedPlotFloor) && parsedPlotFloor > 0 ? parsedPlotFloor : DEFAULT_PLOT_FLOOR_SYNCS;
 
+      // The chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md) — the age-unit
+      // mapping between chunk ordinals and Canonize's pair-counted decay age, bound into the
+      // chunk lane's SQL as $5. Same parse-with-fallback shape; unset/corrupt = DEFAULT_CHUNK_PAIRS
+      // (2 — today's hardcoded 4-message chunk), so a not-yet-saved setting changes nothing.
+      const parsedChunkPairs = chunkPairsRaw ? parseInt(chunkPairsRaw, 10) : NaN;
+      const pairsPerChunk =
+        Number.isFinite(parsedChunkPairs) && parsedChunkPairs > 0 ? parsedChunkPairs : DEFAULT_CHUNK_PAIRS;
+
       const query = buildAutoRecallQuery(messages, pairs);
       if (!query) return { chunks: [], facts: [], plots: [] };
 
@@ -354,7 +364,7 @@ export function buildAutoRecallParts(
       // floor. Each lane module owns its own fetch/scoring pipeline — see recallChunkLane.ts,
       // recallFactLane.ts, and recallPlotLane.ts.
       const [{ chunks }, { facts }, { arcs: plots }] = await Promise.all([
-        recallChunkLane(session, userId, chatId, vector, query, { min: chunkMin, max: chunkTopK, poolMultiple, cutoffMode }),
+        recallChunkLane(session, userId, chatId, vector, query, { min: chunkMin, max: chunkTopK, poolMultiple, cutoffMode, pairsPerChunk }),
         recallFactLane(session, userId, chatId, vector, { min: factMin, max: factTopK, poolMultiple, cutoffMode }),
         recallPlotLane(session, userId, chatId, vector, {
           min: plotMin,

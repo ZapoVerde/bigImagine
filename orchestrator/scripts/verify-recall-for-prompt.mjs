@@ -15,9 +15,10 @@
 //      Pool Multiple/Cutoff Mode knobs. The pure math itself is pinned by verify-recall-cutoff.
 //      mjs; this file proves the settings → pool → slice wiring on both lanes.
 //   5. Stage 3 temporal decay (recallCutoff.decayFactor): the chunks query divides each raw
-//      distance by Canonize's factor max(0.70, 1 − 0.025·ln(2·ageChunks + 1)) in SQL, ages each
-//      row against the chat's newest chunk ordinal, and orders/measures the DECAYED distance —
-//      decay before pool formation, Canonize's pipeline order, chat lane only.
+//      distance by Canonize's factor max(0.70, 1 − 0.025·ln(pairsPerChunk·ageChunks + 1)) in SQL
+//      (pairsPerChunk bound as $5 — the live chat_memory_chunk_pairs setting, default 2), ages
+//      each row against the chat's newest chunk ordinal, and orders/measures the DECAYED
+//      distance — decay before pool formation, Canonize's pipeline order, chat lane only.
 //   6. Stage 4 keyword lane (recallCutoff.blendKeyword, migration 0093): the chunks query
 //      scores every row with ts_rank(content_tsv, ...) as kw_score (tsquery = the OR of the
 //      query text's lexemes), fetches the KEYWORD_WINDOW_SIZE window (≥ the pool) instead of
@@ -267,10 +268,14 @@ function fakeSettings(value) {
 {
   // pairs + chunk top-k override the query size and the SQL limit, from settings not constants.
   const seenSql = [];
+  const seenChunkParams = [];
   const session = {
-    async query(sql) {
+    async query(sql, params) {
       seenSql.push(sql);
-      if (sql.includes('from chat_chunks')) return [];
+      if (sql.includes('from chat_chunks')) {
+        seenChunkParams.push(params ?? []);
+        return [];
+      }
       if (sql.includes('from canon_facts')) return [];
       return [];
     },
@@ -354,6 +359,18 @@ function fakeSettings(value) {
   assert(
     seenSql.filter((sql) => sql.includes('from chat_chunks') && sql.includes('as distance')).length === 2,
     'the chunk path issues exactly two chat_chunks queries — the content lane and the header lane',
+  );
+  assert(
+    seenSql.some((sql) => sql.includes('from chat_chunks') && sql.includes('ln($5 * greatest(0')),
+    "the chunks query takes the chunk size as the $5 bound parameter — decay(age, pairs) is live",
+  );
+  assert(
+    seenSql.every((sql) => !sql.includes('ln(2 *')),
+    'no chat_chunks query hardcodes the old ln(2 * age) decay — the parameterization replaced it',
+  );
+  assert(
+    seenChunkParams.some((params) => params.length === 5 && params[4] === 2),
+    "the decay's $5 parameter is the chunk size in pairs (2, the default when the setting is unset)",
   );
 }
 {
