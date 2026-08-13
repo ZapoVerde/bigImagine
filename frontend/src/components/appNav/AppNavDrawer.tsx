@@ -2,9 +2,9 @@ import { useEffect, useRef } from 'react';
 import type { SummonableType } from '../../hooks/useTabs';
 import './AppNavDrawer.css';
 
-// The "come here to do a task" specialist views. Settings is reachable via TabStrip's gear icon
-// instead (always available), so it isn't one of these. This is the same set the empty-chat
-// landing used to show as pills (ChatView.tsx) — now app-wide, behind the top-left hamburger.
+// The "come here to do a task" specialist views. This is the same set the empty-chat landing
+// used to show as pills (ChatView.tsx) — now app-wide, behind the top-left hamburger. Settings
+// used to live in TabStrip's own gear icon; it's folded in here as an ordinary entry instead.
 export interface AppNavOption {
   type: SummonableType;
   label: string;
@@ -22,6 +22,7 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
   { type: 'locations', label: 'Locations', icon: '📍' },
   { type: 'lorebooks', label: 'Lorebooks', icon: '📖' },
+  { type: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 
 interface AppNavDrawerProps {

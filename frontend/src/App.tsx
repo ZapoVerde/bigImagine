@@ -179,7 +179,6 @@ export default function App() {
             onSelect={focus}
             onClose={close}
             onNew={openBlank}
-            onOpenSettings={() => summon('settings')}
             onChangeKey={
               auth.mode === 'key'
                 ? () => {

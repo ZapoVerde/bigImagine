@@ -6,7 +6,6 @@ interface TabStripProps {
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onNew: () => void;
-  onOpenSettings: () => void;
   /** Omitted entirely under Cloudflare Access SSO — there's no key to change. */
   onChangeKey?: () => void;
   /** App-wide navigation drawer (AppNavDrawer) — open state + toggle, driven by App so the
@@ -21,7 +20,6 @@ export default function TabStrip({
   onSelect,
   onClose,
   onNew,
-  onOpenSettings,
   onChangeKey,
   navOpen,
   onToggleNav,
@@ -66,9 +64,6 @@ export default function TabStrip({
           +
         </button>
       </nav>
-      <button className="settings-gear" title="Settings" onClick={onOpenSettings}>
-        ⚙
-      </button>
       {onChangeKey && (
         <button className="change-key" onClick={onChangeKey}>
           change key

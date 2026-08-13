@@ -330,23 +330,6 @@ body {
   background: var(--color-hover-surface);
 }
 
-.tab-bar .settings-gear {
-  font-size: var(--font-size-base);
-  background: none;
-  border: none;
-  border-radius: var(--radius-sm);
-  padding: 0.4rem 0.55rem;
-  cursor: pointer;
-  color: var(--color-text-muted);
-  flex-shrink: 0;
-  margin-left: 0.4rem;
-}
-
-.tab-bar .settings-gear:hover {
-  color: var(--color-text-primary);
-  background: var(--color-hover-surface);
-}
-
 .tab-bar .change-key {
   font-size: var(--font-size-xs);
   background: none;
