@@ -1114,16 +1114,24 @@ export default function ChatView({
       }
       // Reconcile: for a streamed turn the placeholder is replaced by the server's canonical row
       // (dropped entirely if the stream aborted and nothing was persisted); for a buffered turn
-      // this is the same refetch as before.
-      await refreshActiveMessages(session.chatId);
+      // this is the same refetch as before. Guarded against a chat switch mid-send (chatIdRef):
+      // the turn belongs to the chat that was open when it started, and refreshing it now would
+      // stomp the transcript of whichever chat the user has since opened.
+      if (chatIdRef.current === session.chatId) {
+        await refreshActiveMessages(session.chatId);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.status === 499) {
         // The user hit Stop — the server aborted the turn (POST /v1/chat/abort), so this is
         // the expected outcome, not an error. Refresh to show the stopped state: the user
         // message stands with no reply, which resendMode() already presents as the Resend
         // button recovery path. (activeChat, not the try-scoped session/chatId: a 499 can
-        // only come from a turn on the already-open active chat.)
-        if (activeChat) await refreshActiveMessages(activeChat.chatId).catch(() => {});
+        // only come from a turn on the already-open active chat.) Same chat-switch guard as
+        // the success path above — a Stop landed on a turn the user has since navigated away
+        // from must not repopulate the view with the old chat.
+        if (activeChat && chatIdRef.current === activeChat.chatId) {
+          await refreshActiveMessages(activeChat.chatId).catch(() => {});
+        }
       } else {
         setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
         // A streamed send that failed without streaming (bad request, auth, upstream error before
