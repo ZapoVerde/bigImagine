@@ -12,13 +12,24 @@
 > Setup lives on the **Cleanup page** (`frontend/src/views/CleanupView.tsx`), the per-chat opt-in
 > is the ChatSettings "Async cleanup pass" toggle (`cleanup_enabled_at`), and the floating chat
 > header pill (`components/cleanup/CleanupStatusPill.tsx`) shows TRG-style status.
-> The rest of this plan (steps 1–3, 5's sync rework, 6–7) is historical and stands as written.
+> The rest of this plan (steps 1–3, 5's sync rework, 6–7) is historical and stands as written,
+> except §5 itself — see the next banner.
 
-*Status: built, verified 2026-08-11 — steps 1–3/5–7 are the live shape of
-`httpServer.ts`'s `handleChatCompletions`/`runTurn`, cited by section throughout. (Step 5's
-original cleanup pass is superseded — see the banner above.) Phase 1 = one main LLM call handling
-narrator + all present characters, plus an optional unconditional cleanup pass. Character-stamped
-per-character calls are
+> **⚠️ SPUN OUT (sync rework only) — 2026-08-13.** §5 ("Step 6: count and trigger sync") restated
+> the `chatMemorySync.ts` eager-chunking rework without fully specifying it, and left one blocking
+> question open ("what marks a `sync_id` closed") that was never answered here — which is why it
+> was never built, not because anything superseded it. Investigation on 2026-08-13 confirmed
+> nothing in the codebase does eager chunking; the batch-at-sync-tick design `docs/chat-memory.md`
+> documents is still exactly what runs today. `docs/plans/eager-chunk-sync-plan.md` answers the
+> open question and is now the authoritative spec for this piece; §5 below is kept for historical
+> framing only.
+
+*Status: built, verified 2026-08-11 for steps 1–3/5/7 — the live shape of
+`httpServer.ts`'s `handleChatCompletions`/`runTurn`, cited by section throughout. Step 6 (§5's sync
+rework) was never built — see the spun-out banner above. (Step 5's
+original cleanup pass is superseded — see the first banner above.) Phase 1 = one main LLM call
+handling narrator + all present characters, plus an optional unconditional cleanup pass.
+Character-stamped per-character calls are
 explicitly shelved (see Non-Goals) — this plan builds the loop shape so that expansion doesn't
 require a rewrite, without building the expansion itself.*
 
@@ -146,6 +157,9 @@ message being persisted (`httpServer.ts:625`):
 
 ## 5. Step 6: count and trigger sync (non-blocking)
 
+**Superseded — see `docs/plans/eager-chunk-sync-plan.md` for the buildable spec.** Kept below only
+for historical framing of the original ask.
+
 This is the `chatMemorySync.ts` rework already agreed in this conversation, restated here only as
 a build item (not re-derived):
 
@@ -190,11 +204,12 @@ Dependency-ordered, not calendar-estimated:
 4. **Per-turn narrator assembly (§3.2)** — the `applyPromptStackToChatTool`-shaped bake, moved to
    run every turn instead of once; `memory_recall`/`canon_facts` field wiring.
 5. **Cleanup loop wiring (§4.2)** in `handleChatCompletions`.
-6. **Sync rework (§5)** — blocked on resolving the `sync_id`-closing open question first; otherwise
-   independent of 1–5 and can happen in parallel.
+6. **Sync rework (§5)** — spun out to `docs/plans/eager-chunk-sync-plan.md`, which resolves the
+   `sync_id`-closing question below and is now the doc to build from; independent of 1–5.
 
 ## 8. Open questions carried into this plan
 
-- `sync_id`-closing mechanism (§5) — blocks step 6 specifically, nothing else.
+- `sync_id`-closing mechanism (§5) — resolved in `docs/plans/eager-chunk-sync-plan.md` (a new
+  `closed_at` column on `chat_sync_points`); no longer open.
 - The three open questions already in `docs/plans/completed/llm-gate-plan.md` §6 (concurrency lanes, retry-vs-cap
   accounting, real backoff numbers) — blocks step 1 of the build order above.
