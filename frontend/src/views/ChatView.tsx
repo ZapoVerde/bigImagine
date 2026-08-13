@@ -1714,7 +1714,7 @@ export default function ChatView({
               m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
             const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
             return (
-              <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}`}>
+              <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}${editingId === m.messageId ? ' editing' : ''}`}>
                 {selectionMode && (
                   <label className="chat-select-box" title={m.role === 'user' ? 'Select this message and everything below it' : 'Select this reply and everything below it'}>
                     <input

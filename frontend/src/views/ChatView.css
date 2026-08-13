@@ -1270,12 +1270,28 @@
   }
 
   /* Mobile: editing a message expands that bubble to the full history width — a small bubble
-     leaves too little room for rewriting a long entry comfortably. ChatView marks the bubble
-     with .editing while its edit form is open; this is scoped to the mobile query so desktop
-     keeps the bubble-width editor. */
+     leaves too little room for rewriting a long entry comfortably. ChatView marks both the
+     message row and its bubble with .editing while the edit form is open. The row itself must
+     stretch (its .user variant defaults to align-self:flex-end, shrink-wrapping the row to
+     content width), and the bubble must grow to fill the row: without that the row collapses
+     to the textarea's intrinsic width, which is narrower than the rendered content was. The
+     editor and its textarea then fill the bubble. Scoped to the mobile query so desktop keeps
+     the bubble-width editor. */
+  .chat-message.editing {
+    align-self: stretch;
+  }
+
   .chat-bubble.editing {
     max-width: none;
-    align-self: stretch;
+    flex: 1 1 auto;
+  }
+
+  .chat-bubble.editing .message-edit {
+    width: 100%;
+  }
+
+  .chat-bubble.editing .message-edit textarea {
+    width: 100%;
   }
 
   /* Same bump for the selection-mode tickboxes. */
