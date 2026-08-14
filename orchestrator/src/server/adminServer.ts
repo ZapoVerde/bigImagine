@@ -1414,7 +1414,13 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (inject_recent_history_prompt !== undefined && typeof inject_recent_history_prompt !== 'string') return undefined;
   if (auto_recall_chunk_prompt !== undefined && typeof auto_recall_chunk_prompt !== 'string') return undefined;
   // 0 is meaningful (disables lead-ins), so the check is `>= 0` — unlike the positive-only knobs.
-  if (auto_recall_lead_in_chunks !== undefined && (typeof auto_recall_lead_in_chunks !== 'number' || auto_recall_lead_in_chunks < 0)) return undefined;
+  // Also requires an integer: unlike the other numeric knobs here, this one is read via parseInt
+  // (recallForPrompt.ts), which would silently truncate a fractional value rather than reject it.
+  if (
+    auto_recall_lead_in_chunks !== undefined &&
+    (typeof auto_recall_lead_in_chunks !== 'number' || !Number.isInteger(auto_recall_lead_in_chunks) || auto_recall_lead_in_chunks < 0)
+  )
+    return undefined;
   if (auto_recall_lead_in_prompt !== undefined && typeof auto_recall_lead_in_prompt !== 'string') return undefined;
   return {
     profile: profile as string | undefined,

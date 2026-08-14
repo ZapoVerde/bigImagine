@@ -124,7 +124,7 @@ function assert(cond, message) {
   assert(out.includes('- [plot] The key is in the vault'), 'facts render as bullet lines in the injection template');
 }
 {
-  const out = renderAutoRecall([], [], DEFAULT_INJECT_AUTO_RECALL_PROMPT, DEFAULT_AUTO_RECALL_CHUNK_PROMPT, '');
+  const out = renderAutoRecall([], [], DEFAULT_INJECT_AUTO_RECALL_PROMPT, DEFAULT_AUTO_RECALL_CHUNK_PROMPT, DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT, '');
   assert(out === '', 'empty auto-recall renders empty');
 }
 {
@@ -203,7 +203,7 @@ function assert(cond, message) {
     "empty bridge override falls back to the built-in default ('' || undefined)",
   );
   assert(
-    renderAutoRecall([{ ordinal: 1, summary: '', content: 'x' }], [], '' || undefined, '' || undefined, '') !== '',
+    renderAutoRecall([{ ordinal: 1, summary: '', content: 'x' }], [], '' || undefined, '' || undefined, '' || undefined, '') !== '',
     "empty auto-recall/chunk overrides fall back to the built-in defaults and still render",
   );
 }

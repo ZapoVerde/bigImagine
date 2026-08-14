@@ -251,13 +251,31 @@ function createFakePool() {
             const rows = chunks
               .filter((c) => oldSyncIds.includes(c.sync_id))
               .sort((a, b) => a.ordinal - b.ordinal)
-              .map((c) => ({ sync_id: c.sync_id, ordinal: c.ordinal, content: c.content, summary: c.summary, vector_embed: c.vector_embed }));
+              .map((c) => ({
+                sync_id: c.sync_id,
+                ordinal: c.ordinal,
+                content: c.content,
+                summary: c.summary,
+                vector_embed: c.vector_embed,
+                summary_vector_embed: c.summary_vector_embed,
+              }));
             return { rows };
           }
           if (sql.includes('insert into chat_chunks')) {
-            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, parentChunkId] = params;
+            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, summaryVectorEmbed, parentChunkId] = params;
             const chunkId = randomUUID();
-            chunks.push({ chunk_id: chunkId, chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed, parent_chunk_id: parentChunkId ?? null });
+            chunks.push({
+              chunk_id: chunkId,
+              chat_id: chatId,
+              sync_id: syncId,
+              user_id: userId,
+              ordinal,
+              content,
+              summary,
+              vector_embed: vectorEmbed,
+              summary_vector_embed: summaryVectorEmbed,
+              parent_chunk_id: parentChunkId ?? null,
+            });
             return { rows: [{ chunk_id: chunkId }] };
           }
           // forkChat's chat_memory_entries copy (chatSessions.ts) — read the parent chat's
@@ -978,8 +996,8 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     closed_at: '2026-08-14T00:00:00.000Z',
   };
   pool.syncPoints.push(sp);
-  const headChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 0, content: 'c0', summary: 's0', vector_embed: '[0.1]', parent_chunk_id: null };
-  const secondChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 1, content: 'c1', summary: 's1', vector_embed: '[0.1]', parent_chunk_id: headChunk.chunk_id };
+  const headChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 0, content: 'c0', summary: 's0', vector_embed: '[0.1]', summary_vector_embed: '[0.2]', parent_chunk_id: null };
+  const secondChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 1, content: 'c1', summary: 's1', vector_embed: '[0.1]', summary_vector_embed: '[0.2]', parent_chunk_id: headChunk.chunk_id };
   pool.chunks.push(headChunk, secondChunk);
 
   const forked = await store.forkChat(USER_A, chunkParent.chatId, chunkMsgs[1].messageId);
@@ -994,6 +1012,10 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(
     copied[0].chunk_id !== headChunk.chunk_id && copied[1].chunk_id !== secondChunk.chunk_id,
     'the copied chunks get fresh chunk_ids — the branch never reuses the parent rows',
+  );
+  assert(
+    copied[0].summary_vector_embed === headChunk.summary_vector_embed && copied[1].summary_vector_embed === secondChunk.summary_vector_embed,
+    'the copied chunks carry their summary_vector_embed over too — a fork must not silently lose header-lane recall',
   );
 }
 

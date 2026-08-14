@@ -1171,8 +1171,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             content: string;
             summary: string;
             vector_embed: string | null;
+            summary_vector_embed: string | null;
           }>(
-            'select sync_id, ordinal, content, summary, vector_embed::text as vector_embed from chat_chunks where sync_id = any($1) order by ordinal',
+            'select sync_id, ordinal, content, summary, vector_embed::text as vector_embed, summary_vector_embed::text as summary_vector_embed from chat_chunks where sync_id = any($1) order by ordinal',
             [oldSyncIds],
           );
           // Lead-in chain (docs/plans/chunk-lead-in-context-plan.md): the copied set is a
@@ -1183,10 +1184,10 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           let parentChunkId: string | null = null;
           for (const c of chunks) {
             const [inserted]: { chunk_id: string }[] = await session.query<{ chunk_id: string }>(
-              `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, parent_chunk_id)
-               values ($1, $2, $3, $4, $5, $6, $7, $8)
+              `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed, parent_chunk_id)
+               values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                returning chunk_id`,
-              [newChatId, syncIdMap.get(c.sync_id), userId, c.ordinal, c.content, c.summary, c.vector_embed, parentChunkId],
+              [newChatId, syncIdMap.get(c.sync_id), userId, c.ordinal, c.content, c.summary, c.vector_embed, c.summary_vector_embed, parentChunkId],
             );
             parentChunkId = inserted!.chunk_id;
           }
