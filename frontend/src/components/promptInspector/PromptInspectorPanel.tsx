@@ -68,7 +68,7 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
   }
 
   return (
-    <div className="prompt-inspector-panel">
+    <div className={`prompt-inspector-panel${collapsed ? ' collapsed' : ''}`}>
       <div className="prompt-inspector-header">
         <span className="prompt-inspector-title">Prompt Inspector</span>
         <div className="prompt-inspector-header-actions">

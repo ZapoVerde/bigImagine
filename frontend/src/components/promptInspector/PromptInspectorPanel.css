@@ -255,6 +255,14 @@
   box-shadow: none;
 }
 
+/* Collapsed: stop claiming the drawer column's leftover space so the Timing section (a flex
+   sibling, sidebar-rp-sections) sits directly under this header instead of at the bottom of a
+   flex:1 gap. Only relevant inside the sidebar mount — the standalone panel never collapses. */
+.sidebar .prompt-inspector-panel.collapsed {
+  flex: none;
+  min-height: auto;
+}
+
 /* ---- Tag-tree view of the Main Prompt (docs/prompt-inspector-tag-tree.md) ---- */
 /* The main prompt grouped into collapsible sections by its author's own HTML-style tags. Each
    matched section is a row showing the canonical tag name + token/char budget (+ child count
