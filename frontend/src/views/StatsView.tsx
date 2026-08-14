@@ -294,20 +294,23 @@ export default function StatsView() {
     const groups = groupRows(filtered, timingKeyOf(timingGroupBy));
     const pick = timingPick(timingMetric);
     const items: StatBarItem[] = groups.map((group) => {
-      const average = meanOf(group.rows, pick);
+      const total = sumOf(group.rows, pick);
       const segments: StatBarSegment[] = TIMING_OUTCOMES.map((outcome) => {
         const outcomeRows = group.rows.filter((r) => r.outcome === outcome);
-        return { label: outcome, value: meanOf(outcomeRows, pick) ?? 0 };
+        return { label: outcome, value: sumOf(outcomeRows, pick) ?? 0 };
       });
-      if (average === null) {
+      if (total === null) {
         return { key: group.key, label: group.label, value: 0, valueText: 'no data', segments };
       }
+      const average = meanOf(group.rows, pick);
       return {
         key: group.key,
         label: group.label,
-        value: average,
-        valueText: formatMs(average),
-        sublabel: `${group.rows.length} turn${group.rows.length === 1 ? '' : 's'}`,
+        value: total,
+        valueText: formatMs(total),
+        sublabel: `${group.rows.length} turn${group.rows.length === 1 ? '' : 's'}${
+          average !== null ? ` · avg ${formatMs(average)}` : ''
+        }`,
         segments,
       };
     });
