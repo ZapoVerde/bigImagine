@@ -613,7 +613,12 @@
 }
 
 .chat-bubble {
-  max-width: 34rem;
+  /* min(…, 100%) instead of a bare 34rem: an unbreakable line inside a fenced code block (no
+     wrap points at all, so its min-content width equals its full pixel width) otherwise drags
+     this shrink-to-fit box out to the 34rem cap regardless of the actual viewport — .markdown-
+     content pre's overflow-x:auto only contains it once the bubble's own width is pinned to
+     the available space instead of expanding to fit content. */
+  max-width: min(34rem, 100%);
   padding: 0.6rem 0.9rem;
   border-radius: var(--radius-lg);
   line-height: 1.4;
@@ -800,6 +805,13 @@
   background: rgba(0, 0, 0, 0.06);
   padding: 0.6rem;
   border-radius: var(--radius-sm);
+  /* pre's initial white-space:pre has no wrap points at all, unlike the rest of the bubble's
+     text — pre-wrap keeps code formatting (indentation, blank lines) while letting long lines
+     break instead of forcing horizontal scroll; overflow-wrap catches a single unbroken token
+     (a long URL/hash) that has no natural break point even under pre-wrap. overflow-x stays as
+     a fallback, not the primary containment mechanism anymore. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   overflow-x: auto;
 }
 
