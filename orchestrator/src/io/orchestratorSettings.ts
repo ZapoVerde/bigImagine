@@ -280,6 +280,8 @@ export const SETTING_NAMES = [
   'chat_memory_inject_plot_prompt',
   'chat_memory_inject_auto_recall_prompt',
   'chat_memory_auto_recall_chunk_prompt',
+  'chat_memory_auto_recall_lead_in_chunks',
+  'chat_memory_auto_recall_lead_in_prompt',
   'chat_memory_inject_recent_history_prompt',
   'canon_recall_top_k',
   'canon_recall_min',

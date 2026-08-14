@@ -143,6 +143,7 @@ import {
   DEFAULT_INJECT_PLOT_PROMPT,
   DEFAULT_INJECT_AUTO_RECALL_PROMPT,
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
   DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
 } from '../io/chatMemory/memoryInjection.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
@@ -1149,6 +1150,14 @@ export interface ChatMemorySettings {
   injectRecentHistoryPromptIsDefault: boolean;
   autoRecallChunkPrompt: string;
   autoRecallChunkPromptIsDefault: boolean;
+  // Lead-in window (migration 0100, docs/plans/chunk-lead-in-context-plan.md) — how many
+  // preceding chunks' summaries ride along with each recalled chunk (recallForPrompt.ts merges
+  // them before injection; 0 disables; null = unset, built-in default 2, capped at 3), plus the
+  // per-entry template those summaries render under in the narrator stack (empty string = the
+  // built-in '[Just before: {{text}}]', same default+bespoke shape as the other prompt fields).
+  autoRecallLeadInChunks: number | null;
+  autoRecallLeadInPrompt: string;
+  autoRecallLeadInPromptIsDefault: boolean;
   // RP read-path retrieval knobs (migration 0077, io/chatMemory/recallForPrompt.ts) — read live
   // on every RP prompt assembly, no restart. null = unset (use the built-in default).
   autoRecallEnabled: boolean;
@@ -1202,6 +1211,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     injectAutoRecallPrompt,
     injectRecentHistoryPrompt,
     autoRecallChunkPrompt,
+    autoRecallLeadInChunksRaw,
+    autoRecallLeadInPrompt,
   ] = await Promise.all([
     store.get('chat_memory_profile'),
     store.get('chat_memory_live_window_pairs'),
@@ -1228,6 +1239,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_inject_auto_recall_prompt'),
     store.get('chat_memory_inject_recent_history_prompt'),
     store.get('chat_memory_auto_recall_chunk_prompt'),
+    store.get('chat_memory_auto_recall_lead_in_chunks'),
+    store.get('chat_memory_auto_recall_lead_in_prompt'),
   ]);
   return {
     profile: profile || null,
@@ -1271,6 +1284,9 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     injectRecentHistoryPromptIsDefault: !injectRecentHistoryPrompt,
     autoRecallChunkPrompt: autoRecallChunkPrompt || DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
     autoRecallChunkPromptIsDefault: !autoRecallChunkPrompt,
+    autoRecallLeadInChunks: autoRecallLeadInChunksRaw ? Number(autoRecallLeadInChunksRaw) : null,
+    autoRecallLeadInPrompt: autoRecallLeadInPrompt || DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
+    autoRecallLeadInPromptIsDefault: !autoRecallLeadInPrompt,
   };
 }
 
@@ -1300,6 +1316,10 @@ export interface SetChatMemorySettingsBody {
   injectAutoRecallPrompt?: string;
   injectRecentHistoryPrompt?: string;
   autoRecallChunkPrompt?: string;
+  /** Lead-in window: 0 disables (recallForPrompt.ts skips the walk), 1–3 = how many preceding
+   *  chunks' summaries ride along. Negative rejects. */
+  autoRecallLeadInChunks?: number;
+  autoRecallLeadInPrompt?: string;
 }
 
 // Every field is optional and independently settable; an empty string on any prompt field clears
@@ -1334,6 +1354,8 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     inject_auto_recall_prompt,
     inject_recent_history_prompt,
     auto_recall_chunk_prompt,
+    auto_recall_lead_in_chunks,
+    auto_recall_lead_in_prompt,
   } = raw as Record<string, unknown>;
   if (
     profile === undefined &&
@@ -1360,7 +1382,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     inject_plot_prompt === undefined &&
     inject_auto_recall_prompt === undefined &&
     inject_recent_history_prompt === undefined &&
-    auto_recall_chunk_prompt === undefined
+    auto_recall_chunk_prompt === undefined &&
+    auto_recall_lead_in_chunks === undefined &&
+    auto_recall_lead_in_prompt === undefined
   ) {
     return undefined;
   }
@@ -1389,6 +1413,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   if (inject_auto_recall_prompt !== undefined && typeof inject_auto_recall_prompt !== 'string') return undefined;
   if (inject_recent_history_prompt !== undefined && typeof inject_recent_history_prompt !== 'string') return undefined;
   if (auto_recall_chunk_prompt !== undefined && typeof auto_recall_chunk_prompt !== 'string') return undefined;
+  // 0 is meaningful (disables lead-ins), so the check is `>= 0` — unlike the positive-only knobs.
+  if (auto_recall_lead_in_chunks !== undefined && (typeof auto_recall_lead_in_chunks !== 'number' || auto_recall_lead_in_chunks < 0)) return undefined;
+  if (auto_recall_lead_in_prompt !== undefined && typeof auto_recall_lead_in_prompt !== 'string') return undefined;
   return {
     profile: profile as string | undefined,
     liveWindowPairs: live_window_pairs as number | undefined,
@@ -1415,6 +1442,8 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     injectAutoRecallPrompt: inject_auto_recall_prompt as string | undefined,
     injectRecentHistoryPrompt: inject_recent_history_prompt as string | undefined,
     autoRecallChunkPrompt: auto_recall_chunk_prompt as string | undefined,
+    autoRecallLeadInChunks: auto_recall_lead_in_chunks as number | undefined,
+    autoRecallLeadInPrompt: auto_recall_lead_in_prompt as string | undefined,
   };
 }
 
@@ -1444,6 +1473,8 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.injectAutoRecallPrompt !== undefined) await store.set('chat_memory_inject_auto_recall_prompt', body.injectAutoRecallPrompt);
   if (body.injectRecentHistoryPrompt !== undefined) await store.set('chat_memory_inject_recent_history_prompt', body.injectRecentHistoryPrompt);
   if (body.autoRecallChunkPrompt !== undefined) await store.set('chat_memory_auto_recall_chunk_prompt', body.autoRecallChunkPrompt);
+  if (body.autoRecallLeadInChunks !== undefined) await store.set('chat_memory_auto_recall_lead_in_chunks', String(body.autoRecallLeadInChunks));
+  if (body.autoRecallLeadInPrompt !== undefined) await store.set('chat_memory_auto_recall_lead_in_prompt', body.autoRecallLeadInPrompt);
 }
 
 // --- Cleanup settings (migration 0072, plan v2 §3 — the Cleanup page's setup surface) ---

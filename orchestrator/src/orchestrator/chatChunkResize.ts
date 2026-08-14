@@ -194,12 +194,18 @@ async function resizeOneChat(deps: ChatChunkResizeDeps, s: ResizeSettings, userI
       const summaryVectors = await deps.embeddings.embed(summaries);
 
       await session.query('delete from chat_chunks where chat_id = $1', [chatId]);
+      // Lead-in chain (docs/plans/chunk-lead-in-context-plan.md): this is a full wipe-and-
+      // regenerate from ordinal 0, so the first new chunk is the chain head (null parent) and
+      // each subsequent chunk links to the previous row of this pass via `returning chunk_id`.
+      let parentChunkId: string | null = null;
       for (const [i, chunk] of chunks.entries()) {
-        await session.query(
-          `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed)
-           values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-          [chatId, syncPoint.sync_id, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!), toPgVectorLiteral(summaryVectors[i]!)],
+        const [inserted]: { chunk_id: string }[] = await session.query<{ chunk_id: string }>(
+          `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed, parent_chunk_id)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           returning chunk_id`,
+          [chatId, syncPoint.sync_id, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!), toPgVectorLiteral(summaryVectors[i]!), parentChunkId],
         );
+        parentChunkId = inserted!.chunk_id;
       }
 
       // Advance-only anchor update — see the module header for why it never retreats.

@@ -35,8 +35,9 @@
  * renderPlotThreads(arcs, template) -> string — {{plot}} = canonize-style HTML blocks, one
  *   `<{{arc_tag}}>` card per selected arc (entries blank-line separated inside the wrapper, the
  *   first + last-three reduction recallPlotLane already applied), via the plot template.
- * renderAutoRecall(chunks, facts, template, chunkTemplate, charName) -> string — chunk blocks
- *   rendered through the chunk template ({{text}}, {{turn_range}}, {{header}}, {{char_name}}),
+ * renderAutoRecall(chunks, facts, template, chunkTemplate, leadInTemplate, charName) -> string —
+ *   chunk blocks rendered through the chunk template ({{text}}, {{turn_range}}, {{header}},
+ *   {{char_name}}), lead-in entries through the lead-in template ({{text}} = summary alone),
  *   fact bullets appended as {{facts}}; the injection template receives {{text}} = chunk blocks,
  *   {{facts}} = fact bullets. Empty component => '' (so an enabled slot with no content emits
  *   nothing, same non-empty filter as every other marker).
@@ -110,6 +111,13 @@ export const DEFAULT_AUTO_RECALL_CHUNK_PROMPT = `<memory turns="{{turn_range}}">
 {{text}}
 </memory>`;
 
+/** DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT — the per-entry template for a lead-in chunk
+ *  (docs/plans/chunk-lead-in-context-plan.md §17: a real, user-overridable template, not a
+ *  hardcoded string). A lead-in entry only ever carries a summary, so this is a lighter wrapper
+ *  than the full chunk template — {{text}} is the summary itself. The live value is the
+ *  chat_memory_auto_recall_lead_in_prompt setting (migration 0100), read by promptAssembly.ts. */
+export const DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT = `[Just before: {{text}}]`;
+
 /** DEFAULT_INJECT_RECENT_HISTORY_PROMPT — the recent_history marker's template: bare {{turns}}.
  *  The turns are already fully rendered (formatRecentHistoryTurns) as `Name: content` lines, so
  *  the default just places them; a bespoke override can add a header or wrap them (the template
@@ -147,6 +155,11 @@ export interface ChunkRow {
   ordinal: number;
   summary: string;
   content: string;
+  /** True only for lead-in entries produced by the recallForPrompt.ts merge
+   *  (docs/plans/chunk-lead-in-context-plan.md) — rendered from summary alone under the lighter
+   *  lead-in template, never from content (which is empty for such an entry). Falsy/absent for
+   *  every lane-fetched chunk, so existing call sites and templates are unaffected. */
+  isLeadIn?: boolean;
 }
 
 export interface FactRow {
@@ -175,6 +188,7 @@ export function renderAutoRecall(
   facts: FactRow[],
   template = DEFAULT_INJECT_AUTO_RECALL_PROMPT,
   chunkTemplate = DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  leadInTemplate = DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
   charName = '',
 ): string {
   // Nothing to inject — return '' so an enabled slot emits nothing (the non-empty filter every
@@ -182,6 +196,16 @@ export function renderAutoRecall(
   if (chunks.length === 0 && facts.length === 0) return '';
   const text = chunks
     .map((c) => {
+      // A lead-in entry (recallForPrompt.ts merge, docs/plans/chunk-lead-in-context-plan.md)
+      // carries no content — {{text}} renders as the summary alone under the lead-in template.
+      if (c.isLeadIn) {
+        return interpolateMemoryTemplate(leadInTemplate, {
+          text: c.summary,
+          turn_range: String(c.ordinal),
+          header: c.summary,
+          char_name: charName,
+        });
+      }
       // Canonize rag-fetch.js:202 prefixes the chunk summary into the text as "[header]\n"
       // (its chunk template has no header slot of its own) — {{header}} still substitutes
       // for bespoke templates that place it elsewhere.

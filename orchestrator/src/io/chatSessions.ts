@@ -1172,15 +1172,23 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             summary: string;
             vector_embed: string | null;
           }>(
-            'select sync_id, ordinal, content, summary, vector_embed::text as vector_embed from chat_chunks where sync_id = any($1)',
+            'select sync_id, ordinal, content, summary, vector_embed::text as vector_embed from chat_chunks where sync_id = any($1) order by ordinal',
             [oldSyncIds],
           );
+          // Lead-in chain (docs/plans/chunk-lead-in-context-plan.md): the copied set is a
+          // contiguous ordinal prefix (the eligible sync points form a prefix), so each new
+          // chunk links to the previously copied row's fresh chunk_id — null for the first,
+          // which becomes the branch's chain head. newChatId is brand-new, so no other writer
+          // can touch it and no lock is needed; the read-then-insert shares one transaction.
+          let parentChunkId: string | null = null;
           for (const c of chunks) {
-            await session.query(
-              `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed)
-               values ($1, $2, $3, $4, $5, $6, $7)`,
-              [newChatId, syncIdMap.get(c.sync_id), userId, c.ordinal, c.content, c.summary, c.vector_embed],
+            const [inserted]: { chunk_id: string }[] = await session.query<{ chunk_id: string }>(
+              `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, parent_chunk_id)
+               values ($1, $2, $3, $4, $5, $6, $7, $8)
+               returning chunk_id`,
+              [newChatId, syncIdMap.get(c.sync_id), userId, c.ordinal, c.content, c.summary, c.vector_embed, parentChunkId],
             );
+            parentChunkId = inserted!.chunk_id;
           }
 
           const entries = await session.query<{ sync_id: string; topic_key: string; content: string }>(

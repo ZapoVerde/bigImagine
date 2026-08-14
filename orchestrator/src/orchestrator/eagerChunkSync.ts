@@ -205,12 +205,25 @@ export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chat
           syncId = inserted!.sync_id;
         }
 
+        // Lead-in chain (docs/plans/chunk-lead-in-context-plan.md), same rule as the tick's
+        // insert_chunks step: the batch's first chunk links to the chat's current max-ordinal
+        // row (null when the chat has no chunks yet — it becomes the chain head), each
+        // subsequent chunk links to the previously inserted row. This loop is inside the
+        // per-chat advisory lock taken at the top of Phase 2, so the read-then-insert is
+        // race-free; parent_chunk_id is never inferred from ordinal.
+        const [prevChunk] = await session.query<{ chunk_id: string }>(
+          'select chunk_id from chat_chunks where chat_id = $1 order by ordinal desc limit 1',
+          [chatId],
+        );
+        let parentChunkId: string | null = prevChunk?.chunk_id ?? null;
         for (const [i, chunk] of chunks.entries()) {
-          await session.query(
-            `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed)
-             values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-            [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!), toPgVectorLiteral(summaryVectors[i]!)],
+          const [inserted]: { chunk_id: string }[] = await session.query<{ chunk_id: string }>(
+            `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed, parent_chunk_id)
+             values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             returning chunk_id`,
+            [chatId, syncId, userId, chunk.ordinal, chunk.content, summaries[i], toPgVectorLiteral(vectors[i]!), toPgVectorLiteral(summaryVectors[i]!), parentChunkId],
           );
+          parentChunkId = inserted!.chunk_id;
         }
 
         // Advance the open point's anchor to the new span end — only ever runs when >= 1 chunk was

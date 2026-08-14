@@ -55,6 +55,7 @@ export default function RagView() {
   const [selectedInjectAutoRecallPrompt, setSelectedInjectAutoRecallPrompt] = useState('');
   const [selectedInjectRecentHistoryPrompt, setSelectedInjectRecentHistoryPrompt] = useState('');
   const [selectedAutoRecallChunkPrompt, setSelectedAutoRecallChunkPrompt] = useState('');
+  const [selectedAutoRecallLeadInPrompt, setSelectedAutoRecallLeadInPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
   // The chunk-size backfill's singleton progress row (docs/plans/chunk-size-resize-plan.md) —
   // polled while 'running'; also read once on unlock so a pass started in another session shows up.
@@ -70,6 +71,7 @@ export default function RagView() {
   const [selectedAutoRecallMin, setSelectedAutoRecallMin] = useState('');
   const [selectedAutoRecallPoolMultiple, setSelectedAutoRecallPoolMultiple] = useState('');
   const [selectedAutoRecallCutoffMode, setSelectedAutoRecallCutoffMode] = useState<'mean' | 'mean+1sd' | 'mean+2sd'>('mean');
+  const [selectedAutoRecallLeadInChunks, setSelectedAutoRecallLeadInChunks] = useState('');
   const [selectedCanonRecallTopK, setSelectedCanonRecallTopK] = useState('');
   const [selectedCanonRecallMin, setSelectedCanonRecallMin] = useState('');
   // Ranked plot-arc lane knobs (migration 0097, io/chatMemory/recallPlotLane.ts) — Max cards,
@@ -102,12 +104,14 @@ export default function RagView() {
     setSelectedInjectAutoRecallPrompt(settings.injectAutoRecallPrompt);
     setSelectedInjectRecentHistoryPrompt(settings.injectRecentHistoryPrompt);
     setSelectedAutoRecallChunkPrompt(settings.autoRecallChunkPrompt);
+    setSelectedAutoRecallLeadInPrompt(settings.autoRecallLeadInPrompt);
     setSelectedAutoRecallEnabled(settings.autoRecallEnabled);
     setSelectedAutoRecallPairs(settings.autoRecallPairs === null ? '' : String(settings.autoRecallPairs));
     setSelectedAutoRecallChunkTopK(settings.autoRecallChunkTopK === null ? '' : String(settings.autoRecallChunkTopK));
     setSelectedAutoRecallMin(settings.autoRecallMin === null ? '' : String(settings.autoRecallMin));
     setSelectedAutoRecallPoolMultiple(settings.autoRecallPoolMultiple === null ? '' : String(settings.autoRecallPoolMultiple));
     setSelectedAutoRecallCutoffMode(settings.autoRecallCutoffMode === null ? 'mean' : settings.autoRecallCutoffMode);
+    setSelectedAutoRecallLeadInChunks(settings.autoRecallLeadInChunks === null ? '' : String(settings.autoRecallLeadInChunks));
     setSelectedPlotRecallTopK(settings.plotRecallTopK === null ? '' : String(settings.plotRecallTopK));
     setSelectedPlotRecallMin(settings.plotRecallMin === null ? '' : String(settings.plotRecallMin));
     setSelectedPlotRecallFloorSyncs(settings.plotRecallFloorSyncs === null ? '' : String(settings.plotRecallFloorSyncs));
@@ -247,7 +251,8 @@ export default function RagView() {
       | 'injectPlotPrompt'
       | 'injectAutoRecallPrompt'
       | 'injectRecentHistoryPrompt'
-      | 'autoRecallChunkPrompt',
+      | 'autoRecallChunkPrompt'
+      | 'autoRecallLeadInPrompt',
   ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
@@ -260,6 +265,7 @@ export default function RagView() {
     if (field === 'injectAutoRecallPrompt') setSelectedInjectAutoRecallPrompt('');
     if (field === 'injectRecentHistoryPrompt') setSelectedInjectRecentHistoryPrompt('');
     if (field === 'autoRecallChunkPrompt') setSelectedAutoRecallChunkPrompt('');
+    if (field === 'autoRecallLeadInPrompt') setSelectedAutoRecallLeadInPrompt('');
   }
 
   // The retrieval knobs split across two endpoints: the auto-recall trio lives in
@@ -313,6 +319,15 @@ export default function RagView() {
     }
     if (selectedAutoRecallChunkPrompt !== chatMemorySettings.autoRecallChunkPrompt) {
       memoryPatch.auto_recall_chunk_prompt = selectedAutoRecallChunkPrompt;
+    }
+    // Lead-in window: 0 is meaningful (disables lead-ins), so an empty field means "leave
+    // unset" while a typed 0 must patch — unlike the positive-only knobs above.
+    const autoRecallLeadInChunks = Number(selectedAutoRecallLeadInChunks);
+    if (selectedAutoRecallLeadInChunks !== '' && autoRecallLeadInChunks !== chatMemorySettings.autoRecallLeadInChunks) {
+      memoryPatch.auto_recall_lead_in_chunks = autoRecallLeadInChunks;
+    }
+    if (selectedAutoRecallLeadInPrompt !== chatMemorySettings.autoRecallLeadInPrompt) {
+      memoryPatch.auto_recall_lead_in_prompt = selectedAutoRecallLeadInPrompt;
     }
     const canonPatch: Parameters<typeof adminSetCanonSettings>[0] = {};
     const canonRecallTopK = Number(selectedCanonRecallTopK);
@@ -648,6 +663,24 @@ export default function RagView() {
         </div>
         <br />
         <label>
+          Lead-in window (preceding chunks)
+          <br />
+          <input
+            type="number"
+            min="0"
+            max="3"
+            value={selectedAutoRecallLeadInChunks}
+            onChange={(e) => setSelectedAutoRecallLeadInChunks(e.target.value)}
+            placeholder="2"
+          />
+        </label>
+        <div className="status">
+          How many preceding chunks' summaries ride along with each recalled chunk (chat_memory_auto_recall_lead_in_chunks,
+          default 2, capped at 3) — "what led up to this" context anchoring a retrieved chunk in its conversation flow.
+          0 disables lead-ins entirely.
+        </div>
+        <br />
+        <label>
           Canon facts Max (non-rejected facts injected)
           <br />
           <input
@@ -794,6 +827,20 @@ export default function RagView() {
         </label>
         <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('autoRecallChunkPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Lead-in chunk template {chatMemorySettings?.autoRecallLeadInPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedAutoRecallLeadInPrompt}
+            onChange={(e) => setSelectedAutoRecallLeadInPrompt(e.target.value)}
+            rows={5}
+          />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('autoRecallLeadInPrompt')}>
           Reset to default
         </button>
         <br />

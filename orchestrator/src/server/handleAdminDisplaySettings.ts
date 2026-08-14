@@ -228,7 +228,8 @@ export async function handleChatMemorySettingsSet(req: IncomingMessage, res: Ser
     sendJson(res, 400, {
       error:
         'expected at least one of { profile?, live_window_pairs?: positive number, sync_every_pairs?: positive number, ' +
-        'digest_horizon_pairs?: positive number, chunk_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt? }',
+        'digest_horizon_pairs?: positive number, chunk_pairs?: positive number, chunk_summary_prompt?, distill_prompt?, household_memory_prompt?, ' +
+        'auto_recall_lead_in_chunks?: number >= 0, auto_recall_lead_in_prompt? }',
     });
     return;
   }

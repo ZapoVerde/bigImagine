@@ -271,7 +271,7 @@ export async function buildNarratorStackItems(
   recentHistoryMessages?: LlmMessage[],
   lorebookSeedMessageId?: string,
 ): Promise<{ items: PromptPreviewItem[]; lorebookActivatedEntryIds: string[] }> {
-  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, recentHistoryTemplate, locationBlock, lorebookBlock] = await Promise.all([
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, leadInTemplate, recentHistoryTemplate, locationBlock, lorebookBlock] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -286,6 +286,7 @@ export async function buildNarratorStackItems(
     settings.get('chat_memory_inject_plot_prompt'),
     settings.get('chat_memory_inject_auto_recall_prompt'),
     settings.get('chat_memory_auto_recall_chunk_prompt'),
+    settings.get('chat_memory_auto_recall_lead_in_prompt'),
     settings.get('chat_memory_inject_recent_history_prompt'),
     // location.md §5.4 — the known-locations block for the 'location' marker slot. Fail-open:
     // '' when disabled/empty, so an enabled slot with nothing to say emits nothing (the
@@ -334,8 +335,16 @@ export async function buildNarratorStackItems(
     bridge: renderBridge(memoryContext.scene, memoryContext.events, bridgeTemplate || undefined) || undefined,
     plot_threads: renderPlotThreads(memoryContext.plotThreads, plotTemplate || undefined) || undefined,
     auto_recall:
-      renderAutoRecall(memoryContext.chunks, memoryContext.facts, autoRecallTemplate || undefined, chunkTemplate || undefined, character?.name) ||
-      undefined,
+      renderAutoRecall(
+        memoryContext.chunks,
+        memoryContext.facts,
+        autoRecallTemplate || undefined,
+        chunkTemplate || undefined,
+        // Lead-in entries (docs/plans/chunk-lead-in-context-plan.md) render under their own
+        // lighter template — `|| undefined` per the same empty-string-clears-to-default contract.
+        leadInTemplate || undefined,
+        character?.name,
+      ) || undefined,
     // The active context (2026-08-10 user direction): the live-window turns, last sent turn
     // included, rendered deterministically and placed wherever the preset ordered this slot —
     // inside the preset's own HTML wrapper tags when it authored them (e.g. Comfy 2's

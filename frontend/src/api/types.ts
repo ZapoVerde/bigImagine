@@ -461,6 +461,14 @@ export interface ChatMemorySettings {
   injectRecentHistoryPromptIsDefault: boolean;
   autoRecallChunkPrompt: string;
   autoRecallChunkPromptIsDefault: boolean;
+  // Lead-in window (migration 0100, docs/plans/chunk-lead-in-context-plan.md) — how many
+  // preceding chunks' summaries ride along with each recalled chunk (recallForPrompt.ts merges
+  // them before injection; 0 disables; null = unset, built-in default 2, capped at 3), plus the
+  // per-entry template those summaries render under in the narrator stack (empty = the built-in
+  // '[Just before: {{text}}]').
+  autoRecallLeadInChunks: number | null;
+  autoRecallLeadInPrompt: string;
+  autoRecallLeadInPromptIsDefault: boolean;
   autoRecallEnabled: boolean;
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;

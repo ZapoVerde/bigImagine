@@ -43,7 +43,8 @@
  * every call (chat_memory_auto_recall_enabled, chat_memory_auto_recall_pairs, chat_memory_auto_recall_
  * chunk_top_k / _chunk_min, chat_memory_auto_recall_pool_multiple, chat_memory_auto_recall_
  * cutoff_mode, canon_recall_top_k / canon_recall_min — migrations 0077/0091/0092 — and the plot
- * lane's chat_memory_plot_recall_top_k / _min / _floor_syncs — migration 0097); the exported
+ * lane's chat_memory_plot_recall_top_k / _min / _floor_syncs — migration 0097 — plus the lead-in
+ * window's chat_memory_auto_recall_lead_in_chunks — migration 0100); the exported
  * AUTO_RECALL_* and DEFAULT_PLOT_* constants are the fallback defaults when a setting is unset
  * or corrupt, same fail-open shape as canon_recall_top_k. `enabled === 'false'` silences the
  * silent path without touching the recall tools, which stay in the RP allow-list.
@@ -85,6 +86,7 @@ import type { PlotArcCard } from './memoryInjection.js';
 import { recallChunkLane, type ChunkRow } from './recallChunkLane.js';
 import { recallFactLane, type CanonFactRow } from './recallFactLane.js';
 import { recallPlotLane } from './recallPlotLane.js';
+import { resolveLeadInRows } from './chunkLeadIn.js';
 import { DEFAULT_CHUNK_PAIRS } from './chunkChatTranscript.js';
 import { log } from '../logger.js';
 
@@ -167,11 +169,26 @@ export const DEFAULT_PLOT_FLOOR_SYNCS = 2;
  *  token cost (up to four entries per card) is real. */
 const MAX_PLOT_TOP_K = 50;
 
+/** How many preceding chunks' summaries ride along with each recalled chunk
+ *  (docs/plans/chunk-lead-in-context-plan.md) — the lead-in window that anchors a retrieved
+ *  chunk in its conversation flow ("what led up to this"). Fallback default; the live value is
+ *  the chat_memory_auto_recall_lead_in_chunks setting (migration 0100), read on every call.
+ *  `0` disables lead-ins entirely (resolveLeadInRows is never called). */
+export const DEFAULT_LEAD_IN_CHUNKS = 2;
+
+/** Sanity cap for chat_memory_auto_recall_lead_in_chunks — the lead-in walk adds one extra
+ *  summary line per hop before each recalled chunk, so a corrupt unbounded value would balloon
+ *  the prompt with near-duplicate context. 3 hops back is already generous; the setting UI will
+ *  present the full [0, 3] range. */
+export const MAX_LEAD_IN_CHUNKS = 3;
+
 /** Raw retrieval result — the unformatted parts the narrator stack's component markers render
  *  through their own templates (io/chatMemory/memoryInjection.ts). buildAutoRecallPrompt still
  *  formats them into the legacy labeled block for the deprecated memory_recall alias. `plots`
  *  are the ranked plot-arc cards (recallPlotLane.ts); the legacy block ignores them (plot
- *  threads render through their own marker / the fused alias separately). */
+ *  threads render through their own marker / the fused alias separately). `chunks` is always
+ *  sorted by `ordinal` ascending, mixing full chunks with lead-in entries (isLeadIn: true —
+ *  docs/plans/chunk-lead-in-context-plan.md). */
 export interface AutoRecallParts {
   chunks: ChunkRow[];
   facts: CanonFactRow[];
@@ -207,17 +224,21 @@ export function buildAutoRecallQuery(messages: LlmMessage[], pairCount = AUTO_RE
   );
 }
 
-/** The legacy labeled block — byte-identical to the pre-split output, so the deprecated
- *  memory_recall alias keeps its exact shape. Exported for memoryInjection's fused renderer. */
+/** The legacy labeled block — byte-identical to the pre-split output for full chunks, so the
+ *  deprecated memory_recall alias keeps its exact shape, with one addition: a lead-in entry
+ *  (isLeadIn, produced by the recallForPrompt.ts merge — docs/plans/chunk-lead-in-context-plan.md)
+ *  renders as its summary alone, no `<memory>` wrapper, since it carries no content. Exported for
+ *  memoryInjection's fused renderer. */
 export function formatAutoRecallBlock(chunks: ChunkRow[], facts: CanonFactRow[]): string {
   const parts: string[] = [];
   if (chunks.length) {
     parts.push(
       chunks
-        .map(
-          (c) =>
-            `<memory turns="${c.ordinal}">\n${c.content}\n</memory>` +
-            (c.summary ? ` <!-- ${c.summary} -->` : ''),
+        .map((c) =>
+          c.isLeadIn
+            ? c.summary
+            : `<memory turns="${c.ordinal}">\n${c.content}\n</memory>` +
+                (c.summary ? ` <!-- ${c.summary} -->` : ''),
         )
         .join('\n'),
     );
@@ -262,7 +283,7 @@ export function buildAutoRecallParts(
 ): Promise<AutoRecallParts> {
   return (async () => {
     try {
-      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw, plotTopKRaw, plotMinRaw, plotFloorRaw, chunkPairsRaw] =
+      const [enabledRaw, pairsRaw, chunkTopKRaw, factTopKRaw, chunkMinRaw, poolMultipleRaw, cutoffModeRaw, factMinRaw, plotTopKRaw, plotMinRaw, plotFloorRaw, chunkPairsRaw, leadInChunksRaw] =
         await Promise.all([
           settings.get('chat_memory_auto_recall_enabled'),
           settings.get('chat_memory_auto_recall_pairs'),
@@ -276,6 +297,7 @@ export function buildAutoRecallParts(
           settings.get('chat_memory_plot_recall_min'),
           settings.get('chat_memory_plot_recall_floor_syncs'),
           settings.get('chat_memory_chunk_pairs'),
+          settings.get('chat_memory_auto_recall_lead_in_chunks'),
         ]);
 
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
@@ -352,6 +374,16 @@ export function buildAutoRecallParts(
       const pairsPerChunk =
         Number.isFinite(parsedChunkPairs) && parsedChunkPairs > 0 ? parsedChunkPairs : DEFAULT_CHUNK_PAIRS;
 
+      // The lead-in window (docs/plans/chunk-lead-in-context-plan.md) — how many preceding
+      // chunks' summaries ride along with each recalled chunk. Same parse-with-fallback shape as
+      // the others, but 0 is meaningful (disables lead-ins entirely, resolveLeadInRows never
+      // runs), so it parses like the master switch rather than like chunkMin; the result is
+      // clamped to [0, MAX_LEAD_IN_CHUNKS] so a corrupt value can't balloon the prompt.
+      const parsedLeadInChunks = leadInChunksRaw ? parseInt(leadInChunksRaw, 10) : NaN;
+      const leadInCount = Number.isFinite(parsedLeadInChunks)
+        ? Math.max(0, Math.min(parsedLeadInChunks, MAX_LEAD_IN_CHUNKS))
+        : DEFAULT_LEAD_IN_CHUNKS;
+
       const query = buildAutoRecallQuery(messages, pairs);
       if (!query) return { chunks: [], facts: [], plots: [] };
 
@@ -375,7 +407,31 @@ export function buildAutoRecallParts(
         }),
       ]);
 
-      return { chunks, facts, plots };
+      // Lead-in merge (docs/plans/chunk-lead-in-context-plan.md) — the ONE place the merge
+      // happens, so every consumer of AutoRecallParts.chunks (the legacy formatAutoRecallBlock
+      // path and the real RpMemoryContext.chunks path) gets the same ordered, lead-in-enriched
+      // list. Skipped when the window is 0 (disabled) or nothing was recalled; the lanes always
+      // populate chunk_id (both selects carry it), so the optionality only exists for the merge
+      // entries below.
+      let mergedChunks = chunks;
+      if (leadInCount > 0 && chunks.length > 0) {
+        const chunkIds = chunks.map((c) => c.chunk_id).filter((id): id is string => id !== undefined);
+        const leadInRows = await resolveLeadInRows(session, userId, chatId, chunkIds, leadInCount);
+        const leadInEntries: ChunkRow[] = leadInRows.map((r) => ({
+          ordinal: r.ordinal,
+          summary: r.summary,
+          content: '',
+          isLeadIn: true,
+          // The recursive CTE already guarantees no overlap with `chunks`, so the merge is a
+          // concatenate-and-sort, not a second dedup pass. distance/kw_score are placeholders
+          // never consumed for a lead-in entry (rendered from summary, never re-scored).
+          distance: 0,
+          kw_score: 0,
+        }));
+        mergedChunks = [...chunks, ...leadInEntries].sort((a, b) => a.ordinal - b.ordinal);
+      }
+
+      return { chunks: mergedChunks, facts, plots };
     } catch (err) {
       // Fail-open: a retrieval error must never break the turn. Log and continue empty.
       log.warn('buildAutoRecallParts: retrieval failed, continuing without recalled context', { userId, chatId, err });

@@ -63,11 +63,22 @@ export interface ChunkRow {
   ordinal: number;
   summary: string;
   content: string;
+  /** The chunk's own id (chat_chunks.chunk_id) — the lanes always populate it (both selects
+   *  carry it); optional so the recallForPrompt.ts lead-in merge entries can omit it (plan's
+   *  merge sketch — the fields exist only internally, to feed resolveLeadInRows). */
+  chunk_id?: string;
+  /** The chunk's immediate predecessor (chat_chunks.parent_chunk_id, migration 0100) — null for
+   *  a chat's first chunk. Same optionality as chunk_id: populated by the lanes, omitted by
+   *  lead-in merge entries; never used for ordinal-adjacency inference. */
+  parent_chunk_id?: string | null;
+  /** True only for lead-in entries produced by the recallForPrompt.ts merge (rendered from
+   *  summary alone, never from content). Falsy/absent for every lane-fetched row. */
+  isLeadIn?: boolean;
   /** Decayed L2 distance to the query vector, after fusion + keyword blend — see the file
-   *  preamble's pipeline order. */
+   *  preamble's pipeline order. Placeholder 0 for lead-in entries (never re-scored). */
   distance: number;
   /** Full-text rank for this row (Stage 4) — ts_rank over chat_chunks.content_tsv (migration
-   *  0093), 0 when the row has no keyword match. */
+   *  0093), 0 when the row has no keyword match. Placeholder 0 for lead-in entries. */
   kw_score: number;
 }
 
@@ -113,7 +124,7 @@ export async function recallChunkLane(
     // fetch is the KEYWORD_WINDOW window rather than the pool alone, so blendKeyword has room
     // to promote lexical matches before the window is cut to the pool the cutoff measures.
     session.query<ChunkRow>(
-      `select ordinal, summary, content,
+      `select chunk_id, parent_chunk_id, ordinal, summary, content,
               (vector_embed <-> $3)
                 / greatest(0.70, 1.0 - 0.025 * ln($5 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
                 as distance,
@@ -132,7 +143,7 @@ export async function recallChunkLane(
     // with best-of scoring + the 1.08× dual-confirmation bonus. A chunk the content lane missed
     // can enter the merged window here — the header lane is additive.
     session.query<ChunkRow>(
-      `select ordinal, summary, content,
+      `select chunk_id, parent_chunk_id, ordinal, summary, content,
               (summary_vector_embed <-> $3)
                 / greatest(0.70, 1.0 - 0.025 * ln($5 * greatest(0, (select max(ordinal) from chat_chunks where user_id = $1 and chat_id = $2) - ordinal) + 1))
                 as distance,

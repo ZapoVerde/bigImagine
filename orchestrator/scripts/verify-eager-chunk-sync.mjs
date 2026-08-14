@@ -104,9 +104,22 @@ function createFakePool() {
 
           // Chunk insert (content + summary lanes, matching the tick's own insert shape)
           if (sql.includes('insert into chat_chunks')) {
-            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, summaryVectorEmbed] = params;
-            chatChunks.push({ chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed, summary_vector_embed: summaryVectorEmbed });
-            return { rows: [] };
+            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, summaryVectorEmbed, parentChunkId] = params;
+            const chunkId = randomUUID();
+            chatChunks.push({ chunk_id: chunkId, chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed, summary_vector_embed: summaryVectorEmbed, parent_chunk_id: parentChunkId ?? null });
+            return { rows: [{ chunk_id: chunkId }] };
+          }
+
+          // The lead-in chain's prev-chunk read (eagerChunkSync.ts Phase 2, migration 0100): the
+          // batch's first chunk links to the chat's current max-ordinal row.
+          if (sql.includes('from chat_chunks') && sql.includes('order by ordinal desc limit 1')) {
+            const [chatId] = params;
+            const rows = chatChunks
+              .filter((c) => c.chat_id === chatId)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .slice(0, 1)
+              .map((c) => ({ chunk_id: c.chunk_id }));
+            return { rows };
           }
 
           // Open point's anchor advances to the newly-chunked span end
@@ -231,6 +244,10 @@ let ONE_CHAT_ID;
   assert(pool.chatSyncPoints[0].ordinal === 0, 'the first sync point gets ordinal 0');
   assert(pool.chatSyncPoints[0].last_message_id === msgs[3].message_id, "the open point's anchor is the last message its chunk covers");
   assert(summarizeCalls().length === 1, 'the mandatory chunk summary was LLM-summarized (chat_chunks.summary is not null)');
+  assert(
+    pool.chatChunks[0].parent_chunk_id === null,
+    'the first eager chunk is the chain head (parent_chunk_id null, migration 0100)',
+  );
 }
 
 // --- A second eager call in the same open window reuses the same sync_id (no second point, same
@@ -246,6 +263,10 @@ let ONE_CHAT_ID;
   assert(pool.chatSyncPoints.length === 1, 'the open sync point is reused — no second point is opened');
   assert(pool.chatSyncPoints[0].ordinal === 0, "the reused point's ordinal is unchanged across eager calls");
   assert(pool.chatSyncPoints[0].last_message_id === msgs[7].message_id, "the open point's anchor advances to the new span end");
+  assert(
+    pool.chatChunks[1].parent_chunk_id === pool.chatChunks[0].chunk_id,
+    "the second eager chunk links to the first via parent_chunk_id — the batch chain is contiguous across calls",
+  );
 }
 
 // --- Greeting folded into turn 1 (eager-chunk-sync-plan): a lone leading assistant message is

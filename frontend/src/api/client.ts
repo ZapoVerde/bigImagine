@@ -1380,6 +1380,8 @@ export async function adminSetChatMemorySettings(
     inject_auto_recall_prompt?: string;
     inject_recent_history_prompt?: string;
     auto_recall_chunk_prompt?: string;
+    auto_recall_lead_in_chunks?: number;
+    auto_recall_lead_in_prompt?: string;
   },
   adminKey: string | null,
 ): Promise<ChatMemorySettings> {

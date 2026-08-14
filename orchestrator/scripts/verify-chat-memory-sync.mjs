@@ -199,9 +199,22 @@ function createFakePool() {
           }
 
           if (sql.includes('insert into chat_chunks')) {
-            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed] = params;
-            chatChunks.push({ chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed });
-            return { rows: [] };
+            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, summaryVectorEmbed, parentChunkId] = params;
+            const chunkId = randomUUID();
+            chatChunks.push({ chunk_id: chunkId, chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed, parent_chunk_id: parentChunkId ?? null });
+            return { rows: [{ chunk_id: chunkId }] };
+          }
+
+          // The lead-in chain's prev-chunk read (chatMemorySync.ts insert_chunks step, migration
+          // 0100): the batch's first chunk links to the chat's current max-ordinal row.
+          if (sql.includes('from chat_chunks') && sql.includes('order by ordinal desc limit 1')) {
+            const [chatId] = params;
+            const rows = chatChunks
+              .filter((c) => c.chat_id === chatId)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .slice(0, 1)
+              .map((c) => ({ chunk_id: c.chunk_id }));
+            return { rows };
           }
 
           // archiveChatMemory's own entries read (order by updated_at) — checked before the plain
@@ -535,6 +548,15 @@ seedMessages(CHAT_ID, 'T1', 12);
 await runChatMemorySyncTick(deps);
 
 assert(pool.chatChunks.length === 2, 'tick 1 archives exactly 2 chunks (8 of 12 messages; 4 held back by the live window)');
+{
+  const tick1Chain = pool.chatChunks.filter((c) => c.chat_id === CHAT_ID).sort((a, b) => a.ordinal - b.ordinal);
+  assert(
+    tick1Chain.length === 2 &&
+      tick1Chain[0].parent_chunk_id === null &&
+      tick1Chain[1].parent_chunk_id === tick1Chain[0].chunk_id,
+    'tick 1 links its batch via parent_chunk_id: the first chunk is the chain head (null parent), the second links to the first (migration 0100)',
+  );
+}
 assert(distillCalls().length === 1, 'tick 1 calls distill_chat_memory exactly once for the one due chat');
 {
   const prompt = distillCalls()[0].messages.find((m) => m.role === 'user').content;
@@ -556,6 +578,17 @@ seedMessages(CHAT_ID, 'T2', 8);
 await runChatMemorySyncTick(deps);
 
 assert(pool.chatChunks.length === 4, 'tick 2 archives 2 more chunks (4 total)');
+{
+  const chain = pool.chatChunks.filter((c) => c.chat_id === CHAT_ID).sort((a, b) => a.ordinal - b.ordinal);
+  assert(
+    chain.length === 4 &&
+      chain[0].parent_chunk_id === null &&
+      chain[1].parent_chunk_id === chain[0].chunk_id &&
+      chain[2].parent_chunk_id === chain[1].chunk_id &&
+      chain[3].parent_chunk_id === chain[2].chunk_id,
+    "tick 2's batch links to tick 1's last chunk — the whole 4-chunk chain is contiguous via parent_chunk_id (no gaps, one head)",
+  );
+}
 assert(distillCalls().length === 2, 'distill_chat_memory has now been called once per tick, not once total');
 {
   const tick2Prompt = distillCalls()[1].messages.find((m) => m.role === 'user').content;

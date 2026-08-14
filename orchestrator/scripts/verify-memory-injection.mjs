@@ -15,6 +15,7 @@ import {
   DEFAULT_INJECT_PLOT_PROMPT,
   DEFAULT_INJECT_AUTO_RECALL_PROMPT,
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
   DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
 } from '../dist/io/chatMemory/memoryInjection.js';
 
@@ -111,6 +112,7 @@ function assert(cond, message) {
     [{ category: 'plot', summary: 'The key is in the vault' }],
     DEFAULT_INJECT_AUTO_RECALL_PROMPT,
     DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
     'Bostaff',
   );
   assert(
@@ -131,11 +133,63 @@ function assert(cond, message) {
     [],
     '[Chunks]\n{{text}}',
     'T{{turn_range}} C{{char_name}} H{{header}}: {{text}}',
+    DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
     'Runny',
   );
   assert(
     out === '[Chunks]\nT3 CRunny H: Body',
     'bespoke chunk template gets {{turn_range}}, {{char_name}}, {{header}}, {{text}}',
+  );
+}
+
+// --- Lead-in entries (docs/plans/chunk-lead-in-context-plan.md): a chunk with isLeadIn: true
+// renders through the lead-in template from its summary alone — never its content (lead-ins
+// carry none) — while a full chunk renders exactly as before, unaffected by the new parameter. ---
+{
+  const out = renderAutoRecall(
+    [
+      { ordinal: 7, summary: 'turns 6-8', content: 'User: x\nAssistant: y', isLeadIn: false },
+      { ordinal: 8, summary: 'lead-in-8', content: 'LEAD-IN CONTENT MUST NOT APPEAR', isLeadIn: true },
+    ],
+    [],
+    DEFAULT_INJECT_AUTO_RECALL_PROMPT,
+    DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
+    'Bostaff',
+  );
+  assert(
+    out.includes('[Just before: lead-in-8]') &&
+      !out.includes('LEAD-IN CONTENT MUST NOT APPEAR') &&
+      out.includes('<memory turns="7">\n[turns 6-8]\nUser: x\nAssistant: y\n</memory>'),
+    'a lead-in entry renders via the default lead-in template from its summary alone (never content); the full chunk keeps its <memory> block unchanged',
+  );
+}
+{
+  const out = renderAutoRecall(
+    [{ ordinal: 3, summary: 's3', isLeadIn: true }],
+    [],
+    '[Chunks]\n{{text}}',
+    'unused-chunk-template',
+    'BEFORE {{text}} AFTER',
+    'Runny',
+  );
+  assert(
+    out === '[Chunks]\nBEFORE s3 AFTER',
+    'a bespoke lead-in template gets {{text}} = the lead-in summary',
+  );
+}
+{
+  const out = renderAutoRecall(
+    [{ ordinal: 4, summary: 'lead-in-4', isLeadIn: true }],
+    [],
+    DEFAULT_INJECT_AUTO_RECALL_PROMPT,
+    DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    '' || undefined,
+    '',
+  );
+  assert(
+    out.includes('[Just before: lead-in-4]'),
+    "an empty lead-in override falls back to the built-in default ('' || undefined), same contract as the other templates",
   );
 }
 

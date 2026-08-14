@@ -34,6 +34,8 @@ import { createStubEmbeddingProvider } from '../dist/io/embeddings/stub.js';
 import {
   AUTO_RECALL_PAIRS,
   AUTO_RECALL_CHUNK_TOP_K,
+  DEFAULT_LEAD_IN_CHUNKS,
+  MAX_LEAD_IN_CHUNKS,
   DEFAULT_PLOT_TOP_K,
   DEFAULT_PLOT_MIN,
   DEFAULT_PLOT_FLOOR_SYNCS,
@@ -66,10 +68,21 @@ function createFakeSession({
   plotPoolRows = [],
   plotFloorRows = [],
   plotHistoryByArc = {},
+  leadInRows = [],
   throwOn = null,
 } = {}) {
+  const seenSql = [];
+  const seenCalls = [];
   return {
+    seenSql,
+    seenCalls,
     async query(sql, params) {
+      seenSql.push(sql);
+      seenCalls.push({ sql, params });
+      // Lead-in CTE (chunkLeadIn.ts, migration 0100) — checked BEFORE the generic
+      // `from chat_chunks` lane matcher below, because both the CTE's seed and recursive arms
+      // embed `from chat_chunks`.
+      if (sql.includes('with recursive lead_in')) return leadInRows;
       if (sql.includes('from chat_chunks')) {
         if (throwOn === 'chunks') throw new Error('chunks boom');
         // Stage 5: the chunk path issues TWO chat_chunks queries — the content lane
@@ -1104,9 +1117,158 @@ function countFactBullets(block) {
   );
 }
 
+// --- 8. Lead-in window (migration 0100, chunkLeadIn.ts): the recursive-CTE walk over
+// parent_chunk_id, the clamp, the merge ordering, and the off-by-one regression the plan pins
+// down (the draft's depth-1 seed returned leadInCount - 1 rows; the corrected form seeds depth
+// 0, bounds li.depth < $4, and filters depth > 0 — so leadInCount = 1 returns exactly the
+// immediate predecessors). The SQL itself does the dedup and the retrieved-set exclusion
+// structurally; the merge below it is a concatenate-and-sort. ---
+{
+  // SQL shape: seed depth 0, bound li.depth < $4, filter depth > 0, exclude the retrieved set.
+  const session = createFakeSession({
+    chunkRows: [
+      { chunk_id: 'c10', parent_chunk_id: 'c9', ordinal: 10, summary: 's10', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
+    ],
+    leadInRows: [],
+  });
+  await buildAutoRecallParts(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', '1']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const cte = session.seenSql.find((sql) => sql.includes('with recursive lead_in'));
+  assert(
+    cte &&
+      cte.includes('0 as depth') &&
+      cte.includes('li.depth < $4') &&
+      cte.includes('where depth > 0') &&
+      cte.includes('chunk_id != all($3)'),
+    'the lead-in CTE seeds depth 0, bounds the walk at li.depth < $4, filters depth > 0, and excludes the retrieved set (the corrected off-by-one form)',
+  );
+}
+{
+  // Off-by-one regression: leadInCount = 1 walks exactly one hop and merges exactly the
+  // immediate predecessor (ordinal 9) ahead of the retrieved chunk (ordinal 10).
+  const session = createFakeSession({
+    chunkRows: [
+      { chunk_id: 'c10', parent_chunk_id: 'c9', ordinal: 10, summary: 's10', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
+    ],
+    leadInRows: [{ chunk_id: 'c9', ordinal: 9, summary: 's9' }],
+  });
+  const parts = await buildAutoRecallParts(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', '1']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const cteCall = session.seenCalls.find((c) => c.sql.includes('with recursive lead_in'));
+  assert(cteCall && cteCall.params[3] === 1, 'leadInCount = 1 binds $4 = 1 on the CTE (one hop back, never zero)');
+  assert(
+    parts.chunks.length === 2 &&
+      parts.chunks[0].ordinal === 9 && parts.chunks[0].isLeadIn === true && parts.chunks[0].content === '' &&
+      parts.chunks[1].ordinal === 10 && parts.chunks[1].isLeadIn !== true,
+    'leadInCount = 1 merges exactly the immediate predecessor as a content-less lead-in entry, ahead of the retrieved chunk, sorted ascending',
+  );
+}
+{
+  // Two retrieved chunks with a shared ancestor: the merge concatenates and sorts by ordinal
+  // (the CTE's `select distinct` + `chunk_id != all($3)` already guarantee no overlap and no
+  // duplicates, so there is no second dedup pass). Lead-in entries carry summary, empty content.
+  const session = createFakeSession({
+    chunkRows: [
+      { chunk_id: 'c20', parent_chunk_id: 'c19', ordinal: 20, summary: 's20', content: 'User: a\nAssistant: b', distance: 0.1, kw_score: 0 },
+      { chunk_id: 'c18', parent_chunk_id: 'c17', ordinal: 18, summary: 's18', content: 'User: c\nAssistant: d', distance: 0.2, kw_score: 0 },
+    ],
+    leadInRows: [
+      { chunk_id: 'c17', ordinal: 17, summary: 's17' },
+      { chunk_id: 'c16', ordinal: 16, summary: 's16' },
+      { chunk_id: 'c15', ordinal: 15, summary: 's15' },
+    ],
+  });
+  const parts = await buildAutoRecallParts(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', '3']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    parts.chunks.every((c, i) => i === 0 || parts.chunks[i - 1].ordinal < c.ordinal),
+    'the merged chunks array is strictly ascending by ordinal (retrieved chunks + lead-ins)',
+  );
+  const leadIns = parts.chunks.filter((c) => c.isLeadIn);
+  assert(
+    leadIns.length === 3 && leadIns.map((c) => c.ordinal).join(',') === '15,16,17',
+    'lead-ins come from the chains only — ordinals 15/16/17 — never a retrieved chunk id (the CTE excludes them structurally)',
+  );
+  assert(
+    leadIns.every((c) => c.content === '' && c.summary),
+    'a lead-in entry carries its summary with empty content (rendered from summary alone, never re-scored)',
+  );
+}
+{
+  // lead_in_chunks = 0 disables the walk entirely: no CTE query is issued and the recalled
+  // chunks come back untouched (no lead-in entries).
+  const session = createFakeSession({
+    chunkRows: [
+      { chunk_id: 'c1', parent_chunk_id: null, ordinal: 1, summary: 's1', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
+    ],
+    leadInRows: [{ chunk_id: 'c0', ordinal: 0, summary: 's0' }],
+  });
+  const parts = await buildAutoRecallParts(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', '0']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    !session.seenSql.some((sql) => sql.includes('with recursive lead_in')) &&
+      parts.chunks.length === 1 && !parts.chunks[0].isLeadIn,
+    'lead_in_chunks = 0 disables lead-ins — resolveLeadInRows is never called, no CTE query, chunks unchanged',
+  );
+}
+{
+  // Parse-clamp-fallback: an out-of-range value clamps to MAX_LEAD_IN_CHUNKS (3), a corrupt
+  // value falls back to DEFAULT_LEAD_IN_CHUNKS (2) — both observable through the $4 bound.
+  for (const [raw, expected] of [
+    ['99', MAX_LEAD_IN_CHUNKS],
+    ['not-a-number', DEFAULT_LEAD_IN_CHUNKS],
+  ]) {
+    const session = createFakeSession({
+      chunkRows: [
+        { chunk_id: 'c1', parent_chunk_id: null, ordinal: 1, summary: 's1', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
+      ],
+      leadInRows: [],
+    });
+    await buildAutoRecallParts(
+      session,
+      fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', raw]])),
+      createStubEmbeddingProvider(8),
+      'user-1',
+      'chat-1',
+      [{ role: 'user', content: 'hi' }],
+    );
+    const cteCall = session.seenCalls.find((c) => c.sql.includes('with recursive lead_in'));
+    assert(
+      cteCall && cteCall.params[3] === expected,
+      `lead_in_chunks raw '${raw}' binds $4 = ${expected} on the CTE (clamped to MAX / fallen back to DEFAULT)`,
+    );
+  }
+}
+
 // --- Sanity: the exported constants are what the wiring depends on ---
 assert(AUTO_RECALL_PAIRS === 3, 'AUTO_RECALL_PAIRS mirrors Canonize ragClassifierHistory (3)');
 assert(AUTO_RECALL_CHUNK_TOP_K === 8, 'AUTO_RECALL_CHUNK_TOP_K is the default Max for the dynamic cutoff (8 — CNZ ragChatMax)');
+assert(MAX_LEAD_IN_CHUNKS === 3, 'MAX_LEAD_IN_CHUNKS caps the lead-in window at 3 (a corrupt value can never balloon the prompt)');
+assert(DEFAULT_LEAD_IN_CHUNKS === 2, 'DEFAULT_LEAD_IN_CHUNKS is the lead-in window default (2 preceding chunks)');
 assert(DEFAULT_PLOT_TOP_K === 6, 'DEFAULT_PLOT_TOP_K is the plot lane Max default (6 — fewer than the fact lane\'s 8, each result is a multi-entry card)');
 assert(DEFAULT_PLOT_MIN === 1, 'DEFAULT_PLOT_MIN is the plot lane Min floor default (1)');
 assert(DEFAULT_PLOT_FLOOR_SYNCS === 2, 'DEFAULT_PLOT_FLOOR_SYNCS is the recency-floor default (2 sync ticks)');

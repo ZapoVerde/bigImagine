@@ -31,6 +31,7 @@ function createFakePool() {
   const syncStatus = new Map(); // chat_id -> {user_id, last_attempt_at, last_status, last_step, last_error, last_success_at, last_chunks_added, last_entries_updated, consecutive_errors}
   const canonCounts = new Map(); // chat_id -> {proposed, approved, last_proposed_at}
   const syncPoints = []; // {sync_id, chat_id, user_id, ordinal, last_message_id, created_at, bridge_prompt, closed_at} (0079)
+  const chunks = []; // {chunk_id, chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, parent_chunk_id} (0100)
   const syncEntries = []; // {sync_id, topic_key, content, updated_at} (chat_memory_entries, inspection slice)
   const syncFacts = []; // {sync_id, fact_id, category, arc_tag, entity_key, summary, detail, status, proposed_at} (0079)
   let clock = 1000;
@@ -49,6 +50,7 @@ function createFakePool() {
     syncStatus,
     canonCounts,
     syncPoints,
+    chunks,
     syncEntries,
     syncFacts,
     async connect() {
@@ -217,9 +219,56 @@ function createFakePool() {
               }));
             return { rows };
           }
+          // forkChat's eligible sync-point read (chatSessions.ts) — the `order by ordinal`
+          // distinguishes it from the unsynced-count stub below, and its rows feed the chunk
+          // copy (migration 0100): the copied prefix's chunks must link in ordinal order.
+          if (sql.includes('from chat_sync_points where chat_id') && sql.includes('order by ordinal')) {
+            const rows = syncPoints
+              .filter((sp) => sp.chat_id === params[0])
+              .sort((a, b) => a.ordinal - b.ordinal)
+              .map((sp) => ({ sync_id: sp.sync_id, ordinal: sp.ordinal, last_message_id: sp.last_message_id, closed_at: sp.closed_at ?? null }));
+            return { rows };
+          }
           if (sql.includes('from chat_sync_points where chat_id')) {
             // The unsynced-count query's own embedded max(ordinal) subquery — empty-rows stub,
             // as before (no sync points exist in this pool's status tests).
+            return { rows: [] };
+          }
+          // forkChat's sync-point copy (chatSessions.ts) — same shape as the parent read, under
+          // fresh sync_ids on the branch (the existing fork test never reaches this because its
+          // parent has no sync points; the chunks test below exercises it).
+          if (sql.includes('insert into chat_sync_points')) {
+            const [chatId, userId, ordinal, lastMessageId, closedAt] = params;
+            const row = { sync_id: randomUUID(), chat_id: chatId, user_id: userId, ordinal, last_message_id: lastMessageId, created_at: '2026-08-14T00:00:00.000Z', bridge_prompt: null, closed_at: closedAt ?? null };
+            syncPoints.push(row);
+            return { rows: [{ sync_id: row.sync_id }] };
+          }
+          // forkChat's chunk copy (chatSessions.ts, migration 0100) — read the parent chat's
+          // chunks for the copied sync ids, then re-insert under the branch with parent links
+          // to the previously copied row's fresh chunk_id.
+          if (sql.includes('from chat_chunks where sync_id = any')) {
+            const oldSyncIds = params[0];
+            const rows = chunks
+              .filter((c) => oldSyncIds.includes(c.sync_id))
+              .sort((a, b) => a.ordinal - b.ordinal)
+              .map((c) => ({ sync_id: c.sync_id, ordinal: c.ordinal, content: c.content, summary: c.summary, vector_embed: c.vector_embed }));
+            return { rows };
+          }
+          if (sql.includes('insert into chat_chunks')) {
+            const [chatId, syncId, userId, ordinal, content, summary, vectorEmbed, parentChunkId] = params;
+            const chunkId = randomUUID();
+            chunks.push({ chunk_id: chunkId, chat_id: chatId, sync_id: syncId, user_id: userId, ordinal, content, summary, vector_embed: vectorEmbed, parent_chunk_id: parentChunkId ?? null });
+            return { rows: [{ chunk_id: chunkId }] };
+          }
+          // forkChat's chat_memory_entries copy (chatSessions.ts) — read the parent chat's
+          // entries for the copied sync ids, then re-insert under the branch (the seeded fork
+          // test chats have none, so both sides return empty).
+          if (sql.includes('from chat_memory_entries where chat_id = $1 and sync_id = any')) {
+            const [chatId, oldSyncIds] = params;
+            const rows = syncEntries.filter((e) => e.chat_id === chatId && oldSyncIds.includes(e.sync_id));
+            return { rows };
+          }
+          if (sql.includes('insert into chat_memory_entries')) {
             return { rows: [] };
           }
           if (sql.includes('from canon_facts where chat_id')) {
@@ -902,6 +951,50 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
 
   const missingLineage = await store.getLineage(USER_A, 'no-such-chat-id');
   assert(missingLineage === undefined, 'getLineage on a nonexistent chat id returns undefined');
+}
+
+// --- forkChat with an archived chunk history (migration 0100): the copied chunks keep the
+// parent_chunk_id chain — the branch's first copied chunk is its new head (null parent), each
+// next links to the previously copied row's fresh chunk_id, so the branch's chain has no
+// orphans and never reuses the parent's chunk_ids. ---
+{
+  const chunkParent = await store.createChat(USER_A, { title: 'Fork with chunks' });
+  const chunkMsgs = await store.appendMessages(USER_A, chunkParent.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ]);
+  // Simulate one prior sync: a closed sync point anchored at A1 with two archived chunks —
+  // chunk 0 is the chain head, chunk 1 links to it.
+  const sp = {
+    sync_id: randomUUID(),
+    chat_id: chunkParent.chatId,
+    user_id: USER_A,
+    ordinal: 0,
+    last_message_id: chunkMsgs[1].messageId,
+    created_at: '2026-08-14T00:00:00.000Z',
+    bridge_prompt: null,
+    closed_at: '2026-08-14T00:00:00.000Z',
+  };
+  pool.syncPoints.push(sp);
+  const headChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 0, content: 'c0', summary: 's0', vector_embed: '[0.1]', parent_chunk_id: null };
+  const secondChunk = { chunk_id: randomUUID(), chat_id: chunkParent.chatId, sync_id: sp.sync_id, user_id: USER_A, ordinal: 1, content: 'c1', summary: 's1', vector_embed: '[0.1]', parent_chunk_id: headChunk.chunk_id };
+  pool.chunks.push(headChunk, secondChunk);
+
+  const forked = await store.forkChat(USER_A, chunkParent.chatId, chunkMsgs[1].messageId);
+  assert(forked !== undefined, 'forkChat with an archived chunk history succeeds');
+
+  const copied = pool.chunks.filter((c) => c.chat_id === forked.chatId).sort((a, b) => a.ordinal - b.ordinal);
+  assert(copied.length === 2, 'both archived chunks are copied to the branch');
+  assert(
+    copied[0].parent_chunk_id === null && copied[1].parent_chunk_id === copied[0].chunk_id,
+    "the copied chunks remap parents: the branch's first chunk is its new head (null), the second links to the first's fresh chunk_id — no orphan links",
+  );
+  assert(
+    copied[0].chunk_id !== headChunk.chunk_id && copied[1].chunk_id !== secondChunk.chunk_id,
+    'the copied chunks get fresh chunk_ids — the branch never reuses the parent rows',
+  );
 }
 
 // --- deleteChat ---
