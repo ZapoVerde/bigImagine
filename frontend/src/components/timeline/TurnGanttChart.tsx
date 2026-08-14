@@ -9,7 +9,9 @@
  * totalMs — the same no-library, container-scaling approach StatBarList already established, so
  * it holds up at phone width (bi_principles.md §18) with no fixed pixel math. Instant milestones
  * render as absolutely-positioned dashed vertical lines spanning each track's full height; the
- * abort instant is visually distinct (red). Native title tooltips carry the exact ms/duration on
+ * abort instant is visually distinct (red). Each row carries its own duration label, and the
+ * chart ends with a total-time line (max of every row-stop/milestone, same totalMs the bars are
+ * scaled against). Native title tooltips carry the exact ms/duration on
  * hover — no charting library, no canvas. A null report, or one with an empty rows array (a turn
  * that dispatched but never got a first token), renders the "no timing data reached" state, not
  * a blank chart.
@@ -33,6 +35,13 @@ interface TurnGanttChartProps {
   emptyMessage?: string;
 }
 
+/** Sub-second durations as whole ms (the values here are always well under a second — a phase
+ *  longer than that is the exception, not the common case), everything else in seconds so the
+ *  total doesn't read as an unbroken wall of digits. */
+function formatMs(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
 export default function TurnGanttChart({ report, emptyMessage = 'No timing data reached.' }: TurnGanttChartProps) {
   if (!report || report.rows.length === 0) {
     return <div className="turn-gantt-empty">{emptyMessage}</div>;
@@ -42,7 +51,7 @@ export default function TurnGanttChart({ report, emptyMessage = 'No timing data 
   // percentages are in-bounds by construction — the clamp only guards against a future caller.
   const pct = (ms: number): string => `${Math.max(0, Math.min(100, (ms / totalMs) * 100))}%`;
   return (
-    <div className="turn-gantt" role="img" aria-label="Turn timeline">
+    <div className="turn-gantt" role="img" aria-label={`Turn timeline, total ${formatMs(totalMs)}`}>
       {rows.map((row) => (
         <div className="turn-gantt-row" key={row.key}>
           <span className="turn-gantt-label">{row.label}</span>
@@ -61,8 +70,13 @@ export default function TurnGanttChart({ report, emptyMessage = 'No timing data 
               />
             ))}
           </div>
+          <span className="turn-gantt-duration">{formatMs(row.stopMs - row.startMs)}</span>
         </div>
       ))}
+      <div className="turn-gantt-total">
+        <span>Total</span>
+        <span className="turn-gantt-total-value">{formatMs(totalMs)}</span>
+      </div>
     </div>
   );
 }

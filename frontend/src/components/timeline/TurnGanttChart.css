@@ -12,10 +12,17 @@
 
 .turn-gantt-row {
   display: grid;
-  grid-template-columns: minmax(5.5rem, auto) 1fr;
+  grid-template-columns: minmax(5.5rem, auto) 1fr auto;
   align-items: center;
   gap: 0.6rem;
   min-width: 0;
+}
+
+.turn-gantt-duration {
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .turn-gantt-label {
@@ -81,4 +88,23 @@
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);
   padding: 0.4rem 0.2rem;
+}
+
+.turn-gantt-total {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin-top: 0.15rem;
+  padding-top: 0.4rem;
+  border-top: 1px solid var(--color-border-subtle);
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+}
+
+.turn-gantt-total-value {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-primary);
 }
