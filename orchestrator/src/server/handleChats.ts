@@ -50,6 +50,7 @@ import {
   decorateMessageForDisplay,
 } from './promptAssembly.js';
 import { buildPromptPreview } from './promptPreview.js';
+import { handleTurnDisplayMetricsLatest } from './handleTurnDisplayMetricsLatest.js';
 import {
   ensureActiveLocationImage,
   fireLocationImageGeneration,
@@ -265,6 +266,15 @@ export async function handleChatRoutes(
       return;
     }
     sendJson(res, 200, { nodes });
+    return;
+  }
+
+  // The chat drawer Timing section's durable "last turn" read (docs/plans/turn-timeline-graph-plan.md):
+  // the newest recorded turn for this chat, or null when none — the table, not the session, so a
+  // reload still remembers the last turn. Same regular chat auth as every route here; the read is
+  // user_scoped by construction (migration 0102 RLS), so a foreign chatId reads no rows.
+  if (segments[1] === 'turn-display-metrics' && segments[2] === 'latest' && segments.length === 3 && req.method === 'GET') {
+    await handleTurnDisplayMetricsLatest(res, deps, userId, chatId);
     return;
   }
 

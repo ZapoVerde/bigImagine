@@ -149,6 +149,11 @@ import {
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
+import {
+  mapTurnDisplayMetricRow,
+  type TurnDisplayMetricRow,
+  type TurnDisplayMetricRowShape,
+} from '../io/turnDisplayMetrics.js';
 import type { LorebookEntryDraft } from '../util/parseCharacterBookEntries.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
 import { DEFAULT_REASONING_CLOSE_TAG, DEFAULT_REASONING_OPEN_TAG } from '../orchestrator/liveReasoning.js';
@@ -2648,48 +2653,6 @@ export async function listLlmStats(db: PostgresClient, days: number): Promise<Ll
   }));
 }
 
-export interface TurnDisplayMetricRow {
-  turnDisplayMetricId: string;
-  userId: string;
-  chatId: string;
-  messageId: string;
-  dispatchAt: string; // ISO
-  firstTokenMs: number | null;
-  lastTokenMs: number | null;
-  displayLandMs: number | null;
-  displaySettleMs: number | null;
-  headerStartMs: number | null;
-  headerStopMs: number | null;
-  bodyStartMs: number | null;
-  bodyStopMs: number | null;
-  footerStartMs: number | null;
-  footerStopMs: number | null;
-  outcome: 'ok' | 'aborted' | 'error';
-  terminatedAtMs: number | null;
-  createdAt: string; // ISO
-}
-
-interface TurnDisplayMetricRowShape {
-  turn_display_metric_id: string;
-  user_id: string;
-  chat_id: string;
-  message_id: string;
-  dispatch_at: Date;
-  first_token_ms: number | null;
-  last_token_ms: number | null;
-  display_land_ms: number | null;
-  display_settle_ms: number | null;
-  header_start_ms: number | null;
-  header_stop_ms: number | null;
-  body_start_ms: number | null;
-  body_stop_ms: number | null;
-  footer_start_ms: number | null;
-  footer_stop_ms: number | null;
-  outcome: 'ok' | 'aborted' | 'error';
-  terminated_at_ms: number | null;
-  created_at: Date;
-}
-
 export async function listTurnDisplayStats(db: PostgresClient, days: number): Promise<TurnDisplayMetricRow[]> {
   const rows = await db.withSystemScope((session) =>
     session.query<TurnDisplayMetricRowShape>(
@@ -2703,24 +2666,5 @@ export async function listTurnDisplayStats(db: PostgresClient, days: number): Pr
       [days],
     ),
   );
-  return rows.map((r) => ({
-    turnDisplayMetricId: r.turn_display_metric_id,
-    userId: r.user_id,
-    chatId: r.chat_id,
-    messageId: r.message_id,
-    dispatchAt: r.dispatch_at.toISOString(),
-    firstTokenMs: r.first_token_ms,
-    lastTokenMs: r.last_token_ms,
-    displayLandMs: r.display_land_ms,
-    displaySettleMs: r.display_settle_ms,
-    headerStartMs: r.header_start_ms,
-    headerStopMs: r.header_stop_ms,
-    bodyStartMs: r.body_start_ms,
-    bodyStopMs: r.body_stop_ms,
-    footerStartMs: r.footer_start_ms,
-    footerStopMs: r.footer_stop_ms,
-    outcome: r.outcome,
-    terminatedAtMs: r.terminated_at_ms,
-    createdAt: r.created_at.toISOString(),
-  }));
+  return rows.map(mapTurnDisplayMetricRow);
 }

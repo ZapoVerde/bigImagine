@@ -787,6 +787,18 @@ export async function adminListTurnDisplayStats(adminKey: string | null, days = 
   return body.turns;
 }
 
+/** GET /v1/chats/:chatId/turn-display-metrics/latest — the chat drawer Timing section's durable
+ *  "last turn" read (docs/plans/turn-timeline-graph-plan.md): the newest recorded turn for this
+ *  chat from the table, or null when it has none. Regular chat auth (not admin) — a user's own
+ *  chat's timing is no more sensitive than the chat itself. */
+export async function getLatestTurnDisplayMetric(chatId: string, apiKey: string | null): Promise<TurnDisplayMetricRow | null> {
+  const body = await jsonRequest<{ turn: TurnDisplayMetricRow | null }>(
+    `/v1/chats/${encodeURIComponent(chatId)}/turn-display-metrics/latest`,
+    apiKey,
+  );
+  return body.turn;
+}
+
 /** POST /v1/turn-display-metrics — fire-and-forget timing record, regular chat auth (not admin).
  *  A duplicate message_id resolves as { recorded: false } (idempotent no-op); both shapes mean
  *  "recorded or already known", never an error the recorder has to interpret. */

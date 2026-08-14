@@ -7,6 +7,9 @@
 //     message_id as an idempotent no-op ({ recorded: false }) instead of an error.
 //  3. GET /v1/admin/turn-display-stats requires admin auth and hands a clamped `days` lookback
 //     to the query, same [1, 365] bounds as /v1/admin/llm-stats.
+//  4. GET /v1/chats/:chatId/turn-display-metrics/latest — the drawer Timing section's durable
+//     "last turn" read — requires chat auth, returns the newest recorded turn for the chat (or
+//     { turn: null } when it has none), scoped to the authenticated user by construction.
 
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createApiKeyStore } from '../dist/server/apiKeyStore.js';
@@ -66,6 +69,27 @@ function createFakePool() {
             rows.push(row);
             inserts.push(params);
             return { rows: [] };
+          }
+          if (sql.includes('from turn_display_metrics') && sql.includes('limit 1')) {
+            // GET /v1/chats/:chatId/turn-display-metrics/latest — newest row for the chat. Must
+            // sit before the stats branch below: the latest query also contains "order by
+            // created_at desc" (with the dispatch_at tiebreak), so "limit 1" is its distinguisher.
+            const chatId = params[0];
+            const match = rows
+              .filter((r) => r.chat_id === chatId)
+              .sort((a, b) => (a.dispatch_at < b.dispatch_at ? 1 : -1))[0];
+            return {
+              rows: match
+                ? [
+                    {
+                      ...match,
+                      turn_display_metric_id: `tdm-${match.message_id}`,
+                      dispatch_at: new Date(match.dispatch_at),
+                      created_at: new Date('2026-08-14T00:00:00.000Z'),
+                    },
+                  ]
+                : [],
+            };
           }
           if (sql.includes('from turn_display_metrics') && sql.includes('order by created_at desc')) {
             statsDaysRead.push(params[0]);
@@ -238,6 +262,28 @@ await fetch(`${base}/v1/admin/turn-display-stats?days=banana`, { headers: ADMIN 
 assert(
   pool.statsDaysRead.join(',') === '30,365,1,30',
   `the turn-display days lookback reaches the query clamped into [1, 365] (got ${pool.statsDaysRead.join(',')})`,
+);
+
+// --- Part 4: GET /v1/chats/:chatId/turn-display-metrics/latest — the drawer's durable last turn ---
+const latestNoAuthRes = await fetch(`${base}/v1/chats/chat-http/turn-display-metrics/latest`);
+assert(latestNoAuthRes.status === 401, 'GET /v1/chats/:id/turn-display-metrics/latest with no chat auth returns 401');
+
+const latestRes = await fetch(`${base}/v1/chats/chat-http/turn-display-metrics/latest`, { headers: AUTH });
+const latestBody = await latestRes.json();
+assert(
+  latestRes.status === 200 &&
+    latestBody.turn?.messageId === 'msg-http-1' &&
+    latestBody.turn?.outcome === 'error' &&
+    latestBody.turn?.bodyStartMs === 400 &&
+    latestBody.turn?.userId === '11111111-1111-1111-1111-111111111111',
+  'GET latest returns the newest recorded turn for the chat, mapped to the camelCase wire shape',
+);
+
+const latestEmptyRes = await fetch(`${base}/v1/chats/chat-other/turn-display-metrics/latest`, { headers: AUTH });
+const latestEmptyBody = await latestEmptyRes.json();
+assert(
+  latestEmptyRes.status === 200 && latestEmptyBody.turn === null,
+  'GET latest for a chat with no recorded turns returns { turn: null } — the drawer empty state, not an error',
 );
 
 server.close();
