@@ -42,6 +42,8 @@
  *   cleanupState(region, state) — each bigimagine_cleanup frame
  *   stop()                     — Stop button pressed / abort terminal frame observed
  *   finalize(outcome, messageId?) — resolve or throw; emits last-token + display-settle and POSTs
+ *   getSnapshot()              — the drawer's "last turn" wire (docs/plans/turn-timeline-graph-plan.md):
+ *                                the same record persist() builds, without the messageId gate
  *
  * @contract
  *   assertions:
@@ -52,6 +54,7 @@
 
 import { postTurnDisplayMetrics } from '../api/client';
 import type { CleanupRegionState, TurnDisplayMetricsInput, TurnTimelineEventDetail } from '../api/types';
+import type { TurnTimingFields } from './turnTimelineReport';
 
 export type TimelineRegion = 'header' | 'body' | 'footer';
 export type TimelineOutcome = 'ok' | 'aborted' | 'error';
@@ -86,6 +89,7 @@ export class TurnTimeline {
   private outcome: TimelineOutcome | null = null;
   private terminatedAt: number | null = null;
   private done = false;
+  private dispatched = false;
 
   constructor(options: TurnTimelineOptions) {
     this.chatId = options.chatId;
@@ -107,6 +111,7 @@ export class TurnTimeline {
 
   /** t0 — call the instant before chatCompletion()/swipeMessage(), before any await. */
   dispatch(): void {
+    this.dispatched = true;
     this.emit('dispatch');
   }
 
@@ -164,6 +169,35 @@ export class TurnTimeline {
     });
   }
 
+  /** The drawer's "last turn" wire (docs/plans/turn-timeline-graph-plan.md): the timing fields
+   *  as they stand, built by the same shared builder persist() uses — but without persist()'s
+   *  messageId gate, because the chart is a local, ephemeral UI read, not a thing being posted
+   *  anywhere. There's no reason to withhold it just because the turn failed too early to have
+   *  produced an id. undefined only when the turn never dispatched at all (unreachable in
+   *  practice — ChatView calls this only after finalize()). */
+  getSnapshot(): TurnTimingFields | undefined {
+    if (!this.dispatched) return undefined;
+    return this.buildTimingFields();
+  }
+
+  /** The *_ms record as it stands — null for every field never reached, exactly the shared
+   *  TurnTimingFields shape persist() posts and the drawer's Gantt renders from. */
+  private buildTimingFields(): TurnTimingFields {
+    return {
+      firstTokenMs: this.firstTokenAt,
+      lastTokenMs: this.lastDeltaAt,
+      displayLandMs: this.displayLandAt,
+      displaySettleMs: this.displaySettleAt,
+      headerStartMs: this.regions.header.start,
+      headerStopMs: this.regions.header.stop,
+      bodyStartMs: this.regions.body.start,
+      bodyStopMs: this.regions.body.stop,
+      footerStartMs: this.regions.footer.start,
+      footerStopMs: this.regions.footer.stop,
+      terminatedAtMs: this.terminatedAt,
+    };
+  }
+
   private async persist(): Promise<void> {
     // No message id = failed before the first delta; nothing identifiable to store. Dropped.
     if (!this.messageId) return;
@@ -173,18 +207,27 @@ export class TurnTimeline {
       dispatchAt: this.dispatchAt.toISOString(),
       outcome: this.outcome ?? 'error',
     };
-    if (this.firstTokenAt !== null) body.firstTokenMs = this.firstTokenAt;
-    if (this.lastDeltaAt !== null) body.lastTokenMs = this.lastDeltaAt;
-    if (this.displayLandAt !== null) body.displayLandMs = this.displayLandAt;
-    if (this.displaySettleAt !== null) body.displaySettleMs = this.displaySettleAt;
-    const { header, body: bodyRegion, footer } = this.regions;
-    if (header.start !== null) body.headerStartMs = header.start;
-    if (header.stop !== null) body.headerStopMs = header.stop;
-    if (bodyRegion.start !== null) body.bodyStartMs = bodyRegion.start;
-    if (bodyRegion.stop !== null) body.bodyStopMs = bodyRegion.stop;
-    if (footer.start !== null) body.footerStartMs = footer.start;
-    if (footer.stop !== null) body.footerStopMs = footer.stop;
-    if (this.terminatedAt !== null) body.terminatedAtMs = this.terminatedAt;
+    // Same fields the shared builder produced — only the reached ones (numbers, not nulls) are
+    // posted; a never-reached field is omitted entirely, never sent as a zero (the API type
+    // says optional for exactly this reason).
+    const timing = this.buildTimingFields();
+    const timingKeys: (keyof TurnTimingFields)[] = [
+      'firstTokenMs',
+      'lastTokenMs',
+      'displayLandMs',
+      'displaySettleMs',
+      'headerStartMs',
+      'headerStopMs',
+      'bodyStartMs',
+      'bodyStopMs',
+      'footerStartMs',
+      'footerStopMs',
+      'terminatedAtMs',
+    ];
+    for (const key of timingKeys) {
+      const value = timing[key];
+      if (typeof value === 'number') body[key] = value;
+    }
     await postTurnDisplayMetrics(body, this.apiKey);
   }
 }

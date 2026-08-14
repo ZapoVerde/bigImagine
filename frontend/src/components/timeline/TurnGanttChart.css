@@ -1,0 +1,84 @@
+/* Turn-timeline Gantt (docs/plans/turn-timeline-graph-plan.md): one row per phase, label on the
+   left, percentage-positioned bar on the right — no fixed pixels, so it scales with container
+   width at any screen size (bi_principles.md §18) the same way StatBarList already does.
+   Milestones are dashed vertical lines spanning each track's full height; the abort instant is
+   visually distinct (red dashed) from the other four. */
+
+.turn-gantt {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.turn-gantt-row {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, auto) 1fr;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.turn-gantt-label {
+  font-size: var(--font-size-xs, 0.72rem);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.turn-gantt-track {
+  position: relative;
+  height: 1.05rem;
+  min-width: 0;
+}
+
+.turn-gantt-bar {
+  position: absolute;
+  top: 0.12rem;
+  bottom: 0.12rem;
+  border-radius: var(--radius-sm, 4px);
+}
+
+/* One distinct hue per kind: the main call's three phases (gray → indigo → light indigo), the
+   three cleanup regions (amber, green, teal). Red is reserved for the abort milestone line. */
+.turn-gantt-bar-waiting {
+  background: color-mix(in srgb, var(--color-text-secondary) 32%, transparent);
+}
+
+.turn-gantt-bar-streaming {
+  background: var(--color-accent);
+}
+
+.turn-gantt-bar-header {
+  background: var(--color-secondary);
+}
+
+.turn-gantt-bar-body {
+  background: var(--color-success);
+}
+
+.turn-gantt-bar-footer {
+  background: color-mix(in srgb, var(--color-accent) 45%, var(--color-success) 55%);
+}
+
+.turn-gantt-bar-finalizing {
+  background: color-mix(in srgb, var(--color-accent) 42%, transparent);
+}
+
+.turn-gantt-milestone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--color-text-faint);
+}
+
+.turn-gantt-milestone-terminated {
+  border-left-color: var(--color-danger);
+}
+
+.turn-gantt-empty {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  padding: 0.4rem 0.2rem;
+}

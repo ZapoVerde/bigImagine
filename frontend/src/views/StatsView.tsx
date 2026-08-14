@@ -16,7 +16,10 @@
  *
  *   Timing (GET /v1/admin/turn-display-stats) — group by day/outcome/chat; metric is the mean of
  *   one elapsed span (first-token, display-settle, or a header/body/footer start→stop window, or
- *   the full stop time). Same outcome chips; bars stack by outcome share.
+ *   the full stop time). Same outcome chips; bars stack by outcome share. A second "Turn graph"
+ *   mode (docs/plans/turn-timeline-graph-plan.md) swaps the grouped bar-list for the waterfall
+ *   Gantt: "Last turn" (pick one filtered turn) or "Averages" (per-kind means across the whole
+ *   filtered set) — both built by the shared turnTimelineReport builders, zero new fetches.
  *
  * A shared `days` lookback dropdown (7/30/90/365) re-fetches both lists — the endpoints' bounded
  * [1, 365] window is the plan's unbounded-growth answer.
@@ -28,7 +31,8 @@
  * @contract
  *   assertions:
  *     purity:          impure (fetch, React state)
- *     state_ownership: [call rows, turn rows, groupBy/metric/chips/days selections]
+ *     state_ownership: [call rows, turn rows, groupBy/metric/chips/days selections, graph mode,
+ *                       selected turn]
  *     external_io:     [GET /v1/admin/llm-stats, GET /v1/admin/turn-display-stats]
  */
 
@@ -37,7 +41,9 @@ import { ApiError, adminListLlmStats, adminListTurnDisplayStats } from '../api/c
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import type { LlmCallStatRow, TurnDisplayMetricRow } from '../api/types';
 import { groupRows, meanOf, spanMs, sumOf } from '../lib/aggregateRows';
+import { buildAverageTurnTimelineReport, buildTurnTimelineReport } from '../lib/turnTimelineReport';
 import StatBarList, { type StatBarItem, type StatBarSegment } from '../components/stats/StatBarList';
+import TurnGanttChart from '../components/timeline/TurnGanttChart';
 import './StatsView.css';
 
 // --- Usage & Cost ---
@@ -164,6 +170,12 @@ function formatMs(value: number): string {
   return `${Math.round(value).toLocaleString()} ms`;
 }
 
+// Turn-graph picker label (docs/plans/turn-timeline-graph-plan.md): local time, a short chat id
+// prefix, and the outcome — enough to identify the turn without a second fetch.
+function turnOptionLabel(t: TurnDisplayMetricRow): string {
+  return `${new Date(t.dispatchAt).toLocaleTimeString()} · ${t.chatId.slice(0, 8)} · ${t.outcome}`;
+}
+
 const DAYS_OPTIONS = [7, 30, 90, 365];
 
 export default function StatsView() {
@@ -179,6 +191,12 @@ export default function StatsView() {
   const [timingGroupBy, setTimingGroupBy] = useState<TimingGroupBy>('day');
   const [timingMetric, setTimingMetric] = useState<TimingMetric>('display-settle');
   const [timingOutcomes, setTimingOutcomes] = useState<Set<TurnDisplayMetricRow['outcome']>>(new Set(TIMING_OUTCOMES));
+  // Timing section "Turn graph" mode (docs/plans/turn-timeline-graph-plan.md): grouped bars (the
+  // existing view, default) vs the waterfall Gantt; inside the graph, one selected historical
+  // turn vs per-kind averages across the whole filtered set.
+  const [timingMode, setTimingMode] = useState<'grouped' | 'graph'>('grouped');
+  const [graphMode, setGraphMode] = useState<'last' | 'averages'>('last');
+  const [selectedTurnId, setSelectedTurnId] = useState<string | null>(null);
 
   // useAdminUnlock fixes attemptLoad at mount; the days dropdown re-fetches through it, so the
   // current selection rides in a ref read by that same closure.
@@ -283,6 +301,24 @@ export default function StatsView() {
     return items.sort((a, b) => b.value - a.value);
   }, [turns, timingGroupBy, timingMetric, timingOutcomes]);
 
+  // --- Timing "Turn graph" mode (docs/plans/turn-timeline-graph-plan.md) ---
+
+  // The turn rows the graph works off: same outcome chips (and the top-level days lookback,
+  // which the fetch already applied) the grouped-bars mode respects. Arrival order is newest
+  // first, so the picker reads newest→oldest with no extra sort.
+  const filteredTurns = useMemo<TurnDisplayMetricRow[]>(() => {
+    if (!turns) return [];
+    return turns.filter((r) => timingOutcomes.has(r.outcome));
+  }, [turns, timingOutcomes]);
+
+  // Selection tracks the filtered set: when the selected turn falls out of a new filter (outcome
+  // chip or days change re-fetched), fall back to the new set's newest entry rather than pointing
+  // at a turn no longer listed.
+  const selectedTurn = useMemo<TurnDisplayMetricRow | null>(() => {
+    if (filteredTurns.length === 0) return null;
+    return filteredTurns.find((t) => t.turnDisplayMetricId === selectedTurnId) ?? filteredTurns[0];
+  }, [filteredTurns, selectedTurnId]);
+
   if (checking) {
     return <div className="stats-view" />;
   }
@@ -364,25 +400,36 @@ export default function StatsView() {
         <h2>Timing</h2>
         <div className="stats-controls">
           <label>
-            Group by
-            <select value={timingGroupBy} onChange={(e) => setTimingGroupBy(e.target.value as TimingGroupBy)}>
-              {TIMING_GROUP_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
+            View
+            <select value={timingMode} onChange={(e) => setTimingMode(e.target.value as 'grouped' | 'graph')}>
+              <option value="grouped">Grouped bars</option>
+              <option value="graph">Turn graph</option>
             </select>
           </label>
-          <label>
-            Metric
-            <select value={timingMetric} onChange={(e) => setTimingMetric(e.target.value as TimingMetric)}>
-              {TIMING_METRIC_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          {timingMode === 'grouped' && (
+            <>
+              <label>
+                Group by
+                <select value={timingGroupBy} onChange={(e) => setTimingGroupBy(e.target.value as TimingGroupBy)}>
+                  {TIMING_GROUP_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Metric
+                <select value={timingMetric} onChange={(e) => setTimingMetric(e.target.value as TimingMetric)}>
+                  {TIMING_METRIC_OPTIONS.map((o) => (
+                    <option key={o.value} value={o.value}>
+                      {o.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </>
+          )}
           <div className="stats-chips" role="group" aria-label="Outcome filter">
             {TIMING_OUTCOMES.map((outcome) => (
               <button
@@ -396,7 +443,60 @@ export default function StatsView() {
             ))}
           </div>
         </div>
-        <StatBarList items={timingItems} emptyMessage="No RP turns in this window." />
+        {timingMode === 'grouped' ? (
+          <StatBarList items={timingItems} emptyMessage="No RP turns in this window." />
+        ) : (
+          <>
+            <div className="stats-controls">
+              <div className="stats-mode-toggle" role="group" aria-label="Turn graph mode">
+                <button
+                  type="button"
+                  className={`stats-mode-btn${graphMode === 'last' ? ' active' : ''}`}
+                  onClick={() => setGraphMode('last')}
+                >
+                  Last turn
+                </button>
+                <button
+                  type="button"
+                  className={`stats-mode-btn${graphMode === 'averages' ? ' active' : ''}`}
+                  onClick={() => setGraphMode('averages')}
+                >
+                  Averages
+                </button>
+              </div>
+              {graphMode === 'last' && filteredTurns.length > 0 && (
+                <label>
+                  Turn
+                  <select
+                    value={selectedTurn?.turnDisplayMetricId ?? ''}
+                    onChange={(e) => setSelectedTurnId(e.target.value)}
+                  >
+                    {filteredTurns.map((t) => (
+                      <option key={t.turnDisplayMetricId} value={t.turnDisplayMetricId}>
+                        {turnOptionLabel(t)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+            {graphMode === 'last' ? (
+              <TurnGanttChart
+                report={selectedTurn ? buildTurnTimelineReport(selectedTurn) : null}
+                emptyMessage={
+                  filteredTurns.length === 0 ? 'No RP turns in this window.' : 'No timing data reached for this turn.'
+                }
+              />
+            ) : (
+              <TurnGanttChart
+                report={buildAverageTurnTimelineReport(filteredTurns)}
+                emptyMessage={
+                  filteredTurns.length === 0 ? 'No RP turns in this window.' : 'No timing data reached in this window.'
+                }
+              />
+            )}
+          </>
+        )}
       </section>
     </div>
   );

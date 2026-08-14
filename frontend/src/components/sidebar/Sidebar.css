@@ -101,6 +101,18 @@
   flex-direction: column;
 }
 
+/* The RP drawer holds two stacked collapsible sections (docs/plans/turn-timeline-graph-plan.md):
+   the Prompt Inspector (flex:1, its own internal scroll) and the Timing section underneath
+   (flex-shrink:0, its content bounded and scrollable). The wrapper is the flex column that
+   lets the inspector shrink to give the Timing section room without either overflowing. */
+.sidebar-rp-sections {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .sidebar-browser {
   flex: 1;
   display: flex;

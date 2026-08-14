@@ -35,6 +35,7 @@ import type { SwipeResult } from '../api/client';
 import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import { TurnTimeline, type TimelineOutcome } from '../lib/turnTimeline';
+import type { TurnSnapshot } from '../lib/turnTimelineReport';
 import type {
   ApplyPromptStackToChatResult,
   ChatBackgroundSettings,
@@ -118,6 +119,11 @@ interface ChatViewProps {
    *  app can bump its promptRefreshToken — the Prompt Inspector now lives in the left sidebar
    *  drawer, and this is how it keeps the once-per-turn live-read it had as an in-chat panel. */
   onPromptRefresh?: () => void;
+  /** RP chats only: fired after each turn's timing recorder finalizes (send and swipe paths
+   *  both), with the client-captured timing fields — App holds the last one for the drawer's
+   *  Timing section (docs/plans/turn-timeline-graph-plan.md). Tagged with the chat id so a
+   *  switched tab never shows one chat's chart under another chat's cost line. */
+  onTurnSnapshot?: (snapshot: TurnSnapshot) => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -193,8 +199,19 @@ export default function ChatView({
   topBarsHidden,
   onTopBarsHiddenChange,
   onPromptRefresh,
+  onTurnSnapshot,
   active,
 }: ChatViewProps) {
+  // Turn-timing snapshot reporting (docs/plans/turn-timeline-graph-plan.md): capture the timing
+  // recorder's fields the moment a turn finalizes and hand them up, tagged with the chat, so the
+  // drawer's Timing section shows the turn that just happened here. getSnapshot() is undefined
+  // only when the turn never dispatched — unreachable at these call sites, but skipping is the
+  // safe reading either way.
+  const reportTurnSnapshot = (timeline: TurnTimeline | undefined, chatId: string): void => {
+    const fields = timeline?.getSnapshot();
+    if (fields) onTurnSnapshot?.({ chatId, fields });
+  };
+
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
@@ -1101,6 +1118,7 @@ export default function ChatView({
         // finalize. It is unique per turn, which is all the unique-index dedupe needs; aborted/
         // errored streams resolve normally, so the terminal frame's outcome above decides.
         timeline.finalize(streamOutcome, resolved.id);
+        reportTurnSnapshot(timeline, chatId);
       } else {
         await chatCompletion(wireMessages, apiKey, chatId, attachments, images);
       }
@@ -1112,6 +1130,7 @@ export default function ChatView({
       // a pre-stream throw has no message id to attach, which is precisely the case the
       // recorder's persist() deliberately drops.
       timeline?.finalize(err instanceof ApiError && err.status === 499 ? 'aborted' : 'error');
+      reportTurnSnapshot(timeline, chatId);
       // A streamed turn that failed without ever streaming (bad request, auth, upstream error
       // before the first chunk, or a Stop abort) left its empty placeholder behind — drop it so
       // the list reflects reality (nothing was persisted). It's the only assistant message
@@ -1349,6 +1368,7 @@ export default function ChatView({
         } else {
           swipeTimeline.finalize(streamOutcome);
         }
+        reportTurnSnapshot(swipeTimeline, activeChat.chatId);
       } else {
         result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
       }
@@ -1382,6 +1402,7 @@ export default function ChatView({
       // cycling never creates a timeline). 499 = Stop before anything streamed; nothing was
       // written either way, so the recorder's no-message-id guard drops the record.
       swipeTimeline?.finalize(err instanceof ApiError && err.status === 499 ? 'aborted' : 'error');
+      reportTurnSnapshot(swipeTimeline, activeChat.chatId);
       if (err instanceof ApiError && err.status === 499) {
         // The user hit Stop mid-regeneration — the server aborted the turn (POST
         // /v1/chat/abort) and the swipe route answers 499 for it, same contract as the main

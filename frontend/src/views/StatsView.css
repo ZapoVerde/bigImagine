@@ -85,6 +85,34 @@
   color: var(--color-accent-contrast);
 }
 
+/* Timing "Turn graph" mode toggle (docs/plans/turn-timeline-graph-plan.md): a segmented
+   control reusing the chip styling, so "Last turn / Averages" reads as one switch, not two
+   unrelated buttons. */
+.stats-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.stats-mode-btn {
+  font-size: var(--font-size-sm);
+  background: var(--color-bg-canvas);
+  color: var(--color-text-secondary);
+  border: none;
+  padding: 3px 12px;
+  cursor: pointer;
+}
+
+.stats-mode-btn + .stats-mode-btn {
+  border-left: 1px solid var(--color-border-subtle);
+}
+
+.stats-mode-btn.active {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
 /* Mobile (bi_principles.md §18): dropdowns wrap instead of overflowing; chips take the full
    second row; bars need no horizontal scroll by construction. */
 @media (max-width: 640px) {

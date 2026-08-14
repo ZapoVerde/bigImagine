@@ -50,15 +50,19 @@
 }
 
 .prompt-inspector-refresh,
-.prompt-inspector-copy {
+.prompt-inspector-copy,
+.prompt-inspector-collapse {
   background: none;
+  border: none;
   color: var(--color-text-muted);
   font-size: var(--font-size-sm);
   padding: 0.3rem 0.6rem;
+  cursor: pointer;
 }
 
 .prompt-inspector-refresh:hover,
-.prompt-inspector-copy:hover {
+.prompt-inspector-copy:hover,
+.prompt-inspector-collapse:hover {
   color: var(--color-text-primary);
 }
 

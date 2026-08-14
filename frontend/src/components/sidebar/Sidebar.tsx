@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
 import type { TabType } from '../../hooks/useTabs';
+import type { TurnSnapshot } from '../../lib/turnTimelineReport';
 import ChatBrowser from './ChatBrowser';
 import NotesBrowser from './NotesBrowser';
 import PromptInspectorPanel from '../promptInspector/PromptInspectorPanel';
+import TurnDrawerSection from '../timeline/TurnDrawerSection';
 import './Sidebar.css';
 
 interface SidebarProps {
@@ -21,6 +23,9 @@ interface SidebarProps {
   /** Bumped (App.tsx) when the chat set changes out from under the browsers (a deleted
    *  character's chats were purged) so the history lists re-fetch. */
   chatsRefreshKey: number;
+  /** The last completed turn's timing fields, tagged with the chat it happened in
+   *  (docs/plans/turn-timeline-graph-plan.md) — feeds the RP drawer's Timing section. */
+  turnSnapshot?: TurnSnapshot;
 
   selectedNoteId: string | null;
   onSelectNote: (id: string) => void;
@@ -51,7 +56,16 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
       break;
     case 'rp':
       content = props.activeChatId ? (
-        <PromptInspectorPanel apiKey={props.apiKey} chatId={props.activeChatId} refreshToken={props.promptRefreshToken} />
+        <div className="sidebar-rp-sections">
+          <PromptInspectorPanel apiKey={props.apiKey} chatId={props.activeChatId} refreshToken={props.promptRefreshToken} />
+          {/* The snapshot is only shown when it belongs to THIS chat — a switched tab must never
+              render one chat's chart under another chat's cost line. */}
+          <TurnDrawerSection
+            apiKey={props.apiKey}
+            chatId={props.activeChatId}
+            snapshot={props.turnSnapshot?.chatId === props.activeChatId ? props.turnSnapshot.fields : undefined}
+          />
+        </div>
       ) : (
         <div className="empty-state small">Open an RP chat to inspect its prompt.</div>
       );

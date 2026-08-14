@@ -1,0 +1,81 @@
+/* The chat drawer's Timing section (docs/plans/turn-timeline-graph-plan.md): a collapsible
+   section stacked under the Prompt Inspector in the RP sidebar. Default collapsed (opt-in); when
+   expanded its content scrolls within a bounded area so it can never push the inspector away or
+   blow past the drawer at any width (§18). */
+
+.turn-drawer-section {
+  flex-shrink: 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+}
+
+.turn-drawer-header {
+  display: flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+}
+
+.turn-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  padding: 0.35rem 0.5rem;
+}
+
+.turn-drawer-toggle:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+.turn-drawer-chevron {
+  font-size: 0.65rem;
+  flex-shrink: 0;
+}
+
+.turn-drawer-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.25rem 0.9rem 0.9rem;
+  overflow-y: auto;
+  max-height: min(40vh, 20rem);
+}
+
+.turn-drawer-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+/* One-line cost summary for the last turn — same source (the `main` group's usage/price) and
+   same arithmetic as the Prompt Inspector's receipt, just condensed. */
+.turn-drawer-cost {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.1rem 0.8rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.5rem;
+}
+
+.turn-drawer-cost-usd {
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent);
+}
+
+.turn-drawer-empty {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}

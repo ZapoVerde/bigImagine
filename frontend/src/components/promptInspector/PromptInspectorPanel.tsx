@@ -4,6 +4,7 @@ import type { PromptTagSection } from '@bigbrain/orchestrator/prompt-tag-tree';
 import { ApiError, getPromptPreview } from '../../api/client';
 import { markerLabel } from '../../api/markerLabels';
 import type { PromptPreview, PromptPreviewGroup, PromptPreviewItem } from '../../api/types';
+import { computeReceiptCost, formatUsd } from '../../lib/promptReceipt';
 import './PromptInspectorPanel.css';
 
 interface PromptInspectorPanelProps {
@@ -35,6 +36,11 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  // The section's own collapse state (docs/plans/turn-timeline-graph-plan.md): independent of
+  // the whole-sidebar collapse arrow, and of the Timing section's — plain in-memory, matching
+  // how the whole-sidebar collapsed flag in App.tsx already works. Default open: this is the
+  // established, primary reason to open the drawer.
+  const [collapsed, setCollapsed] = useState(false);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -66,6 +72,15 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
       <div className="prompt-inspector-header">
         <span className="prompt-inspector-title">Prompt Inspector</span>
         <div className="prompt-inspector-header-actions">
+          <button
+            type="button"
+            className="prompt-inspector-collapse"
+            title={collapsed ? 'Expand prompt inspector' : 'Collapse prompt inspector'}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((c) => !c)}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
           <button type="button" className="prompt-inspector-refresh" title="Re-fetch the current prompt" onClick={load} disabled={loading}>
             ↻
           </button>
@@ -86,57 +101,26 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
         </div>
       </div>
 
-      <div className="prompt-inspector-content">
-        {error && <div className="prompt-inspector-error">{error}</div>}
-        {loading && !preview && <div className="prompt-inspector-loading">Loading…</div>}
+      {!collapsed && (
+        <div className="prompt-inspector-content">
+          {error && <div className="prompt-inspector-error">{error}</div>}
+          {loading && !preview && <div className="prompt-inspector-loading">Loading…</div>}
 
-        {preview && (
-          <>
-            <div className="prompt-inspector-stats">
-              <span className="prompt-inspector-stats-total">{preview.totalEstimatedTokens.toLocaleString()} est. tokens</span>
-            </div>
+          {preview && (
+            <>
+              <div className="prompt-inspector-stats">
+                <span className="prompt-inspector-stats-total">{preview.totalEstimatedTokens.toLocaleString()} est. tokens</span>
+              </div>
 
-            {preview.groups.map((group, i) => (
-              <PromptGroupSection key={`${group.kind}-${i}`} group={group} />
-            ))}
-          </>
-        )}
-      </div>
+              {preview.groups.map((group, i) => (
+                <PromptGroupSection key={`${group.kind}-${i}`} group={group} />
+              ))}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
-}
-
-// The receipt's $ figure — raw counts × raw per-million rates, USD. A pure function so the
-// frontend is the single place this arithmetic lives (docs/plans/completed/prompt-inspector-usage-cost.md):
-// the tokens are exactly what the server relayed, the rates exactly what the admin typed, and the
-// derived figure can never drift from either. Returns undefined when any tier the calculation
-// needs is unconfigured — the caller then omits the $ figure entirely rather than computing a
-// partially-wrong total.
-function computeReceiptCost(
-  usage: NonNullable<PromptPreviewGroup['usage']>,
-  price: NonNullable<PromptPreviewGroup['price']>,
-): number | undefined {
-  const needsCacheRate = usage.cacheReadTokens !== undefined;
-  if (
-    price.inputPerMillion === undefined ||
-    price.outputPerMillion === undefined ||
-    (needsCacheRate && price.cacheHitPerMillion === undefined)
-  ) {
-    return undefined;
-  }
-  const perMillion = 1_000_000;
-  const cacheHit = usage.cacheReadTokens ?? 0;
-  const cacheMiss = usage.promptTokens - cacheHit;
-  return (
-    (cacheMiss * price.inputPerMillion + cacheHit * (price.cacheHitPerMillion ?? 0)) / perMillion +
-    (usage.completionTokens * price.outputPerMillion) / perMillion
-  );
-}
-
-// Sub-cent figures are the norm for a single turn — show enough decimals to stay meaningful
-// without trailing zeros past four places.
-function formatUsd(cost: number): string {
-  return `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
 }
 
 function itemLabel(item: PromptPreviewItem): string {

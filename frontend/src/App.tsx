@@ -13,6 +13,7 @@ import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs, type TabType } from './hooks/useTabs';
 import { useTheme } from './hooks/useTheme';
+import type { TurnSnapshot } from './lib/turnTimelineReport';
 import BrowseChubView from './views/BrowseChubView';
 import BackgroundsView from './views/BackgroundsView';
 import LocationsView from './views/LocationsView';
@@ -68,6 +69,13 @@ export default function App() {
   // changes up via onPromptRefresh) and forwarded to Sidebar's Prompt Inspector, so the drawer
   // version keeps the same live-read-once-per-turn behavior the in-chat panel had.
   const [promptRefreshToken, setPromptRefreshToken] = useState(0);
+
+  // The last completed turn's timing fields, captured by ChatView the moment its recorder
+  // finalizes (docs/plans/turn-timeline-graph-plan.md) and forwarded to Sidebar's Timing
+  // section — the "last turn" chart is a live, zero-fetch read of the turn you just watched,
+  // with no server round trip. Tagged with the chat it happened in; Sidebar refuses to show it
+  // under a different chat's cost line after a tab switch.
+  const [turnSnapshot, setTurnSnapshot] = useState<TurnSnapshot | undefined>(undefined);
 
   // Bumped when a character is deleted and its chats were purged server-side, so the sidebar's
   // history browsers (which list those chats) re-fetch and drop them.
@@ -209,6 +217,7 @@ export default function App() {
           activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
           promptRefreshToken={promptRefreshToken}
           chatsRefreshKey={chatsRefreshKey}
+          turnSnapshot={turnSnapshot}
         />
         {/* Mobile-only edge-grip opener for the left rail (App.css, .edge-grip) — the desktop
             rail's own header arrow is the control wide-screen. A 6px strip pinned to the left
@@ -263,6 +272,7 @@ export default function App() {
                 topBarsHidden={topBarsHidden}
                 onTopBarsHiddenChange={setTopBarsHidden}
                 onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
+                onTurnSnapshot={tab.id === activeTabId ? setTurnSnapshot : undefined}
               />
             )}
             {tab.type === 'notes' && (
