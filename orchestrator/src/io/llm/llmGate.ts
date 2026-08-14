@@ -63,7 +63,10 @@
  * rejection that never reached the provider at all, and correctly excluded).
  *
  * @api-declaration
- * createGatedLlmProvider(base, db, settings) — returns an LlmProvider wrapping base
+ * createGatedLlmProvider(base, db, settings, profile) — returns an LlmProvider wrapping base
+ * (the fourth parameter, the resolved LlmProfile for `base`, attributes every llm_calls row with
+ * providerKind/model and supplies the price tiers callCost.ts derives cost_usd from — docs/plans/
+ * llm-stats-page-plan.md).
  *
  * @contract
  *   assertions:
@@ -80,6 +83,8 @@ import { getCallContext } from './callContext.js';
 import { isRetryableLlmError } from './llmRetryClassify.js';
 import { computeBackoffMs } from './llmBackoff.js';
 import { withLaneSlot, type LlmLane } from './llmQueue.js';
+import { computeCallCostUsd } from './callCost.js';
+import type { LlmProfile } from './profiles.js';
 
 const DEFAULT_HOUSEHOLD_MAX_RUNS_PER_DAY = 20;
 const DEFAULT_HOUSEHOLD_MAX_TOKENS_PER_DAY = 200_000;
@@ -166,6 +171,10 @@ async function logCall(
     promptTokens: number | null;
     completionTokens: number | null;
     totalTokens: number | null;
+    cacheReadTokens: number | null;
+    costUsd: number | null;
+    providerKind: string;
+    model: string;
     durationMs: number | null;
     reason: string | null;
     requestId: string;
@@ -174,8 +183,8 @@ async function logCall(
 ): Promise<void> {
   await db.withSystemScope((session) =>
     session.query(
-      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason, request_id, attempt)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason, request_id, attempt, provider_kind, model, cache_read_tokens, cost_usd)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
       [
         fields.userId,
         fields.kind,
@@ -189,6 +198,10 @@ async function logCall(
         fields.reason,
         fields.requestId,
         fields.attempt,
+        fields.providerKind,
+        fields.model,
+        fields.cacheReadTokens,
+        fields.costUsd,
       ],
     ),
   );
@@ -275,6 +288,7 @@ async function resolveGateCallConfig(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   ctx: NonNullable<ReturnType<typeof getCallContext>>,
+  profile: LlmProfile,
 ): Promise<GateCallConfig> {
   if (ctx.kind === 'agent_routine') {
     try {
@@ -290,6 +304,10 @@ async function resolveGateCallConfig(
         promptTokens: null,
         completionTokens: null,
         totalTokens: null,
+        cacheReadTokens: null,
+        costUsd: null,
+        providerKind: profile.kind,
+        model: profile.model,
         durationMs: null,
         reason,
         requestId: randomUUID(),
@@ -325,7 +343,12 @@ async function resolveGateCallConfig(
   return { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs };
 }
 
-export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, settings: OrchestratorSettingsStore): LlmProvider {
+export function createGatedLlmProvider(
+  base: LlmProvider,
+  db: PostgresClient,
+  settings: OrchestratorSettingsStore,
+  profile: LlmProfile,
+): LlmProvider {
   return {
     name: base.name,
     supportsVision: base.supportsVision,
@@ -338,7 +361,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
         );
       }
 
-      const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx);
+      const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx, profile);
 
       const requestId = randomUUID();
       let turn: LlmTurn | undefined;
@@ -361,6 +384,10 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
             promptTokens: turn.usage?.promptTokens ?? null,
             completionTokens: turn.usage?.completionTokens ?? null,
             totalTokens: turn.usage?.totalTokens ?? null,
+            cacheReadTokens: turn.usage?.cacheReadTokens ?? null,
+            costUsd: turn.usage ? (computeCallCostUsd(turn.usage, profile) ?? null) : null,
+            providerKind: profile.kind,
+            model: profile.model,
             durationMs: Date.now() - callStart,
             reason: null,
             requestId,
@@ -378,6 +405,10 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
             promptTokens: null,
             completionTokens: null,
             totalTokens: null,
+            cacheReadTokens: null,
+            costUsd: null,
+            providerKind: profile.kind,
+            model: profile.model,
             durationMs: Date.now() - callStart,
             reason,
             requestId,
@@ -420,7 +451,7 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
               );
             }
 
-            const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx);
+            const { lane, maxConcurrent, maxRetries, retryBaseMs, retryMaxMs } = await resolveGateCallConfig(db, settings, ctx, profile);
 
             const requestId = randomUUID();
             let turn: LlmTurn | undefined;
@@ -444,6 +475,10 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
                   promptTokens: turn.usage?.promptTokens ?? null,
                   completionTokens: turn.usage?.completionTokens ?? null,
                   totalTokens: turn.usage?.totalTokens ?? null,
+                  cacheReadTokens: turn.usage?.cacheReadTokens ?? null,
+                  costUsd: turn.usage ? (computeCallCostUsd(turn.usage, profile) ?? null) : null,
+                  providerKind: profile.kind,
+                  model: profile.model,
                   durationMs: Date.now() - callStart,
                   reason: null,
                   requestId,
@@ -461,6 +496,10 @@ export function createGatedLlmProvider(base: LlmProvider, db: PostgresClient, se
                   promptTokens: null,
                   completionTokens: null,
                   totalTokens: null,
+                  cacheReadTokens: null,
+                  costUsd: null,
+                  providerKind: profile.kind,
+                  model: profile.model,
                   durationMs: Date.now() - callStart,
                   reason,
                   requestId,

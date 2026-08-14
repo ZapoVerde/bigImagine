@@ -34,6 +34,7 @@ import {
 import type { SwipeResult } from '../api/client';
 import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
+import { TurnTimeline, type TimelineOutcome } from '../lib/turnTimeline';
 import type {
   ApplyPromptStackToChatResult,
   ChatBackgroundSettings,
@@ -231,6 +232,10 @@ export default function ChatView({
   // setSending), so a cleanup settle that lands mid-send sees it immediately, and a cleanup
   // settle deferred past the send can be re-run in send()'s finally without a stale check.
   const sendingRef = useRef(false);
+  // The RP turn-timing recorder currently in flight (lib/turnTimeline.ts, llm-stats-page-plan.md)
+  // — exactly one at a time (sending/swipingId guards), so the Stop button can mark `stop` the
+  // instant it fires POST /v1/chat/abort rather than waiting for the terminal frame.
+  const activeTimelineRef = useRef<TurnTimeline | null>(null);
   // A cleanup settle observed while a send was in flight — the send's own refresh may have
   // already read the DB before the cleanup write landed, so re-fetch once in send()'s finally.
   const deferredCleanupSettleRef = useRef<string | null>(null);
@@ -948,6 +953,10 @@ export default function ChatView({
    *  continues and its reply lands — nothing worse happens, so no error banner either. */
   async function stopTurn() {
     if (!activeChat) return; // chat still being created — nothing in flight to abort yet
+    // Mark `stop` the instant the abort is requested — the plan's "stop is marked when the
+    // client calls POST /v1/chat/abort itself" case (the terminal frame re-marks it idempotently
+    // when it lands a moment later).
+    activeTimelineRef.current?.stop();
     try {
       await abortTurn(activeChat.chatId, apiKey);
     } catch {
@@ -1003,6 +1012,12 @@ export default function ChatView({
     // chat-kind turns (tool-calling) keep the buffered path, polled via getChatTurnStatus.
     const streaming = kind === 'rp';
     let statusTimer: number | undefined;
+    // The turn-timing recorder (docs/plans/llm-stats-page-plan.md): one per RP turn, created only
+    // when the turn actually streams (a buffered chat-kind turn never fires onDelta/cleanup
+    // frames, so there'd be nothing to time). Marked from the existing SSE callbacks below,
+    // finalized once the awaited call resolves or throws. The Stop button reaches it through
+    // activeTimelineRef while the turn is in flight.
+    let timeline: TurnTimeline | undefined;
     if (!streaming) {
       statusTimer = window.setInterval(async () => {
         setTurnStatus(await getChatTurnStatus(chatId, apiKey));
@@ -1019,13 +1034,26 @@ export default function ChatView({
         setLiveReasoning(null);
         setLiveReasoningDone(false);
         setLiveReasoningTargetId(null);
-        await chatCompletion(
+        // Turn-timing recorder (docs/plans/llm-stats-page-plan.md): the RP turn is the unit of
+        // measurement — created here and marked from the SSE callbacks below. The Stop button
+        // reaches this instance through activeTimelineRef while the turn is in flight.
+        timeline = new TurnTimeline({ chatId, apiKey });
+        activeTimelineRef.current = timeline;
+        // The terminal frame upgrades this from the default 'ok' — an abort or a genuine
+        // upstream failure after streaming began both still end with [DONE] (so the await below
+        // resolves either way), and finalize reads this rather than the resolved value.
+        let streamOutcome: TimelineOutcome = 'ok';
+        // t0 — the instant before the API call, before any await.
+        timeline.dispatch();
+        const resolved = await chatCompletion(
           wireMessages,
           apiKey,
           chatId,
           attachments,
           images,
           (delta) => {
+            // Turn-timing recorder: every content delta marks the first/last-token window.
+            timeline!.onDelta();
             // Append into the placeholder pushed above. It is always the last message while
             // this turn is in flight — sending/swipingId guards block anything else appending —
             // so a tail-append is safe; the caller's post-turn refresh reconciles it either way.
@@ -1039,24 +1067,51 @@ export default function ChatView({
             // Abort/error terminal frame (client.ts's StreamingTerminalFrame). An abort is the
             // expected Stop outcome — the caller's refresh shows the true state. A genuine
             // upstream failure after streaming began surfaces as an error banner instead.
-            if (!frame.aborted) setError(frame.message);
+            if (frame.aborted) {
+              streamOutcome = 'aborted';
+              // The recorder's stop mark (plan Logic): the abort-flavored terminal frame is the
+              // same abort signal as the Stop button — idempotent, first one wins.
+              timeline!.stop();
+            } else {
+              streamOutcome = 'error';
+              setError(frame.message);
+            }
           },
           // In-stream cleanup (in-stream-cleanup-plan.md): the live pill states ride the same
           // SSE stream as the deltas, and the content patches splice into the placeholder in
           // onDelta-accumulated coordinates (the tail while this turn is in flight). Patches
           // never arrive for turn 1 — the server sends the composed text wholesale there, so
-          // there is no already-streamed raw text to correct in place.
-          handleCleanupStatus,
+          // there is no already-streamed raw text to correct in place. The recorder also reads
+          // every cleanup frame: a region's first in-flux opens its span, its first
+          // deployed/flagged closes it (plan Logic).
+          (frame) => {
+            timeline!.cleanupState(frame.region, frame.state);
+            handleCleanupStatus(frame);
+          },
           (frame) => applyCleanupPatch(frame),
           // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
           // the live buffer — deliberately separate from the content accumulation, so the
           // rendered content stays de-tagged (the server persists the same split).
           (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
         );
+        // Turn-timing recorder: the turn is final — emit last-token + display-settle and POST
+        // the record fire-and-forget. The resolved `id` is the SSE completion id (chatcmpl-*):
+        // the assistant message's real id is never carried on the stream (it's generated
+        // server-side, separate from the chunk id), so this is the best id available at
+        // finalize. It is unique per turn, which is all the unique-index dedupe needs; aborted/
+        // errored streams resolve normally, so the terminal frame's outcome above decides.
+        timeline.finalize(streamOutcome, resolved.id);
       } else {
         await chatCompletion(wireMessages, apiKey, chatId, attachments, images);
       }
     } catch (err) {
+      // Turn-timing recorder: the awaited call threw. 499 = Stop (the server aborted before
+      // anything streamed — nothing was persisted, so the recorder's no-message-id guard drops
+      // the record); anything else = genuine failure. Either way the elapsed-time record up to
+      // the throw is what the plan's "aborted/errored turns are still recorded" wants — except
+      // a pre-stream throw has no message id to attach, which is precisely the case the
+      // recorder's persist() deliberately drops.
+      timeline?.finalize(err instanceof ApiError && err.status === 499 ? 'aborted' : 'error');
       // A streamed turn that failed without ever streaming (bad request, auth, upstream error
       // before the first chunk, or a Stop abort) left its empty placeholder behind — drop it so
       // the list reflects reality (nothing was persisted). It's the only assistant message
@@ -1081,6 +1136,8 @@ export default function ChatView({
       // Reasoning: the live block collapses now (thinking → done); the caller's refresh swaps
       // the buffer for the canonical row's persisted `reasoning`.
       setLiveReasoningDone(true);
+      // The turn is no longer in flight — the Stop button must not mark a stale recorder.
+      activeTimelineRef.current = null;
     }
   }
 
@@ -1207,6 +1264,11 @@ export default function ChatView({
       // last settled location until the regenerated turn settles.
       setLocationImage({ locationId: prevImage.locationId, name: prevImage.name, definition: prevImage.definition, imageUrl: prevImage.imageUrl });
     }
+    // Turn-timing recorder (docs/plans/llm-stats-page-plan.md): one per regeneration, marked
+    // from the same SSE callbacks as a send. Declared outside the try so the catch can finalize
+    // it on a throw. Swipes and sends are mutually exclusive (UI + the sending/swipingId
+    // guards), so activeTimelineRef can hold only one recorder at a time.
+    let swipeTimeline: TurnTimeline | undefined;
     try {
       // RP chats stream a needs_regenerate swipe live (rp-streaming-plan.md): the request gains
       // stream: true and each delta appends into the regenerating message in place; prev/next
@@ -1228,12 +1290,23 @@ export default function ChatView({
         // zero-based buffer for this turn only) lands on top of/into the old swipe's text instead
         // of a clean one, visibly appending until the post-stream refresh overwrites it.
         setMessages((prev) => prev.map((m) => (m.messageId === messageId ? { ...m, content: '' } : m)));
+        // Turn-timing recorder: created here and marked from the SSE callbacks below, same as a
+        // send. The Stop button reaches this instance through activeTimelineRef.
+        swipeTimeline = new TurnTimeline({ chatId: activeChat.chatId, apiKey });
+        activeTimelineRef.current = swipeTimeline;
+        // The terminal frame upgrades this from the default 'ok' — abort and mid-stream failure
+        // both end with [DONE] (the await resolves either way), so finalize reads this.
+        let streamOutcome: TimelineOutcome = 'ok';
+        // t0 — the instant before the API call, before any await.
+        swipeTimeline.dispatch();
         result = await swipeMessage(
           activeChat.chatId,
           messageId,
           'next',
           apiKey,
           (delta) => {
+            // Turn-timing recorder: every content delta marks the first/last-token window.
+            swipeTimeline!.onDelta();
             setMessages((prev) =>
               prev.map((m) => (m.messageId === messageId ? { ...m, content: m.content + delta } : m)),
             );
@@ -1241,18 +1314,41 @@ export default function ChatView({
           (frame) => {
             // Abort is the expected Stop outcome (partial text was never recordSwipe'd — the
             // refresh below restores the true state); a genuine upstream failure shows a banner.
-            if (frame.aborted) abortedStream = true;
-            else setError(frame.message);
+            if (frame.aborted) {
+              abortedStream = true;
+              streamOutcome = 'aborted';
+              // The recorder's stop mark (plan Logic): the abort-flavored terminal frame is the
+              // same abort signal as the Stop button — idempotent, first one wins.
+              swipeTimeline!.stop();
+            } else {
+              streamOutcome = 'error';
+              setError(frame.message);
+            }
           },
           // In-stream cleanup (in-stream-cleanup-plan.md): same frames as a send, but a swipe
           // has no turn-1 special case — every delta (and patch) targets the regenerating
-          // message in place, so patches splice into that message by id.
-          handleCleanupStatus,
+          // message in place, so patches splice into that message by id. The recorder also reads
+          // every cleanup frame: a region's first in-flux opens its span, its first
+          // deployed/flagged closes it (plan Logic).
+          (frame) => {
+            swipeTimeline!.cleanupState(frame.region, frame.state);
+            handleCleanupStatus(frame);
+          },
           (frame) => applyCleanupPatch(frame, messageId),
           // Reasoning blocks (reasoning-blocks-plan.md): accumulate each reasoning delta into
           // the live buffer, separate from the content accumulation (content stays de-tagged).
           (frame: ReasoningFrame) => setLiveReasoning((prev) => (prev ?? '') + frame.delta),
         );
+        // Turn-timing recorder: the regeneration is final. Unlike the send path, the streamed
+        // return carries the real message id (an in-place regeneration keeps the message's id),
+        // so the record is joinable to the message. Note the unique index on message_id means a
+        // message regenerated more than once keeps only its first record — the plan's dedupe
+        // contract, an accepted coverage gap for repeated Reruns.
+        if ('message' in result) {
+          swipeTimeline.finalize(streamOutcome, result.message.messageId);
+        } else {
+          swipeTimeline.finalize(streamOutcome);
+        }
       } else {
         result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
       }
@@ -1282,6 +1378,10 @@ export default function ChatView({
       }
       // 'no_earlier_swipe': nothing to do — the prev button is already disabled at index 0.
     } catch (err) {
+      // Turn-timing recorder: the regeneration call threw (streamingSwipe only — prev/next
+      // cycling never creates a timeline). 499 = Stop before anything streamed; nothing was
+      // written either way, so the recorder's no-message-id guard drops the record.
+      swipeTimeline?.finalize(err instanceof ApiError && err.status === 499 ? 'aborted' : 'error');
       if (err instanceof ApiError && err.status === 499) {
         // The user hit Stop mid-regeneration — the server aborted the turn (POST
         // /v1/chat/abort) and the swipe route answers 499 for it, same contract as the main
@@ -1304,6 +1404,10 @@ export default function ChatView({
       // Reasoning (reasoning-blocks-plan.md): the live block collapses now; the refresh in the
       // success branch above swaps the buffer for the canonical row's persisted `reasoning`.
       setLiveReasoningDone(true);
+      // The regeneration is no longer in flight — the Stop button must not mark a stale
+      // recorder (safe: sends and swipes are mutually exclusive, so this can't clear a
+      // send's live recorder).
+      activeTimelineRef.current = null;
     }
   }
 

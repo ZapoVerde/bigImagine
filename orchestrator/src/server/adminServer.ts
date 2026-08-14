@@ -2565,3 +2565,162 @@ export async function getLocationsAdmin(db: PostgresClient): Promise<LocationAdm
   return rows;
 }
 
+
+// --- LLM Stats page data reads (docs/plans/llm-stats-page-plan.md) ---
+// The Usage & Cost and Timing sections' row sources. Both are cross-user admin reads via
+// db.withSystemScope — llm_calls is deliberately RLS-exempt (the gate's own household-wide cap
+// check needs to sum across users, 0035), and turn_display_metrics is user_scoped but the
+// household's own stats page needs the same roster-every-user shape getLocationsAdmin already
+// uses. Bounded lookback (max 365 days, default 30) keeps both comfortably small at household
+// scale — no pagination needed (plan Edge Cases).
+
+export interface LlmCallStatRow {
+  callId: string;
+  createdAt: string; // ISO
+  userId: string;
+  kind: 'chat' | 'agent_routine' | 'system';
+  taskId: string;
+  jobId: string | null;
+  outcome: 'ok' | 'refused' | 'error';
+  /** The LlmProfile.kind that served the call, or '(pre-tracking)' for rows written before
+   *  migration 0101 — the numeric columns stay null for those rows, excluded from sums/averages,
+   *  not treated as zero. */
+  providerKind: string;
+  model: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+  costUsd: number | null;
+  durationMs: number | null;
+  attempt: number;
+}
+
+interface LlmCallRowShape {
+  call_id: string;
+  created_at: Date;
+  user_id: string;
+  kind: 'chat' | 'agent_routine' | 'system';
+  task_id: string;
+  job_id: string | null;
+  outcome: 'ok' | 'refused' | 'error';
+  provider_kind: string | null;
+  model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  cache_read_tokens: number | null;
+  cost_usd: string | null; // numeric columns come back as strings from node-postgres
+  duration_ms: number | null;
+  attempt: number;
+}
+
+const PRE_TRACKING = '(pre-tracking)';
+
+export async function listLlmStats(db: PostgresClient, days: number): Promise<LlmCallStatRow[]> {
+  const rows = await db.withSystemScope((session) =>
+    session.query<LlmCallRowShape>(
+      `select call_id, created_at, user_id, kind, task_id, job_id, outcome, provider_kind, model,
+              prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, cost_usd, duration_ms, attempt
+       from llm_calls
+       where created_at > now() - ($1 || ' days')::interval
+       order by created_at desc`,
+      [days],
+    ),
+  );
+  return rows.map((r) => ({
+    callId: r.call_id,
+    createdAt: r.created_at.toISOString(),
+    userId: r.user_id,
+    kind: r.kind,
+    taskId: r.task_id,
+    jobId: r.job_id,
+    outcome: r.outcome,
+    providerKind: r.provider_kind ?? PRE_TRACKING,
+    model: r.model ?? PRE_TRACKING,
+    promptTokens: r.prompt_tokens,
+    completionTokens: r.completion_tokens,
+    totalTokens: r.total_tokens,
+    cacheReadTokens: r.cache_read_tokens,
+    costUsd: r.cost_usd === null ? null : Number(r.cost_usd),
+    durationMs: r.duration_ms,
+    attempt: r.attempt,
+  }));
+}
+
+export interface TurnDisplayMetricRow {
+  turnDisplayMetricId: string;
+  userId: string;
+  chatId: string;
+  messageId: string;
+  dispatchAt: string; // ISO
+  firstTokenMs: number | null;
+  lastTokenMs: number | null;
+  displayLandMs: number | null;
+  displaySettleMs: number | null;
+  headerStartMs: number | null;
+  headerStopMs: number | null;
+  bodyStartMs: number | null;
+  bodyStopMs: number | null;
+  footerStartMs: number | null;
+  footerStopMs: number | null;
+  outcome: 'ok' | 'aborted' | 'error';
+  terminatedAtMs: number | null;
+  createdAt: string; // ISO
+}
+
+interface TurnDisplayMetricRowShape {
+  turn_display_metric_id: string;
+  user_id: string;
+  chat_id: string;
+  message_id: string;
+  dispatch_at: Date;
+  first_token_ms: number | null;
+  last_token_ms: number | null;
+  display_land_ms: number | null;
+  display_settle_ms: number | null;
+  header_start_ms: number | null;
+  header_stop_ms: number | null;
+  body_start_ms: number | null;
+  body_stop_ms: number | null;
+  footer_start_ms: number | null;
+  footer_stop_ms: number | null;
+  outcome: 'ok' | 'aborted' | 'error';
+  terminated_at_ms: number | null;
+  created_at: Date;
+}
+
+export async function listTurnDisplayStats(db: PostgresClient, days: number): Promise<TurnDisplayMetricRow[]> {
+  const rows = await db.withSystemScope((session) =>
+    session.query<TurnDisplayMetricRowShape>(
+      `select turn_display_metric_id, user_id, chat_id, message_id, dispatch_at,
+              first_token_ms, last_token_ms, display_land_ms, display_settle_ms,
+              header_start_ms, header_stop_ms, body_start_ms, body_stop_ms,
+              footer_start_ms, footer_stop_ms, outcome, terminated_at_ms, created_at
+       from turn_display_metrics
+       where created_at > now() - ($1 || ' days')::interval
+       order by created_at desc`,
+      [days],
+    ),
+  );
+  return rows.map((r) => ({
+    turnDisplayMetricId: r.turn_display_metric_id,
+    userId: r.user_id,
+    chatId: r.chat_id,
+    messageId: r.message_id,
+    dispatchAt: r.dispatch_at.toISOString(),
+    firstTokenMs: r.first_token_ms,
+    lastTokenMs: r.last_token_ms,
+    displayLandMs: r.display_land_ms,
+    displaySettleMs: r.display_settle_ms,
+    headerStartMs: r.header_start_ms,
+    headerStopMs: r.header_stop_ms,
+    bodyStartMs: r.body_start_ms,
+    bodyStopMs: r.body_stop_ms,
+    footerStartMs: r.footer_start_ms,
+    footerStopMs: r.footer_stop_ms,
+    outcome: r.outcome,
+    terminatedAtMs: r.terminated_at_ms,
+    createdAt: r.created_at.toISOString(),
+  }));
+}

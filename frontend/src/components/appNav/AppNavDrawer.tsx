@@ -22,6 +22,7 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
   { type: 'locations', label: 'Locations', icon: '📍' },
   { type: 'lorebooks', label: 'Lorebooks', icon: '📖' },
+  { type: 'stats', label: 'Stats', icon: '📊' },
   { type: 'settings', label: 'Settings', icon: '⚙️' },
 ];
 

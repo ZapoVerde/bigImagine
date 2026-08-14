@@ -28,6 +28,7 @@ import ReviewPanelView from './views/ReviewPanelView';
 import RagView from './views/RagView';
 import LorebooksView from './views/LorebooksView';
 import SettingsView from './views/SettingsView';
+import StatsView from './views/StatsView';
 
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 
@@ -284,6 +285,7 @@ export default function App() {
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}
             {tab.type === 'locations' && <LocationsView />}
+            {tab.type === 'stats' && <StatsView />}
           </div>
         ))}
       </div>

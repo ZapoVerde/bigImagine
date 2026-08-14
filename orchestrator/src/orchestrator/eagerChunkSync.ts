@@ -88,7 +88,7 @@ async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
   if (profileName) {
     const profile = await deps.llmConnections.resolveByName(profileName);
     if (profile) {
-      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
+      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
     } else {
       log.error(`eager chunk: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
     }

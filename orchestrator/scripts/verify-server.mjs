@@ -614,12 +614,19 @@ function createFakePool() {
   // finalizeCleanupResult's FOR UPDATE content/active-swipe read on the no-change path — the
   // send path's assistant message id is generated inside the request, so it can't be seeded.
   let resolveCleanupMessage;
+  // GET /v1/admin/llm-stats (adminServer.ts listLlmStats): seeded rows shaped like the query's
+  // snake_case result columns (cost_usd as a string, exactly what node-postgres returns for a
+  // numeric column), plus a recorder for the `days` lookback param the clamp assertions read.
+  const llmStatsRows = [];
+  const llmStatsDaysRead = [];
   return {
     inserts,
     characters,
     slotsByPreset,
     cleanupMessages,
     cleanupJobs,
+    llmStatsRows,
+    llmStatsDaysRead,
     set resolveCleanupMessage(fn) {
       resolveCleanupMessage = fn;
     },
@@ -778,6 +785,13 @@ function createFakePool() {
               });
             }
             return { rows: [] };
+          }
+          // GET /v1/admin/llm-stats (adminServer.ts listLlmStats): the withSystemScope read over
+          // llm_calls — params: [days]. Serves the seeded rows (already in created_at desc order)
+          // and records the days value so the clamp assertions below can see what reached the DB.
+          if (sql.includes('from llm_calls') && sql.includes('order by created_at desc')) {
+            llmStatsDaysRead.push(params[0]);
+            return { rows: llmStatsRows };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
@@ -1465,6 +1479,87 @@ try {
 } finally {
   globalThis.fetch = originalFetchTestFail;
 }
+
+// --- Admin llm-stats route (docs/plans/llm-stats-page-plan.md — the Usage & Cost section) ---
+// GET /v1/admin/llm-stats reads llm_calls (adminServer.ts listLlmStats). The fixture seeds two
+// rows: one from before the 0101 migration (provider_kind/model null -> '(pre-tracking)') and one
+// tracked with a numeric cost_usd (returned as a string by node-postgres, so the row proves the
+// Number() cast in the mapper).
+pool.llmStatsRows.push(
+  {
+    call_id: 'call-pre',
+    created_at: new Date('2026-08-10T10:00:00.000Z'),
+    user_id: 'u-pre',
+    kind: 'chat',
+    task_id: 'task-pre',
+    job_id: null,
+    outcome: 'ok',
+    provider_kind: null,
+    model: null,
+    prompt_tokens: 100,
+    completion_tokens: 50,
+    total_tokens: 150,
+    cache_read_tokens: null,
+    cost_usd: null,
+    duration_ms: 1200,
+    attempt: 0,
+  },
+  {
+    call_id: 'call-tracked',
+    created_at: new Date('2026-08-13T10:00:00.000Z'),
+    user_id: 'u-tracked',
+    kind: 'chat',
+    task_id: 'task-tracked',
+    job_id: null,
+    outcome: 'ok',
+    provider_kind: 'openai-compatible',
+    model: 'deepseek-v4-flash',
+    prompt_tokens: 200,
+    completion_tokens: 80,
+    total_tokens: 280,
+    cache_read_tokens: 40,
+    cost_usd: '0.00123',
+    duration_ms: 900,
+    attempt: 0,
+  },
+);
+
+const llmStatsNoAuthRes = await fetch(`${base}/v1/admin/llm-stats`);
+assert(llmStatsNoAuthRes.status === 401, 'GET /v1/admin/llm-stats with no auth header returns 401');
+
+const llmStatsRes = await fetch(`${base}/v1/admin/llm-stats`, { headers: { authorization: 'Bearer the-admin-key' } });
+const llmStatsBody = await llmStatsRes.json();
+assert(llmStatsRes.status === 200 && Array.isArray(llmStatsBody.calls) && llmStatsBody.calls.length === 2, 'GET /v1/admin/llm-stats with the admin key returns the seeded rows');
+const preTracked = llmStatsBody.calls.find((c) => c.callId === 'call-pre');
+assert(
+  preTracked && preTracked.providerKind === '(pre-tracking)' && preTracked.model === '(pre-tracking)' && preTracked.costUsd === null,
+  'a pre-migration row surfaces as "(pre-tracking)" provider/model with no cost — never a fabricated value',
+);
+const tracked = llmStatsBody.calls.find((c) => c.callId === 'call-tracked');
+assert(
+  tracked && tracked.providerKind === 'openai-compatible' && tracked.model === 'deepseek-v4-flash',
+  'a post-migration row carries its real provider kind and model',
+);
+assert(
+  tracked && tracked.costUsd === 0.00123 && typeof tracked.costUsd === 'number',
+  'cost_usd comes back as a number — the numeric-as-string DB value is Number()-cast in the mapper',
+);
+assert(
+  tracked && tracked.cacheReadTokens === 40 && tracked.createdAt === '2026-08-13T10:00:00.000Z',
+  'token columns and the ISO timestamp survive the row mapping untouched',
+);
+
+// days is a bounded lookback: default 30, clamped to [1, 365] before it ever reaches the query.
+pool.llmStatsDaysRead.length = 0;
+await fetch(`${base}/v1/admin/llm-stats`, { headers: { authorization: 'Bearer the-admin-key' } });
+await fetch(`${base}/v1/admin/llm-stats?days=9999`, { headers: { authorization: 'Bearer the-admin-key' } });
+await fetch(`${base}/v1/admin/llm-stats?days=0`, { headers: { authorization: 'Bearer the-admin-key' } });
+await fetch(`${base}/v1/admin/llm-stats?days=-7`, { headers: { authorization: 'Bearer the-admin-key' } });
+await fetch(`${base}/v1/admin/llm-stats?days=banana`, { headers: { authorization: 'Bearer the-admin-key' } });
+assert(
+  pool.llmStatsDaysRead.join(',') === '30,365,1,1,30',
+  `the days lookback reaches the query clamped into [1, 365] (got ${pool.llmStatsDaysRead.join(',')})`,
+);
 
 // --- Admin image-connections routes (endpoint.md §3 — the Connections tab's image section) ---
 

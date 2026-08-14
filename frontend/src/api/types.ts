@@ -1154,3 +1154,95 @@ export type ApplyCharacterToChatResult =
 export type ApplyPromptStackToChatResult =
   | { applied: false; reason: string }
   | { applied: true; systemText: string; greetingInserted: boolean };
+
+// docs/plans/llm-stats-page-plan.md — the Stats view's wire shapes (hand-mirrored from
+// orchestrator/src/server/adminServer.ts's row mappers, same file-noted-by-hand convention as
+// the rest of this file).
+
+export type LlmCallKind = 'chat' | 'agent_routine' | 'system';
+export type LlmCallOutcome = 'ok' | 'refused' | 'error';
+export type TurnDisplayOutcome = 'ok' | 'aborted' | 'error';
+
+/** GET /v1/admin/llm-stats row — adminServer.ts listLlmStats's map result. providerKind/model are
+ *  '(pre-tracking)' for rows written before migration 0101; every numeric column is null for
+ *  those rows, and the Stats view excludes nulls from sums/averages rather than treating them as
+ *  zero. costUsd is already Number()-cast server-side (node-postgres returns numerics as text). */
+export interface LlmCallStatRow {
+  callId: string;
+  createdAt: string; // ISO
+  userId: string;
+  kind: LlmCallKind;
+  taskId: string;
+  jobId: string | null;
+  outcome: LlmCallOutcome;
+  providerKind: string;
+  model: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+  costUsd: number | null;
+  durationMs: number | null;
+  attempt: number;
+}
+
+/** GET /v1/admin/turn-display-stats row — camelCase mirror of migration 0102's columns, one per
+ *  RP turn. Every *_ms field is elapsed milliseconds since dispatch_at, measured client-side. */
+export interface TurnDisplayMetricRow {
+  turnDisplayMetricId: string;
+  userId: string;
+  chatId: string;
+  messageId: string;
+  dispatchAt: string; // ISO
+  firstTokenMs: number | null;
+  lastTokenMs: number | null;
+  displayLandMs: number | null;
+  displaySettleMs: number | null;
+  headerStartMs: number | null;
+  headerStopMs: number | null;
+  bodyStartMs: number | null;
+  bodyStopMs: number | null;
+  footerStartMs: number | null;
+  footerStopMs: number | null;
+  outcome: TurnDisplayOutcome;
+  terminatedAtMs: number | null;
+  createdAt: string; // ISO
+}
+
+/** POST /v1/turn-display-metrics body — the optional *_ms fields are omitted entirely when never
+ *  reached (an abort mid-turn), never sent as zeros. */
+export interface TurnDisplayMetricsInput {
+  chatId: string;
+  messageId: string;
+  dispatchAt: string; // ISO
+  firstTokenMs?: number;
+  lastTokenMs?: number;
+  displayLandMs?: number;
+  displaySettleMs?: number;
+  headerStartMs?: number;
+  headerStopMs?: number;
+  bodyStartMs?: number;
+  bodyStopMs?: number;
+  footerStartMs?: number;
+  footerStopMs?: number;
+  outcome: TurnDisplayOutcome;
+  terminatedAtMs?: number;
+}
+
+/** Client-only: the window CustomEvent detail turnTimeline.ts dispatches at each milestone
+ *  ('bigimagine:turn-event') — listenable in devtools, same spirit as Loggeryze's
+ *  window.loggeryze.time(). messageId is null until the first delta lands. */
+export interface TurnTimelineEventDetail {
+  messageId: string | null;
+  event:
+    | 'dispatch'
+    | 'stop'
+    | 'first-token'
+    | 'last-token'
+    | 'cleanup-start'
+    | 'cleanup-stop'
+    | 'display-land'
+    | 'display-settle';
+  region?: 'header' | 'body' | 'footer';
+  tsMs: number;
+}

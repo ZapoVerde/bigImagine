@@ -1,0 +1,119 @@
+.stat-bar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.stat-bar-list-empty {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-sm);
+  padding: 12px 0;
+}
+
+.stat-bar-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stat-bar-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.stat-bar-item-label {
+  font-size: 0.92rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stat-bar-item-value {
+  font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stat-bar-item-sublabel {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-faint);
+}
+
+.stat-bar-track {
+  display: flex;
+  height: 14px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--color-border-subtle);
+}
+
+.stat-bar-seg {
+  height: 100%;
+  transition: width 200ms ease;
+}
+
+/* Data palette — deliberately theme-independent: outcome colors must read the same in both
+   themes, like error/success states elsewhere in the app. */
+.stat-bar-seg-ok {
+  background: #3fb27f;
+}
+
+.stat-bar-seg-error {
+  background: #d05555;
+}
+
+.stat-bar-seg-refused {
+  background: #b07a3a;
+}
+
+.stat-bar-seg-aborted {
+  background: #8a6fd0;
+}
+
+.stat-bar-seg-other {
+  background: #5b8db8;
+}
+
+.stat-bar-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-faint);
+}
+
+.stat-bar-legend-entry {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.stat-bar-legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.stat-bar-legend-dot.stat-bar-seg-ok {
+  background: #3fb27f;
+}
+
+.stat-bar-legend-dot.stat-bar-seg-error {
+  background: #d05555;
+}
+
+.stat-bar-legend-dot.stat-bar-seg-refused {
+  background: #b07a3a;
+}
+
+.stat-bar-legend-dot.stat-bar-seg-aborted {
+  background: #8a6fd0;
+}
+
+.stat-bar-legend-dot.stat-bar-seg-other {
+  background: #5b8db8;
+}

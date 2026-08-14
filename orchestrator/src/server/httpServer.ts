@@ -248,6 +248,8 @@ import {
   handleAdminImageConnectionRoutes,
 } from './handleAdminConnections.js';
 import { handleChatCompletions } from './handleChatCompletions.js';
+import { handleTurnDisplayMetrics } from './handleTurnDisplayMetrics.js';
+import { handleLlmStatsGet, handleTurnDisplayStatsGet } from './handleAdminStats.js';
 import { buildModelsList } from './openai.js';
 import { handleLocationImageBroken } from './locationImages.js';
 
@@ -509,6 +511,10 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/cleanup/run', run: async (req, res, deps) => { await handleCleanupRunNow(req, res, deps); } },
   { method: 'POST', path: '/v1/chat/completions', run: async (req, res, deps) => { await handleChatCompletions(req, res, deps); } },
   { method: 'POST', path: '/v1/chat/abort', run: async (req, res, deps) => { await handleChatAbort(req, res, deps); } },
+  // Client-reported RP turn display timing (llm-stats-page-plan.md Timing section) — written by
+  // every regular chat turn, so regular chat auth, not admin (the same gate /v1/chat/completions
+  // uses). Fire-and-forget from the client; a failed write never fails the turn.
+  { method: 'POST', path: '/v1/turn-display-metrics', run: async (req, res, deps) => { await handleTurnDisplayMetrics(req, res, deps); } },
   { method: 'POST', path: '/v1/attachments/extract', run: async (req, res, deps) => { await handleUploadAttachment(req, res, deps); } },
 
   // ---- Characters ----
@@ -596,6 +602,15 @@ const routes: Route[] = [
   { method: '*', family: ['/v1/admin/lorebooks', '/v1/admin/lorebook-entries'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => {
       await handleAdminLorebookRoutes(req, res, deps, new URL(req.url!, 'http://placeholder'));
     }) },
+  // Stats page reads (llm-stats-page-plan.md): Usage & Cost over llm_calls and Timing over
+  // turn_display_metrics. Both read across every user via db.withSystemScope, admin-gated like
+  // every other /v1/admin/* route; `days` (default 30, clamped to 365) bounds the lookback.
+  // Family (not exact-path) entries, the same convention as the lorebooks routes below: the
+  // route matcher compares the raw req.url against an exact path, so a `?days=` query string
+  // would 404 an exact-path entry — the family matcher's explicit `url.startsWith(f + '?')`
+  // case is how every query-param endpoint in this table stays reachable.
+  { method: 'GET', family: ['/v1/admin/llm-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLlmStatsGet(req, res, deps); }) },
+  { method: 'GET', family: ['/v1/admin/turn-display-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTurnDisplayStatsGet(req, res, deps); }) },
 ];
 
 async function handleRequest(

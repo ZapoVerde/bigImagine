@@ -166,7 +166,7 @@ async function main(): Promise<void> {
   // chat's own per-connection override is the one other place a *new* LlmProvider gets
   // constructed at runtime (server/httpServer.ts) — that call site gates its own throwaway
   // instance the same way, since this wrap can't reach something built after boot.
-  const llm = createGatedLlmProvider(createLlmProviderForProfile(activeProfile), db, settings);
+  const llm = createGatedLlmProvider(createLlmProviderForProfile(activeProfile), db, settings, activeProfile);
   const embeddings = createRetryingEmbeddingProvider(
     createEmbeddingProvider({ ...process.env, BIGBRAIN_EMBEDDINGS_API_KEY: voyageKey ?? '' }),
     settings,

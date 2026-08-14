@@ -269,7 +269,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
   if (profileName) {
     const profile = await deps.llmConnections.resolveByName(profileName);
     if (profile) {
-      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
+      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
     } else {
       log.error(`chat-memory sync: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
     }

@@ -51,9 +51,14 @@ function createFakePool(jobs) {
           }
 
           if (sql.includes('insert into llm_calls')) {
-            const [userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt] =
-              params;
-            llmCalls.push({ userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt });
+            const [
+              userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
+              providerKind, model, cacheReadTokens, costUsd,
+            ] = params;
+            llmCalls.push({
+              userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
+              providerKind, model, cacheReadTokens, costUsd,
+            });
             return { rows: [] };
           }
 
@@ -136,10 +141,28 @@ function createFakeStreamingBase(scripts) {
         calls[calls.length - 1].deltas.push(step);
         onDelta(step);
       }
-      return { message: { role: 'assistant', content: text }, toolCalls: [], usage: { promptTokens: 5, completionTokens: text.length, totalTokens: 5 + text.length } };
+      return { message: { role: 'assistant', content: text }, toolCalls: [], usage: { promptTokens: 5, completionTokens: text.length, totalTokens: 5 + text.length, cacheReadTokens: 2 } };
     },
   };
 }
+
+/** A fake resolved LlmProfile (io/llm/profiles.ts shape) with price tiers, so ok/refused rows can
+ *  be asserted to carry providerKind/model/costUsd (docs/plans/llm-stats-page-plan.md). One shared
+ *  instance for every construction below — the gate must never mutate the profile it is handed. */
+function createFakeProfile() {
+  return {
+    kind: 'openai-compatible',
+    model: 'fake-model',
+    apiKey: 'x',
+    baseUrl: 'https://fake.example/v1',
+    supportsVision: false,
+    priceInputPerMillion: 1,
+    priceOutputPerMillion: 2,
+    priceCacheHitPerMillion: 0.5,
+  };
+}
+
+const PROFILE = createFakeProfile();
 
 // --- no call context at all -> throws before ever reaching the base provider ---
 {
@@ -148,7 +171,7 @@ function createFakeStreamingBase(scripts) {
   const db = createPostgresClient(pool);
   const settings = createFakeSettings();
   const base = createFakeBase([{ message: { role: 'assistant', content: 'hi' }, toolCalls: [] }]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   let threw = false;
   try {
@@ -169,13 +192,21 @@ function createFakeStreamingBase(scripts) {
   const base = createFakeBase([
     { message: { role: 'assistant', content: 'hi' }, toolCalls: [], usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   const turn = await runWithCallContext({ taskId: 'chat-1', kind: 'chat', userId: 'u1' }, () =>
     gated.complete([{ role: 'user', content: 'hi' }], []),
   );
   assert(turn.message.content === 'hi', 'a chat-kind call goes through even with agent_routines_enabled off');
   assert(pool.llmCalls.length === 1 && pool.llmCalls[0].outcome === 'ok' && pool.llmCalls[0].totalTokens === 15, 'a chat-kind call is logged with its usage');
+  assert(
+    pool.llmCalls[0].providerKind === 'openai-compatible' && pool.llmCalls[0].model === 'fake-model',
+    'an ok row is attributed with the resolved profile\'s provider kind and model',
+  );
+  assert(
+    pool.llmCalls[0].cacheReadTokens === null && Math.abs(pool.llmCalls[0].costUsd - 0.00002) < 1e-12,
+    `an ok row without cache hits prices the whole prompt at the input rate (cost ${pool.llmCalls[0].costUsd})`,
+  );
 }
 
 // --- kind: agent_routine, household switch off -> refused pre-flight, base provider never called ---
@@ -185,7 +216,7 @@ function createFakeStreamingBase(scripts) {
   const db = createPostgresClient(pool);
   const settings = createFakeSettings({ agent_routines_enabled: 'false' });
   const base = createFakeBase([{ message: { role: 'assistant', content: 'should not be reached' }, toolCalls: [] }]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   let threw = false;
   try {
@@ -195,6 +226,10 @@ function createFakeStreamingBase(scripts) {
   }
   assert(threw, 'agent_routine call is refused when agent_routines_enabled is off');
   assert(pool.llmCalls.length === 1 && pool.llmCalls[0].outcome === 'refused', 'the refusal is still logged (an audit trail entry, not silently dropped)');
+  assert(
+    pool.llmCalls[0].providerKind === 'openai-compatible' && pool.llmCalls[0].model === 'fake-model' && pool.llmCalls[0].costUsd === null,
+    'a refused row carries provider/model attribution but never a usage-derived cost',
+  );
 }
 
 // --- kind: agent_routine, enabled, under caps -> succeeds and is logged ---
@@ -206,7 +241,7 @@ function createFakeStreamingBase(scripts) {
   const base = createFakeBase([
     { message: { role: 'assistant', content: 'did the thing' }, toolCalls: [], usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   const turn = await runWithCallContext({ taskId: 'job-2', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
   assert(turn.message.content === 'did the thing', 'an agent_routine call under both caps succeeds');
@@ -223,7 +258,7 @@ function createFakeStreamingBase(scripts) {
     { message: { role: 'assistant', content: 'run 1' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
     { message: { role: 'assistant', content: 'run 2' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   await runWithCallContext({ taskId: 'job-3', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
   assert(jobs.get('job-3').status === 'active', 'still active after the first of two allowed calls');
@@ -254,7 +289,7 @@ function createFakeStreamingBase(scripts) {
     { message: { role: 'assistant', content: 'a' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
     { message: { role: 'assistant', content: 'b' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   await runWithCallContext({ taskId: 'job-4', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
   await runWithCallContext({ taskId: 'job-5', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
@@ -271,7 +306,7 @@ function createFakeStreamingBase(scripts) {
   const db = createPostgresClient(pool);
   const settings = createFakeSettings({ llm_gate_max_retries: '0' });
   const base = createFakeBase([new Error('upstream API exploded')]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   let threw = false;
   try {
@@ -295,7 +330,7 @@ function createFakeStreamingBase(scripts) {
     new Error('fetch failed'),
     { message: { role: 'assistant', content: 'third time lucky' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   const turn = await runWithCallContext({ taskId: 'chat-3', kind: 'chat', userId: 'u1' }, () =>
     gated.complete([{ role: 'user', content: 'hi' }], []),
@@ -326,7 +361,7 @@ function createFakeStreamingBase(scripts) {
     new Error('OpenAI-compatible API error 401: invalid api key'),
     { message: { role: 'assistant', content: 'should never be reached' }, toolCalls: [] },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   let threw = false;
   try {
@@ -355,7 +390,7 @@ function createFakeStreamingBase(scripts) {
     new Error('fetch failed'),
     { message: { role: 'assistant', content: 'ok' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   await runWithCallContext({ taskId: 'job-6', kind: 'agent_routine', userId: 'u1' }, () => gated.complete([{ role: 'user', content: 'go' }], []));
   assert(
@@ -378,7 +413,7 @@ function createFakeStreamingBase(scripts) {
     [new Error('fetch failed')], // attempt 1: dies before any delta
     ['third time lucky'],        // attempt 2: succeeds
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
   assert(typeof gated.completeStream === 'function', 'gated provider mirrors completeStream when the base has one');
 
   const deltas = [];
@@ -391,6 +426,11 @@ function createFakeStreamingBase(scripts) {
   assert(
     pool.llmCalls.map((c) => c.outcome).join(',') === 'error,error,ok',
     'the two failed attempts are logged as error, the final one as ok',
+  );
+  assert(pool.llmCalls[2].cacheReadTokens === 2, 'an ok streaming row carries the provider-reported cache-read token count');
+  assert(
+    Math.abs(pool.llmCalls[2].costUsd - 0.000036) < 1e-12,
+    `cached tokens are priced at the cache tier, the rest at input/output (cost ${pool.llmCalls[2].costUsd})`,
   );
 }
 
@@ -405,7 +445,7 @@ function createFakeStreamingBase(scripts) {
     ['partial text ', new Error('connection dropped mid-stream')],
     ['should never be reached'],
   ]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
 
   let threw = false;
   const deltas = [];
@@ -431,7 +471,7 @@ function createFakeStreamingBase(scripts) {
   const db = createPostgresClient(pool);
   const settings = createFakeSettings({ agent_routines_enabled: 'true' });
   const base = createFakeBase([{ message: { role: 'assistant', content: 'hi' }, toolCalls: [] }]);
-  const gated = createGatedLlmProvider(base, db, settings);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
   assert(gated.completeStream === undefined, 'gated provider has no completeStream when the base lacks one');
 }
 

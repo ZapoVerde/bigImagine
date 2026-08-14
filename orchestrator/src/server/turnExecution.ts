@@ -106,7 +106,7 @@ export async function resolveTurnLlm(
       // gated the same as deps.llm (index.ts wraps that one once, at boot), since a call through
       // an override is exactly as real a call as one through the household's active connection
       // (bb_principles.md §14 doesn't carve out an exception for "which connection").
-      turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings);
+      turnLlm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
       turnDefaultModel = profile.model;
       // The override's own profile already carries the connection's prices — no second read.
       turnPrice = toTurnPrice(profile);

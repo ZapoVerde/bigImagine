@@ -38,6 +38,7 @@ import type {
   ChatLegibilitySettings,
   ChatLegibilitySettingsPatch,
   ImportedCharacter,
+  LlmCallStatRow,
   LlmConnectionSummary,
   ModelProvidersResult,
   NotificationSettings,
@@ -48,6 +49,8 @@ import type {
   ScreenLockSettings,
   StagedAttachment,
   StoredChatMessage,
+  TurnDisplayMetricRow,
+  TurnDisplayMetricsInput,
   UpdateConnectionInput,
   UpdateImageConnectionInput,
 } from './types';
@@ -768,6 +771,30 @@ export async function adminTestConnection(id: string, adminKey: string | null): 
 export async function adminListImageConnections(adminKey: string | null): Promise<ImageConnectionSummary[]> {
   const body = await jsonRequest<{ connections: ImageConnectionSummary[] }>('/v1/admin/image-connections', adminKey);
   return body.connections;
+}
+
+/** GET /v1/admin/llm-stats?days=N — the Stats view's Usage & Cost read (llm-stats-page-plan.md).
+ *  days is a bounded lookback (server clamps to [1, 365]); the view defaults to 30 like the
+ *  endpoint's own default. */
+export async function adminListLlmStats(adminKey: string | null, days = 30): Promise<LlmCallStatRow[]> {
+  const body = await jsonRequest<{ calls: LlmCallStatRow[] }>(`/v1/admin/llm-stats?days=${days}`, adminKey);
+  return body.calls;
+}
+
+/** GET /v1/admin/turn-display-stats?days=N — the Stats view's Timing read; same days semantics. */
+export async function adminListTurnDisplayStats(adminKey: string | null, days = 30): Promise<TurnDisplayMetricRow[]> {
+  const body = await jsonRequest<{ turns: TurnDisplayMetricRow[] }>(`/v1/admin/turn-display-stats?days=${days}`, adminKey);
+  return body.turns;
+}
+
+/** POST /v1/turn-display-metrics — fire-and-forget timing record, regular chat auth (not admin).
+ *  A duplicate message_id resolves as { recorded: false } (idempotent no-op); both shapes mean
+ *  "recorded or already known", never an error the recorder has to interpret. */
+export async function postTurnDisplayMetrics(
+  input: TurnDisplayMetricsInput,
+  apiKey: string | null,
+): Promise<{ recorded: boolean }> {
+  return jsonRequest<{ recorded: boolean }>('/v1/turn-display-metrics', apiKey, { method: 'POST', body: input });
 }
 
 export function adminCreateImageConnection(
