@@ -843,7 +843,9 @@
 }
 
 .markdown-content q em,
-.markdown-content q i {
+.markdown-content q i,
+.markdown-content q strong,
+.markdown-content q b {
   color: inherit;
 }
 
