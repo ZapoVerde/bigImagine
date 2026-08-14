@@ -1166,7 +1166,10 @@ export type TurnDisplayOutcome = 'ok' | 'aborted' | 'error';
 /** GET /v1/admin/llm-stats row — adminServer.ts listLlmStats's map result. providerKind/model are
  *  '(pre-tracking)' for rows written before migration 0101; every numeric column is null for
  *  those rows, and the Stats view excludes nulls from sums/averages rather than treating them as
- *  zero. costUsd is already Number()-cast server-side (node-postgres returns numerics as text). */
+ *  zero. costUsd is already Number()-cast server-side (node-postgres returns numerics as text).
+ *  callLabel (migration 0103) is the finer one-level-deeper label for 'system'-kind calls
+ *  (docs/plans/llm-call-label-breakdown-plan.md): null for kind 'chat'/'agent_routine' rows,
+ *  pre-0103 rows, and any unlabeled system call — passed through untouched, never substituted. */
 export interface LlmCallStatRow {
   callId: string;
   createdAt: string; // ISO
@@ -1177,6 +1180,7 @@ export interface LlmCallStatRow {
   outcome: LlmCallOutcome;
   providerKind: string;
   model: string;
+  callLabel: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
   totalTokens: number | null;

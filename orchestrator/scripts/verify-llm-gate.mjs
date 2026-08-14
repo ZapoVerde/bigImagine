@@ -12,7 +12,7 @@
 // 'error' rows, not just 'ok').
 
 import { createGatedLlmProvider } from '../dist/io/llm/llmGate.js';
-import { runWithCallContext } from '../dist/io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../dist/io/llm/callContext.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 
 function assert(cond, message) {
@@ -53,11 +53,11 @@ function createFakePool(jobs) {
           if (sql.includes('insert into llm_calls')) {
             const [
               userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
-              providerKind, model, cacheReadTokens, costUsd,
+              providerKind, model, cacheReadTokens, costUsd, callLabel,
             ] = params;
             llmCalls.push({
               userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
-              providerKind, model, cacheReadTokens, costUsd,
+              providerKind, model, cacheReadTokens, costUsd, callLabel,
             });
             return { rows: [] };
           }
@@ -181,6 +181,44 @@ const PROFILE = createFakeProfile();
   }
   assert(threw, 'complete() with no call context throws (bb_principles.md §14)');
   assert(pool.llmCalls.length === 0, 'no llm_calls row is written for a call outside any context');
+}
+
+// --- withCallLabel (docs/plans/llm-call-label-breakdown-plan.md): a call made inside the scope
+// logs the label; a call in the same outer context but outside/after the scope does not retain
+// it — proves the nesting narrows the context for exactly the labeled call, never mutates the
+// outer one ---
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings();
+  const base = createFakeBase([
+    { message: { role: 'assistant', content: 'labeled' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+    { message: { role: 'assistant', content: 'unlabeled' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+
+  await runWithCallContext({ taskId: 'chat-label-1', kind: 'system', userId: 'u1' }, () =>
+    withCallLabel('cleanup:header', () => gated.complete([{ role: 'user', content: 'hi' }], [])),
+  );
+  assert(pool.llmCalls.length === 1 && pool.llmCalls[0].callLabel === 'cleanup:header', 'a call made inside withCallLabel logs the label');
+
+  await runWithCallContext({ taskId: 'chat-label-1', kind: 'system', userId: 'u1' }, () =>
+    gated.complete([{ role: 'user', content: 'hi' }], []),
+  );
+  assert(
+    pool.llmCalls.length === 2 && pool.llmCalls[1].callLabel === null,
+    'a call in the same outer context but outside the withCallLabel scope carries no label — the nesting is scoped, not a mutation of the outer context',
+  );
+
+  let threw = false;
+  try {
+    withCallLabel('cleanup:header', () => gated.complete([{ role: 'user', content: 'hi' }], []));
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'withCallLabel outside any runWithCallContext throws the same no-context bug error');
+  assert(pool.llmCalls.length === 2, 'the out-of-context withCallLabel never reaches the provider');
 }
 
 // --- kind: chat -- metered, never capped, even with agent_routines_enabled off ---

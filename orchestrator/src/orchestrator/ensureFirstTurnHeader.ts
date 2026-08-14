@@ -44,7 +44,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -102,7 +102,10 @@ export async function ensureFirstTurnHeader(
     recordPromptTrace(chatId, entry);
     log.info('ensureFirstTurnHeader: first-turn header repair fired', { chatId, promptChars: headerStep.prompt.length });
     const turn = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-      llm.complete([{ role: 'user', content: headerStep.prompt }], []),
+      // Same label as the poll-tick's repair-header step (cleanupLoop.ts's dispatchStep) — this
+      // is the same repair, just on a different code path for turn 1 (llm-call-label-breakdown-
+      // plan.md).
+      withCallLabel('cleanup:header', () => llm.complete([{ role: 'user', content: headerStep.prompt }], [])),
     );
     const out = turn.message.content;
     if (!out || !out.trim()) {

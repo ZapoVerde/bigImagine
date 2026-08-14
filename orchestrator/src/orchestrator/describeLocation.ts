@@ -56,7 +56,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -217,7 +217,7 @@ export async function describeLocationIfNeeded(
       recordPromptTrace(chatId ?? locationId, entry);
       log.info('describeLocation: describer fired', { locationId, name: row.name, promptChars: prompt.length });
       const turn = await runWithCallContext({ taskId: chatId ?? locationId, kind: 'system', userId }, () =>
-        llm.complete([{ role: 'user', content: prompt }], []),
+        withCallLabel('bg:location-description', () => llm.complete([{ role: 'user', content: prompt }], [])),
       );
       const out = turn.message.content;
       if (!out || !out.trim()) {

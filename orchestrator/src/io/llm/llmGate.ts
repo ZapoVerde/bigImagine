@@ -175,6 +175,10 @@ async function logCall(
     costUsd: number | null;
     providerKind: string;
     model: string;
+    /** The finer one-level-deeper label for 'system'-kind calls (docs/plans/
+     *  llm-call-label-breakdown-plan.md), read off the ambient context's callLabel — null for
+     *  kind 'chat'/'agent_routine' rows and for any call made without a withCallLabel scope. */
+    callLabel: string | null;
     durationMs: number | null;
     reason: string | null;
     requestId: string;
@@ -183,8 +187,8 @@ async function logCall(
 ): Promise<void> {
   await db.withSystemScope((session) =>
     session.query(
-      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason, request_id, attempt, provider_kind, model, cache_read_tokens, cost_usd)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+      `insert into llm_calls (user_id, kind, task_id, job_id, outcome, prompt_tokens, completion_tokens, total_tokens, duration_ms, reason, request_id, attempt, provider_kind, model, cache_read_tokens, cost_usd, call_label)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
       [
         fields.userId,
         fields.kind,
@@ -202,6 +206,7 @@ async function logCall(
         fields.model,
         fields.cacheReadTokens,
         fields.costUsd,
+        fields.callLabel,
       ],
     ),
   );
@@ -308,6 +313,7 @@ async function resolveGateCallConfig(
         costUsd: null,
         providerKind: profile.kind,
         model: profile.model,
+        callLabel: ctx.callLabel ?? null,
         durationMs: null,
         reason,
         requestId: randomUUID(),
@@ -388,6 +394,7 @@ export function createGatedLlmProvider(
             costUsd: turn.usage ? (computeCallCostUsd(turn.usage, profile) ?? null) : null,
             providerKind: profile.kind,
             model: profile.model,
+            callLabel: ctx.callLabel ?? null,
             durationMs: Date.now() - callStart,
             reason: null,
             requestId,
@@ -409,6 +416,7 @@ export function createGatedLlmProvider(
             costUsd: null,
             providerKind: profile.kind,
             model: profile.model,
+            callLabel: ctx.callLabel ?? null,
             durationMs: Date.now() - callStart,
             reason,
             requestId,
@@ -479,6 +487,7 @@ export function createGatedLlmProvider(
                   costUsd: turn.usage ? (computeCallCostUsd(turn.usage, profile) ?? null) : null,
                   providerKind: profile.kind,
                   model: profile.model,
+                  callLabel: ctx.callLabel ?? null,
                   durationMs: Date.now() - callStart,
                   reason: null,
                   requestId,
@@ -500,6 +509,7 @@ export function createGatedLlmProvider(
                   costUsd: null,
                   providerKind: profile.kind,
                   model: profile.model,
+                  callLabel: ctx.callLabel ?? null,
                   durationMs: Date.now() - callStart,
                   reason,
                   requestId,

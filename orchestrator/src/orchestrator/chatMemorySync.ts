@@ -97,7 +97,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionStore } from '../io/llmConnections.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
@@ -568,7 +568,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       });
 
       const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
-        const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt)));
+        const summaries = await withCallLabel('sync:chunk-summary', () =>
+          Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt))),
+        );
         const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
         // Stage 5 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the header
         // lane — embed each chunk's summary too, into chat_chunks.summary_vector_embed
@@ -658,7 +660,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             .map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`)
             .join('\n');
 
-          return bridgeChatMemory(sync.llm, transcriptText, previousOutput, existingThreads, sync.personaName, sync.bridgePrompt);
+          return withCallLabel('sync:bridge', () =>
+            bridgeChatMemory(sync.llm, transcriptText, previousOutput, existingThreads, sync.personaName, sync.bridgePrompt),
+          );
         });
 
         await step('upsert_bridge', async () => {
@@ -712,7 +716,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             [chatId],
           );
           const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}\n#${r.category}`).join('\n\n');
-          const entries = await curateWorldMemory(sync.llm, transcriptText, existingBlock, sync.worldCuratorPrompt);
+          const entries = await withCallLabel('sync:world-memory', () =>
+            curateWorldMemory(sync.llm, transcriptText, existingBlock, sync.worldCuratorPrompt),
+          );
           return { entries, existingRows };
         });
 
@@ -745,7 +751,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             [chatId],
           );
           const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}`).join('\n\n');
-          return curatePeople(sync.llm, transcriptText, existingBlock, sync.personaName, sync.peopleCuratorPrompt);
+          return withCallLabel('sync:people', () =>
+            curatePeople(sync.llm, transcriptText, existingBlock, sync.personaName, sync.peopleCuratorPrompt),
+          );
         });
 
         await step('upsert_people', async () => {
@@ -792,7 +800,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         );
         const horizonSummaries = horizonRows.map((r) => r.summary).reverse();
 
-        return distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt);
+        return withCallLabel('sync:distill', () =>
+          distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt),
+        );
       });
 
       await step('upsert_entries', async () => {
@@ -870,7 +880,9 @@ export async function archiveChatMemory(deps: ChatMemorySyncDeps, userId: string
         `Most recent messages (newest first):\n${tail.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}`,
       ].join('\n\n');
 
-      const memories = await classifyHouseholdMemory(sync.llm, digest, sync.householdMemoryPrompt);
+      const memories = await withCallLabel('sync:household-memory', () =>
+        classifyHouseholdMemory(sync.llm, digest, sync.householdMemoryPrompt),
+      );
       for (const content of memories) {
         await session.query(
           `insert into household_memory (user_id, source_chat_id, content, source) values ($1, $2, $3, 'inferred')`,

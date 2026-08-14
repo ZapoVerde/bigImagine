@@ -77,7 +77,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -342,6 +342,10 @@ async function dispatchStep(
   signal: AbortSignal,
 ): Promise<string | null> {
   const stepKind = step.kind === 'repair-header' ? 'header' : step.kind === 'repair-footer' ? 'footer' : step.setName;
+  // The llm_calls.call_label for this repair (docs/plans/llm-call-label-breakdown-plan.md):
+  // h/b/f is the granularity the Stats page asked for, so body's per-paragraph-set name
+  // (step.setName, still in the trace/log lines above for debugging) collapses to one label.
+  const callLabel = step.kind === 'repair-header' ? 'cleanup:header' : step.kind === 'repair-footer' ? 'cleanup:footer' : 'cleanup:body';
   try {
     // A Stop (orchestrator/turnAbort.ts, fired by POST /v1/chat/abort) landed while this chat's
     // repair pass was between steps: skip without firing another billed call — the caller's loop
@@ -361,7 +365,7 @@ async function dispatchStep(
     // below is the part that's otherwise unrecoverable.
     log.info('cleanup loop: repair prompt fired', { chat: chatId, kind: stepKind, promptChars: step.prompt.length });
     const turn = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-      deps.llm.complete([{ role: 'user', content: step.prompt }], [], { signal }),
+      withCallLabel(callLabel, () => deps.llm.complete([{ role: 'user', content: step.prompt }], [], { signal })),
     );
     const out = turn.message.content;
     if (out && out.trim()) {

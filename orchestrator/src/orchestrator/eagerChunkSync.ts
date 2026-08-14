@@ -44,7 +44,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
@@ -176,7 +176,9 @@ export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chat
 
         // The mandatory summarize + embed pair, byte-for-byte the tick's own summarize_embed step
         // (content lane + the 0094 summary lane).
-        const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(llm, c.content, chunkSummaryPrompt)));
+        const summaries = await withCallLabel('sync:chunk-summary', () =>
+          Promise.all(chunks.map((c) => summarizeChatChunk(llm, c.content, chunkSummaryPrompt))),
+        );
         const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
         const summaryVectors = await deps.embeddings.embed(summaries);
         const lastChunkedMessageId = chunks[chunks.length - 1]!.lastMessageId;

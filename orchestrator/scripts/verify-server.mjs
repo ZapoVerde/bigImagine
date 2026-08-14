@@ -1484,7 +1484,9 @@ try {
 // GET /v1/admin/llm-stats reads llm_calls (adminServer.ts listLlmStats). The fixture seeds two
 // rows: one from before the 0101 migration (provider_kind/model null -> '(pre-tracking)') and one
 // tracked with a numeric cost_usd (returned as a string by node-postgres, so the row proves the
-// Number() cast in the mapper).
+// Number() cast in the mapper). The tracked row is a kind 'system' call carrying a call_label
+// ('sync:bridge', docs/plans/llm-call-label-breakdown-plan.md) to prove the new column round-trips
+// untouched, while the pre row's null call_label proves it gets no '(pre-tracking)'-style rewrite.
 pool.llmStatsRows.push(
   {
     call_id: 'call-pre',
@@ -1496,6 +1498,7 @@ pool.llmStatsRows.push(
     outcome: 'ok',
     provider_kind: null,
     model: null,
+    call_label: null,
     prompt_tokens: 100,
     completion_tokens: 50,
     total_tokens: 150,
@@ -1508,12 +1511,13 @@ pool.llmStatsRows.push(
     call_id: 'call-tracked',
     created_at: new Date('2026-08-13T10:00:00.000Z'),
     user_id: 'u-tracked',
-    kind: 'chat',
+    kind: 'system',
     task_id: 'task-tracked',
     job_id: null,
     outcome: 'ok',
     provider_kind: 'openai-compatible',
     model: 'deepseek-v4-flash',
+    call_label: 'sync:bridge',
     prompt_tokens: 200,
     completion_tokens: 80,
     total_tokens: 280,
@@ -1535,10 +1539,18 @@ assert(
   preTracked && preTracked.providerKind === '(pre-tracking)' && preTracked.model === '(pre-tracking)' && preTracked.costUsd === null,
   'a pre-migration row surfaces as "(pre-tracking)" provider/model with no cost — never a fabricated value',
 );
+assert(
+  preTracked && preTracked.callLabel === null,
+  'a null call_label stays null on the wire — unlike providerKind/model, no "(pre-tracking)"-style substitution',
+);
 const tracked = llmStatsBody.calls.find((c) => c.callId === 'call-tracked');
 assert(
   tracked && tracked.providerKind === 'openai-compatible' && tracked.model === 'deepseek-v4-flash',
   'a post-migration row carries its real provider kind and model',
+);
+assert(
+  tracked && tracked.callLabel === 'sync:bridge',
+  'a labeled call round-trips its call_label to the wire shape untouched',
 );
 assert(
   tracked && tracked.costUsd === 0.00123 && typeof tracked.costUsd === 'number',

@@ -26,7 +26,17 @@
  * @api-declaration
  * runWithCallContext(ctx, fn) — every LLM call made during fn (including nested async work it
  *   kicks off) is tagged with ctx
- * getCallContext() — the current {taskId, kind}, or undefined outside any runWithCallContext
+ * withCallLabel(label, fn) — narrows the currently active context to { ...active, callLabel:
+ *   label } for the duration of fn (docs/plans/llm-call-label-breakdown-plan.md): the Stats
+ *   page's one-level-deeper breakdown of 'system'-kind calls (cleanup repairs, chat-memory sync
+ *   steps, background title/location work). Reads the active context and throws if none is set
+ *   (unreachable in practice — every call site is already nested inside an outer
+ *   runWithCallContext); AsyncLocalStorage nests cleanly, so a call made inside fn is tagged
+ *   with the label while anything outside fn keeps seeing the outer, unlabeled context. Additive
+ *   to runWithCallContext, not a replacement — call sites that don't care about a finer label
+ *   keep working unchanged.
+ * getCallContext() — the current {taskId, kind, callLabel?}, or undefined outside any
+ *   runWithCallContext
  *
  * @contract
  *   assertions:
@@ -49,6 +59,12 @@ export interface LlmCallContext {
    *  that table is itself RLS-exempt (bb_principles.md §4 still applies to attribution, just not
    *  to query-time enforcement here). */
   userId: string;
+  /** Optional finer-grained breakdown of the call's purpose, one level deeper than `kind` —
+   *  llmGate.ts logs it onto llm_calls.call_label. Set via withCallLabel() from inside an
+   *  already-active runWithCallContext; null/absent on the outer context means "no finer label",
+   *  which the Stats page's 'call-type' grouping falls back to `kind` for. The closed label
+   *  vocabulary lives in docs/plans/llm-call-label-breakdown-plan.md (cleanup:*, bg:*, sync:*). */
+  callLabel?: string;
 }
 
 const store = new AsyncLocalStorage<LlmCallContext>();
@@ -59,4 +75,20 @@ export function runWithCallContext<T>(ctx: LlmCallContext, fn: () => T): T {
 
 export function getCallContext(): LlmCallContext | undefined {
   return store.getStore();
+}
+
+/** Re-runs fn under a nested context identical to the currently active one except for
+ *  callLabel. The label describes what the call is *for* (the same purpose a call made inside
+ *  fn is billed against), so it rides the same gate every other attribution field already rides
+ *  through — no second logging path (bb_principles.md §14). Throws if called outside any
+ *  runWithCallContext, the same "a call with nothing attached to it" bug llmGate.ts guards
+ *  against — unreachable in practice, every call site is already nested inside an outer context. */
+export function withCallLabel<T>(label: string, fn: () => T): T {
+  const active = getCallContext();
+  if (!active) {
+    throw new Error(
+      'withCallLabel: no call context set — every LLM call must run inside runWithCallContext (bb_principles.md §14)',
+    );
+  }
+  return store.run({ ...active, callLabel: label }, fn);
 }

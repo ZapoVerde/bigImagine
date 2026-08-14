@@ -48,13 +48,19 @@ import './StatsView.css';
 
 // --- Usage & Cost ---
 
-type UsageGroupBy = 'provider' | 'model' | 'kind' | 'outcome' | 'day';
+type UsageGroupBy = 'provider' | 'model' | 'kind' | 'call-type' | 'outcome' | 'day';
 type UsageMetric = 'cost' | 'tokens' | 'prompt' | 'completion' | 'cache' | 'calls';
 
 const USAGE_GROUP_OPTIONS: { value: UsageGroupBy; label: string }[] = [
   { value: 'provider', label: 'Provider' },
   { value: 'model', label: 'Model' },
   { value: 'kind', label: 'Kind' },
+  // One level deeper than Kind (docs/plans/llm-call-label-breakdown-plan.md): 'system' alone
+  // already covers cleanup repairs, chat-memory sync's six LLM steps, location descriptions,
+  // and title generation, indistinguishable from each other. The call_label string carries its
+  // category in itself (cleanup:header, sync:bridge, …), so one flat group-by option is enough
+  // — no second-level UI.
+  { value: 'call-type', label: 'Call type' },
   { value: 'outcome', label: 'Outcome' },
   { value: 'day', label: 'Day' },
 ];
@@ -78,6 +84,13 @@ function usageKeyOf(groupBy: UsageGroupBy): (row: LlmCallStatRow) => string | nu
       return (r) => r.model;
     case 'kind':
       return (r) => r.kind;
+    case 'call-type':
+      // The finer breakdown: a labeled row groups by its call_label (cleanup:header,
+      // sync:bridge, …); an unlabeled one falls back to its own kind — 'main' for chat, the
+      // kind verbatim otherwise. A pre-0103 'system' row thus lands in its own 'system' bucket,
+      // distinct from every labeled group rather than silently merging into one of them
+      // (llm-call-label-breakdown-plan.md Edge Cases).
+      return (r) => r.callLabel ?? (r.kind === 'chat' ? 'main' : r.kind);
     case 'outcome':
       return (r) => r.outcome;
     case 'day':

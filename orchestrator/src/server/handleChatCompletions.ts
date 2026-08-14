@@ -33,7 +33,7 @@
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { generateChatTitle } from '../io/llm/generateChatTitle.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { log } from '../io/logger.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
@@ -673,7 +673,9 @@ export async function handleChatCompletions(
         let title: string;
         try {
           title = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-            generateChatTitle(turnLlm, userMessageText, reply),
+            // bg:title-generation — the one already-runWithCallContext-wrapped call in this
+            // file other than the turn itself (llm-call-label-breakdown-plan.md).
+            withCallLabel('bg:title-generation', () => generateChatTitle(turnLlm, userMessageText, reply)),
           );
         } catch (err) {
           log.error('generateChatTitle failed, falling back to a truncated title', err);

@@ -2592,6 +2592,13 @@ export interface LlmCallStatRow {
    *  not treated as zero. */
   providerKind: string;
   model: string;
+  /** The finer one-level-deeper label for 'system'-kind calls (docs/plans/
+   *  llm-call-label-breakdown-plan.md), or null — for kind 'chat'/'agent_routine' rows, for
+   *  rows written before migration 0103, and for any system call no label applies to. Null is
+   *  passed through untouched, deliberately NOT substituted like providerKind/model: a null
+   *  call_label isn't necessarily a pre-migration artifact, so the Stats page falls back to the
+   *  row's own kind for those. */
+  callLabel: string | null;
   promptTokens: number | null;
   completionTokens: number | null;
   totalTokens: number | null;
@@ -2611,6 +2618,7 @@ interface LlmCallRowShape {
   outcome: 'ok' | 'refused' | 'error';
   provider_kind: string | null;
   model: string | null;
+  call_label: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
   total_tokens: number | null;
@@ -2625,7 +2633,7 @@ const PRE_TRACKING = '(pre-tracking)';
 export async function listLlmStats(db: PostgresClient, days: number): Promise<LlmCallStatRow[]> {
   const rows = await db.withSystemScope((session) =>
     session.query<LlmCallRowShape>(
-      `select call_id, created_at, user_id, kind, task_id, job_id, outcome, provider_kind, model,
+      `select call_id, created_at, user_id, kind, task_id, job_id, outcome, provider_kind, model, call_label,
               prompt_tokens, completion_tokens, total_tokens, cache_read_tokens, cost_usd, duration_ms, attempt
        from llm_calls
        where created_at > now() - ($1 || ' days')::interval
@@ -2643,6 +2651,11 @@ export async function listLlmStats(db: PostgresClient, days: number): Promise<Ll
     outcome: r.outcome,
     providerKind: r.provider_kind ?? PRE_TRACKING,
     model: r.model ?? PRE_TRACKING,
+    // Deliberately no '(pre-tracking)'-style substitution: a null call_label isn't necessarily
+    // a pre-migration artifact (it may just be an unlabeled system call), so the Stats page
+    // falls back to the row's own kind for those — never a fabricated group (llm-call-label-
+    // breakdown-plan.md Edge Cases).
+    callLabel: r.call_label,
     promptTokens: r.prompt_tokens,
     completionTokens: r.completion_tokens,
     totalTokens: r.total_tokens,

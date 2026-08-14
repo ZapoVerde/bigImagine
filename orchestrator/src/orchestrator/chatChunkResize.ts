@@ -47,7 +47,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
@@ -189,7 +189,9 @@ async function resizeOneChat(deps: ChatChunkResizeDeps, s: ResizeSettings, userI
 
       // Regenerate the summaries + both embeddings (content lane and the 0094 summary lane),
       // byte-for-byte the tick's own summarize_embed step, then swap the archive atomically.
-      const summaries = await Promise.all(chunks.map((c) => summarizeChatChunk(s.llm, c.content, s.chunkSummaryPrompt)));
+      const summaries = await withCallLabel('sync:chunk-summary', () =>
+        Promise.all(chunks.map((c) => summarizeChatChunk(s.llm, c.content, s.chunkSummaryPrompt))),
+      );
       const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
       const summaryVectors = await deps.embeddings.embed(summaries);
 
