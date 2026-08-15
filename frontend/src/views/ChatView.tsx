@@ -570,6 +570,12 @@ export default function ChatView({
   );
 
   const historyRef = useRef<HTMLDivElement | null>(null);
+  // Set true right after a chat's messages are (re)loaded from the server (opening a tab, or
+  // switching this tab to a different chat) so the messages-effect below knows to jump to the
+  // last turn exactly once. Left false the rest of the time so sending/editing/swiping — which
+  // also change `messages` — never re-trigger it (see the "No auto-scroll" note below on why
+  // scrolling on every messages change was tried and reverted).
+  const pendingInitialScrollRef = useRef(false);
   // The bottom control stack (staging bars, delete bar, input row) floats over the conversation
   // as .chat-bottom-overlay — bubbles scroll under it. Its height is dynamic (staging/delete
   // bars appear and vanish, the textarea grows), so the history's matching bottom padding is
@@ -677,6 +683,7 @@ export default function ChatView({
       .then((detail) => {
         setActiveChat(detail.session);
         setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+        pendingInitialScrollRef.current = true;
         // Robust-chat-turns plan: a remounted tab reopens while a turn is still running
         // server-side (the reload happened mid-turn and local `sending` was lost) — the local
         // view has no way to know. Ask the server once; if a turn is active, show the pending
@@ -921,11 +928,19 @@ export default function ChatView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeChat]);
 
-  // No auto-scroll here, on purpose: a new turn renders below the fold and the reader scrolls
-  // down on their own. Auto-positioning — to the bottom, or to the top of the newest turn —
-  // kept fighting the reader: it fired on every messages/sending change, and whenever a chat
-  // had no user message left it snapped to the very first message. Manual scrolling only.
-
+  // No auto-scroll on a running chat, on purpose: a new turn renders below the fold and the
+  // reader scrolls down on their own. Auto-positioning on every messages/sending change kept
+  // fighting the reader, so that was reverted (see git history) — the one case still worth
+  // handling is the very first render of a (re)loaded chat, which otherwise just lands at
+  // scrollTop 0, i.e. the start of the chat rather than where the reader left off. That one-shot
+  // jump is gated on pendingInitialScrollRef, set only by the chat-load effect above, so it never
+  // fires again while this tab keeps showing the same chat.
+  useEffect(() => {
+    if (!pendingInitialScrollRef.current) return;
+    pendingInitialScrollRef.current = false;
+    const target = historyRef.current?.querySelector<HTMLElement>('[data-last-user-msg="true"]');
+    target?.scrollIntoView({ block: 'start' });
+  }, [messages]);
 
   // Re-fetches the active chat from the server — the source of truth for real messageIds, called
   // after every mutation (send/rerun/edit) rather than hand-constructing local state, so
@@ -2012,7 +2027,11 @@ export default function ChatView({
               m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
             const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
             return (
-              <div key={m.messageId ?? `pending-${i}`} className={`chat-message ${m.role}${editingId === m.messageId ? ' editing' : ''}`}>
+              <div
+                key={m.messageId ?? `pending-${i}`}
+                className={`chat-message ${m.role}${editingId === m.messageId ? ' editing' : ''}`}
+                data-last-user-msg={isLastUserMsg || undefined}
+              >
                 {selectionMode && (
                   <label className="chat-select-box" title={m.role === 'user' ? 'Select this message and everything below it' : 'Select this reply and everything below it'}>
                     <input
