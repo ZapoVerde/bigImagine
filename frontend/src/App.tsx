@@ -246,6 +246,7 @@ export default function App() {
             {tab.type === 'chat' && (
               <ChatView
                 apiKey={apiKey}
+                tabId={tab.id}
                 chatId={tab.chatId}
                 active={tab.id === activeTabId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
@@ -261,6 +262,7 @@ export default function App() {
             {tab.type === 'rp' && (
               <ChatView
                 apiKey={apiKey}
+                tabId={tab.id}
                 chatId={tab.chatId}
                 active={tab.id === activeTabId}
                 onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}

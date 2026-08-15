@@ -82,6 +82,11 @@ function GitBranchIcon() {
 
 interface ChatViewProps {
   apiKey: string | null;
+  /** The owning tab's stable id (useTabs.ts's TabInstance.id, persisted in bb_tabs across
+   *  reloads) — used to key the composer draft in localStorage (robust-chat-turns-plan.md), so
+   *  typed-but-unsent text survives an involuntary remount (a mobile browser reloading a
+   *  backgrounded tab, a relogin). */
+  tabId: string;
   /** undefined = a fresh, not-yet-created chat (today's "New chat" state). Once set by a parent
    *  tab (either up front, from History, or via onChatCreated below), it never changes again for
    *  the lifetime of this component — tabs are single-purpose and never swap which chat they show. */
@@ -189,6 +194,7 @@ function readImageAsBase64(file: File): Promise<string> {
 // full response.
 export default function ChatView({
   apiKey,
+  tabId,
   chatId,
   onChatCreated,
   onTitleChange,
@@ -386,7 +392,23 @@ export default function ChatView({
     };
   }, []);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  const [draft, setDraft] = useState('');
+  // Robust-chat-turns plan: the composer's draft survives involuntary remounts (a mobile browser
+  // reloading a backgrounded tab, a relogin) keyed by this tab's stable id — useTabs.ts persists
+  // TabInstance.id in bb_tabs across reloads, so the key is stable exactly when the tab is. Pure
+  // local scratch (bi_principles.md §1), never sent to the server. A deliberate tab close still
+  // drops it (App.tsx's documented "closing a tab does unmount it... any local-only draft is
+  // gone"); only the involuntary remount is being fixed here, so no cleanup-on-close is needed.
+  const draftKey = `bb_chat_draft:${tabId}`;
+  const [draft, setDraft] = useState(() => localStorage.getItem(draftKey) ?? '');
+  // Write-through on change with a short debounce (~250ms is plenty for text). send() also
+  // removes the key alongside setDraft('') so a sent draft can't resurrect on a later remount.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (draft) localStorage.setItem(draftKey, draft);
+      else localStorage.removeItem(draftKey);
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [draft, draftKey]);
   const [sending, setSending] = useState(false);
   // What runTurn's currently running tool is doing, polled from GET /v1/chat/status while
   // `sending` is true (client.ts's getChatTurnStatus) — null renders as the old plain "…" bubble.
@@ -1187,6 +1209,10 @@ export default function ChatView({
       : [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
     setDraft('');
+    // Robust-chat-turns plan: the sent draft must not resurrect from localStorage on a later
+    // remount — remove the key alongside clearing the state (the debounced write-through effect
+    // would clear it 250ms later anyway; doing it here makes the intent explicit and immediate).
+    localStorage.removeItem(draftKey);
     // Strip the client-only id (StagingBar's key/promotion-tracking field) before it goes over
     // the wire — the server's IncomingAttachment shape doesn't know about it.
     const attachments = stagedFiles.map(({ id: _id, ...rest }) => rest);
