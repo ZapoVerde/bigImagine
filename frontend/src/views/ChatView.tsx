@@ -30,6 +30,7 @@ import {
   truncateMessagesFrom,
   updateChat,
   uploadAttachment,
+  whoami,
 } from '../api/client';
 import type { SwipeResult } from '../api/client';
 import { attachBackgroundParallax } from '../components/chat/backgroundParallax';
@@ -420,6 +421,18 @@ export default function ChatView({
   // load-effect check, a visibilitychange, and a send()-409 can all fire within a second of each
   // other — only one poll loop should ever run for this tab.
   const resumingTurnRef = useRef(false);
+  // Re-entrancy guard for waitForReconnectThenReconcile, same shape as resumingTurnRef — only
+  // one reconnect-poll loop should ever run for this tab.
+  const reconnectingRef = useRef(false);
+  // Flips true on unmount so a reconnect-poll loop started before a chat switch/tab close stops
+  // polling instead of leaking — same StrictMode-safe reset-in-setup pattern as bgDisposedRef.
+  const reconnectDisposedRef = useRef(false);
+  useEffect(() => {
+    reconnectDisposedRef.current = false;
+    return () => {
+      reconnectDisposedRef.current = true;
+    };
+  }, []);
   // What runTurn's currently running tool is doing, polled from GET /v1/chat/status while
   // `sending` is true (client.ts's getChatTurnStatus) — null renders as the old plain "…" bubble.
   const [turnStatus, setTurnStatus] = useState<string | null>(null);
@@ -961,6 +974,38 @@ export default function ChatView({
     }
   }
 
+  // send()'s generic catch-all: the fetch itself threw (not an ApiError — no HTTP response was
+  // ever received), most commonly a backgrounded mobile tab whose OS suspended the in-flight
+  // connection rather than a real outage. Left alone, the error banner is a dead end — the turn
+  // behind the failed request may have completed, or still be running, entirely unrelated to
+  // whether *this* tab can currently reach the server. Poll a cheap reachability probe (whoami —
+  // the same unauthenticated probe App.tsx uses at mount) until it succeeds, then reconcile
+  // against server truth instead of leaving the banner (and the unconfirmed optimistic message)
+  // stuck. Deliberately unconditional on reachability, unlike reconcileTurnInFlight's other
+  // callers: this tab has a specific pending attempt of unknown outcome, so a reply that landed
+  // while disconnected must show up even if the turn is no longer "active" by the time we ask.
+  async function waitForReconnectThenReconcile(chatId: string | undefined) {
+    if (reconnectingRef.current) return;
+    reconnectingRef.current = true;
+    try {
+      while (!reconnectDisposedRef.current) {
+        const reachable = await whoami(apiKey).then(
+          () => true,
+          () => false,
+        );
+        if (reachable) break;
+        await new Promise((r) => window.setTimeout(r, 3000));
+      }
+    } finally {
+      reconnectingRef.current = false;
+    }
+    if (reconnectDisposedRef.current) return;
+    setError(null);
+    if (!chatId || chatIdRef.current !== chatId) return;
+    await refreshActiveMessages(chatId).catch(() => {});
+    await reconcileTurnInFlight(chatId);
+  }
+
   async function closeCanvas() {
     if (!activeChat) return;
     try {
@@ -1339,8 +1384,16 @@ export default function ChatView({
         } else {
           setError('a turn is already in progress for this chat');
         }
+      } else if (err instanceof ApiError) {
+        setError(err.message);
       } else {
-        setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
+        // No HTTP response was ever received — most commonly a backgrounded mobile tab whose OS
+        // suspended this request's connection, not a real outage. The banner self-clears once
+        // the server is reachable again (waitForReconnectThenReconcile), which also picks up a
+        // reply that landed while this tab was disconnected — same recovery as the 409 path
+        // above, just triggered by a lower-level failure than a clean 409 response.
+        setError('failed to reach BigImagine — reconnecting…');
+        void waitForReconnectThenReconcile(activeChat?.chatId);
       }
     } finally {
       setSending(false);
