@@ -1,11 +1,5 @@
-/* @stamp 2026-08-10 */
-import { useEffect, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkBreaks from 'remark-breaks';
-import remarkQuotes from '../lib/remarkQuotes';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
+/* @stamp 2026-08-15 */
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   adminListConnections,
@@ -61,12 +55,13 @@ import StagingBar, { type StagedFile } from '../components/attachments/StagingBa
 import ImageStagingBar, { type StagedImageFile } from '../components/attachments/ImageStagingBar';
 import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
+import ChatMessageRow from '../components/chat/ChatMessageRow';
 import { useBottomThirdSwipe } from '../hooks/useBottomThirdSwipe';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
 // currentColor and scales with the surrounding text (1em) instead of relying on an emoji glyph.
-function GitBranchIcon() {
+export function GitBranchIcon() {
   return (
     <svg
       className="git-branch-icon"
@@ -136,7 +131,7 @@ interface ChatViewProps {
 // getChat — undefined for the brief optimistic window between sending and that refetch landing.
 // Copy/edit/swipe/delete all need a real id (they're per-message API calls), so they're simply
 // not offered on a message that doesn't have one yet.
-interface DisplayMessage {
+export interface DisplayMessage {
   messageId?: string;
   role: 'user' | 'assistant';
   content: string;
@@ -1871,6 +1866,55 @@ export default function ChatView({
     </>
   );
 
+  // Typing lag fix: each row's own onChange (the composer draft) re-renders ChatView on every
+  // keystroke. Without this, that cascaded into a full re-render — and a full ReactMarkdown
+  // reparse — of every message in the history on every keystroke, worst on long RP chats where
+  // it's most of what's on screen. ChatMessageRow (React.memo) skips that reparse for messages
+  // whose own props didn't change, but memoization only holds if those props are referentially
+  // stable across renders. `messages[i]` objects already are (setMessages only replaces the
+  // entries that actually changed); the callbacks below are the other half — swipe/startEdit/
+  // etc. are plain `function` declarations redeclared every render, so passed directly they'd
+  // break the memo on every keystroke too. Routing them through a ref keeps the identity handed
+  // to each row permanently stable while every call still reaches the current closure (avoids
+  // hand-deriving accurate useCallback dependency arrays for functions this wide, e.g. swipe's).
+  const swipeRef = useRef(swipe);
+  swipeRef.current = swipe;
+  const startEditRef = useRef(startEdit);
+  startEditRef.current = startEdit;
+  const cancelEditRef = useRef(cancelEdit);
+  cancelEditRef.current = cancelEdit;
+  const submitEditRef = useRef(submitEdit);
+  submitEditRef.current = submitEdit;
+  const removeMessageRef = useRef(removeMessage);
+  removeMessageRef.current = removeMessage;
+  const toggleSelectRef = useRef(toggleSelect);
+  toggleSelectRef.current = toggleSelect;
+  const forkFromRef = useRef(forkFrom);
+  forkFromRef.current = forkFrom;
+  const toggleMessageActionsRef = useRef(toggleMessageActions);
+  toggleMessageActionsRef.current = toggleMessageActions;
+
+  const stableSwipe = useCallback((messageId: string, direction: 'prev' | 'next') => swipeRef.current(messageId, direction), []);
+  const stableStartEdit = useCallback((messageId: string, content: string) => startEditRef.current(messageId, content), []);
+  const stableCancelEdit = useCallback(() => cancelEditRef.current(), []);
+  const stableSubmitEdit = useCallback((inPlace: boolean) => submitEditRef.current(inPlace), []);
+  const stableRemoveMessage = useCallback((messageId: string) => removeMessageRef.current(messageId), []);
+  const stableToggleSelect = useCallback((index: number) => toggleSelectRef.current(index), []);
+  const stableForkFrom = useCallback((messageId: string) => forkFromRef.current(messageId), []);
+  const stableToggleMessageActions = useCallback((messageId: string | undefined) => toggleMessageActionsRef.current(messageId), []);
+
+  // Single O(n) pass so isLastAssistant/isLastUserMsg below don't cost an O(n) lookahead scan
+  // per message (an O(n^2) cost that itself grows with the same long RP histories this fix targets).
+  const { lastAssistantIndex, lastUserIndex } = useMemo(() => {
+    let lastAssistant = -1;
+    let lastUser = -1;
+    messages.forEach((m, idx) => {
+      if (m.role === 'assistant') lastAssistant = idx;
+      else if (m.role === 'user') lastUser = idx;
+    });
+    return { lastAssistantIndex: lastAssistant, lastUserIndex: lastUser };
+  }, [messages]);
+
   return (
     <div
       className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}
@@ -1986,12 +2030,12 @@ export default function ChatView({
             </div>
           )}
           {messages.map((m, i) => {
-            const isLastAssistant = m.role === 'assistant' && !messages.slice(i + 1).some((x) => x.role === 'assistant');
+            const isLastAssistant = m.role === 'assistant' && i === lastAssistantIndex;
             // The user's last message can be saved in place (no resend) — editing it with the
             // resend path would burn a regeneration just to fix the wording. Earlier user messages
             // keep the branch-and-resend semantic (an in-place save mid-conversation would silently
             // orphan the exchange that followed).
-            const isLastUserMsg = m.role === 'user' && !messages.slice(i + 1).some((x) => x.role === 'user');
+            const isLastUserMsg = m.role === 'user' && i === lastUserIndex;
             // The chat's very first message being an assistant message only ever happens via
             // apply_character_to_chat's greeting seed (applyCharacterToChatTool.ts) — there's no
             // other path that produces an assistant reply with no user message before it. Its
@@ -2000,16 +2044,6 @@ export default function ChatView({
             // path (server/httpServer.ts's swipe route enforces the same rule; this just keeps the
             // button/gesture from offering an action the server would reject anyway).
             const isOpeningGreeting = i === 0 && m.role === 'assistant';
-            const hasMoreSwipesAhead = m.swipes ? m.swipes.index < m.swipes.count - 1 : false;
-            // The last reply's bottom action bar (below) is always visible on desktop, unlike the
-            // per-message hover row — arrow shown only when a swipe exists in that direction, Rerun
-            // standing in for the next-arrow when there's nothing ahead to swipe to. Mobile hides
-            // it until the message is tapped (actionsVisibleId / .actions-visible).
-            const busy = sending || swipingId === m.messageId;
-            const hasPrevSwipe = !!m.swipes && m.swipes.index > 0;
-            const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
-            const showCounter = !!m.swipes && m.swipes.count > 1;
-            const showRerun = !isOpeningGreeting && !hasMoreSwipesAhead;
             // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): the block renders whenever
             // this assistant message has a persisted `reasoning` (the canonical row) or is the
             // live target of an in-flight turn's reasoning buffer — the id-less tail placeholder
@@ -2027,161 +2061,32 @@ export default function ChatView({
               m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
             const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
             return (
-              <div
+              <ChatMessageRow
                 key={m.messageId ?? `pending-${i}`}
-                className={`chat-message ${m.role}${editingId === m.messageId ? ' editing' : ''}`}
-                data-last-user-msg={isLastUserMsg || undefined}
-              >
-                {selectionMode && (
-                  <label className="chat-select-box" title={m.role === 'user' ? 'Select this message and everything below it' : 'Select this reply and everything below it'}>
-                    <input
-                      type="checkbox"
-                      checked={selectionStart !== null && i >= selectionStart}
-                      disabled={!m.messageId}
-                      onChange={() => toggleSelect(i)}
-                    />
-                  </label>
-                )}
-                <div
-                  className={`chat-bubble ${m.role}${editingId === m.messageId ? ' editing' : ''}${actionsVisibleId === m.messageId ? ' actions-visible' : ''}`}
-                  onClick={() => toggleMessageActions(m.messageId)}
-                >
-                {editingId === m.messageId ? (
-                  <div className="message-edit">
-                    <textarea value={editDraft} onChange={(e) => setEditDraft(e.target.value)} rows={3} autoFocus />
-                    <div className="message-edit-actions">
-                      {m.role === 'assistant' || isLastUserMsg ? (
-                        <button onClick={() => submitEdit(true)} disabled={!editDraft.trim() || sending}>
-                          Save
-                        </button>
-                      ) : null}
-                      {m.role === 'user' ? (
-                        <button onClick={() => submitEdit(false)} disabled={!editDraft.trim() || sending}>
-                          Save &amp; resend
-                        </button>
-                      ) : null}
-                      <button onClick={cancelEdit}>Cancel</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    {/* Reasoning block (docs/plans/reasoning-blocks-plan.md): a first-class
-                        <details> sibling above the content — same SillyTavern-style "hidden text"
-                        idiom the raw markdown below already supports, applied to the model's
-                        thinking span instead of LLM-authored markdown. Rendered from the
-                        persisted field (collapsed, opened on demand) or the live in-flight
-                        buffer (open while streaming, collapsed once done). The text runs through
-                        the same sanitizing markdown pipeline as the content below — never raw
-                        HTML injection. */}
-                    {shownReasoning !== undefined && (
-                      <details className="mes_reasoning_details" open={reasoningLiveOpen}>
-                        <summary>Reasoning</summary>
-                        <div className="mes_reasoning">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm, remarkBreaks, remarkQuotes]}
-                            remarkRehypeOptions={{ allowDangerousHtml: true }}
-                            rehypePlugins={[rehypeRaw, [rehypeSanitize, defaultSchema]]}
-                          >
-                            {shownReasoning}
-                          </ReactMarkdown>
-                        </div>
-                      </details>
-                    )}
-                    <div className="markdown-content">
-                      {/* allowDangerousHtml + rehypeRaw let literal HTML the LLM writes inline (chiefly
-                          <details>/<summary> spoiler blocks, SillyTavern-style "hidden text") parse into
-                          real elements instead of rendering as escaped text. rehypeSanitize runs right
-                          after with hast-util-sanitize's default (GitHub) schema, which strips anything
-                          not on its allowlist — script tags, event-handler attributes, iframes, etc. —
-                          so this never becomes a path for injected HTML/JS from message content (including
-                          tool/RAG output that ends up quoted back into a message) to execute. */}
-                      <ReactMarkdown
-                        remarkPlugins={[remarkGfm, remarkBreaks, remarkQuotes]}
-                        remarkRehypeOptions={{ allowDangerousHtml: true }}
-                        rehypePlugins={[rehypeRaw, [rehypeSanitize, defaultSchema]]}
-                      >
-                        {/* resolvedContent is the display copy of a macro-bearing message (the
-                            seeded greeting's {{user}} etc., resolved against the live persona on
-                            the server); content stays verbatim and is what re-sends, so the
-                            per-turn resolution stays fresh. */}
-                        {m.resolvedContent ?? m.content}
-                      </ReactMarkdown>
-                    </div>
-                    {m.messageId && !selectionMode &&
-                      (isLastAssistant && m.role === 'assistant' ? (
-                        <div className="last-chat-actions" onClick={(e) => e.stopPropagation()}>
-                          {hasPrevSwipe && (
-                            <button
-                              type="button"
-                              className="last-chat-arrow"
-                              title="Previous reply"
-                              disabled={busy}
-                              onClick={() => swipe(m.messageId!, 'prev')}
-                            >
-                              ‹
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="last-chat-icon"
-                            title="Edit this reply — rewrite the text in place, the original stays one ‹ away"
-                            disabled={busy}
-                            onClick={() => startEdit(m.messageId!, m.content)}
-                          >
-                            ✏️
-                          </button>
-                          {showRerun && (
-                            <button
-                              type="button"
-                              className="last-chat-icon"
-                              title="Regenerate this reply"
-                              disabled={busy}
-                              onClick={() => swipe(m.messageId!, 'next')}
-                            >
-                              {swipingId === m.messageId ? '…' : '↻'}
-                            </button>
-                          )}
-                          <button
-                            type="button"
-                            className="last-chat-icon"
-                            title="Branch a new chat from this point, leaving this one untouched"
-                            onClick={() => forkFrom(m.messageId!)}
-                          >
-                            <GitBranchIcon />
-                          </button>
-                          <button type="button" className="last-chat-icon" title="Delete" onClick={() => removeMessage(m.messageId!)}>
-                            🗑
-                          </button>
-                          {showCounter && (
-                            <span className="last-chat-counter">
-                              [{m.swipes!.index + 1}/{m.swipes!.count}]
-                            </span>
-                          )}
-                          {hasNextSwipe && (
-                            <button
-                              type="button"
-                              className="last-chat-arrow"
-                              title="Next reply"
-                              disabled={busy}
-                              onClick={() => swipe(m.messageId!, 'next')}
-                            >
-                              ›
-                            </button>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="message-actions" onClick={(e) => e.stopPropagation()}>
-                          <button onClick={() => startEdit(m.messageId!, m.content)}>Edit</button>
-                          <button onClick={() => forkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
-                            Fork from here
-                          </button>
-                          <button onClick={() => removeMessage(m.messageId!)}>Delete</button>
-                        </div>
-                      ))}
-                  </>
-                )}
-                </div>
-              </div>
+                message={m}
+                index={i}
+                isLastAssistant={isLastAssistant}
+                isLastUserMsg={isLastUserMsg}
+                isOpeningGreeting={isOpeningGreeting}
+                selectionMode={selectionMode}
+                selected={selectionStart !== null && i >= selectionStart}
+                editing={editingId === m.messageId}
+                editDraft={editDraft}
+                onEditDraftChange={setEditDraft}
+                onSubmitEdit={stableSubmitEdit}
+                onCancelEdit={stableCancelEdit}
+                sending={sending}
+                swipingId={swipingId}
+                actionsVisible={actionsVisibleId === m.messageId}
+                onToggleActions={stableToggleMessageActions}
+                onToggleSelect={stableToggleSelect}
+                onSwipe={stableSwipe}
+                onStartEdit={stableStartEdit}
+                onForkFrom={stableForkFrom}
+                onRemoveMessage={stableRemoveMessage}
+                shownReasoning={shownReasoning}
+                reasoningLiveOpen={reasoningLiveOpen}
+              />
             );
           })}
           {(sending || resumingTurn) && !liveStreaming && (
