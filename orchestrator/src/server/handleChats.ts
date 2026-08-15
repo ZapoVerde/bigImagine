@@ -40,6 +40,7 @@ import { log } from '../io/logger.js';
 import { clearPromptTrace } from '../io/promptTrace.js';
 import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { abortTurn } from '../orchestrator/turnAbort.js';
+import { beginInteractiveTurn, endInteractiveTurn } from '../orchestrator/interactiveTurnLock.js';
 import { interpolateMacros } from '../util/interpolateMacros.js';
 import { getLorebookPanelData, quickAddLorebookEntry, setLorebookChatOverride, setLorebookEntryOverride } from '../io/lorebook/panelData.js';
 import type { ChatParams } from '../io/chatSessions.js';
@@ -509,86 +510,106 @@ export async function handleChatRoutes(
         sendJson(res, 200, { status: 'no_further_swipe' });
         return;
       }
-      // Streaming branch, same shape as handleChatCompletions's: SSE headers deferred until the
-      // first delta, deltas relayed live via onDelta, and the failure/abort outcome decided by
-      // whether any bytes were already committed. A dropped client connection cancels the LLM call
-      // (plan Edge Cases) — detached on every exit so a late close can't abort the next turn.
-      const streamingRp = detail.session.kind === 'rp' && stream === true;
-      const sseId = `chatcmpl-${randomUUID()}`;
-      let streamHeadersSent = false;
-      const onClientClose = () => {
-        if (streamingRp) abortTurn(chatId);
-      };
-      req.on('close', onClientClose);
-      const onDelta = (delta: string) => {
-        if (!streamHeadersSent) {
-          writeStreamHeaders(res);
-          streamHeadersSent = true;
-        }
-        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
-      };
-      // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): forward the cleanup events to
-      // regenerateSwipe for RP chats that opted in (cleanup_enabled_at), which translates them
-      // into SSE frames mirroring handleChatCompletions exactly — the send/swipe parity the plan
-      // carries through to cleanup. Same first-frame-commits-headers rule as onDelta above.
-      const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined =
-        streamingRp && detail.session.cleanupEnabledAt != null
-          ? (event) => {
+      // Robust-chat-turns plan (docs/plans/robust-chat-turns-plan.md): only the needs_regenerate
+      // branch actually starts generation, so only it takes the per-chat interactive-turn lock
+      // (orchestrator/interactiveTurnLock.ts) — a regeneration and a send on the same chat are
+      // mutually exclusive, and two concurrent regenerations can't race the same message. Plain
+      // prev/next cycling (pure content swaps, no LLM call) never takes the lock — those returns
+      // above have already left the branch.
+      if (!beginInteractiveTurn(chatId)) {
+        sendJson(res, 409, { error: 'a turn is already in progress for this chat' });
+        return;
+      }
+      try {
+        // Streaming branch, same shape as handleChatCompletions's: SSE headers deferred until the
+        // first delta, deltas relayed live via onDelta, and the failure/abort outcome decided by
+        // whether any bytes were already committed. A dropped client connection cancels the LLM call
+        // (plan Edge Cases) — detached on every exit so a late close can't abort the next turn.
+        const streamingRp = detail.session.kind === 'rp' && stream === true;
+        const sseId = `chatcmpl-${randomUUID()}`;
+        let streamHeadersSent = false;
+        const onClientClose = () => {
+          if (streamingRp) abortTurn(chatId);
+        };
+        req.on('close', onClientClose);
+        const onDelta = (delta: string) => {
+          if (!streamHeadersSent) {
+            writeStreamHeaders(res);
+            streamHeadersSent = true;
+          }
+          res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, { role: 'assistant', content: delta }, null))}\n\n`);
+        };
+        // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): forward the cleanup events to
+        // regenerateSwipe for RP chats that opted in (cleanup_enabled_at), which translates them
+        // into SSE frames mirroring handleChatCompletions exactly — the send/swipe parity the plan
+        // carries through to cleanup. Same first-frame-commits-headers rule as onDelta above.
+        const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined =
+          streamingRp && detail.session.cleanupEnabledAt != null
+            ? (event) => {
+                if (!streamHeadersSent) {
+                  writeStreamHeaders(res);
+                  streamHeadersSent = true;
+                }
+                if (event.kind === 'status') {
+                  res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
+                } else {
+                  res.write(
+                    `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
+                  );
+                }
+              }
+            : undefined;
+        // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): forward each reasoning delta to
+        // regenerateSwipe, which relays it to this callback for a bigimagine_reasoning SSE frame —
+        // the send/swipe parity carried through to reasoning exactly like the cleanup frames. NOT
+        // gated on cleanup_enabled_at: reasoning is independent of the cleanup opt-in (detection
+        // runs unconditionally inside streamingTurn), so an RP swipe that never enabled cleanup
+        // still streams its thinking live. Same first-frame-commits-headers rule as onDelta.
+        const onReasoningDelta: ((reasoningDelta: string) => void) | undefined = streamingRp
+          ? (reasoningDelta) => {
               if (!streamHeadersSent) {
                 writeStreamHeaders(res);
                 streamHeadersSent = true;
               }
-              if (event.kind === 'status') {
-                res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
-              } else {
-                res.write(
-                  `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
-                );
-              }
+              res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
             }
           : undefined;
-      // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): forward each reasoning delta to
-      // regenerateSwipe, which relays it to this callback for a bigimagine_reasoning SSE frame —
-      // the send/swipe parity carried through to reasoning exactly like the cleanup frames. NOT
-      // gated on cleanup_enabled_at: reasoning is independent of the cleanup opt-in (detection
-      // runs unconditionally inside streamingTurn), so an RP swipe that never enabled cleanup
-      // still streams its thinking live. Same first-frame-commits-headers rule as onDelta.
-      const onReasoningDelta: ((reasoningDelta: string) => void) | undefined = streamingRp
-        ? (reasoningDelta) => {
-            if (!streamHeadersSent) {
-              writeStreamHeaders(res);
-              streamHeadersSent = true;
-            }
-            res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
+        const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta, onCleanupEvent, onReasoningDelta);
+        if (!result.ok) {
+          if (streamingRp && streamHeadersSent) {
+            // Streaming had already begun: headers are committed, so surface the failure/abort as
+            // the terminal frame before [DONE] instead of an HTTP status change (plan Contracts).
+            // Nothing was persisted (recordSwipe never ran) — the client that sees this frame knows
+            // the regeneration didn't complete.
+            log.error(`swipe regenerate failed for chat ${chatId} after streaming began`, result.error);
+            writeStreamErrorTerminalFrame(res, result.aborted === true, result.error);
+            req.off('close', onClientClose);
+            return;
           }
-        : undefined;
-      const result = await regenerateSwipe(deps, userId, chatId, detail, messageId, streamingRp, onDelta, onCleanupEvent, onReasoningDelta);
-      if (!result.ok) {
-        if (streamingRp && streamHeadersSent) {
-          // Streaming had already begun: headers are committed, so surface the failure/abort as
-          // the terminal frame before [DONE] instead of an HTTP status change (plan Contracts).
-          // Nothing was persisted (recordSwipe never ran) — the client that sees this frame knows
-          // the regeneration didn't complete.
-          log.error(`swipe regenerate failed for chat ${chatId} after streaming began`, result.error);
-          writeStreamErrorTerminalFrame(res, result.aborted === true, result.error);
+          // 499 = the user stopped this regeneration (POST /v1/chat/abort) — same contract as the
+          // main turn's aborted response, so the frontend treats both the same way.
           req.off('close', onClientClose);
+          sendJson(res, result.aborted ? 499 : 500, { error: result.error });
           return;
         }
-        // 499 = the user stopped this regeneration (POST /v1/chat/abort) — same contract as the
-        // main turn's aborted response, so the frontend treats both the same way.
-        req.off('close', onClientClose);
-        sendJson(res, result.aborted ? 499 : 500, { error: result.error });
-        return;
-      }
-      if (streamingRp) {
-        // The stream resolved and recordSwipe persisted the regenerated swipe above. The final SSE
-        // frames go out only now — a client that sees [DONE] can trust the swipe is already saved
-        // (plan Logic), the same guarantee the non-streaming response gives.
-        if (!streamHeadersSent) writeStreamHeaders(res);
-        res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, {}, 'stop'))}\n\n`);
-        res.write('data: [DONE]\n\n');
-        res.end();
-        req.off('close', onClientClose);
+        if (streamingRp) {
+          // The stream resolved and recordSwipe persisted the regenerated swipe above. The final SSE
+          // frames go out only now — a client that sees [DONE] can trust the swipe is already saved
+          // (plan Logic), the same guarantee the non-streaming response gives.
+          if (!streamHeadersSent) writeStreamHeaders(res);
+          res.write(`data: ${JSON.stringify(buildChatCompletionChunk(detail.session.params.model ?? '', sseId, {}, 'stop'))}\n\n`);
+          res.write('data: [DONE]\n\n');
+          res.end();
+          req.off('close', onClientClose);
+          // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+          // sent — a provider round-trip has no place in the request path, so the trigger rides the
+          // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
+          if (result.locationId) {
+            res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
+          }
+          return;
+        }
+        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
         // endpoint.md §5: fire the location-image generation pass only once the reply is actually
         // sent — a provider round-trip has no place in the request path, so the trigger rides the
         // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
@@ -596,15 +617,9 @@ export async function handleChatRoutes(
           res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
         }
         return;
+      } finally {
+        endInteractiveTurn(chatId);
       }
-      sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
-      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-      // sent — a provider round-trip has no place in the request path, so the trigger rides the
-      // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
-      if (result.locationId) {
-        res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
-      }
-      return;
     }
   }
 

@@ -22,6 +22,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { getTurnStatus } from '../orchestrator/turnStatus.js';
+import { isInteractiveTurnActive } from '../orchestrator/interactiveTurnLock.js';
 import { abortTurn } from '../orchestrator/turnAbort.js';
 import { authenticate, readJsonBody, sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
@@ -32,6 +33,12 @@ import type { HttpServerDeps } from './httpServer.js';
 // persisted-session turn is always its chat_id (httpServer.ts's own handleChatCompletions), so
 // that's what this keys on; no status ever existing (not yet started, already finished, or a
 // stateless Open WebUI turn with no chat_id) is a normal, empty response, not an error.
+// `active` is the real "is a turn running" answer (robust-chat-turns-plan.md): it reads the
+// per-chat interactive-turn lock (orchestrator/interactiveTurnLock.ts) that both turn-producing
+// endpoints gate on — unlike `status`, which is only a "still thinking" hint set while a tool
+// round is churning and reads null between rounds and for the whole RP streaming lane. The client
+// uses `active` to reconcile on mount/visibility change (a turn this tab lost track of is running
+// server-side); `status` stays what it always was.
 export async function handleChatTurnStatus(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   const userId = await authenticate(req, deps.apiKeys, deps.accessIdentity);
   if (!userId) {
@@ -39,7 +46,10 @@ export async function handleChatTurnStatus(req: IncomingMessage, res: ServerResp
     return;
   }
   const chatId = new URL(req.url ?? '', 'http://placeholder').searchParams.get('chat_id');
-  sendJson(res, 200, { status: chatId ? (getTurnStatus(chatId) ?? null) : null });
+  sendJson(res, 200, {
+    status: chatId ? (getTurnStatus(chatId) ?? null) : null,
+    active: chatId ? isInteractiveTurnActive(chatId) : false,
+  });
 }
 
 // The Stop button's server side (orchestrator/turnAbort.ts): abort every LLM task currently in

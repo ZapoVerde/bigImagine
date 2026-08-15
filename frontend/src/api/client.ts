@@ -359,13 +359,17 @@ function applyPatchToAccumulated(
 
 /** GET /v1/chat/status — polled by ChatView while `sending` is true, alongside the still-in-flight
  *  chatCompletion POST above (not a replacement for it — see that function's own note on why this
- *  is a separate call at all). null means no tool call is currently running: not started yet, the
- *  turn already finished, or the reply needed no tools this round. */
-export async function getChatTurnStatus(chatId: string, apiKey: string | null): Promise<string | null> {
+ *  is a separate call at all). Since robust-chat-turns-plan.md the response carries two fields:
+ *  `status` (the "still thinking" hint — which tool runTurn is currently running, null when none
+ *  is: not started yet, the turn already finished, or the reply needed no tools this round) and
+ *  `active` (the real "is a turn running" answer from the server-side per-chat interactive-turn
+ *  lock, true for the whole turn including the RP streaming lane). A failed poll degrades to
+ *  "not active / no status" rather than throwing — best-effort, keep-last-known-state. */
+export async function getChatTurnStatus(chatId: string, apiKey: string | null): Promise<{ status: string | null; active: boolean }> {
   const res = await fetch(`/v1/chat/status?chat_id=${encodeURIComponent(chatId)}`, { headers: authHeaders(apiKey) });
-  if (!res.ok) return null;
-  const body = (await res.json()) as { status: string | null };
-  return body.status;
+  if (!res.ok) return { status: null, active: false };
+  const body = (await res.json()) as { status: string | null; active: boolean };
+  return body;
 }
 
 /** POST /v1/chat/abort — the Stop button's client side: asks the orchestrator to abort the LLM

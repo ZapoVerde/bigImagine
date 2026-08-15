@@ -39,6 +39,7 @@ import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { runStreamingRpTurn, type RunStreamingRpTurnResult } from '../orchestrator/streamingTurn.js';
 import { abortTurn, isAbortError, registerTurnAbort, unregisterTurnAbort } from '../orchestrator/turnAbort.js';
+import { beginInteractiveTurn, endInteractiveTurn } from '../orchestrator/interactiveTurnLock.js';
 import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, type CleanupLoopDeps, type CleanupRegionOutcome } from '../orchestrator/cleanupLoop.js';
 import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
 import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
@@ -324,453 +325,468 @@ export async function handleChatCompletions(
   let streamHeadersSent = false;
   const sseId = `chatcmpl-${randomUUID()}`;
   const taskId = body.chat_id ?? randomUUID();
-  // A dropped client connection cancels the in-flight LLM call (plan Edge Cases) instead of
-  // burning tokens on a stream nobody is reading — fires the same abort path as the explicit
-  // Stop button. Detached when the streaming branch ends (every outcome) so a close event that
-  // fires after this turn finished can't abort the next turn registered under the same chat_id.
-  const onClientClose = () => {
-    if (streamingRp) abortTurn(taskId);
-  };
-  req.on('close', onClientClose);
-
-  // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): wired only for RP chats that opted
-  // into the cleanup subloop (cleanup_enabled_at) and have a persisted session (chat_id) — the
-  // live engine's bigimagine_cleanup / bigimagine_patch frames ride the same SSE stream, and the
-  // finalizeCleanupResult handoff writes the composed swipe exactly the way the poll tick does.
-  // The gate keeps a chat that never enabled cleanup free of both live repairs and cleanup frames.
-  const liveCleanupActive = streamingRp && !!body.chat_id && sessionCleanupEnabledAt != null;
-  const cleanupDeps: CleanupLoopDeps = {
-    db,
-    llm: deps.llm, // the household gated provider — same one the poll tick's repairs use
-    settings,
-    chats,
-    // Same deferred post-repair location-scrape trigger the poll tick wires at the composition
-    // root (index.ts): a live header repair also lands a location, so the bg pass fires too.
-    onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
-  };
-  const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined = liveCleanupActive
-    ? (event) => {
-        // Cleanup frames can arrive before the first content delta (turn 1's finishStream runs
-        // after persistence; the header check can fire on an early delta) — commit SSE headers
-        // on the first frame of any kind.
-        if (!streamHeadersSent) {
-          writeStreamHeaders(res);
-          streamHeadersSent = true;
-        }
-        // Turn 1 is never streamed live (same rule as onDelta below): the client has accumulated
-        // no raw text, so a patch span would splice against an empty buffer — and the composed
-        // text arrives wholesale in the post-persistence chunk anyway, making any in-place
-        // correction redundant. Status frames still go out so the pills track the repairs.
-        if (event.kind === 'patch' && firstLlmTurn) return;
-        if (event.kind === 'status') {
-          res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
-        } else {
-          res.write(
-            `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
-          );
-        }
-      }
-    : undefined;
-  // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): every reasoning delta the turn's
-  // detector classifies is relayed as its own bigimagine_reasoning frame — the same
-  // always-before-[DONE] interleaving as the cleanup frames, and the client renders them into a
-  // <details> sibling above the markdown. Deliberately NOT gated by liveCleanupActive (reasoning
-  // is independent of the cleanup opt-in) and NOT gated by skipLiveTriggers (the detector runs
-  // unconditionally inside streamingTurn; this callback only relays what it classified — the plan
-  // says detection happens on every RP streaming turn). Reasoning frames can arrive before the
-  // first content delta (models emit thinking first), so headers are committed on the first frame
-  // of any kind, exactly like the cleanup frames. Turn 1 withholds reasoning exactly like content
-  // (firstLlmTurn below — the raw reply is never streamed live): it is sent as one frame in the
-  // final SSE phase, right before the whole-reply chunk, preserving "reasoning, then reply".
-  const onReasoningDelta: (reasoningDelta: string) => void = (reasoningDelta) => {
-    if (firstLlmTurn) return;
-    if (!streamHeadersSent) {
-      writeStreamHeaders(res);
-      streamHeadersSent = true;
-    }
-    res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
-  };
-  // The live path holds the loop's in-flight guard for (chat, messageId, '*') from stream start
-  // through finalizeCleanupResult — the assistant messageId is pre-generated before the turn and
-  // the swipeId isn't known until appendMessages runs, so the wildcard key keeps the 5s poll tick
-  // from launching a duplicate repair pass in the appendMessages→finalizeCleanupResult window.
-  let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
-  let cleanupAbortController: AbortController | undefined;
-  let liveCleanupGuardHeld = false;
-  // The turn's accumulated reasoning span (reasoning-blocks-plan.md): read after runStreamingRpTurn
-  // resolves for persistence (appendMessages) and for turn-1's final reasoning frame; absent when
-  // the turn produced no reasoning span. Declared here because both consumers live outside the
-  // turn's own try block scope.
-  let turnReasoning: RunStreamingRpTurnResult['reasoning'] | undefined;
-  // The composed text/outcomes the handoff produced — read again after the if (body.chat_id)
-  // block closes (turn-1's final SSE chunk carries the composed text), so declared here.
-  let cleanupComposed: string | undefined;
-  let cleanupOutcomes: CleanupRegionOutcome[] | undefined;
-  const releaseLiveCleanupGuard = () => {
-    if (liveCleanupGuardHeld) {
-      liveCleanupGuardHeld = false;
-      if (body.chat_id && assistantMessageId) releaseCleanupInFlight(body.chat_id, assistantMessageId, '*');
-      if (cleanupAbortController) unregisterTurnAbort(taskId, cleanupAbortController);
-      // The settled cleanup_jobs rows finalizeCleanupResult just wrote are authoritative now —
-      // drop the live overlay so a later getCleanupStatus polls the DB, not this turn's frames.
-      if (body.chat_id) clearCleanupLiveStatus(body.chat_id);
-    }
-  };
-  if (liveCleanupActive && body.chat_id && assistantMessageId) {
-    claimCleanupInFlight(body.chat_id, assistantMessageId, '*');
-    // A second controller under the same taskId — registerTurnAbort supports several per key —
-    // so finishStream's end-of-stream repairs share the turn's abort signal (one Stop cancels
-    // everything, including a repair still in flight when the stream ended).
-    cleanupAbortController = registerTurnAbort(taskId);
-    liveCleanupGuardHeld = true;
+  // Robust-chat-turns plan (docs/plans/robust-chat-turns-plan.md): the per-chat interactive-turn
+  // lock. A chat may only ever have one turn running at a time — send and swipe-regenerate both
+  // gate on it, so a client that lost track of an in-flight turn (a backgrounded tab, a reload)
+  // can't launch a second, concurrent one that would corrupt the transcript, not just the
+  // display (orchestrator/interactiveTurnLock.ts). Stateless traffic (no chat_id — Open WebUI)
+  // is untouched by the lock. The rest of this function is wrapped in try/finally so every
+  // return/throw path releases the slot exactly once.
+  if (body.chat_id && !beginInteractiveTurn(body.chat_id)) {
+    sendJson(res, 409, { error: 'a turn is already in progress for this chat' });
+    return;
   }
+  try {
+    // A dropped client connection cancels the in-flight LLM call (plan Edge Cases) instead of
+    // burning tokens on a stream nobody is reading — fires the same abort path as the explicit
+    // Stop button. Detached when the streaming branch ends (every outcome) so a close event that
+    // fires after this turn finished can't abort the next turn registered under the same chat_id.
+    const onClientClose = () => {
+      if (streamingRp) abortTurn(taskId);
+    };
+    req.on('close', onClientClose);
 
-  if (streamingRp) {
-    try {
-      const turnResult = await runStreamingRpTurn({
-        userId,
-        taskId,
-        messages: messagesForLlm,
-        systemPrompt,
-        model,
-        sampling: {
-          temperature: sessionParams.temperature,
-          topP: sessionParams.top_p,
-          maxTokens: sessionParams.max_tokens,
-        },
-        llm: turnLlm,
-        db,
-        settings,
-        chats,
-        onCleanupEvent,
-        skipLiveTriggers: firstLlmTurn,
-        onReasoningDelta,
-        onDelta: (delta) => {
-          // Turn 1 is deliberately NOT streamed live (plan Edge Cases): ensureFirstTurnHeader may
-          // rewrite the reply after the stream resolves, so relaying raw pre-repair text would show
-          // the client something that doesn't match what gets saved. The core still accumulates
-          // it; the header-repaired text is sent as a single chunk once persistence completes.
-          if (firstLlmTurn) return;
+    // In-stream cleanup (docs/plans/completed/in-stream-cleanup-plan.md): wired only for RP chats that opted
+    // into the cleanup subloop (cleanup_enabled_at) and have a persisted session (chat_id) — the
+    // live engine's bigimagine_cleanup / bigimagine_patch frames ride the same SSE stream, and the
+    // finalizeCleanupResult handoff writes the composed swipe exactly the way the poll tick does.
+    // The gate keeps a chat that never enabled cleanup free of both live repairs and cleanup frames.
+    const liveCleanupActive = streamingRp && !!body.chat_id && sessionCleanupEnabledAt != null;
+    const cleanupDeps: CleanupLoopDeps = {
+      db,
+      llm: deps.llm, // the household gated provider — same one the poll tick's repairs use
+      settings,
+      chats,
+      // Same deferred post-repair location-scrape trigger the poll tick wires at the composition
+      // root (index.ts): a live header repair also lands a location, so the bg pass fires too.
+      onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
+    };
+    const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined = liveCleanupActive
+      ? (event) => {
+          // Cleanup frames can arrive before the first content delta (turn 1's finishStream runs
+          // after persistence; the header check can fire on an early delta) — commit SSE headers
+          // on the first frame of any kind.
           if (!streamHeadersSent) {
             writeStreamHeaders(res);
             streamHeadersSent = true;
           }
-          res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: delta }, null))}\n\n`);
-        },
-      });
-      reply = turnResult.content;
-      cleanupHandoff = turnResult.cleanup;
-      turnReasoning = turnResult.reasoning;
-      if (mainTraceEntry) {
-        mainTraceEntry.usage = turnResult.usage;
-        mainTraceEntry.price = turnPrice;
-      }
-    } catch (err) {
+          // Turn 1 is never streamed live (same rule as onDelta below): the client has accumulated
+          // no raw text, so a patch span would splice against an empty buffer — and the composed
+          // text arrives wholesale in the post-persistence chunk anyway, making any in-place
+          // correction redundant. Status frames still go out so the pills track the repairs.
+          if (event.kind === 'patch' && firstLlmTurn) return;
+          if (event.kind === 'status') {
+            res.write(`data: ${JSON.stringify({ bigimagine_cleanup: true, region: event.region, state: event.state })}\n\n`);
+          } else {
+            res.write(
+              `data: ${JSON.stringify({ bigimagine_patch: true, region: event.region, start: event.start, end: event.end, replacement: event.replacement })}\n\n`,
+            );
+          }
+        }
+      : undefined;
+    // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): every reasoning delta the turn's
+    // detector classifies is relayed as its own bigimagine_reasoning frame — the same
+    // always-before-[DONE] interleaving as the cleanup frames, and the client renders them into a
+    // <details> sibling above the markdown. Deliberately NOT gated by liveCleanupActive (reasoning
+    // is independent of the cleanup opt-in) and NOT gated by skipLiveTriggers (the detector runs
+    // unconditionally inside streamingTurn; this callback only relays what it classified — the plan
+    // says detection happens on every RP streaming turn). Reasoning frames can arrive before the
+    // first content delta (models emit thinking first), so headers are committed on the first frame
+    // of any kind, exactly like the cleanup frames. Turn 1 withholds reasoning exactly like content
+    // (firstLlmTurn below — the raw reply is never streamed live): it is sent as one frame in the
+    // final SSE phase, right before the whole-reply chunk, preserving "reasoning, then reply".
+    const onReasoningDelta: (reasoningDelta: string) => void = (reasoningDelta) => {
+      if (firstLlmTurn) return;
       if (!streamHeadersSent) {
-        // Nothing has been streamed yet — today's exact behavior, no SSE at all (plan Contracts).
-        if (isAbortError(err)) {
-          log.info(`runStreamingRpTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
+        writeStreamHeaders(res);
+        streamHeadersSent = true;
+      }
+      res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: reasoningDelta })}\n\n`);
+    };
+    // The live path holds the loop's in-flight guard for (chat, messageId, '*') from stream start
+    // through finalizeCleanupResult — the assistant messageId is pre-generated before the turn and
+    // the swipeId isn't known until appendMessages runs, so the wildcard key keeps the 5s poll tick
+    // from launching a duplicate repair pass in the appendMessages→finalizeCleanupResult window.
+    let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
+    let cleanupAbortController: AbortController | undefined;
+    let liveCleanupGuardHeld = false;
+    // The turn's accumulated reasoning span (reasoning-blocks-plan.md): read after runStreamingRpTurn
+    // resolves for persistence (appendMessages) and for turn-1's final reasoning frame; absent when
+    // the turn produced no reasoning span. Declared here because both consumers live outside the
+    // turn's own try block scope.
+    let turnReasoning: RunStreamingRpTurnResult['reasoning'] | undefined;
+    // The composed text/outcomes the handoff produced — read again after the if (body.chat_id)
+    // block closes (turn-1's final SSE chunk carries the composed text), so declared here.
+    let cleanupComposed: string | undefined;
+    let cleanupOutcomes: CleanupRegionOutcome[] | undefined;
+    const releaseLiveCleanupGuard = () => {
+      if (liveCleanupGuardHeld) {
+        liveCleanupGuardHeld = false;
+        if (body.chat_id && assistantMessageId) releaseCleanupInFlight(body.chat_id, assistantMessageId, '*');
+        if (cleanupAbortController) unregisterTurnAbort(taskId, cleanupAbortController);
+        // The settled cleanup_jobs rows finalizeCleanupResult just wrote are authoritative now —
+        // drop the live overlay so a later getCleanupStatus polls the DB, not this turn's frames.
+        if (body.chat_id) clearCleanupLiveStatus(body.chat_id);
+      }
+    };
+    if (liveCleanupActive && body.chat_id && assistantMessageId) {
+      claimCleanupInFlight(body.chat_id, assistantMessageId, '*');
+      // A second controller under the same taskId — registerTurnAbort supports several per key —
+      // so finishStream's end-of-stream repairs share the turn's abort signal (one Stop cancels
+      // everything, including a repair still in flight when the stream ended).
+      cleanupAbortController = registerTurnAbort(taskId);
+      liveCleanupGuardHeld = true;
+    }
+
+    if (streamingRp) {
+      try {
+        const turnResult = await runStreamingRpTurn({
+          userId,
+          taskId,
+          messages: messagesForLlm,
+          systemPrompt,
+          model,
+          sampling: {
+            temperature: sessionParams.temperature,
+            topP: sessionParams.top_p,
+            maxTokens: sessionParams.max_tokens,
+          },
+          llm: turnLlm,
+          db,
+          settings,
+          chats,
+          onCleanupEvent,
+          skipLiveTriggers: firstLlmTurn,
+          onReasoningDelta,
+          onDelta: (delta) => {
+            // Turn 1 is deliberately NOT streamed live (plan Edge Cases): ensureFirstTurnHeader may
+            // rewrite the reply after the stream resolves, so relaying raw pre-repair text would show
+            // the client something that doesn't match what gets saved. The core still accumulates
+            // it; the header-repaired text is sent as a single chunk once persistence completes.
+            if (firstLlmTurn) return;
+            if (!streamHeadersSent) {
+              writeStreamHeaders(res);
+              streamHeadersSent = true;
+            }
+            res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: delta }, null))}\n\n`);
+          },
+        });
+        reply = turnResult.content;
+        cleanupHandoff = turnResult.cleanup;
+        turnReasoning = turnResult.reasoning;
+        if (mainTraceEntry) {
+          mainTraceEntry.usage = turnResult.usage;
+          mainTraceEntry.price = turnPrice;
+        }
+      } catch (err) {
+        if (!streamHeadersSent) {
+          // Nothing has been streamed yet — today's exact behavior, no SSE at all (plan Contracts).
+          if (isAbortError(err)) {
+            log.info(`runStreamingRpTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
+            req.off('close', onClientClose);
+            releaseLiveCleanupGuard();
+            sendJson(res, 499, { error: 'turn aborted' });
+            return;
+          }
+          log.error(`runStreamingRpTurn failed for user ${userId}`, err);
           req.off('close', onClientClose);
           releaseLiveCleanupGuard();
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+          return;
+        }
+        // Streaming had already begun: headers are committed, so the failure/abort surfaces as the
+        // terminal frame before [DONE] instead of an HTTP status change (plan Contracts). Nothing
+        // is persisted — the client that sees this frame knows the turn didn't complete.
+        log.error(`runStreamingRpTurn failed for user ${userId} after streaming began`, err);
+        writeStreamErrorTerminalFrame(res, isAbortError(err), err instanceof Error ? err.message : String(err));
+        req.off('close', onClientClose);
+        releaseLiveCleanupGuard();
+        return;
+      }
+    } else {
+      try {
+        const turnResult = await runTurn({
+          userId,
+          // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
+          // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
+          // one per turn is fine there, since kind stays 'chat' (never capped, only metered) and
+          // nothing needs it to be stable across calls the way an agent_routine's job_id must be.
+          taskId,
+          messages: messagesForLlm,
+          systemPrompt,
+          model,
+          sampling: {
+            temperature: sessionParams.temperature,
+            topP: sessionParams.top_p,
+            maxTokens: sessionParams.max_tokens,
+          },
+          llm: turnLlm,
+          db,
+          tools: sessionTools,
+          anchorMessageId,
+          embeddings: deps.embeddings,
+        });
+        reply = turnResult.content;
+        focusedNoteId = turnResult.focusedNoteId;
+        if (mainTraceEntry) {
+          mainTraceEntry.usage = turnResult.usage;
+          mainTraceEntry.price = turnPrice;
+        }
+      } catch (err) {
+        // Surfaced to the client rather than falling through to startHttpServer's generic top-level
+        // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
+        // upstream response) should be diagnosable from the chat itself, not just the server log.
+        if (isAbortError(err)) {
+          // The user hit Stop (POST /v1/chat/abort). Not an error: the upstream call was cancelled,
+          // nothing was appended, and the frontend treats 499 as the expected "turn stopped" outcome.
+          log.info(`runTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
           sendJson(res, 499, { error: 'turn aborted' });
           return;
         }
-        log.error(`runStreamingRpTurn failed for user ${userId}`, err);
-        req.off('close', onClientClose);
-        releaseLiveCleanupGuard();
+        log.error(`runTurn failed for user ${userId}`, err);
         sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
         return;
       }
-      // Streaming had already begun: headers are committed, so the failure/abort surfaces as the
-      // terminal frame before [DONE] instead of an HTTP status change (plan Contracts). Nothing
-      // is persisted — the client that sees this frame knows the turn didn't complete.
-      log.error(`runStreamingRpTurn failed for user ${userId} after streaming began`, err);
-      writeStreamErrorTerminalFrame(res, isAbortError(err), err instanceof Error ? err.message : String(err));
-      req.off('close', onClientClose);
-      releaseLiveCleanupGuard();
-      return;
     }
-  } else {
-    try {
-      const turnResult = await runTurn({
-        userId,
-        // A stateless request (no chat_id — Open WebUI's traffic, or any caller not using bigBrain's
-        // own persisted-session frontend) still needs a task id for bb_principles.md §14: a fresh
-        // one per turn is fine there, since kind stays 'chat' (never capped, only metered) and
-        // nothing needs it to be stable across calls the way an agent_routine's job_id must be.
-        taskId,
-        messages: messagesForLlm,
-        systemPrompt,
-        model,
-        sampling: {
-          temperature: sessionParams.temperature,
-          topP: sessionParams.top_p,
-          maxTokens: sessionParams.max_tokens,
-        },
-        llm: turnLlm,
-        db,
-        tools: sessionTools,
-        anchorMessageId,
-        embeddings: deps.embeddings,
-      });
-      reply = turnResult.content;
-      focusedNoteId = turnResult.focusedNoteId;
-      if (mainTraceEntry) {
-        mainTraceEntry.usage = turnResult.usage;
-        mainTraceEntry.price = turnPrice;
-      }
-    } catch (err) {
-      // Surfaced to the client rather than falling through to startHttpServer's generic top-level
-      // catch (bare "internal error") — a provider quirk (truncated tool-call JSON, a malformed
-      // upstream response) should be diagnosable from the chat itself, not just the server log.
-      if (isAbortError(err)) {
-        // The user hit Stop (POST /v1/chat/abort). Not an error: the upstream call was cancelled,
-        // nothing was appended, and the frontend treats 499 as the expected "turn stopped" outcome.
-        log.info(`runTurn aborted for user ${userId}`, { chatId: body.chat_id ?? 'stateless' });
-        sendJson(res, 499, { error: 'turn aborted' });
-        return;
-      }
-      log.error(`runTurn failed for user ${userId}`, err);
-      sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
-      return;
-    }
-  }
 
-  if (body.chat_id) {
-    // Repair the scene header synchronously when the raw reply lacks one, so the scrape below has
-    // a header to resolve a location from and the bg pass fires on turn 1 — the async cleanup
-    // subloop would otherwise add the header only after this reply was already persisted and
-    // scraped, and nothing re-scrapes (see orchestrator/ensureFirstTurnHeader.ts). One small LLM
-    // call, first turn only, fail-open: a failed repair stores and sends the raw reply,
-    // byte-identical to before.
-    // Everything between the wildcard claim above and this finally can throw — appendMessages on
-    // a DB error, ensureFirstTurnHeader on a provider bug — and the guard must drop either way,
-    // or the 5s poll tick would never process this message again until restart. releaseLiveCleanupGuard
-    // is idempotent, so the finally is the handoff segment's single release point. The composed
-    // text and outcomes are read after the finally (turn-1's final SSE chunk carries the composed
-    // text), so they are declared here in the enclosing block.
-    let firstTurnHeaderRepaired = false;
-    let assistantMessage: { messageId: string; role: 'user' | 'assistant' } | undefined;
-    try {
-      if (firstLlmTurn && reply) {
-        const rawReply = reply;
-        reply = await ensureFirstTurnHeader(
-          { settings: deps.settings },
-          turnLlm,
-          userId,
-          body.chat_id,
-          reply,
-          messagesForLlm,
-        );
-        firstTurnHeaderRepaired = reply !== rawReply;
-      }
-      // The raw reply is persisted BEFORE the cleanup handoff runs, matching regenerateSwipe's
-      // ordering exactly (recordSwipe, then finishStream) — finishStream fires independent LLM
-      // calls (tail body, footer, deferred 'llm' pass) that can take a while and, in principle,
-      // fail unexpectedly; the reply the user already watched stream to their screen must be
-      // durable either way, not held hostage to cleanup succeeding. The user message (if this was
-      // a genuinely new turn) is already persisted above, before runTurn ran — only the assistant
-      // reply is appended here now. Stage 2 (segway.md §4) then scrapes the turn's header block
-      // into trusted scene state, anchored to the new message's active swipe — fail-open inside
-      // the scraper, so it can never block or degrade the turn.
-      const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [
-        { role: 'assistant', content: reply, messageId: assistantMessageId, reasoning: turnReasoning?.text },
-      ]);
-      assistantMessage = insertedAssistant;
-      // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream's end-of-stream
-      // repairs (tail body, footer, deferred 'llm' pass) patch the composed buffer, and every
-      // patch was already relayed to the client via SSE frames; the composed text is what
-      // finalizeCleanupResult writes as the next swipe, with the raw reply already durable as
-      // swipe #0 above (the same durable shape the poll tick produces). Turn 1: baseText is
-      // ensureFirstTurnHeader's output and the header region is attributed from its own result.
-      if (cleanupHandoff) {
-        try {
-          const fsResult = await finishStream(cleanupHandoff.ctx, cleanupDeps, reply, {
-            userId,
-            chatId: body.chat_id,
-            signal: cleanupAbortController!.signal,
-            onCleanupEvent,
-            skipLiveTriggers: firstLlmTurn,
-            headerDeployed: firstTurnHeaderRepaired,
-          });
-          cleanupComposed = fsResult.composed;
-          cleanupOutcomes = fsResult.outcomes;
-        } catch (err) {
-          if (isAbortError(err)) {
-            // A Stop landed during the end-of-stream repairs: the raw reply is already persisted
-            // above, but no composed swipe and no job rows — the message stays due and the poll
-            // tick catches it, same as the tick's own abort path.
-            log.info(`live cleanup handoff aborted for user ${userId}`, { chatId: body.chat_id });
-          } else {
-            throw err; // finishStream is fail-open internally — a non-abort throw here is a bug
-          }
-        }
-      }
-      // The composed text (if the live path ran) becomes the next swipe, exactly the poll tick's
-      // writeback — same finalizeCleanupResult, so the message is indistinguishable in
-      // cleanup_jobs from one the tick caught. Fail-open inside; then the in-flight guard drops.
-      if (cleanupOutcomes && cleanupComposed) {
-        await finalizeCleanupResult(
-          cleanupDeps,
-          userId,
-          body.chat_id,
-          assistantMessageId!,
-          reply,
-          cleanupComposed,
-          cleanupOutcomes,
-          turnReasoning?.text, // carry the reasoning into the composed swipe — see finalizeCleanupResult
-        );
-      }
-    } finally {
-      releaseLiveCleanupGuard();
-    }
-    // docs/lorebook-plan.md §3e/§4 — the activation log is written after the turn completes
-    // ("write after, not during"): one row per entry this turn injected, the source sticky/
-    // cooldown resolve from next turn. writeLorebookActivationLog fails open inside itself, so a
-    // log hiccup can never fail a turn that already succeeded. Deliberately NOT wired into the
-    // swipe-regenerate path — regenerating a message re-rolls the gate with the same message id
-    // (same seed), and the message's original rows stay the audit trail for that message.
-    if (lorebookActivatedEntryIds.length > 0 && assistantMessageId) {
-      await deps.db.withUserScope(userId, (session) =>
-        writeLorebookActivationLog(session, userId, body.chat_id!, assistantMessageId, lorebookActivatedEntryIds),
-      );
-    }
-    if (assistantMessage) {
-      // 'extend': a genuinely new turn — a location change advances previous_scene_id
-      // (endpoint.md §5.1.8's last-turn location state), so the background can revert to the
-      // location that was showing before this turn while the new render is pending.
-      // location.md §4.2's header-good gate: only scrape when the reply's header parses — a bad
-      // header is left to the cleanup subloop, which repairs it and then fires the deferred
-      // scrape on the repaired text (cleanupLoop.ts's onLocationScraped hook). This is the same
-      // race ensureFirstTurnHeader.ts already closes for turn 1, generalized to every turn.
-      scrapedLocationId = parseStoryHeader(reply)
-        ? await scrapeTurnPresence(
-            { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+    if (body.chat_id) {
+      // Repair the scene header synchronously when the raw reply lacks one, so the scrape below has
+      // a header to resolve a location from and the bg pass fires on turn 1 — the async cleanup
+      // subloop would otherwise add the header only after this reply was already persisted and
+      // scraped, and nothing re-scrapes (see orchestrator/ensureFirstTurnHeader.ts). One small LLM
+      // call, first turn only, fail-open: a failed repair stores and sends the raw reply,
+      // byte-identical to before.
+      // Everything between the wildcard claim above and this finally can throw — appendMessages on
+      // a DB error, ensureFirstTurnHeader on a provider bug — and the guard must drop either way,
+      // or the 5s poll tick would never process this message again until restart. releaseLiveCleanupGuard
+      // is idempotent, so the finally is the handoff segment's single release point. The composed
+      // text and outcomes are read after the finally (turn-1's final SSE chunk carries the composed
+      // text), so they are declared here in the enclosing block.
+      let firstTurnHeaderRepaired = false;
+      let assistantMessage: { messageId: string; role: 'user' | 'assistant' } | undefined;
+      try {
+        if (firstLlmTurn && reply) {
+          const rawReply = reply;
+          reply = await ensureFirstTurnHeader(
+            { settings: deps.settings },
+            turnLlm,
             userId,
             body.chat_id,
-            assistantMessage.messageId,
             reply,
-            'extend',
-          )
-        : undefined;
-    }
-    // First exchange in a still-untitled session names it, once — bigBrain never retitles a
-    // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
-    // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
-    // fallback keeps a naming hiccup from being visible as a broken turn.
-    // Deliberately *not* awaited: naming the chat is background polish, and the reply the user
-    // is waiting on has no business sitting behind a second LLM round-trip. The call runs
-    // decoupled — the same shape as fireLocationImageGeneration and chatMemorySync.ts's tick —
-    // and the title lands in the DB whenever it lands; the client picks it up on its next chat
-    // refresh (ChatView's refreshActiveMessages re-reads the session). A naming failure still
-    // falls back to the truncated title, and a failed persist is logged, never surfaced.
-    if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
-      // Const captures for the background task — TypeScript doesn't preserve let/narrowed
-      // variable types inside closures, and these are read after this function has returned.
-      const chatId = body.chat_id;
-      const userMessageText = latestUserMessage.content;
-      void (async () => {
-        let title: string;
-        try {
-          title = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-            // bg:title-generation — the one already-runWithCallContext-wrapped call in this
-            // file other than the turn itself (llm-call-label-breakdown-plan.md).
-            withCallLabel('bg:title-generation', () => generateChatTitle(turnLlm, userMessageText, reply)),
+            messagesForLlm,
           );
-        } catch (err) {
-          log.error('generateChatTitle failed, falling back to a truncated title', err);
-          title = userMessageText.slice(0, 60);
+          firstTurnHeaderRepaired = reply !== rawReply;
         }
-        await chats.updateChat(userId, chatId, { title }).catch((err) =>
-          log.error(`failed to persist chat title for ${chatId}`, err),
-        );
-      })();
-    }
-    // Canvas: only when this turn actually touched a note (a tool's own focusHint said so) —
-    // omitted entirely otherwise, so an unrelated turn never clears/overwrites the chat's
-    // existing canvas focus (updateChat's dynamic patch treats "not present" as "leave alone").
-    if (focusedNoteId !== undefined) {
-      await chats.updateChat(userId, body.chat_id, { canvasNoteId: focusedNoteId });
-    }
-    // Eager chat-memory chunking (docs/plans/eager-chunk-sync-plan.md): the turn pair is now
-    // durably persisted — fire the eager chunk step without awaiting it, so the chunk rows
-    // mostly exist by the time the sync tick runs and the tick's job shrinks to consolidation.
-    // Fire-and-forget, never awaited before the response is sent; maybeEagerChunk catches and
-    // logs its own errors, so nothing here can fail or delay the turn (a missed eager pass just
-    // falls back to the tick's own chunking, the same graceful degradation an app restart
-    // causes). Only the completion of a turn (an assistant reply persisted) triggers it — a
-    // rerun/abort never grew the transcript in a way this matters for, and the eager call
-    // re-derives everything from the DB anyway.
-    if (assistantMessage) {
-      const eagerChatId = body.chat_id;
-      void maybeEagerChunk(
-        { db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
-        userId,
-        eagerChatId,
-      );
-    }
-  }
-
-  if (streamingRp) {
-    // The stream has resolved and persistence above completed. The final SSE frames are written
-    // only now, after persistence succeeds — so a client that sees [DONE] can trust the message is
-    // already saved, the same guarantee the non-streaming path gives via its single response
-    // (rp-streaming-plan.md Logic). Turn 1 (buffered by onDelta above) gets its one whole-reply
-    // chunk here, post header-repair.
-    if (!streamHeadersSent) writeStreamHeaders(res);
-    if (firstLlmTurn) {
-      // Reasoning was withheld during the turn exactly like the reply itself (firstLlmTurn in
-      // onReasoningDelta); it's sent here as one frame before the whole-reply chunk — "present
-      // only when the turn produced a reasoning span" (the frame is skipped entirely otherwise),
-      // preserving the reasoning-then-reply order of live streaming.
-      if (turnReasoning) {
-        res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: turnReasoning.text })}\n\n`);
+        // The raw reply is persisted BEFORE the cleanup handoff runs, matching regenerateSwipe's
+        // ordering exactly (recordSwipe, then finishStream) — finishStream fires independent LLM
+        // calls (tail body, footer, deferred 'llm' pass) that can take a while and, in principle,
+        // fail unexpectedly; the reply the user already watched stream to their screen must be
+        // durable either way, not held hostage to cleanup succeeding. The user message (if this was
+        // a genuinely new turn) is already persisted above, before runTurn ran — only the assistant
+        // reply is appended here now. Stage 2 (segway.md §4) then scrapes the turn's header block
+        // into trusted scene state, anchored to the new message's active swipe — fail-open inside
+        // the scraper, so it can never block or degrade the turn.
+        const [insertedAssistant] = await chats.appendMessages(userId, body.chat_id, [
+          { role: 'assistant', content: reply, messageId: assistantMessageId, reasoning: turnReasoning?.text },
+        ]);
+        assistantMessage = insertedAssistant;
+        // Live cleanup persistence handoff (in-stream-cleanup-plan.md): finishStream's end-of-stream
+        // repairs (tail body, footer, deferred 'llm' pass) patch the composed buffer, and every
+        // patch was already relayed to the client via SSE frames; the composed text is what
+        // finalizeCleanupResult writes as the next swipe, with the raw reply already durable as
+        // swipe #0 above (the same durable shape the poll tick produces). Turn 1: baseText is
+        // ensureFirstTurnHeader's output and the header region is attributed from its own result.
+        if (cleanupHandoff) {
+          try {
+            const fsResult = await finishStream(cleanupHandoff.ctx, cleanupDeps, reply, {
+              userId,
+              chatId: body.chat_id,
+              signal: cleanupAbortController!.signal,
+              onCleanupEvent,
+              skipLiveTriggers: firstLlmTurn,
+              headerDeployed: firstTurnHeaderRepaired,
+            });
+            cleanupComposed = fsResult.composed;
+            cleanupOutcomes = fsResult.outcomes;
+          } catch (err) {
+            if (isAbortError(err)) {
+              // A Stop landed during the end-of-stream repairs: the raw reply is already persisted
+              // above, but no composed swipe and no job rows — the message stays due and the poll
+              // tick catches it, same as the tick's own abort path.
+              log.info(`live cleanup handoff aborted for user ${userId}`, { chatId: body.chat_id });
+            } else {
+              throw err; // finishStream is fail-open internally — a non-abort throw here is a bug
+            }
+          }
+        }
+        // The composed text (if the live path ran) becomes the next swipe, exactly the poll tick's
+        // writeback — same finalizeCleanupResult, so the message is indistinguishable in
+        // cleanup_jobs from one the tick caught. Fail-open inside; then the in-flight guard drops.
+        if (cleanupOutcomes && cleanupComposed) {
+          await finalizeCleanupResult(
+            cleanupDeps,
+            userId,
+            body.chat_id,
+            assistantMessageId!,
+            reply,
+            cleanupComposed,
+            cleanupOutcomes,
+            turnReasoning?.text, // carry the reasoning into the composed swipe — see finalizeCleanupResult
+          );
+        }
+      } finally {
+        releaseLiveCleanupGuard();
       }
-      // The composed text (if the live path ran) is what finalizeCleanupResult persisted as the
-      // active swipe; turn-1's raw reply is never relayed to the client, so send the composed
-      // text here (falling back to reply when no live pass ran — byte-identical to the old path).
+      // docs/lorebook-plan.md §3e/§4 — the activation log is written after the turn completes
+      // ("write after, not during"): one row per entry this turn injected, the source sticky/
+      // cooldown resolve from next turn. writeLorebookActivationLog fails open inside itself, so a
+      // log hiccup can never fail a turn that already succeeded. Deliberately NOT wired into the
+      // swipe-regenerate path — regenerating a message re-rolls the gate with the same message id
+      // (same seed), and the message's original rows stay the audit trail for that message.
+      if (lorebookActivatedEntryIds.length > 0 && assistantMessageId) {
+        await deps.db.withUserScope(userId, (session) =>
+          writeLorebookActivationLog(session, userId, body.chat_id!, assistantMessageId, lorebookActivatedEntryIds),
+        );
+      }
+      if (assistantMessage) {
+        // 'extend': a genuinely new turn — a location change advances previous_scene_id
+        // (endpoint.md §5.1.8's last-turn location state), so the background can revert to the
+        // location that was showing before this turn while the new render is pending.
+        // location.md §4.2's header-good gate: only scrape when the reply's header parses — a bad
+        // header is left to the cleanup subloop, which repairs it and then fires the deferred
+        // scrape on the repaired text (cleanupLoop.ts's onLocationScraped hook). This is the same
+        // race ensureFirstTurnHeader.ts already closes for turn 1, generalized to every turn.
+        scrapedLocationId = parseStoryHeader(reply)
+          ? await scrapeTurnPresence(
+              { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
+              userId,
+              body.chat_id,
+              assistantMessage.messageId,
+              reply,
+              'extend',
+            )
+          : undefined;
+      }
+      // First exchange in a still-untitled session names it, once — bigBrain never retitles a
+      // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
+      // single tiny forced-schema call, not worth a separate cheap-model concept); a truncated
+      // fallback keeps a naming hiccup from being visible as a broken turn.
+      // Deliberately *not* awaited: naming the chat is background polish, and the reply the user
+      // is waiting on has no business sitting behind a second LLM round-trip. The call runs
+      // decoupled — the same shape as fireLocationImageGeneration and chatMemorySync.ts's tick —
+      // and the title lands in the DB whenever it lands; the client picks it up on its next chat
+      // refresh (ChatView's refreshActiveMessages re-reads the session). A naming failure still
+      // falls back to the truncated title, and a failed persist is logged, never surfaced.
+      if (sessionWasEmpty && sessionTitle === 'New chat' && latestUserMessage) {
+        // Const captures for the background task — TypeScript doesn't preserve let/narrowed
+        // variable types inside closures, and these are read after this function has returned.
+        const chatId = body.chat_id;
+        const userMessageText = latestUserMessage.content;
+        void (async () => {
+          let title: string;
+          try {
+            title = await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
+              // bg:title-generation — the one already-runWithCallContext-wrapped call in this
+              // file other than the turn itself (llm-call-label-breakdown-plan.md).
+              withCallLabel('bg:title-generation', () => generateChatTitle(turnLlm, userMessageText, reply)),
+            );
+          } catch (err) {
+            log.error('generateChatTitle failed, falling back to a truncated title', err);
+            title = userMessageText.slice(0, 60);
+          }
+          await chats.updateChat(userId, chatId, { title }).catch((err) =>
+            log.error(`failed to persist chat title for ${chatId}`, err),
+          );
+        })();
+      }
+      // Canvas: only when this turn actually touched a note (a tool's own focusHint said so) —
+      // omitted entirely otherwise, so an unrelated turn never clears/overwrites the chat's
+      // existing canvas focus (updateChat's dynamic patch treats "not present" as "leave alone").
+      if (focusedNoteId !== undefined) {
+        await chats.updateChat(userId, body.chat_id, { canvasNoteId: focusedNoteId });
+      }
+      // Eager chat-memory chunking (docs/plans/eager-chunk-sync-plan.md): the turn pair is now
+      // durably persisted — fire the eager chunk step without awaiting it, so the chunk rows
+      // mostly exist by the time the sync tick runs and the tick's job shrinks to consolidation.
+      // Fire-and-forget, never awaited before the response is sent; maybeEagerChunk catches and
+      // logs its own errors, so nothing here can fail or delay the turn (a missed eager pass just
+      // falls back to the tick's own chunking, the same graceful degradation an app restart
+      // causes). Only the completion of a turn (an assistant reply persisted) triggers it — a
+      // rerun/abort never grew the transcript in a way this matters for, and the eager call
+      // re-derives everything from the DB anyway.
+      if (assistantMessage) {
+        const eagerChatId = body.chat_id;
+        void maybeEagerChunk(
+          { db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
+          userId,
+          eagerChatId,
+        );
+      }
+    }
+
+    if (streamingRp) {
+      // The stream has resolved and persistence above completed. The final SSE frames are written
+      // only now, after persistence succeeds — so a client that sees [DONE] can trust the message is
+      // already saved, the same guarantee the non-streaming path gives via its single response
+      // (rp-streaming-plan.md Logic). Turn 1 (buffered by onDelta above) gets its one whole-reply
+      // chunk here, post header-repair.
+      if (!streamHeadersSent) writeStreamHeaders(res);
+      if (firstLlmTurn) {
+        // Reasoning was withheld during the turn exactly like the reply itself (firstLlmTurn in
+        // onReasoningDelta); it's sent here as one frame before the whole-reply chunk — "present
+        // only when the turn produced a reasoning span" (the frame is skipped entirely otherwise),
+        // preserving the reasoning-then-reply order of live streaming.
+        if (turnReasoning) {
+          res.write(`data: ${JSON.stringify({ bigimagine_reasoning: true, delta: turnReasoning.text })}\n\n`);
+        }
+        // The composed text (if the live path ran) is what finalizeCleanupResult persisted as the
+        // active swipe; turn-1's raw reply is never relayed to the client, so send the composed
+        // text here (falling back to reply when no live pass ran — byte-identical to the old path).
+        res.write(
+          `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: cleanupComposed ?? reply }, null))}\n\n`,
+        );
+      }
+      res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, {}, 'stop'))}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      req.off('close', onClientClose);
+      if (scrapedLocationId) {
+        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+        // sent — never awaited inline (a provider round-trip has no place blocking the reply).
+        // turnLlm is the connection this very turn ran on — the describer uses it too (the same
+        // "the room's description is written by the story's own voice" default VLZ uses).
+        res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+      }
+      return;
+    }
+
+    if (body.stream) {
+      const id = `chatcmpl-${randomUUID()}`;
+      writeStreamHeaders(res);
       res.write(
-        `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, { role: 'assistant', content: cleanupComposed ?? reply }, null))}\n\n`,
+        `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, { role: 'assistant', content: reply }, null))}\n\n`,
       );
+      res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, {}, 'stop'))}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+      if (scrapedLocationId) {
+        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
+        // sent — never awaited inline (a provider round-trip has no place blocking the reply).
+        // turnLlm is the connection this very turn ran on — the describer uses it too (the same
+        // "the room's description is written by the story's own voice" default VLZ uses).
+        res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+      }
+      return;
     }
-    res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, sseId, {}, 'stop'))}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
-    req.off('close', onClientClose);
+
+    sendJson(res, 200, buildChatCompletion(echoedModel, reply));
     if (scrapedLocationId) {
-      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-      // sent — never awaited inline (a provider round-trip has no place blocking the reply).
-      // turnLlm is the connection this very turn ran on — the describer uses it too (the same
-      // "the room's description is written by the story's own voice" default VLZ uses).
+      // endpoint.md §5: same decoupled trigger as the streaming branch — the reply is sent, the
+      // image pass starts in the background like chatMemorySync.ts's tick. Same turnLlm threading
+      // as the streaming branch above.
       res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
     }
-    return;
-  }
-
-  if (body.stream) {
-    const id = `chatcmpl-${randomUUID()}`;
-    writeStreamHeaders(res);
-    res.write(
-      `data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, { role: 'assistant', content: reply }, null))}\n\n`,
-    );
-    res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, {}, 'stop'))}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
-    if (scrapedLocationId) {
-      // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-      // sent — never awaited inline (a provider round-trip has no place blocking the reply).
-      // turnLlm is the connection this very turn ran on — the describer uses it too (the same
-      // "the room's description is written by the story's own voice" default VLZ uses).
-      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
-    }
-    return;
-  }
-
-  sendJson(res, 200, buildChatCompletion(echoedModel, reply));
-  if (scrapedLocationId) {
-    // endpoint.md §5: same decoupled trigger as the streaming branch — the reply is sent, the
-    // image pass starts in the background like chatMemorySync.ts's tick. Same turnLlm threading
-    // as the streaming branch above.
-    res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+  } finally {
+    if (body.chat_id) endInteractiveTurn(body.chat_id);
   }
 }

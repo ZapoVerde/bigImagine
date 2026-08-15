@@ -410,6 +410,16 @@ export default function ChatView({
     return () => window.clearTimeout(t);
   }, [draft, draftKey]);
   const [sending, setSending] = useState(false);
+  // Robust-chat-turns plan: a turn is running server-side for this chat that this tab lost track
+  // of (a backgrounded tab / reload mid-turn wiped the local `sending` state). Kept separate from
+  // `sending` so it never disturbs send()'s own guards — send() is not running; we're catching up
+  // to a turn the client can't see. Renders the pending bubble and disables the composer while the
+  // server-side lock is held (reconcileTurnInFlight), then refreshes against canonical state.
+  const [resumingTurn, setResumingTurn] = useState(false);
+  // Re-entrancy guard for reconcileTurnInFlight (read from async callbacks, like sendingRef): the
+  // load-effect check, a visibilitychange, and a send()-409 can all fire within a second of each
+  // other — only one poll loop should ever run for this tab.
+  const resumingTurnRef = useRef(false);
   // What runTurn's currently running tool is doing, polled from GET /v1/chat/status while
   // `sending` is true (client.ts's getChatTurnStatus) — null renders as the old plain "…" bubble.
   const [turnStatus, setTurnStatus] = useState<string | null>(null);
@@ -654,11 +664,35 @@ export default function ChatView({
       .then((detail) => {
         setActiveChat(detail.session);
         setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+        // Robust-chat-turns plan: a remounted tab reopens while a turn is still running
+        // server-side (the reload happened mid-turn and local `sending` was lost) — the local
+        // view has no way to know. Ask the server once; if a turn is active, show the pending
+        // bubble and refresh when it resolves (reconcileTurnInFlight).
+        void reconcileTurnInFlight(chatId);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'failed to load chat'));
     refreshLocationImage(chatId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId]);
+
+  // Robust-chat-turns plan: on regaining visibility, re-check server truth about whether a turn
+  // is running for the chat currently open in this tab. This is what directly answers "I check
+  // another tab and come back": the tab need not have been killed/reloaded for the local poll to
+  // have gone stale — mobile browsers throttle/pause timers in backgrounded tabs — so every
+  // return re-syncs against the server, not only on mount. Guarded to the visible, loaded chat
+  // (the same activeChat/chatIdRef pattern send()'s post-turn refresh uses): hidden tabs stay
+  // mounted and must not reconcile the chat they happen to hold.
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== 'visible' || !active) return;
+      const chatId = chatIdRef.current;
+      if (!chatId || !activeChat || chatIdRef.current !== activeChat.chatId) return;
+      void reconcileTurnInFlight(chatId);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, activeChat]);
 
   // Close the ⋯ chat menu (either mount — header or mobile input row) on outside click or
   // Escape. Only mounted while the menu is open, so the listeners cost nothing when it isn't.
@@ -892,6 +926,41 @@ export default function ChatView({
     refreshLocationImage(chatId);
   }
 
+  // Robust-chat-turns plan: reconcile this chat against server truth about whether a turn is
+  // running. Entered from three places — the chat-load effect (a remounted tab reopens mid-turn),
+  // document visibilitychange (mobile browsers throttle/pause timers in backgrounded tabs, so the
+  // local 1s poll may have gone stale while away), and send()'s 409 branch (a turn this client
+  // lost track of is already running). If the server's lock says a turn is active, show the
+  // pending bubble, poll on the same 1s cadence runChatTurn's status poll uses, and once the lock
+  // clears refresh the messages — the reply lands as the canonical row, exactly like the
+  // post-turn refresh send() runs. No-op when the turn already finished (the active check races
+  // the lock release), and a no-op on a chat the user has since switched away from (chatIdRef
+  // guard, same pattern as send()'s post-turn refresh).
+  async function reconcileTurnInFlight(chatId: string) {
+    if (resumingTurnRef.current || chatIdRef.current !== chatId) return;
+    const { active } = await getChatTurnStatus(chatId, apiKey).catch(() => ({ status: null, active: false }));
+    if (!active) return;
+    resumingTurnRef.current = true;
+    setResumingTurn(true);
+    try {
+      // The turn that holds the lock will release it in its own finally — poll until it clears,
+      // then refresh to show the persisted result (a resumed streaming turn has no live SSE
+      // stream to reattach to, so this is the same degradation turn 1 already accepts today).
+      while (resumingTurnRef.current && chatIdRef.current === chatId) {
+        await new Promise((r) => window.setTimeout(r, 1000));
+        if (chatIdRef.current !== chatId) return;
+        const status = await getChatTurnStatus(chatId, apiKey).catch(() => ({ status: null, active: false }));
+        if (!status.active) break;
+      }
+      if (chatIdRef.current === chatId) {
+        await refreshActiveMessages(chatId).catch(() => {});
+      }
+    } finally {
+      resumingTurnRef.current = false;
+      setResumingTurn(false);
+    }
+  }
+
   async function closeCanvas() {
     if (!activeChat) return;
     try {
@@ -1059,7 +1128,7 @@ export default function ChatView({
     let timeline: TurnTimeline | undefined;
     if (!streaming) {
       statusTimer = window.setInterval(async () => {
-        setTurnStatus(await getChatTurnStatus(chatId, apiKey));
+        setTurnStatus((await getChatTurnStatus(chatId, apiKey)).status);
       }, 1000);
     }
     try {
@@ -1185,7 +1254,7 @@ export default function ChatView({
   async function send() {
     const text = draft.trim();
     const resendLast = resendMode();
-    if (sending) return;
+    if (sending || resumingTurn) return;
     if (!resendLast && !text && stagedFiles.length === 0 && stagedImages.length === 0) return;
 
     // A file/image-only send (no typed text) still needs non-empty, readable content for the
@@ -1256,6 +1325,19 @@ export default function ChatView({
         // from must not repopulate the view with the old chat.
         if (activeChat && chatIdRef.current === activeChat.chatId) {
           await refreshActiveMessages(activeChat.chatId).catch(() => {});
+        }
+      } else if (err instanceof ApiError && err.status === 409) {
+        // Robust-chat-turns plan: the server refused this send because a turn is already running
+        // for this chat — most likely one this same client lost track of (a backgrounded tab or
+        // reload wiped the local `sending` state) rather than a genuinely foreign turn. Reconcile
+        // against server truth instead of surfacing an error banner: show the pending bubble and
+        // refresh once the in-flight turn resolves (reconcileTurnInFlight). The optimistic user
+        // message this send pushed is not in the canonical record and disappears on that refresh,
+        // exactly like the 499 stopped-turn path.
+        if (activeChat && chatIdRef.current === activeChat.chatId) {
+          void reconcileTurnInFlight(activeChat.chatId);
+        } else {
+          setError('a turn is already in progress for this chat');
         }
       } else {
         setError(err instanceof ApiError ? err.message : 'failed to reach BigImagine');
@@ -2030,7 +2112,9 @@ export default function ChatView({
               </div>
             );
           })}
-          {sending && !liveStreaming && <div className="chat-bubble assistant pending">{turnStatus ?? '…'}</div>}
+          {(sending || resumingTurn) && !liveStreaming && (
+            <div className="chat-bubble assistant pending">{resumingTurn ? 'still generating…' : (turnStatus ?? '…')}</div>
+          )}
           {/* Mobile bottom slack (ChatView.css): the scrollable content otherwise ends at the
               last entry, which pins its bottom to the top of the input row — the expandable
               rerun/edit bar could never be pulled up to mid-screen. This spacer extends the
@@ -2123,6 +2207,9 @@ export default function ChatView({
                 📎
               </button>
             )}
+            {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this
+                tab lost track of (resumingTurn) — typing into a conversation whose transcript is
+                about to change under you is worse than waiting for the refresh. */}
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -2135,6 +2222,7 @@ export default function ChatView({
               placeholder="Message BigImagine…"
               rows={2}
               autoFocus
+              disabled={resumingTurn}
             />
             {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
                 the row is identical in both breakpoints. Scrolls the history to its end. */}
@@ -2152,6 +2240,7 @@ export default function ChatView({
               disabled={
                 !sending &&
                 !swipeRegenerating &&
+                !resumingTurn &&
                 (selectionMode ||
                   (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
               }

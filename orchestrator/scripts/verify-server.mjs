@@ -4050,6 +4050,98 @@ function reasoningFrameDelta(payload) {
   server9.close();
 }
 
+// --- Part 10: robust chat turns (robust-chat-turns-plan.md) — the per-chat interactive-turn
+// lock rejects overlapping turns with 409, and GET /v1/chat/status reports active:true mid-turn
+// and false after the turn releases the lock ---
+{
+  // A deliberately slow provider so two sends for the same chat actually overlap in time — the
+  // lock (orchestrator/interactiveTurnLock.ts) must reject the second with 409 while the first
+  // is still churning, no matter how long the LLM takes.
+  let lockLlmCalls = 0;
+  const lockLlm = {
+    name: 'lock-test',
+    async complete() {
+      lockLlmCalls++;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { message: { role: 'assistant', content: 'lock reply' }, toolCalls: [] };
+    },
+  };
+  const lockUserId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  const lockChats = createFakeChatSessionStore();
+  const lockServer = startHttpServer({
+    llm: lockLlm,
+    db: createPostgresClient(createFakePool()),
+    tools: createToolRegistry([echoTool]),
+    apiKeys: createApiKeyStore(`good-key-lock:${lockUserId}`),
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: lockChats,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: createFakeSettingsStore(),
+    llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => lockServer.once('listening', resolve));
+  const lockBase = `http://127.0.0.1:${lockServer.address().port}`;
+  const lockAuth = { authorization: 'Bearer good-key-lock' };
+  // Titled explicitly (not 'New chat') so the first exchange's background auto-title never fires
+  // and muddies the LLM call-count assertion.
+  const lockChat = await lockChats.createChat(lockUserId, { title: 'Lock test' });
+  const statusUrl = `${lockBase}/v1/chat/status?chat_id=${encodeURIComponent(lockChat.chatId)}`;
+
+  // Fire the first send; it takes the lock and holds it for the whole 400ms LLM call plus
+  // persistence. Not awaited — the second send must race it.
+  const firstSendPromise = fetch(`${lockBase}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...lockAuth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: lockChat.chatId }),
+  });
+  // Wait (polling, not a fixed sleep) until the status endpoint actually reports the lock held —
+  // a fixed sleep would race the handler reaching beginInteractiveTurn.
+  const lockDeadline = Date.now() + 3000;
+  let lockActive = false;
+  while (!lockActive && Date.now() < lockDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const st = await fetch(statusUrl, { headers: lockAuth }).then((r) => r.json());
+    lockActive = st.active === true;
+  }
+  assert(lockActive, 'GET /v1/chat/status reports active:true while a turn holds the lock');
+
+  // A second send for the same chat must be refused with 409 before any DB/LLM work.
+  const secondRes = await fetch(`${lockBase}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...lockAuth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi again' }], chat_id: lockChat.chatId }),
+  });
+  const secondBody = await secondRes.json();
+  assert(secondRes.status === 409, 'a second overlapping turn on the same chat_id gets 409');
+  assert(secondBody.error === 'a turn is already in progress for this chat', 'the 409 body names the reason');
+  assert(lockLlmCalls === 1, 'the rejected second turn never reached the LLM (the lock gates before any work)');
+
+  // The first turn still succeeds normally.
+  const firstRes = await firstSendPromise;
+  const firstBody = await firstRes.json();
+  assert(
+    firstRes.status === 200 && firstBody.choices?.[0]?.message?.content === 'lock reply',
+    'the first turn completes normally while the second was rejected',
+  );
+
+  // After the turn resolves, the lock is released and a fresh send proceeds.
+  const afterStatusRes = await fetch(statusUrl, { headers: lockAuth });
+  const afterStatusBody = await afterStatusRes.json();
+  assert(afterStatusRes.status === 200 && afterStatusBody.active === false, 'GET /v1/chat/status reports active:false after the turn releases the lock');
+  const thirdRes = await fetch(`${lockBase}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...lockAuth, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'hi third' }], chat_id: lockChat.chatId }),
+  });
+  assert(thirdRes.status === 200, 'a turn on the same chat succeeds once the lock is released');
+
+  lockServer.close();
+}
+
 if (process.exitCode) {
   console.error('\nserver verification FAILED');
   process.exit(1);
