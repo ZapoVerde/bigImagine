@@ -8,6 +8,7 @@ import {
   renderBridge,
   renderPlotThreads,
   renderAutoRecall,
+  renderSyncSummaries,
   renderFusedMemoryBlock,
   formatRecentHistoryTurns,
   renderRecentHistory,
@@ -17,6 +18,8 @@ import {
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
   DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
   DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
+  DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+  DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
 } from '../dist/io/chatMemory/memoryInjection.js';
 
 function assert(cond, message) {
@@ -191,6 +194,60 @@ function assert(cond, message) {
     out.includes('[Just before: lead-in-4]'),
     "an empty lead-in override falls back to the built-in default ('' || undefined), same contract as the other templates",
   );
+}
+
+// --- renderSyncSummaries (docs/plans/sync-summaries-plan.md): bare rows through the entry
+// template, inflated rows (content attached by recallForPrompt.ts's merge) through the SAME
+// auto-recall chunk template with the [header] prefix — never duplicated vocabulary. ---
+{
+  const out = renderSyncSummaries(
+    [
+      { chunk_id: 'c5', ordinal: 5, summary: 'the docks at dusk', content: '' },
+      { chunk_id: 'c6', ordinal: 6, summary: 'Mara arrives', content: '' },
+    ],
+    DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+    DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
+    DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    'Bostaff',
+  );
+  assert(
+    out.startsWith('[The following are recent turns not yet folded into the story summary:]') &&
+      out.includes('[the docks at dusk]') &&
+      out.includes('[Mara arrives]') &&
+      !out.includes('<memory turns='),
+    'bare rows render as [summary] entries through the default entry template, no <memory> blocks',
+  );
+}
+{
+  const out = renderSyncSummaries(
+    [
+      { chunk_id: 'c5', ordinal: 5, summary: 'the docks at dusk', content: '' },
+      { chunk_id: 'c6', ordinal: 6, summary: 'Mara arrives', content: 'User: hi\nAssistant: hello' },
+    ],
+    DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+    DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
+    DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    'Bostaff',
+  );
+  assert(
+    out.includes('[the docks at dusk]') &&
+      out.includes('<memory turns="6">\n[Mara arrives]\nUser: hi\nAssistant: hello\n</memory>'),
+    'an inflated row renders through the SAME chunk template as auto_recall, [summary] prefixed into the text (rag-fetch.js:202 shape)',
+  );
+}
+{
+  const out = renderSyncSummaries([], DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT, DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT, DEFAULT_AUTO_RECALL_CHUNK_PROMPT, '');
+  assert(out === '', 'empty sync-summaries renders empty (the {{#if text}} wrapper collapses to nothing)');
+}
+{
+  const out = renderSyncSummaries(
+    [{ chunk_id: 'c3', ordinal: 3, summary: 's3', content: '' }],
+    'SYNC: {{text}}',
+    'E{{turn_range}} {{text}} C{{char_name}}',
+    DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+    'Runny',
+  );
+  assert(out === 'SYNC: E3 s3 CRunny', 'a bespoke entry template gets {{text}}, {{turn_range}}, {{char_name}}');
 }
 
 // --- Empty-string template = built-in default (the platform's "default + bespoke" contract, the

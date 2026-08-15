@@ -469,6 +469,15 @@ export interface ChatMemorySettings {
   autoRecallLeadInChunks: number | null;
   autoRecallLeadInPrompt: string;
   autoRecallLeadInPromptIsDefault: boolean;
+  // Sync-summaries component (migration 0104, docs/plans/sync-summaries-plan.md) — the
+  // unconditional open-sync-point section between bridge and recent_history: the outer wrapper
+  // (mirrors injectAutoRecallPrompt's shape) and the per-entry bare-summary template (its own
+  // setting — lead-ins stay reserved for auto_recall's deep-archive picks). Empty = the
+  // built-in default, same contract as the other prompt fields.
+  injectSyncSummariesPrompt: string;
+  injectSyncSummariesPromptIsDefault: boolean;
+  syncSummaryEntryPrompt: string;
+  syncSummaryEntryPromptIsDefault: boolean;
   autoRecallEnabled: boolean;
   autoRecallPairs: number | null;
   autoRecallChunkTopK: number | null;

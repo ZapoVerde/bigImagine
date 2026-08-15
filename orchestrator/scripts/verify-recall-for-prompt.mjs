@@ -69,6 +69,8 @@ function createFakeSession({
   plotFloorRows = [],
   plotHistoryByArc = {},
   leadInRows = [],
+  openSyncPoint = null,
+  syncSummaryRows = [],
   throwOn = null,
 } = {}) {
   const seenSql = [];
@@ -79,6 +81,18 @@ function createFakeSession({
     async query(sql, params) {
       seenSql.push(sql);
       seenCalls.push({ sql, params });
+      // Sync-summaries lane (recallSyncSummaryLane.ts, sync-summaries-plan.md) — checked
+      // BEFORE the generic `from chat_chunks` matcher below: the lane's chunk query also
+      // embeds `from chat_chunks`, discriminated here by its `'' as content` select, and its
+      // open-point query is the chat_sync_points read with `closed_at is null` (the plot
+      // lane's recency-floor query reads `closed_at is not null` — no collision).
+      if (sql.includes('from chat_sync_points') && sql.includes('closed_at is null')) {
+        return openSyncPoint ? [openSyncPoint] : [];
+      }
+      if (sql.includes('from chat_chunks') && sql.includes("'' as content")) {
+        if (throwOn === 'syncSummaries') throw new Error('syncSummaries boom');
+        return syncSummaryRows;
+      }
       // Lead-in CTE (chunkLeadIn.ts, migration 0100) — checked BEFORE the generic
       // `from chat_chunks` lane matcher below, because both the CTE's seed and recursive arms
       // embed `from chat_chunks`.
@@ -1110,7 +1124,7 @@ function countFactBullets(block) {
     poolSql && poolSql.includes('distinct on (arc_tag)') && poolSql.includes('order by vector_embed <-> $3, arc_tag'),
     'the plot pool reduces to one best-scoring row per arc_tag with a deterministic arc_tag tie-break',
   );
-  const floorSql = seenSql.find((sql) => sql.includes('from chat_sync_points'));
+  const floorSql = seenSql.find((sql) => sql.includes('from chat_sync_points') && sql.includes('closed_at is not null'));
   assert(
     floorSql && floorSql.includes('order by ordinal desc') && floorSql.includes('limit $3'),
     'the recency floor reads the chat\'s most recent sync ticks by chat_sync_points.ordinal (limit = floor_syncs)',
@@ -1262,6 +1276,128 @@ function countFactBullets(block) {
       `lead_in_chunks raw '${raw}' binds $4 = ${expected} on the CTE (clamped to MAX / fallen back to DEFAULT)`,
     );
   }
+}
+
+// --- 11. Sync-summaries lane (recallSyncSummaryLane.ts, migration 0104,
+// docs/plans/sync-summaries-plan.md): the unconditional open-sync-point section ---
+{
+  // An open sync point with two chunks, NEITHER RAG-selected: both come back as bare
+  // summaries (content ''), auto_recall is unaffected (the RAG-picked chunks are other,
+  // older ordinals), and the legacy fused block never sees the sync rows.
+  const syncRows = [
+    { chunk_id: 'c7', ordinal: 7, summary: 'the docks at dusk', content: '' },
+    { chunk_id: 'c8', ordinal: 8, summary: 'Mara arrives', content: '' },
+  ];
+  const parts = await buildAutoRecallParts(
+    createFakeSession({
+      openSyncPoint: { sync_id: 'sp-1' },
+      syncSummaryRows: syncRows,
+      chunkRows: [
+        { chunk_id: 'c2', ordinal: 2, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 },
+      ],
+    }),
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    parts.syncSummaries.length === 2 &&
+      parts.syncSummaries[0].chunk_id === 'c7' && parts.syncSummaries[0].content === '' &&
+      parts.syncSummaries[1].chunk_id === 'c8' && parts.syncSummaries[1].content === '',
+    'an open sync point with RAG-untouched chunks yields bare summaries, ordinal order, no inflated content',
+  );
+  assert(
+    parts.chunks.length === 1 && parts.chunks[0].ordinal === 2,
+    'auto_recall chunks are unaffected — the sync-window rows never enter the chunks lane',
+  );
+}
+{
+  // One sync-window chunk IS also RAG-selected: it appears exactly ONCE — full-text, inside
+  // syncSummaries (content attached, ordinal kept) — and is absent from chunks; it receives
+  // no lead-in (the CTE is called with the post-removal ids only).
+  const syncRows = [
+    { chunk_id: 'c7', ordinal: 7, summary: 'the docks at dusk', content: '' },
+    { chunk_id: 'c8', ordinal: 8, summary: 'Mara arrives', content: '' },
+  ];
+  const session = createFakeSession({
+    openSyncPoint: { sync_id: 'sp-1' },
+    syncSummaryRows: syncRows,
+    chunkRows: [
+      { chunk_id: 'c2', ordinal: 2, summary: 'old scene', content: 'User: a\nAssistant: b', distance: 0.1, kw_score: 0 },
+      { chunk_id: 'c8', ordinal: 8, summary: 'Mara arrives', content: 'User: c\nAssistant: d', distance: 0.1, kw_score: 0 },
+    ],
+    leadInRows: [{ chunk_id: 'c1', ordinal: 1, summary: 's1' }],
+  });
+  const parts = await buildAutoRecallParts(
+    session,
+    fakeSettings(new Map([['chat_memory_auto_recall_lead_in_chunks', '1']])),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  const inflated = parts.syncSummaries.find((s) => s.chunk_id === 'c8');
+  assert(
+    inflated && inflated.content === 'User: c\nAssistant: d',
+    'a RAG-selected sync-window chunk inflates its sync-summary row in place with the full content',
+  );
+  assert(
+    parts.syncSummaries.length === 2 && parts.syncSummaries[0].chunk_id === 'c7' && parts.syncSummaries[0].content === '',
+    'the sibling sync-window row stays a bare summary — only the RAG-selected chunk inflates',
+  );
+  assert(
+    !parts.chunks.some((c) => c.ordinal === 8) && parts.chunks.some((c) => c.ordinal === 2),
+    'the inflated chunk is absent from auto_recall chunks (never duplicated across the two sections)',
+  );
+  const cteCall = session.seenCalls.find((c) => c.sql.includes('with recursive lead_in'));
+  assert(
+    cteCall && !cteCall.params[2].includes('c8') && cteCall.params[2].includes('c2'),
+    'the lead-in walk runs on the post-removal chunks only — the inflated chunk neither triggers nor receives a lead-in',
+  );
+}
+{
+  // No open sync point at all: empty syncSummaries and the chunk read is never even issued
+  // (the lane returns before its second query).
+  const session = createFakeSession({});
+  const parts = await buildAutoRecallParts(
+    session,
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    parts.syncSummaries.length === 0,
+    'no open sync point => empty syncSummaries (the sync_summaries slot emits nothing)',
+  );
+  assert(
+    !session.seenSql.some((sql) => sql.includes("'' as content") && sql.includes('from chat_chunks')),
+    'with no open sync point the lane never issues its chunks query',
+  );
+}
+{
+  // Fail-open with lane isolation (recallPlotLane precedent): a sync-summaries throw degrades
+  // to empty sync rows only — the chunk/fact lanes are untouched, and nothing rejects.
+  const parts = await buildAutoRecallParts(
+    createFakeSession({
+      openSyncPoint: { sync_id: 'sp-1' },
+      syncSummaryRows: [],
+      throwOn: 'syncSummaries',
+      chunkRows: [{ chunk_id: 'c2', ordinal: 2, summary: 'old scene', content: 'User: x\nAssistant: y', distance: 0.1, kw_score: 0 }],
+    }),
+    fakeSettings(),
+    createStubEmbeddingProvider(8),
+    'user-1',
+    'chat-1',
+    [{ role: 'user', content: 'hi' }],
+  );
+  assert(
+    parts.syncSummaries.length === 0 && parts.chunks.length === 1 && parts.chunks[0].ordinal === 2,
+    'a sync-summaries lane failure degrades to empty sync rows alone — the chunk/fact lanes are unaffected (never a rejection)',
+  );
 }
 
 // --- Sanity: the exported constants are what the wiring depends on ---

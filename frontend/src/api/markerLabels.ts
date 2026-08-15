@@ -17,6 +17,7 @@ export const MARKER_LABELS: Record<string, string> = {
   bridge: 'Bridge',
   plot_threads: 'Plot Threads',
   auto_recall: 'Auto Recall',
+  sync_summaries: 'Sync Summaries',
   lorebook: 'Lorebook',
   recent_history: 'Recent History',
   post_history_instructions: 'Post-History Instructions',

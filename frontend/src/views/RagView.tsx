@@ -56,6 +56,8 @@ export default function RagView() {
   const [selectedInjectRecentHistoryPrompt, setSelectedInjectRecentHistoryPrompt] = useState('');
   const [selectedAutoRecallChunkPrompt, setSelectedAutoRecallChunkPrompt] = useState('');
   const [selectedAutoRecallLeadInPrompt, setSelectedAutoRecallLeadInPrompt] = useState('');
+  const [selectedInjectSyncSummariesPrompt, setSelectedInjectSyncSummariesPrompt] = useState('');
+  const [selectedSyncSummaryEntryPrompt, setSelectedSyncSummaryEntryPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
   // The chunk-size backfill's singleton progress row (docs/plans/chunk-size-resize-plan.md) —
   // polled while 'running'; also read once on unlock so a pass started in another session shows up.
@@ -105,6 +107,8 @@ export default function RagView() {
     setSelectedInjectRecentHistoryPrompt(settings.injectRecentHistoryPrompt);
     setSelectedAutoRecallChunkPrompt(settings.autoRecallChunkPrompt);
     setSelectedAutoRecallLeadInPrompt(settings.autoRecallLeadInPrompt);
+    setSelectedInjectSyncSummariesPrompt(settings.injectSyncSummariesPrompt);
+    setSelectedSyncSummaryEntryPrompt(settings.syncSummaryEntryPrompt);
     setSelectedAutoRecallEnabled(settings.autoRecallEnabled);
     setSelectedAutoRecallPairs(settings.autoRecallPairs === null ? '' : String(settings.autoRecallPairs));
     setSelectedAutoRecallChunkTopK(settings.autoRecallChunkTopK === null ? '' : String(settings.autoRecallChunkTopK));
@@ -252,7 +256,9 @@ export default function RagView() {
       | 'injectAutoRecallPrompt'
       | 'injectRecentHistoryPrompt'
       | 'autoRecallChunkPrompt'
-      | 'autoRecallLeadInPrompt',
+      | 'autoRecallLeadInPrompt'
+      | 'injectSyncSummariesPrompt'
+      | 'syncSummaryEntryPrompt',
   ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
@@ -266,6 +272,8 @@ export default function RagView() {
     if (field === 'injectRecentHistoryPrompt') setSelectedInjectRecentHistoryPrompt('');
     if (field === 'autoRecallChunkPrompt') setSelectedAutoRecallChunkPrompt('');
     if (field === 'autoRecallLeadInPrompt') setSelectedAutoRecallLeadInPrompt('');
+    if (field === 'injectSyncSummariesPrompt') setSelectedInjectSyncSummariesPrompt('');
+    if (field === 'syncSummaryEntryPrompt') setSelectedSyncSummaryEntryPrompt('');
   }
 
   // The retrieval knobs split across two endpoints: the auto-recall trio lives in
@@ -328,6 +336,12 @@ export default function RagView() {
     }
     if (selectedAutoRecallLeadInPrompt !== chatMemorySettings.autoRecallLeadInPrompt) {
       memoryPatch.auto_recall_lead_in_prompt = selectedAutoRecallLeadInPrompt;
+    }
+    if (selectedInjectSyncSummariesPrompt !== chatMemorySettings.injectSyncSummariesPrompt) {
+      memoryPatch.inject_sync_summaries_prompt = selectedInjectSyncSummariesPrompt;
+    }
+    if (selectedSyncSummaryEntryPrompt !== chatMemorySettings.syncSummaryEntryPrompt) {
+      memoryPatch.sync_summary_entry_prompt = selectedSyncSummaryEntryPrompt;
     }
     const canonPatch: Parameters<typeof adminSetCanonSettings>[0] = {};
     const canonRecallTopK = Number(selectedCanonRecallTopK);
@@ -841,6 +855,36 @@ export default function RagView() {
         </label>
         <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('autoRecallLeadInPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Sync-summaries injection prompt (the open-sync-point wrapper, e.g. between bridge and
+          recent_history) {chatMemorySettings?.injectSyncSummariesPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedInjectSyncSummariesPrompt}
+            onChange={(e) => setSelectedInjectSyncSummariesPrompt(e.target.value)}
+            rows={5}
+          />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('injectSyncSummariesPrompt')}>
+          Reset to default
+        </button>
+        <br />
+        <label>
+          Sync-summary entry template (one bare chunk summary, e.g. {'[{{text}}]'}){' '}
+          {chatMemorySettings?.syncSummaryEntryPromptIsDefault && <em>(default)</em>}
+          <br />
+          <textarea
+            value={selectedSyncSummaryEntryPrompt}
+            onChange={(e) => setSelectedSyncSummaryEntryPrompt(e.target.value)}
+            rows={5}
+          />
+        </label>
+        <br />
+        <button type="button" onClick={() => resetChatMemoryPrompt('syncSummaryEntryPrompt')}>
           Reset to default
         </button>
         <br />

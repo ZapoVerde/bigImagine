@@ -34,12 +34,19 @@
  *     recency floor (arcs touched in the last N sync ticks stay visible regardless of score),
  *     capped at the plot lane's own Max, each arc rendered as a first-entry + last-three-entries
  *     card.
+ *  4. recallSyncSummaryLane.ts — the unconditional sync-window lane (docs/plans/
+ *     sync-summaries-plan.md): every chunk under the chat's currently-open sync point
+ *     (eager-chunked since the last bridge tick, `closed_at is null`) listed as a bare
+ *     summary. No vector query, no cutoff — it starts before the embed and its rows are merged
+ *     with the RAG-scored chunk lane in this file's post-processing (a chunk RAG also selected
+ *     leaves `chunks` and inflates its sync-summary row to full text in place, never
+ *     duplicated across the two sections).
  *
- * This file's own job is narrower than it used to be: the three lanes' fetch/scoring pipelines
+ * This file's own job is narrower than it used to be: the lanes' fetch/scoring pipelines
  * moved into their own modules per bi_principles.md §10's 300-line budget once Stages 3-5 grew
  * the chunk lane substantially. What's left here is settings resolution and orchestration:
- * resolve the live settings into plain numbers, build and embed the query once, call all three
- * lanes, and return their combined result. The retrieval knobs are all live settings read on
+ * resolve the live settings into plain numbers, build and embed the query once, call the
+ * lanes, merge the sync-summary rows, and return their combined result. The retrieval knobs are all live settings read on
  * every call (chat_memory_auto_recall_enabled, chat_memory_auto_recall_pairs, chat_memory_auto_recall_
  * chunk_top_k / _chunk_min, chat_memory_auto_recall_pool_multiple, chat_memory_auto_recall_
  * cutoff_mode, canon_recall_top_k / canon_recall_min — migrations 0077/0091/0092 — and the plot
@@ -86,6 +93,7 @@ import type { PlotArcCard } from './memoryInjection.js';
 import { recallChunkLane, type ChunkRow } from './recallChunkLane.js';
 import { recallFactLane, type CanonFactRow } from './recallFactLane.js';
 import { recallPlotLane } from './recallPlotLane.js';
+import { recallSyncSummaryLane, type SyncSummaryRow } from './recallSyncSummaryLane.js';
 import { resolveLeadInRows } from './chunkLeadIn.js';
 import { DEFAULT_CHUNK_PAIRS } from './chunkChatTranscript.js';
 import { log } from '../logger.js';
@@ -188,11 +196,14 @@ export const MAX_LEAD_IN_CHUNKS = 3;
  *  are the ranked plot-arc cards (recallPlotLane.ts); the legacy block ignores them (plot
  *  threads render through their own marker / the fused alias separately). `chunks` is always
  *  sorted by `ordinal` ascending, mixing full chunks with lead-in entries (isLeadIn: true —
- *  docs/plans/chunk-lead-in-context-plan.md). */
+ *  docs/plans/chunk-lead-in-context-plan.md). `syncSummaries` are the open-sync-point rows
+ *  (docs/plans/sync-summaries-plan.md), ordinal-ascending; a row whose chunk RAG also selected
+ *  carries its full `content` (inflated) and is absent from `chunks` — never duplicated. */
 export interface AutoRecallParts {
   chunks: ChunkRow[];
   facts: CanonFactRow[];
   plots: PlotArcCard[];
+  syncSummaries: SyncSummaryRow[];
 }
 
 /** Query-text cleanup in CNZ's spirit: collapse whitespace runs so the embedded query is about
@@ -303,7 +314,7 @@ export function buildAutoRecallParts(
       // Master switch: 'false' disables the auto-injection entirely. The recall *tools* stay in
       // the RP allow-list either way — this knob only silences the silent path (CNZ's own
       // enable/disable shape). Unset/any-other-value = on (the shipped default).
-      if (enabledRaw === 'false') return { chunks: [], facts: [], plots: [] };
+      if (enabledRaw === 'false') return { chunks: [], facts: [], plots: [], syncSummaries: [] };
 
       const parsedPairs = pairsRaw ? parseInt(pairsRaw, 10) : NaN;
       const pairs = Number.isFinite(parsedPairs) && parsedPairs > 0 ? parsedPairs : AUTO_RECALL_PAIRS;
@@ -385,17 +396,23 @@ export function buildAutoRecallParts(
         : DEFAULT_LEAD_IN_CHUNKS;
 
       const query = buildAutoRecallQuery(messages, pairs);
-      if (!query) return { chunks: [], facts: [], plots: [] };
+      if (!query) return { chunks: [], facts: [], plots: [], syncSummaries: [] };
+
+      // The sync-summaries lane needs no embedding — start it before the embed round-trip so
+      // the open-sync-point read overlaps the provider call instead of serializing behind it
+      // (docs/plans/sync-summaries-plan.md Step 1: unconditional, no vector query, no cutoff).
+      const syncSummaryFetch = recallSyncSummaryLane(session, userId, chatId);
 
       const [vector] = await embeddings.embed([query]);
-      if (!vector) return { chunks: [], facts: [], plots: [] };
+      if (!vector) return { chunks: [], facts: [], plots: [], syncSummaries: [] };
 
       // The shared Pool Multiple and Cutoff Mode apply to both lanes unchanged (the Stage-1
       // naming anticipated this); the per-channel Max (chunkTopK / factTopK / plotTopK) and Min
       // (chunkMin / factMin / plotMin) differ per lane, and the plot lane adds its own recency
       // floor. Each lane module owns its own fetch/scoring pipeline — see recallChunkLane.ts,
       // recallFactLane.ts, and recallPlotLane.ts.
-      const [{ chunks }, { facts }, { arcs: plots }] = await Promise.all([
+      const [{ rows: syncRows }, { chunks }, { facts }, { arcs: plots }] = await Promise.all([
+        syncSummaryFetch,
         recallChunkLane(session, userId, chatId, vector, query, { min: chunkMin, max: chunkTopK, poolMultiple, cutoffMode, pairsPerChunk }),
         recallFactLane(session, userId, chatId, vector, { min: factMin, max: factTopK, poolMultiple, cutoffMode }),
         recallPlotLane(session, userId, chatId, vector, {
@@ -407,35 +424,65 @@ export function buildAutoRecallParts(
         }),
       ]);
 
+      // Sync-summaries inflate/exclude merge (docs/plans/sync-summaries-plan.md Step 2) — the
+      // ONE place a chunk RAG also selected under the open sync point moves sections: it leaves
+      // `chunks` (so auto_recall never duplicates it) and marks its sync-summary row inflated
+      // by attaching the full content (renderSyncSummaries renders it through the same chunk
+      // template as a normal full chunk). Runs BEFORE the lead-in walk below, so a moved chunk
+      // never triggers or receives a lead-in: sync-window chunks are always the newest (open
+      // sync point), so a deep-archive pick's lead-in predecessors are structurally older
+      // still — no ordinal overlap between the two lanes is possible.
+      let syncSummaries = syncRows;
+      let mergedChunks = chunks;
+      if (syncSummaries.length > 0 && mergedChunks.length > 0) {
+        const inflatedByChunkId = new Set(syncSummaries.map((s) => s.chunk_id));
+        const remaining: ChunkRow[] = [];
+        for (const c of mergedChunks) {
+          if (c.chunk_id !== undefined && inflatedByChunkId.has(c.chunk_id)) continue;
+          remaining.push(c);
+        }
+        if (remaining.length !== mergedChunks.length) {
+          mergedChunks = remaining;
+          const recalledByChunkId = new Map(
+            chunks.filter((c) => c.chunk_id !== undefined).map((c) => [c.chunk_id!, c]),
+          );
+          syncSummaries = syncSummaries.map((s) => {
+            const recalled = inflatedByChunkId.has(s.chunk_id) ? recalledByChunkId.get(s.chunk_id) : undefined;
+            return recalled ? { ...s, content: recalled.content } : s;
+          });
+        }
+      }
+
       // Lead-in merge (docs/plans/chunk-lead-in-context-plan.md) — the ONE place the merge
       // happens, so every consumer of AutoRecallParts.chunks (the legacy formatAutoRecallBlock
       // path and the real RpMemoryContext.chunks path) gets the same ordered, lead-in-enriched
-      // list. Skipped when the window is 0 (disabled) or nothing was recalled; the lanes always
-      // populate chunk_id (both selects carry it), so the optionality only exists for the merge
-      // entries below.
-      let mergedChunks = chunks;
-      if (leadInCount > 0 && chunks.length > 0) {
-        const chunkIds = chunks.map((c) => c.chunk_id).filter((id): id is string => id !== undefined);
+      // list. Runs on the post-removal chunks only (a chunk moved into sync_summaries never
+      // triggers or receives a lead-in walk). Skipped when the window is 0 (disabled) or
+      // nothing was recalled; the lanes always populate chunk_id (both selects carry it), so
+      // the optionality only exists for the merge entries below.
+      if (leadInCount > 0 && mergedChunks.length > 0) {
+        const chunkIds = mergedChunks.map((c) => c.chunk_id).filter((id): id is string => id !== undefined);
         const leadInRows = await resolveLeadInRows(session, userId, chatId, chunkIds, leadInCount);
         const leadInEntries: ChunkRow[] = leadInRows.map((r) => ({
           ordinal: r.ordinal,
           summary: r.summary,
           content: '',
           isLeadIn: true,
-          // The recursive CTE already guarantees no overlap with `chunks`, so the merge is a
-          // concatenate-and-sort, not a second dedup pass. distance/kw_score are placeholders
-          // never consumed for a lead-in entry (rendered from summary, never re-scored).
+          // The recursive CTE already guarantees no overlap with `mergedChunks`, so the merge
+          // is a concatenate-and-sort, not a second dedup pass. distance/kw_score are
+          // placeholders never consumed for a lead-in entry (rendered from summary, never
+          // re-scored).
           distance: 0,
           kw_score: 0,
         }));
-        mergedChunks = [...chunks, ...leadInEntries].sort((a, b) => a.ordinal - b.ordinal);
+        mergedChunks = [...mergedChunks, ...leadInEntries].sort((a, b) => a.ordinal - b.ordinal);
       }
 
-      return { chunks: mergedChunks, facts, plots };
+      return { chunks: mergedChunks, facts, plots, syncSummaries };
     } catch (err) {
       // Fail-open: a retrieval error must never break the turn. Log and continue empty.
       log.warn('buildAutoRecallParts: retrieval failed, continuing without recalled context', { userId, chatId, err });
-      return { chunks: [], facts: [], plots: [] };
+      return { chunks: [], facts: [], plots: [], syncSummaries: [] };
     }
   })();
 }

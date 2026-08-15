@@ -1425,6 +1425,8 @@ export async function adminSetChatMemorySettings(
     auto_recall_chunk_prompt?: string;
     auto_recall_lead_in_chunks?: number;
     auto_recall_lead_in_prompt?: string;
+    inject_sync_summaries_prompt?: string;
+    sync_summary_entry_prompt?: string;
   },
   adminKey: string | null,
 ): Promise<ChatMemorySettings> {

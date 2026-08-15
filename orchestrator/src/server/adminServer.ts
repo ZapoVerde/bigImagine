@@ -145,6 +145,8 @@ import {
   DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
   DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
   DEFAULT_INJECT_RECENT_HISTORY_PROMPT,
+  DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+  DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
 } from '../io/chatMemory/memoryInjection.js';
 import { DEFAULT_CANON_EXTRACTION_PROMPT } from '../io/canonExtraction.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
@@ -1163,6 +1165,15 @@ export interface ChatMemorySettings {
   autoRecallLeadInChunks: number | null;
   autoRecallLeadInPrompt: string;
   autoRecallLeadInPromptIsDefault: boolean;
+  // Sync-summaries component (migration 0104, docs/plans/sync-summaries-plan.md) — the
+  // unconditional open-sync-point section between bridge and recent_history: the outer wrapper
+  // (mirrors injectAutoRecallPrompt's shape) and the per-entry bare-summary template (its own
+  // setting — lead-ins stay reserved for auto_recall's deep-archive picks). Empty string =
+  // built-in default, same contract as the other prompt fields.
+  injectSyncSummariesPrompt: string;
+  injectSyncSummariesPromptIsDefault: boolean;
+  syncSummaryEntryPrompt: string;
+  syncSummaryEntryPromptIsDefault: boolean;
   // RP read-path retrieval knobs (migration 0077, io/chatMemory/recallForPrompt.ts) — read live
   // on every RP prompt assembly, no restart. null = unset (use the built-in default).
   autoRecallEnabled: boolean;
@@ -1218,6 +1229,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     autoRecallChunkPrompt,
     autoRecallLeadInChunksRaw,
     autoRecallLeadInPrompt,
+    injectSyncSummariesPrompt,
+    syncSummaryEntryPrompt,
   ] = await Promise.all([
     store.get('chat_memory_profile'),
     store.get('chat_memory_live_window_pairs'),
@@ -1246,6 +1259,8 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     store.get('chat_memory_auto_recall_chunk_prompt'),
     store.get('chat_memory_auto_recall_lead_in_chunks'),
     store.get('chat_memory_auto_recall_lead_in_prompt'),
+    store.get('chat_memory_inject_sync_summaries_prompt'),
+    store.get('chat_memory_sync_summary_entry_prompt'),
   ]);
   return {
     profile: profile || null,
@@ -1292,6 +1307,10 @@ export async function getChatMemorySettings(store: OrchestratorSettingsStore): P
     autoRecallLeadInChunks: autoRecallLeadInChunksRaw ? Number(autoRecallLeadInChunksRaw) : null,
     autoRecallLeadInPrompt: autoRecallLeadInPrompt || DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
     autoRecallLeadInPromptIsDefault: !autoRecallLeadInPrompt,
+    injectSyncSummariesPrompt: injectSyncSummariesPrompt || DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+    injectSyncSummariesPromptIsDefault: !injectSyncSummariesPrompt,
+    syncSummaryEntryPrompt: syncSummaryEntryPrompt || DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
+    syncSummaryEntryPromptIsDefault: !syncSummaryEntryPrompt,
   };
 }
 
@@ -1325,6 +1344,10 @@ export interface SetChatMemorySettingsBody {
    *  chunks' summaries ride along. Negative rejects. */
   autoRecallLeadInChunks?: number;
   autoRecallLeadInPrompt?: string;
+  /** Sync-summaries component (migration 0104): the outer wrapper and the per-entry bare-
+   *  summary template. Empty string on either clears back to its built-in default. */
+  injectSyncSummariesPrompt?: string;
+  syncSummaryEntryPrompt?: string;
 }
 
 // Every field is optional and independently settable; an empty string on any prompt field clears
@@ -1361,6 +1384,8 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     auto_recall_chunk_prompt,
     auto_recall_lead_in_chunks,
     auto_recall_lead_in_prompt,
+    inject_sync_summaries_prompt,
+    sync_summary_entry_prompt,
   } = raw as Record<string, unknown>;
   if (
     profile === undefined &&
@@ -1389,7 +1414,9 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     inject_recent_history_prompt === undefined &&
     auto_recall_chunk_prompt === undefined &&
     auto_recall_lead_in_chunks === undefined &&
-    auto_recall_lead_in_prompt === undefined
+    auto_recall_lead_in_prompt === undefined &&
+    inject_sync_summaries_prompt === undefined &&
+    sync_summary_entry_prompt === undefined
   ) {
     return undefined;
   }
@@ -1427,6 +1454,8 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
   )
     return undefined;
   if (auto_recall_lead_in_prompt !== undefined && typeof auto_recall_lead_in_prompt !== 'string') return undefined;
+  if (inject_sync_summaries_prompt !== undefined && typeof inject_sync_summaries_prompt !== 'string') return undefined;
+  if (sync_summary_entry_prompt !== undefined && typeof sync_summary_entry_prompt !== 'string') return undefined;
   return {
     profile: profile as string | undefined,
     liveWindowPairs: live_window_pairs as number | undefined,
@@ -1455,6 +1484,8 @@ export function parseSetChatMemorySettingsBody(raw: unknown): SetChatMemorySetti
     autoRecallChunkPrompt: auto_recall_chunk_prompt as string | undefined,
     autoRecallLeadInChunks: auto_recall_lead_in_chunks as number | undefined,
     autoRecallLeadInPrompt: auto_recall_lead_in_prompt as string | undefined,
+    injectSyncSummariesPrompt: inject_sync_summaries_prompt as string | undefined,
+    syncSummaryEntryPrompt: sync_summary_entry_prompt as string | undefined,
   };
 }
 
@@ -1486,6 +1517,8 @@ export async function setChatMemorySettings(store: OrchestratorSettingsStore, bo
   if (body.autoRecallChunkPrompt !== undefined) await store.set('chat_memory_auto_recall_chunk_prompt', body.autoRecallChunkPrompt);
   if (body.autoRecallLeadInChunks !== undefined) await store.set('chat_memory_auto_recall_lead_in_chunks', String(body.autoRecallLeadInChunks));
   if (body.autoRecallLeadInPrompt !== undefined) await store.set('chat_memory_auto_recall_lead_in_prompt', body.autoRecallLeadInPrompt);
+  if (body.injectSyncSummariesPrompt !== undefined) await store.set('chat_memory_inject_sync_summaries_prompt', body.injectSyncSummariesPrompt);
+  if (body.syncSummaryEntryPrompt !== undefined) await store.set('chat_memory_sync_summary_entry_prompt', body.syncSummaryEntryPrompt);
 }
 
 // --- Cleanup settings (migration 0072, plan v2 §3 — the Cleanup page's setup surface) ---

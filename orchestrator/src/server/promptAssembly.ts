@@ -31,6 +31,7 @@ import {
   renderBridge,
   renderPlotThreads,
   renderAutoRecall,
+  renderSyncSummaries,
   renderFusedMemoryBlock,
   formatRecentHistoryTurns,
   renderRecentHistory,
@@ -107,7 +108,7 @@ export async function buildChatMemorySystemPrompt(
       const events = bridgeRows.find((r) => r.topic_key === 'events')?.content;
       const plotThreads = autoRecall.plots;
       const fused = renderFusedMemoryBlock(scene, events, plotThreads, formatAutoRecallBlock(autoRecall.chunks, autoRecall.facts));
-      return { scene, events, plotThreads, chunks: autoRecall.chunks, facts: autoRecall.facts, fused };
+      return { scene, events, plotThreads, chunks: autoRecall.chunks, facts: autoRecall.facts, syncSummaries: autoRecall.syncSummaries, fused };
     }
 
     const [household, entries] = await Promise.all([
@@ -271,7 +272,7 @@ export async function buildNarratorStackItems(
   recentHistoryMessages?: LlmMessage[],
   lorebookSeedMessageId?: string,
 ): Promise<{ items: PromptPreviewItem[]; lorebookActivatedEntryIds: string[] }> {
-  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, leadInTemplate, recentHistoryTemplate, locationBlock, lorebookBlock] = await Promise.all([
+  const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, leadInTemplate, recentHistoryTemplate, syncSummariesTemplate, syncSummaryEntryTemplate, locationBlock, lorebookBlock] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
     characterId
       ? db.withUserScope(userId, (session) =>
@@ -288,6 +289,12 @@ export async function buildNarratorStackItems(
     settings.get('chat_memory_auto_recall_chunk_prompt'),
     settings.get('chat_memory_auto_recall_lead_in_prompt'),
     settings.get('chat_memory_inject_recent_history_prompt'),
+    // Sync-summaries component (docs/plans/sync-summaries-plan.md Step 4) — the outer wrapper
+    // and the per-entry bare-summary template, same live-read shape as the others. The chunk
+    // template for INFLATED rows is the auto-recall chunk template already fetched above —
+    // identical "what does a full recalled chunk look like" concept, so no fifth setting.
+    settings.get('chat_memory_inject_sync_summaries_prompt'),
+    settings.get('chat_memory_sync_summary_entry_prompt'),
     // location.md §5.4 — the known-locations block for the 'location' marker slot. Fail-open:
     // '' when disabled/empty, so an enabled slot with nothing to say emits nothing (the
     // assembler's non-empty filter drops it) — never an empty <locations> block in the prompt.
@@ -343,6 +350,19 @@ export async function buildNarratorStackItems(
         // Lead-in entries (docs/plans/chunk-lead-in-context-plan.md) render under their own
         // lighter template — `|| undefined` per the same empty-string-clears-to-default contract.
         leadInTemplate || undefined,
+        character?.name,
+      ) || undefined,
+    // The sync_summaries component (docs/plans/sync-summaries-plan.md) — every chunk under the
+    // chat's open sync point, chronologically between bridge and recent_history. Bare rows
+    // render through the entry template; a row RAG also selected (recallForPrompt.ts's inflate
+    // merge) renders through the SAME chunk template as a normal auto-recall chunk, so it can
+    // never appear twice across the two sections.
+    sync_summaries:
+      renderSyncSummaries(
+        memoryContext.syncSummaries,
+        syncSummariesTemplate || undefined,
+        syncSummaryEntryTemplate || undefined,
+        chunkTemplate || undefined,
         character?.name,
       ) || undefined,
     // The active context (2026-08-10 user direction): the live-window turns, last sent turn

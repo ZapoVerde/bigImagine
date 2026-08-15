@@ -41,6 +41,12 @@
  *   fact bullets appended as {{facts}}; the injection template receives {{text}} = chunk blocks,
  *   {{facts}} = fact bullets. Empty component => '' (so an enabled slot with no content emits
  *   nothing, same non-empty filter as every other marker).
+ * renderSyncSummaries(rows, template, entryTemplate, chunkTemplate, charName) -> string — the
+ *   sync_summaries component (docs/plans/sync-summaries-plan.md): a bare row renders through
+ *   the lightweight entry template ({{text}} = its summary); an inflated row (content attached
+ *   by recallForPrompt.ts's merge) renders through the SAME chunk template auto_recall uses,
+ *   with the same [{{header}}]\n{{text}} composition — identical "what does a full recalled
+ *   chunk look like" concept, no duplicated vocabulary (bi_principles.md §17).
  * renderFusedMemoryBlock(scene, events, arcs, autoRecallBlock) -> string — the deprecated
  *   memory_recall alias: byte-identical to the legacy buildChatMemorySystemPrompt join.
  * formatRecentHistoryTurns(messages, charName, userName) -> string — the live-window turns
@@ -59,6 +65,7 @@
  */
 
 import type { LlmMessage } from '../llm/types.js';
+import type { SyncSummaryRow } from './recallSyncSummaryLane.js';
 
 /** CNZ's interpolate() (SillyTavern-Canonize defaults.js) — {{#if key}}...{{/if}} conditionals
  *  first, then plain {{var}} substitution for the known vocabulary. One deliberate divergence:
@@ -118,6 +125,26 @@ export const DEFAULT_AUTO_RECALL_CHUNK_PROMPT = `<memory turns="{{turn_range}}">
  *  chat_memory_auto_recall_lead_in_prompt setting (migration 0100), read by promptAssembly.ts. */
 export const DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT = `[Just before: {{text}}]`;
 
+/** DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT — the sync_summaries wrapper
+ *  (docs/plans/sync-summaries-plan.md Step 3): {{#if text}}...{{/if}}, the same
+ *  empty-collapses-to-nothing shape as DEFAULT_INJECT_AUTO_RECALL_PROMPT — an enabled slot
+ *  with nothing in the sync window emits nothing. {{text}} = the entry blocks (bare summaries
+ *  or inflated full chunks), each already rendered through its per-entry template. The live
+ *  value is the chat_memory_inject_sync_summaries_prompt setting (migration 0104), read by
+ *  promptAssembly.ts. */
+export const DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT = `{{#if text}}[The following are recent turns not yet folded into the story summary:]
+{{text}}{{/if}}`;
+
+/** DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT — the per-entry template for a BARE sync-summary row
+ *  (a chunk waiting for the bridge tick that RAG did not also select): a lightweight wrapper,
+ *  {{text}} = the chunk's summary. Its own setting (chat_memory_sync_summary_entry_prompt,
+ *  migration 0104), NOT a reuse of chat_memory_auto_recall_lead_in_prompt — lead-ins are
+ *  reserved for auto_recall's deep-archive picks only, and this entry's summary is the chunk's
+ *  own header, not a "just before" predecessor. An inflated row (content attached by the
+ *  recallForPrompt.ts merge) skips this template and renders through the auto-recall chunk
+ *  template instead. */
+export const DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT = `[{{text}}]`;
+
 /** DEFAULT_INJECT_RECENT_HISTORY_PROMPT — the recent_history marker's template: bare {{turns}}.
  *  The turns are already fully rendered (formatRecentHistoryTurns) as `Name: content` lines, so
  *  the default just places them; a bespoke override can add a header or wrap them (the template
@@ -135,6 +162,10 @@ export interface RpMemoryContext {
   plotThreads: PlotArcCard[];
   chunks: ChunkRow[];
   facts: FactRow[];
+  /** The open-sync-point rows (docs/plans/sync-summaries-plan.md) — every chunk archived
+   *  since the chat's last bridge update, as bare summaries; a row RAG also selected carries
+   *  its full content (inflated by recallForPrompt.ts's merge) and is absent from `chunks`. */
+  syncSummaries: SyncSummaryRow[];
   /** The legacy fused block (renderFusedMemoryBlock over the parts) — the deprecated
    *  memory_recall alias, and the no-preset fallback string. */
   fused: string;
@@ -220,6 +251,48 @@ export function renderAutoRecall(
     .join('\n\n');
   const factBlock = facts.map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`).join('\n');
   return interpolateMemoryTemplate(template, { text, facts: factBlock });
+}
+
+/** Render the sync_summaries component (docs/plans/sync-summaries-plan.md) — every chunk under
+ *  the chat's open sync point (archived since the last bridge tick). A BARE row (RAG did not
+ *  also select it) renders through the lightweight entry template with {{text}} = its summary.
+ *  An INFLATED row (content attached by the recallForPrompt.ts merge) renders through the SAME
+ *  chunkTemplate auto_recall uses, with the same `[{{header}}]\n{{text}}` composition
+ *  renderAutoRecall applies to a normal full chunk — identical "what does a full recalled chunk
+ *  look like" concept, so reuse avoids a redundant setting (bi_principles.md §17's
+ *  "default + bespoke" pattern, not duplicated vocabulary). Empty rows => '' (an enabled slot
+ *  with nothing in the sync window emits nothing). */
+export function renderSyncSummaries(
+  rows: SyncSummaryRow[],
+  template = DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT,
+  entryTemplate = DEFAULT_SYNC_SUMMARY_ENTRY_PROMPT,
+  chunkTemplate = DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
+  charName = '',
+): string {
+  if (rows.length === 0) return '';
+  const text = rows
+    .map((r) => {
+      // Inflated row — the merge attached full content; compose the same way renderAutoRecall
+      // does for a full chunk (summary prefixed as [header], CNZ rag-fetch.js:202 shape).
+      if (r.content) {
+        const content = r.summary ? `[${r.summary}]\n${r.content}` : r.content;
+        return interpolateMemoryTemplate(chunkTemplate, {
+          text: content,
+          turn_range: String(r.ordinal),
+          header: r.summary,
+          char_name: charName,
+        });
+      }
+      // Bare row — summary alone under the lightweight entry template.
+      return interpolateMemoryTemplate(entryTemplate, {
+        text: r.summary,
+        turn_range: String(r.ordinal),
+        header: r.summary,
+        char_name: charName,
+      });
+    })
+    .join('\n\n');
+  return interpolateMemoryTemplate(template, { text });
 }
 
 /** The recent_history marker's {{turns}} value — the live-window messages rendered as one
