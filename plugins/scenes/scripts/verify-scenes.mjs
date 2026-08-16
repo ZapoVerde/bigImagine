@@ -49,6 +49,7 @@ function createFakePool() {
               user_id: userId,
               name,
               active_location_id: null,
+              chat_id: null, // create_scene mints user-authored, globally-visible rows (no chat_id)
             };
             scenes.push(row);
             return { rows: [{ scene_id: row.scene_id, name: row.name }] };
@@ -69,6 +70,9 @@ function createFakePool() {
             const rows = scenes
               .filter((s) => {
                 if (s.user_id !== userId) return false;
+                // rp-cast-infrastructure-plan.md Part C fix 1: `and (s.chat_id = $2 or s.chat_id is
+                // null)` — a scene minted by resolveScene() for a different chat must never surface.
+                if (s.chat_id !== null && s.chat_id !== chatId) return false;
                 if (s.active_location_id === null) return true;
                 const loc = locations.find((l) => l.location_id === s.active_location_id && l.user_id === userId);
                 return loc ? eligibleLocation(loc) : true; // FK guarantees a row in real Postgres; lenient here
@@ -256,6 +260,66 @@ assert(!crossUserScenes.some((s) => s.sceneId === otherUsersScene.sceneId), "ano
   assert(
     live.characterIds.includes(liveChar) && live.characterIds.includes(charB) && !live.characterIds.includes(deadChar),
     "a transient character linked to the calling chat is surfaced; one linked only to a different chat is not",
+  );
+}
+
+// --- rp-cast-infrastructure-plan.md Part C fix 1: get_scenes is scoped to s.chat_id ---------------
+{
+  // resolveScene() (locationAndPresenceScraper.ts), not create_scene, is what mints a scene with a
+  // chat_id — modeled here by pushing rows directly into the fake pool rather than going through
+  // createSceneTool (which never sets chat_id).
+  // castle's active_location_id was pinned to an inactive location in the block above, so it's no
+  // longer eligible on its own — mint a fresh user-authored (chat_id null) scene for this block.
+  const globalScene = await db.withUserScope(userId, (session) =>
+    createSceneTool.handler({ name: 'Global user-authored scene' }, { userId, db: session }),
+  );
+
+  const chatA = 'chat-scene-a';
+  const chatB = 'chat-scene-b';
+  const sceneInChatA = {
+    scene_id: 'scene-chat-a',
+    user_id: userId,
+    name: 'Chat A courtyard',
+    active_location_id: null,
+    chat_id: chatA,
+  };
+  const sceneInChatB = {
+    scene_id: 'scene-chat-b',
+    user_id: userId,
+    name: 'Chat B courtyard',
+    active_location_id: null,
+    chat_id: chatB,
+  };
+  pool.scenes.push(sceneInChatA, sceneInChatB);
+
+  const fromChatA = await db.withUserScope(userId, (session) =>
+    getScenesTool.handler({}, { userId, db: session, chatId: chatA }),
+  );
+  assert(
+    fromChatA.some((s) => s.sceneId === sceneInChatA.scene_id) && !fromChatA.some((s) => s.sceneId === sceneInChatB.scene_id),
+    "get_scenes(chatId: chatA) returns chat A's own scene, not chat B's (Part C fix 1)",
+  );
+  assert(
+    fromChatA.some((s) => s.sceneId === globalScene.sceneId),
+    "get_scenes(chatId: chatA) still returns user-authored (chat_id null) scenes alongside the chat's own",
+  );
+
+  const fromChatB = await db.withUserScope(userId, (session) =>
+    getScenesTool.handler({}, { userId, db: session, chatId: chatB }),
+  );
+  assert(
+    fromChatB.some((s) => s.sceneId === sceneInChatB.scene_id) && !fromChatB.some((s) => s.sceneId === sceneInChatA.scene_id),
+    "get_scenes(chatId: chatB) returns chat B's own scene, not chat A's",
+  );
+
+  const stateless = await db.withUserScope(userId, (session) => getScenesTool.handler({}, { userId, db: session }));
+  assert(
+    !stateless.some((s) => s.sceneId === sceneInChatA.scene_id) && !stateless.some((s) => s.sceneId === sceneInChatB.scene_id),
+    'a stateless get_scenes call (no chatId) sees neither chat-scoped scene — only user-authored ones (posture change from Part C fix 1)',
+  );
+  assert(
+    stateless.some((s) => s.sceneId === globalScene.sceneId),
+    'a stateless get_scenes call still returns user-authored (chat_id null) scenes',
   );
 }
 

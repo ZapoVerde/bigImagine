@@ -2,7 +2,7 @@
  * @file orchestrator/src/orchestrator/portraitGeneration.ts
  * @stamp 2026-08-16
  * @architectural-role Orchestrator — one Portrait Studio generation round
- *   (docs/plans/portrait-studio-plan.md §Generation round)
+ *   (docs/plans/completed/portrait-studio-plan.md §Generation round)
  * @description
  * The generation round of Portrait Studio: manifest + entity resolution, Path-1 wiki injection,
  * the forced-schema mutation LLM call, slot-key reconciliation, and the parallel per-candidate

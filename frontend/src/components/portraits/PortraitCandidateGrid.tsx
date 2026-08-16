@@ -2,7 +2,7 @@ import { useState } from 'react';
 import type { PortraitCandidate } from '../../api/types';
 import './PortraitCandidateGrid.css';
 
-// The Portrait Studio round's candidate grid (docs/plans/portrait-studio-plan.md §Frontend): one
+// The Portrait Studio round's candidate grid (docs/plans/completed/portrait-studio-plan.md §Frontend): one
 // card per rendered candidate with a winner-pick action and a per-candidate 1-5 star + note field
 // (collapsible note, matching SettingsView's fieldset/textarea convention). The grid owns the
 // ratings/notes draft state and hands them up with the pick; the parent owns the feedback call.

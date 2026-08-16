@@ -630,7 +630,7 @@ const routes: Route[] = [
   { method: 'GET', family: ['/v1/admin/llm-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLlmStatsGet(req, res, deps); }) },
   { method: 'GET', family: ['/v1/admin/turn-display-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTurnDisplayStatsGet(req, res, deps); }) },
 
-  // ---- Portrait Studio (docs/plans/portrait-studio-plan.md) ----
+  // ---- Portrait Studio (docs/plans/completed/portrait-studio-plan.md) ----
   // User-scoped surfaces (visual_* tables are user_scoped RLS, migration 0105): entity CRUD,
   // wiki browse/edit, the generate/feedback actions. The layers write is the one admin-gated
   // route — visual_layer_stack is an orchestrator_settings write, and every settings write on

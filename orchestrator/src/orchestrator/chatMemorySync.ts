@@ -278,7 +278,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
   const livePairs = toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
   const syncEveryPairs = toPositiveInt(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
   const digestHorizonPairs = toPositiveInt(digestHorizonPairsRaw, DEFAULT_DIGEST_HORIZON_PAIRS);
-  // Live chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md) — the chunker's
+  // Live chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md) — the chunker's
   // message count is this × 2. Fallback DEFAULT_CHUNK_PAIRS = today's hardcoded 4-message chunk.
   const pairsPerChunk = toPositiveInt(chunkPairsRaw, DEFAULT_CHUNK_PAIRS);
 

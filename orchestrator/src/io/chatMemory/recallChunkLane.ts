@@ -88,7 +88,7 @@ export interface ChunkLaneOptions {
   poolMultiple: number;
   cutoffMode: CutoffMode;
   /** Turn-pairs per chunk (the live chat_memory_chunk_pairs setting,
-   *  docs/plans/chunk-size-resize-plan.md) — the age-unit mapping between chunk ordinals and
+   *  docs/plans/completed/chunk-size-resize-plan.md) — the age-unit mapping between chunk ordinals and
    *  Canonize's pair-counted age in the decay SQL (bound as $5). */
   pairsPerChunk: number;
 }

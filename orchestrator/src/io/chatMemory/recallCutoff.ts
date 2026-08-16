@@ -113,7 +113,7 @@ export function poolSize(max: number, poolMultiple: number): number {
 /** Canonize's temporal-decay factor (RAG_strategy_v4.md §3 Step 2, chat channel only), their
  *  formula unchanged. `ageChunks` is how many chunks behind the conversation's newest archived
  *  chunk the row is; each chunk covers `pairsPerChunk` turn-pairs (the live
- *  chat_memory_chunk_pairs setting, docs/plans/chunk-size-resize-plan.md), so the age enters
+ *  chat_memory_chunk_pairs setting, docs/plans/completed/chunk-size-resize-plan.md), so the age enters
  *  Canonize's ln(age + 1) in pair units (pairsPerChunk·ageChunks + 1) — the faithful unit
  *  mapping, not an extra tuning knob. age 0 → factor 1 (no decay); the floor (0.70) stops
  *  ancient-but-relevant chunks from being buried entirely. The caller divides the row's raw

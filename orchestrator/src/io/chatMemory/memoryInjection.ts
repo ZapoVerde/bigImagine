@@ -42,7 +42,7 @@
  *   {{facts}} = fact bullets. Empty component => '' (so an enabled slot with no content emits
  *   nothing, same non-empty filter as every other marker).
  * renderSyncSummaries(rows, template, entryTemplate, chunkTemplate, charName) -> string — the
- *   sync_summaries component (docs/plans/sync-summaries-plan.md): a bare row renders through
+ *   sync_summaries component (docs/plans/completed/sync-summaries-plan.md): a bare row renders through
  *   the lightweight entry template ({{text}} = its summary); an inflated row (content attached
  *   by recallForPrompt.ts's merge) renders through the SAME chunk template auto_recall uses,
  *   with the same [{{header}}]\n{{text}} composition — identical "what does a full recalled
@@ -126,7 +126,7 @@ export const DEFAULT_AUTO_RECALL_CHUNK_PROMPT = `<memory turns="{{turn_range}}">
 export const DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT = `[Just before: {{text}}]`;
 
 /** DEFAULT_INJECT_SYNC_SUMMARIES_PROMPT — the sync_summaries wrapper
- *  (docs/plans/sync-summaries-plan.md Step 3): {{#if text}}...{{/if}}, the same
+ *  (docs/plans/completed/sync-summaries-plan.md Step 3): {{#if text}}...{{/if}}, the same
  *  empty-collapses-to-nothing shape as DEFAULT_INJECT_AUTO_RECALL_PROMPT — an enabled slot
  *  with nothing in the sync window emits nothing. {{text}} = the entry blocks (bare summaries
  *  or inflated full chunks), each already rendered through its per-entry template. The live
@@ -162,7 +162,7 @@ export interface RpMemoryContext {
   plotThreads: PlotArcCard[];
   chunks: ChunkRow[];
   facts: FactRow[];
-  /** The open-sync-point rows (docs/plans/sync-summaries-plan.md) — every chunk archived
+  /** The open-sync-point rows (docs/plans/completed/sync-summaries-plan.md) — every chunk archived
    *  since the chat's last bridge update, as bare summaries; a row RAG also selected carries
    *  its full content (inflated by recallForPrompt.ts's merge) and is absent from `chunks`. */
   syncSummaries: SyncSummaryRow[];
@@ -253,7 +253,7 @@ export function renderAutoRecall(
   return interpolateMemoryTemplate(template, { text, facts: factBlock });
 }
 
-/** Render the sync_summaries component (docs/plans/sync-summaries-plan.md) — every chunk under
+/** Render the sync_summaries component (docs/plans/completed/sync-summaries-plan.md) — every chunk under
  *  the chat's open sync point (archived since the last bridge tick). A BARE row (RAG did not
  *  also select it) renders through the lightweight entry template with {{text}} = its summary.
  *  An INFLATED row (content attached by the recallForPrompt.ts merge) renders through the SAME

@@ -56,10 +56,18 @@ const throwingTool = {
     throw new Error('simulated tool failure');
   },
 };
+const chatScopedTool = {
+  definition: {
+    name: 'chat_scoped_tool',
+    description: 'Echoes back the chatId it was invoked with, per ToolHandlerContext.',
+    parameters: { type: 'object', properties: {} },
+  },
+  handler: async (_args, ctx) => ({ chatId: ctx.chatId ?? null }),
+};
 
 const pool = createFakePool();
 const db = createPostgresClient(pool);
-const tools = createToolRegistry([echoTool, throwingTool]);
+const tools = createToolRegistry([echoTool, throwingTool, chatScopedTool]);
 const apiKeys = createApiKeyStore('good-key:11111111-1111-1111-1111-111111111111');
 
 const server = startHttpServer({
@@ -81,7 +89,7 @@ const listRes = await fetch(`${base}/v1/tools`, { headers: { authorization: 'Bea
 const listBody = await listRes.json();
 assert(listRes.status === 200, 'GET /v1/tools with a valid key returns 200');
 assert(
-  Array.isArray(listBody.names) && listBody.names.sort().join(',') === 'echo_tool,throwing_tool',
+  Array.isArray(listBody.names) && listBody.names.sort().join(',') === 'chat_scoped_tool,echo_tool,throwing_tool',
   'the tool list carries exactly the names in the registry, no more and no fewer',
 );
 
@@ -135,6 +143,33 @@ assert(throwBody.error?.includes('simulated tool failure'), "the 500 response su
 // the server is still alive and answering after a handler threw
 const stillAliveRes = await fetch(`${base}/healthz`);
 assert(stillAliveRes.status === 200, 'the server keeps serving requests after a tool handler threw');
+
+// --- POST /v1/tools/:name?chat_id=…: the chat_id query param threads into ToolHandlerContext ---
+const CHAT_ID = '33333333-3333-3333-3333-333333333333';
+const withChatIdRes = await fetch(`${base}/v1/tools/chat_scoped_tool?chat_id=${CHAT_ID}`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer good-key' },
+  body: JSON.stringify({}),
+});
+const withChatIdBody = await withChatIdRes.json();
+assert(withChatIdRes.status === 200, 'a tool invocation with ?chat_id= on the URL returns 200');
+assert(
+  withChatIdBody.chatId === CHAT_ID,
+  '?chat_id= on the URL reaches the tool handler as ctx.chatId (Part B: the Cast sidebar / get_characters / get_scenes chat-scoping path)',
+);
+
+// --- POST /v1/tools/:name with no chat_id: ctx.chatId is undefined, not a stray empty string ---
+const noChatIdRes = await fetch(`${base}/v1/tools/chat_scoped_tool`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer good-key' },
+  body: JSON.stringify({}),
+});
+const noChatIdBody = await noChatIdRes.json();
+assert(noChatIdRes.status === 200, 'a tool invocation with no chat_id query param still returns 200');
+assert(
+  noChatIdBody.chatId === null,
+  'omitting ?chat_id= leaves ctx.chatId undefined, exactly the pre-Part-B behavior for unscoped callers',
+);
 
 // --- POST /v1/tools/:name: malformed JSON body ---
 const badJsonRes = await fetch(`${base}/v1/tools/echo_tool`, {

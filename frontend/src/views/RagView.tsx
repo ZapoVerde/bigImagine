@@ -59,7 +59,7 @@ export default function RagView() {
   const [selectedInjectSyncSummariesPrompt, setSelectedInjectSyncSummariesPrompt] = useState('');
   const [selectedSyncSummaryEntryPrompt, setSelectedSyncSummaryEntryPrompt] = useState('');
   const [chatMemoryStatus, setChatMemoryStatus] = useState('');
-  // The chunk-size backfill's singleton progress row (docs/plans/chunk-size-resize-plan.md) —
+  // The chunk-size backfill's singleton progress row (docs/plans/completed/chunk-size-resize-plan.md) —
   // polled while 'running'; also read once on unlock so a pass started in another session shows up.
   const [chunkResizeStatus, setChunkResizeStatus] = useState<ChunkResizeStatus | null>(null);
   const [chunkResizeModalOpen, setChunkResizeModalOpen] = useState(false);

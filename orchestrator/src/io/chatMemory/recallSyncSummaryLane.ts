@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — the unconditional sync-window summaries lane, the
  * fourth member of buildAutoRecallParts's parallel fetch
  * @description
- * Closes the eager-chunk / bridge-tick gap (docs/plans/sync-summaries-plan.md): a chunk
+ * Closes the eager-chunk / bridge-tick gap (docs/plans/completed/sync-summaries-plan.md): a chunk
  * archived by the eager path (eagerChunkSync.ts) sits under the chat's OPEN sync point
  * (`closed_at is null`) until the bridge tick (chatMemorySync.ts) closes it — archived, but
  * folded into neither the bridge digest nor guaranteed inclusion in RAG's scored top-k. This
@@ -39,7 +39,7 @@ import { log } from '../logger.js';
 
 /** One chunk waiting for the bridge tick, rendered as a bare summary. `content` is '' unless
  *  recallForPrompt.ts's inflate step promoted this row to full text in place (RAG's own
- *  scoring also selected it — see docs/plans/sync-summaries-plan.md Step 2). */
+ *  scoring also selected it — see docs/plans/completed/sync-summaries-plan.md Step 2). */
 export interface SyncSummaryRow {
   chunk_id: string;
   ordinal: number;

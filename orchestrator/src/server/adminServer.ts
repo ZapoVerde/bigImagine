@@ -1196,7 +1196,7 @@ export interface ChatMemorySettings {
   liveWindowPairs: number | null;
   syncEveryPairs: number | null;
   digestHorizonPairs: number | null;
-  // Chunk size in turn-pairs (migration 0099, docs/plans/chunk-size-resize-plan.md) — read live
+  // Chunk size in turn-pairs (migration 0099, docs/plans/completed/chunk-size-resize-plan.md) — read live
   // by the sync tick, the eager path, the recall decay SQL, and the admin-triggered re-chunk
   // backfill (orchestrator/chatChunkResize.ts). null = unset (built-in default of 2 pairs = the
   // classic 4-message chunk); a saved value only affects NEW chunks — existing archives keep
@@ -1236,7 +1236,7 @@ export interface ChatMemorySettings {
   autoRecallLeadInChunks: number | null;
   autoRecallLeadInPrompt: string;
   autoRecallLeadInPromptIsDefault: boolean;
-  // Sync-summaries component (migration 0104, docs/plans/sync-summaries-plan.md) — the
+  // Sync-summaries component (migration 0104, docs/plans/completed/sync-summaries-plan.md) — the
   // unconditional open-sync-point section between bridge and recent_history: the outer wrapper
   // (mirrors injectAutoRecallPrompt's shape) and the per-entry bare-summary template (its own
   // setting — lead-ins stay reserved for auto_recall's deep-archive picks). Empty string =

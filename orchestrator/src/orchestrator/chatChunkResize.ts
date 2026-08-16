@@ -2,7 +2,7 @@
  * @file orchestrator/src/orchestrator/chatChunkResize.ts
  * @stamp 2026-08-13
  * @architectural-role Orchestrator — the admin-triggered backfill that re-chunks every chat's
- *   archived history at the live chat_memory_chunk_pairs size (docs/plans/chunk-size-resize-plan.md)
+ *   archived history at the live chat_memory_chunk_pairs size (docs/plans/completed/chunk-size-resize-plan.md)
  * @description
  * The chunk size is a live, household-wide setting (migration 0099); changing it only affects
  * NEW chunks the sync tick / eager path write. This module is the one-time backfill that brings

@@ -24,7 +24,7 @@
  * handleLocationsGet(res, deps) — read-only GET /v1/admin/locations (cross-user roster)
  * handleChatMemorySyncStatusGet / handleLocationRenderStatusGet — read-only proof-it-ran GETs
  * handleChatMemoryResizePost / handleChatMemoryResizeStatusGet — trigger + poll the chunk-size
- *   backfill (docs/plans/chunk-size-resize-plan.md); POST claims the singleton status row (409
+ *   backfill (docs/plans/completed/chunk-size-resize-plan.md); POST claims the singleton status row (409
  *   while one pass is live) and fires the pass fire-and-forget
  *
  * @contract
@@ -278,7 +278,7 @@ export async function handleChatMemorySyncStatusGet(res: ServerResponse, deps: H
   sendJson(res, 200, { chats: await getChatMemorySyncStatus(deps.db) });
 }
 
-// docs/plans/chunk-size-resize-plan.md — the admin-triggered backfill that re-chunks every chat's
+// docs/plans/completed/chunk-size-resize-plan.md — the admin-triggered backfill that re-chunks every chat's
 // archived history at the live chat_memory_chunk_pairs size (changing that setting only affects
 // NEW chunks the sync tick / eager path write; this pass brings existing archives in line).
 // POST claims the singleton chat_chunk_resize_status row atomically and fires the pass

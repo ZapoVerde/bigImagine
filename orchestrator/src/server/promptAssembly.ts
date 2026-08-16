@@ -289,7 +289,7 @@ export async function buildNarratorStackItems(
     settings.get('chat_memory_auto_recall_chunk_prompt'),
     settings.get('chat_memory_auto_recall_lead_in_prompt'),
     settings.get('chat_memory_inject_recent_history_prompt'),
-    // Sync-summaries component (docs/plans/sync-summaries-plan.md Step 4) — the outer wrapper
+    // Sync-summaries component (docs/plans/completed/sync-summaries-plan.md Step 4) — the outer wrapper
     // and the per-entry bare-summary template, same live-read shape as the others. The chunk
     // template for INFLATED rows is the auto-recall chunk template already fetched above —
     // identical "what does a full recalled chunk look like" concept, so no fifth setting.
@@ -352,7 +352,7 @@ export async function buildNarratorStackItems(
         leadInTemplate || undefined,
         character?.name,
       ) || undefined,
-    // The sync_summaries component (docs/plans/sync-summaries-plan.md) — every chunk under the
+    // The sync_summaries component (docs/plans/completed/sync-summaries-plan.md) — every chunk under the
     // chat's open sync point, chronologically between bridge and recent_history. Bare rows
     // render through the entry template; a row RAG also selected (recallForPrompt.ts's inflate
     // merge) renders through the SAME chunk template as a normal auto-recall chunk, so it can

@@ -5,7 +5,7 @@
  *   subsystem's DB read/write seam (bi_principles.md §8), the file wiki.ts's preamble names as
  *   the wrapper that shapes visual_wiki_entries rows before the pure formatters see them
  * @description
- * The Portrait Studio's routes (docs/plans/portrait-studio-plan.md §New files): entity CRUD,
+ * The Portrait Studio's routes (docs/plans/completed/portrait-studio-plan.md §New files): entity CRUD,
  * layer-stack management, generate/feedback, and wiki browse/edit — the same posture as
  * adminServer.ts (parse-body pure functions + handler functions, no HTTP plumbing of their own;
  * httpServer.ts's route table wires them with its withUser/withAdmin gates).

@@ -525,7 +525,7 @@ export async function handleChatRoutes(
         sendJson(res, 200, { status: 'no_further_swipe' });
         return;
       }
-      // Robust-chat-turns plan (docs/plans/robust-chat-turns-plan.md): only the needs_regenerate
+      // Robust-chat-turns plan (docs/plans/completed/robust-chat-turns-plan.md): only the needs_regenerate
       // branch actually starts generation, so only it takes the per-chat interactive-turn lock
       // (orchestrator/interactiveTurnLock.ts) — a regeneration and a send on the same chat are
       // mutually exclusive, and two concurrent regenerations can't race the same message. Plain

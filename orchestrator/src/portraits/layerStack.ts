@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — read/seed/parse the Portrait Studio layer manifest; pure
  *   helpers over an already-loaded manifest (bi_principles.md §8)
  * @description
- * The Portrait Studio's layer manifest (docs/plans/portrait-studio-plan.md §Layer manifest): one
+ * The Portrait Studio's layer manifest (docs/plans/completed/portrait-studio-plan.md §Layer manifest): one
  * global JSON value under `orchestrator_settings.visual_layer_stack` (Principle 13 — runtime
  * config, not env/const; editable without a redeploy). Shape:
  * `{ layers: [{ id, label, promptable, boundary }], template }` — the four default layers

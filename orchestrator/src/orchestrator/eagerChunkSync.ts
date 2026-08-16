@@ -68,7 +68,7 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
  *  does for the tick: chat_memory_profile names the chunk-summary connection (falling back to the
  *  household's active connection when unset or unknown), chat_memory_chunk_summary_prompt can
  *  override the built-in summarize prompt, chat_memory_live_window_pairs sets the live window, and
- *  chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md
+ *  chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md
  *  — fallback DEFAULT_CHUNK_PAIRS = today's 4-message chunk, so a changed size is a no-op until a
  *  value is saved). */
 async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{

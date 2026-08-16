@@ -241,7 +241,7 @@
  *
  * visual_layer_stack/visual_mutation_candidate_count/visual_mutation_system_prompt_override/
  * visual_reflection_system_prompt_override/visual_wiki_investigation_max_turns (migration 0105,
- * docs/plans/portrait-studio-plan.md) are the Portrait Studio's five settings. visual_layer_stack
+ * docs/plans/completed/portrait-studio-plan.md) are the Portrait Studio's five settings. visual_layer_stack
  * is the manifest JSON (default {layers:[subject/outfit/style/expression], template} — the
  * generative portraits subsystem's whole configuration), visual_mutation_candidate_count is how
  * many mutated candidate chromosomes a generation round produces (integer-as-text, default '3'),

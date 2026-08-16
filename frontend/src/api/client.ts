@@ -1180,7 +1180,7 @@ export async function adminGetChatMemorySyncStatus(adminKey: string | null): Pro
   return body.chats;
 }
 
-/** docs/plans/chunk-size-resize-plan.md — triggers the one-time backfill that re-chunks every
+/** docs/plans/completed/chunk-size-resize-plan.md — triggers the one-time backfill that re-chunks every
  *  chat's archived history at the live chat_memory_chunk_pairs size. 202 = claimed and started
  *  (poll adminGetChunkResizeStatus for progress); 409 = a pass is already running. */
 export async function adminTriggerChunkResize(adminKey: string | null): Promise<void> {
@@ -1569,7 +1569,7 @@ export async function adminSetCleanupSettings(
 }
 
 // ============================================================================
-// Portrait Studio (docs/plans/portrait-studio-plan.md) — the user-scoped visual_* routes
+// Portrait Studio (docs/plans/completed/portrait-studio-plan.md) — the user-scoped visual_* routes
 // (orchestrator/src/server/portraitRoutes.ts). Entities/wiki/generate/feedback + the layers read
 // are regular user routes (the visual_* tables are user-scoped RLS); only the layers WRITE is
 // admin-gated (a visual_layer_stack settings write), so it takes adminKey like Connections-tab

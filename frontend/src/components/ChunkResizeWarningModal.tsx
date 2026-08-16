@@ -6,7 +6,7 @@ interface ChunkResizeWarningModalProps {
   onChangeAndRechunk: () => void;
 }
 
-/** docs/plans/chunk-size-resize-plan.md — shown when the Chat Memory fieldset's chunk-size input
+/** docs/plans/completed/chunk-size-resize-plan.md — shown when the Chat Memory fieldset's chunk-size input
  *  is saved with a new value. The size only affects NEW chunks the sync tick / eager path write
  *  from now on; existing archives keep their old size until the one-time re-chunk backfill
  *  (orchestrator/chatChunkResize.ts) rewrites them. That pass re-summarizes + re-embeds every

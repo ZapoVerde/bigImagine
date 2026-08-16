@@ -197,7 +197,7 @@ export const MAX_LEAD_IN_CHUNKS = 3;
  *  threads render through their own marker / the fused alias separately). `chunks` is always
  *  sorted by `ordinal` ascending, mixing full chunks with lead-in entries (isLeadIn: true —
  *  docs/plans/chunk-lead-in-context-plan.md). `syncSummaries` are the open-sync-point rows
- *  (docs/plans/sync-summaries-plan.md), ordinal-ascending; a row whose chunk RAG also selected
+ *  (docs/plans/completed/sync-summaries-plan.md), ordinal-ascending; a row whose chunk RAG also selected
  *  carries its full `content` (inflated) and is absent from `chunks` — never duplicated. */
 export interface AutoRecallParts {
   chunks: ChunkRow[];
@@ -377,7 +377,7 @@ export function buildAutoRecallParts(
       const plotFloorSyncs =
         Number.isFinite(parsedPlotFloor) && parsedPlotFloor > 0 ? parsedPlotFloor : DEFAULT_PLOT_FLOOR_SYNCS;
 
-      // The chunk size in turn-pairs (docs/plans/chunk-size-resize-plan.md) — the age-unit
+      // The chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md) — the age-unit
       // mapping between chunk ordinals and Canonize's pair-counted decay age, bound into the
       // chunk lane's SQL as $5. Same parse-with-fallback shape; unset/corrupt = DEFAULT_CHUNK_PAIRS
       // (2 — today's hardcoded 4-message chunk), so a not-yet-saved setting changes nothing.
@@ -400,7 +400,7 @@ export function buildAutoRecallParts(
 
       // The sync-summaries lane needs no embedding — start it before the embed round-trip so
       // the open-sync-point read overlaps the provider call instead of serializing behind it
-      // (docs/plans/sync-summaries-plan.md Step 1: unconditional, no vector query, no cutoff).
+      // (docs/plans/completed/sync-summaries-plan.md Step 1: unconditional, no vector query, no cutoff).
       const syncSummaryFetch = recallSyncSummaryLane(session, userId, chatId);
 
       const [vector] = await embeddings.embed([query]);
@@ -424,7 +424,7 @@ export function buildAutoRecallParts(
         }),
       ]);
 
-      // Sync-summaries inflate/exclude merge (docs/plans/sync-summaries-plan.md Step 2) — the
+      // Sync-summaries inflate/exclude merge (docs/plans/completed/sync-summaries-plan.md Step 2) — the
       // ONE place a chunk RAG also selected under the open sync point moves sections: it leaves
       // `chunks` (so auto_recall never duplicates it) and marks its sync-summary row inflated
       // by attaching the full content (renderSyncSummaries renders it through the same chunk

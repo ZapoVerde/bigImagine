@@ -343,7 +343,7 @@ export async function handleChatCompletions(
   let streamHeadersSent = false;
   const sseId = `chatcmpl-${randomUUID()}`;
   const taskId = body.chat_id ?? randomUUID();
-  // Robust-chat-turns plan (docs/plans/robust-chat-turns-plan.md): the per-chat interactive-turn
+  // Robust-chat-turns plan (docs/plans/completed/robust-chat-turns-plan.md): the per-chat interactive-turn
   // lock. A chat may only ever have one turn running at a time — send and swipe-regenerate both
   // gate on it, so a client that lost track of an in-flight turn (a backgrounded tab, a reload)
   // can't launch a second, concurrent one that would corrupt the transcript, not just the

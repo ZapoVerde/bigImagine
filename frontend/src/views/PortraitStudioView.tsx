@@ -25,7 +25,7 @@ import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import PortraitCandidateGrid from '../components/portraits/PortraitCandidateGrid';
 import './PortraitStudioView.css';
 
-// Portrait Studio (docs/plans/portrait-studio-plan.md §Frontend) — the training/authoring surface
+// Portrait Studio (docs/plans/completed/portrait-studio-plan.md §Frontend) — the training/authoring surface
 // for character portraits: per-layer entity pickers + create-new drive a Generate action; the
 // round's candidates land in PortraitCandidateGrid for winner-pick + 1-5 rating + note; feedback
 // runs the Reflection Investigation and surfaces an "Applied" banner (created vs amended,

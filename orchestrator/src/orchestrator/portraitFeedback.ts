@@ -2,7 +2,7 @@
  * @file orchestrator/src/orchestrator/portraitFeedback.ts
  * @stamp 2026-08-16
  * @architectural-role Orchestrator — human evaluation, episode logging, and the Reflection
- *   Investigation wiki-writing loop (docs/plans/portrait-studio-plan.md §Human evaluation and
+ *   Investigation wiki-writing loop (docs/plans/completed/portrait-studio-plan.md §Human evaluation and
  *   episode logging / §Reflection Investigation)
  * @description
  * The feedback half of Portrait Studio: submitPortraitFeedback writes the visual_episodes row,
