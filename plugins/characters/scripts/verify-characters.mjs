@@ -123,10 +123,18 @@ function createFakePool() {
             assert(scopedUserId === userId, 'get_characters is scoped to the requesting user');
             // db/migrations/0096 eligibility: user-authored (status null) is always eligible; an
             // auto-registered row is eligible only when linked to the calling chat and not
-            // demoted to inactive (null chat -> no auto-registered row ever matches).
+            // demoted to inactive (null chat -> no auto-registered row ever matches). The
+            // castOnly=true query (rp-cast-library-repair.md Part A) drops the status-null
+            // carve-out — the SQL text is the only signal of which shape this call is.
+            const castOnly = sql.includes('status is not null');
             const eligible = (c) =>
-              c.status === null ||
-              (c.status !== 'inactive' && characterChatLinks.some((link) => link.character_id === c.character_id && link.chat_id === chatId));
+              castOnly
+                ? c.status !== null &&
+                  c.status !== 'inactive' &&
+                  characterChatLinks.some((link) => link.character_id === c.character_id && link.chat_id === chatId)
+                : c.status === null ||
+                  (c.status !== 'inactive' &&
+                    characterChatLinks.some((link) => link.character_id === c.character_id && link.chat_id === chatId));
             const rows = characters
               .filter((c) => c.user_id === userId && eligible(c))
               .sort((a, b) => a.name.localeCompare(b.name))
@@ -454,6 +462,40 @@ assert(notFoundDetail.found === false, "get_character can't see another user's c
   assert(
     !inOtherChat.some((c) => c.characterId === transientChar.characterId),
     "a transient character linked to a DIFFERENT chat is not surfaced — chat-scoping's core invariant",
+  );
+
+  // rp-cast-library-repair.md Part A — castOnly: true is the RP Cast section's internal
+  // frontend↔handler contract (deliberately NOT in definition.parameters). It must surface only
+  // this chat's linked auto-registered characters, never the user's card library (status null).
+  const castOnlyInChat = await db.withUserScope(userId, (session) =>
+    getTool.handler({ castOnly: true }, { userId, db: session, chatId }),
+  );
+  assert(
+    castOnlyInChat.length === 1 && castOnlyInChat[0].characterId === transientChar.characterId,
+    'castOnly: true surfaces only the chat-linked auto-registered character — user-authored cards and inactive rows are excluded',
+  );
+
+  const castOnlyNoChat = await db.withUserScope(userId, (session) =>
+    getTool.handler({ castOnly: true }, { userId, db: session }),
+  );
+  assert(castOnlyNoChat.length === 0, 'castOnly: true with no chat context returns an empty list');
+
+  const castOnlyFalse = await db.withUserScope(userId, (session) =>
+    getTool.handler({ castOnly: false }, { userId, db: session, chatId }),
+  );
+  assert(
+    castOnlyFalse.some((c) => c.characterId === elara.characterId) &&
+      castOnlyFalse.some((c) => c.characterId === transientChar.characterId),
+    'castOnly: false behaves exactly like today — user-authored cards and chat-linked auto-registered rows both surface',
+  );
+
+  const castOnlyMalformed = await db.withUserScope(userId, (session) =>
+    getTool.handler({ castOnly: 'yes' }, { userId, db: session, chatId }),
+  );
+  assert(
+    castOnlyMalformed.some((c) => c.characterId === elara.characterId) &&
+      castOnlyMalformed.some((c) => c.characterId === transientChar.characterId),
+    'a non-boolean castOnly is treated as false — the full-library behavior is preserved, never throwing',
   );
 
   const inactiveDetail = await db.withUserScope(userId, (session) =>

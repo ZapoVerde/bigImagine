@@ -6,8 +6,9 @@
  * @description
  * rp-cast-infrastructure-plan.md Part C — the RP sidebar's "Cast" section: who's known to this
  * chat, with a live presence indicator for whoever the current scene's `Present:` line says is
- * here right now. The roster comes from the chat-scoped get_characters tool (?chat_id=…, Part B
- * — user-authored rows plus this chat's auto-registered ones); presence comes from the
+ * here right now. The roster comes from the chat-scoped get_characters tool (?chat_id=…, called
+ * with castOnly: true per rp-cast-library-repair.md Part A — only this chat's linked
+ * auto-registered characters, never the user's whole card library); presence comes from the
  * now-chat-scoped get_scenes tool, whose matching scene row's character_ids (matched against the
  * active chat's session.sceneId, up-reported by ChatView through App) are the present set.
  *
@@ -35,7 +36,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { ApiError, callTool } from '../../api/client';
+import { ApiError, callTool, seedSubjectFromCharacter } from '../../api/client';
 import type { CharacterSummary } from '../../api/types';
 import CharacterAvatarThumb from '../CharacterAvatarThumb';
 import './CastSection.css';
@@ -67,13 +68,17 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   // until the new chat's fetch lands, never showing the previous chat's cast under it.
   const [loadChatId, setLoadChatId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // studio-character-bridge-plan.md Part A on the cast row: which character's seed is in flight
+  // (the button shows a busy state), and the most recent per-row result/error message.
+  const [studioBusyId, setStudioBusyId] = useState<string | null>(null);
+  const [studioMessage, setStudioMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
     if (collapsed) return;
     let cancelled = false;
     setError(null);
     Promise.all([
-      callTool<CharacterSummary[]>('get_characters', {}, apiKey, chatId),
+      callTool<CharacterSummary[]>('get_characters', { castOnly: true }, apiKey, chatId),
       callTool<SceneSummary[]>('get_scenes', {}, apiKey, chatId),
     ])
       .then(([chars, scenesResult]) => {
@@ -97,6 +102,25 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   const activeScene = scenes?.find((s) => s.sceneId === sceneId) ?? null;
   const presentIds = new Set(activeScene?.characterIds ?? []);
   const visibleRoster = loadChatId === chatId ? roster : null;
+
+  // studio-character-bridge-plan.md Part A: the cast row's "Send to Studio" — the Roster's own
+  // no-chatId get_characters listing never includes RP-born characters (see the plan's Out of
+  // Scope), so this row-level action sources characterId straight off the chat-scoped cast list.
+  // Explicit operator click, same unconditional-refresh semantics as the CharactersView button.
+  async function sendToStudio(characterId: string) {
+    setStudioBusyId(characterId);
+    setStudioMessage(null);
+    try {
+      const result = await seedSubjectFromCharacter(characterId, apiKey);
+      const text = result.action === 'created' ? 'Seeded in Studio.' : 'Refreshed in Studio.';
+      setStudioMessage({ id: characterId, text, ok: true });
+      window.setTimeout(() => setStudioMessage((m) => (m?.id === characterId ? null : m)), 4000);
+    } catch (err) {
+      setStudioMessage({ id: characterId, text: err instanceof ApiError ? err.message : 'Studio seed failed.', ok: false });
+    } finally {
+      setStudioBusyId(null);
+    }
+  }
 
   return (
     <section className="cast-section">
@@ -127,6 +151,18 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
                   <li key={c.characterId} className={`cast-row${present ? ' present' : ''}`}>
                     <CharacterAvatarThumb characterId={c.characterId} apiKey={apiKey} className="cast-row-avatar" />
                     <span className="cast-row-name">{c.name}</span>
+                    {studioMessage?.id === c.characterId && (
+                      <span className={`cast-row-studio-status${studioMessage.ok ? '' : ' err'}`}>{studioMessage.text}</span>
+                    )}
+                    <button
+                      type="button"
+                      className="cast-row-studio-btn"
+                      disabled={studioBusyId === c.characterId}
+                      title="Create or refresh this character's subject entity in Portrait Studio (its persona becomes the entity's instructions)"
+                      onClick={() => void sendToStudio(c.characterId)}
+                    >
+                      {studioBusyId === c.characterId ? '…' : 'Send to Studio'}
+                    </button>
                     <span
                       className={`cast-presence${present ? ' on' : ''}`}
                       title={present ? 'Present in the current scene' : 'Not present in the current scene'}
