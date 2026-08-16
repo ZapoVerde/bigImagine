@@ -1,12 +1,14 @@
 import { useRef, useState } from 'react';
 import {
   ApiError,
+  adminGetCharacterSettings,
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
   adminGetScreenLockSettings,
   adminGetTimezone,
   adminListCredentials,
+  adminSetCharacterSettings,
   adminSetCredential,
   adminSetNotificationSettings,
   adminSetPersonaSettings,
@@ -15,7 +17,7 @@ import {
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
+import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
@@ -64,7 +66,10 @@ function formatUtcOffset(tz: string): string {
 // Memory fieldset that used to live here (sync timing, prompts, the auto-recall retrieval knobs)
 // moved to the RAG tab (views/RagView.tsx), and the Image Generation + Chat Background fieldsets
 // moved to the Backgrounds tab (views/BackgroundsView.tsx) — this view is household settings only
-// now.
+// now. The Character-describer fieldset moved IN from the Characters page
+// (rp-cast-library-repair.md Part B): it configures the in-chat character describer pass, a
+// characters concern stranded on what is now explicitly the cards-only page — the same
+// admin-gated, chat-independent LLM/prompt-config shape as its Persona neighbor here.
 interface SettingsViewProps {
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -112,6 +117,22 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedScreenLockTimeoutMinutes, setSelectedScreenLockTimeoutMinutes] = useState('5');
   const [screenLockStatus, setScreenLockStatus] = useState('');
 
+  // Character-describer settings (rp-cast-infrastructure-plan.md A4 — moved here from the
+  // Characters page by rp-cast-library-repair.md Part B): the describer LLM pass that turns a
+  // newly-minted in-chat character's blank persona into a real persona blurb. Same shape as the
+  // Persona/Screen Lock fieldsets — admin-gated by this tab's single useAdminUnlock, no separate
+  // unlock of its own.
+  const [characterSettings, setCharacterSettings] = useState<CharacterSettings | null>(null);
+  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
+  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
+  const [characterSettingsStatus, setCharacterSettingsStatus] = useState('');
+
+  function applyCharacterSettings(settings: CharacterSettings) {
+    setCharacterSettings(settings);
+    setSelectedDescriberPrompt(settings.describerPrompt);
+    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
+  }
+
   function applyNotificationSettings(settings: NotificationSettings) {
     setNtfyServerUrl(settings.serverUrl ?? '');
     setSelectedNtfyServerUrl(settings.serverUrl ?? '');
@@ -138,13 +159,14 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings] = await Promise.all([
+      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, characterSettingsResult] = await Promise.all([
         adminListCredentials(key),
         adminGetTimezone(key),
         adminGetNotificationSettings(key),
         adminGetPiaProxyUrl(key),
         adminGetPersonaSettings(key),
         adminGetScreenLockSettings(key),
+        adminGetCharacterSettings(key),
       ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -155,6 +177,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setSelectedPiaProxyUrl(piaProxyUrlResult ?? '');
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
+      applyCharacterSettings(characterSettingsResult);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };
@@ -240,6 +263,26 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setScreenLockPassword(selectedScreenLockPassword);
     setScreenLockTimeoutMinutes(timeoutValue);
     setScreenLockStatus('Saved — takes effect for this tab on its next reload, no restart needed.');
+  }
+
+  async function saveCharacterSettings() {
+    if (!characterSettings) return;
+    const patch: {
+      describer_prompt?: string;
+      describer_history_pairs?: string;
+    } = {};
+    if (selectedDescriberPrompt !== characterSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
+    if (selectedDescriberHistoryPairs !== characterSettings.describerHistoryPairs) {
+      patch.describer_history_pairs = selectedDescriberHistoryPairs;
+    }
+    if (Object.keys(patch).length === 0) return;
+    setCharacterSettingsStatus('Saving…');
+    try {
+      applyCharacterSettings(await adminSetCharacterSettings(patch, adminKey));
+      setCharacterSettingsStatus('Saved.');
+    } catch (err) {
+      setCharacterSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
+    }
   }
 
   async function save() {
@@ -406,6 +449,55 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           Save
         </button>
         <div className="status">{personaSettingsStatus}</div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Character-describer</legend>
+        <div className="settings-describer-fields">
+          <label>
+            Prompt {characterSettings?.describerPromptIsDefault && <em>(default)</em>}
+            <br />
+            <textarea
+              value={selectedDescriberPrompt}
+              onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
+              rows={10}
+              placeholder="[SYSTEM: TASK — CHARACTER ARCHIVIST]… (the built-in default)"
+            />
+          </label>
+          <div className="status">
+            The describer LLM call that turns a newly-minted character's blank persona into a real
+            persona blurb (rp-cast-infrastructure-plan.md). Macros expanded per call are{' '}
+            <code>{'{{character_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
+            <code>Persona:</code> marker fills <code>characters.persona</code>. Empty means the
+            built-in default.
+          </div>
+          <label>
+            Context (turn-pairs)
+            <br />
+            <input
+              type="text"
+              inputMode="numeric"
+              value={selectedDescriberHistoryPairs}
+              onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
+              placeholder="1"
+            />
+          </label>
+          <div className="status">
+            How many trailing turn-pairs the describer reads as narrative context (default 1).
+            Leave empty for the default.
+          </div>
+          <button
+            onClick={saveCharacterSettings}
+            disabled={
+              !characterSettings ||
+              (selectedDescriberPrompt === characterSettings.describerPrompt &&
+                selectedDescriberHistoryPairs === characterSettings.describerHistoryPairs)
+            }
+          >
+            Save
+          </button>
+          <div className="status">{characterSettingsStatus}</div>
+        </div>
       </fieldset>
 
       <fieldset>

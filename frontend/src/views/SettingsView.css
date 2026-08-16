@@ -31,6 +31,22 @@
   box-sizing: border-box;
 }
 
+/* The Character-describer fieldset (rp-cast-infrastructure-plan.md A4 — moved here from the
+   Characters page by rp-cast-library-repair.md Part B, since it configures in-chat character
+   behavior this tab owns): the describer prompt textarea and the turn-pairs input stretch full
+   width like the other textareas on this tab, and the explanatory status lines stay muted/small
+   like their neighbors. */
+.settings-describer-fields textarea,
+.settings-describer-fields input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-describer-fields .status {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs, 0.72rem);
+}
+
 /* The Chat Background fieldset's sliders/color pickers: range gets a full-width track with the
    accent color, color stays a compact swatch (the generic input rule above would stretch it). */
 .settings-view input[type='range'] {

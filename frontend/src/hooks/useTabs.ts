@@ -45,7 +45,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   rag: 'RAG',
   reviewpanel: 'Review Panel',
   promptstacks: 'Prompt Stacks',
-  characters: 'Characters',
+  characters: 'Cards',
   'browse-chub': 'Browse Chub',
   cleanup: 'Cleanup',
   backgrounds: 'Backgrounds',

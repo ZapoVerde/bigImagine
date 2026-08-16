@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
 import {
   ApiError,
-  adminGetCharacterSettings,
-  adminSetCharacterSettings,
   callTool,
   createChat,
   exportCharacterCard,
   importCharacterCard,
+  seedSubjectFromCharacter,
   updateChat,
 } from '../api/client';
-import type { CharacterDetail, CharacterSettings, CharacterSummary, ContextStackPreset } from '../api/types';
+import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
 import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
-import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import './CharactersView.css';
 
 interface CharactersViewProps {
@@ -67,6 +65,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [startingRp, setStartingRp] = useState(false);
+  const [studioSeedStatus, setStudioSeedStatus] = useState<string | null>(null);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -74,51 +73,6 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   // a counter (rather than a plain boolean) is the standard way to tell "left a child" from "left
   // the whole drop zone" without flicker.
   const dragCounter = useRef(0);
-
-  // --- Character-describer settings (rp-cast-infrastructure-plan.md A4) ---
-  // Same admin-key gate + mount-time no-key-then-stored-key probe as LocationsView's unified
-  // settings surface — the describer endpoints are admin-gated like every Settings-tab pair.
-  const [characterSettings, setCharacterSettings] = useState<CharacterSettings | null>(null);
-  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
-  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
-  const [settingsStatus, setSettingsStatus] = useState('');
-
-  function applyCharacterSettings(settings: CharacterSettings) {
-    setCharacterSettings(settings);
-    setSelectedDescriberPrompt(settings.describerPrompt);
-    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
-  }
-
-  async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
-    try {
-      applyCharacterSettings(await adminGetCharacterSettings(key));
-      return { ok: true };
-    } catch (error) {
-      return { ok: false, error };
-    }
-  }
-
-  const { adminKey, setAdminKey, checking, unlocked, loadError, load } = useAdminUnlock(attemptLoad);
-
-  async function saveCharacterSettings() {
-    if (!characterSettings) return;
-    const patch: {
-      describer_prompt?: string;
-      describer_history_pairs?: string;
-    } = {};
-    if (selectedDescriberPrompt !== characterSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
-    if (selectedDescriberHistoryPairs !== characterSettings.describerHistoryPairs) {
-      patch.describer_history_pairs = selectedDescriberHistoryPairs;
-    }
-    if (Object.keys(patch).length === 0) return;
-    setSettingsStatus('Saving…');
-    try {
-      applyCharacterSettings(await adminSetCharacterSettings(patch, adminKey));
-      setSettingsStatus('Saved.');
-    } catch (err) {
-      setSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
-    }
-  }
 
   const refresh = useCallback(
     async (selectAfter?: string) => {
@@ -287,6 +241,24 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
     }
   }
 
+  // studio-character-bridge-plan.md Part A: create-or-refresh this character's subject entity
+  // in Portrait Studio from its persona. An explicit operator click every time — the server
+  // overwrites an existing subject entity's standing_instructions unconditionally, so clicking
+  // again after editing the persona is how the Studio copy is deliberately refreshed.
+  async function sendToPortraitStudio() {
+    if (!detail?.found) return;
+    setStudioSeedStatus('Seeding…');
+    setError(null);
+    try {
+      const result = await seedSubjectFromCharacter(detail.characterId, apiKey);
+      setStudioSeedStatus(result.action === 'created' ? 'Seeded — tune it in Portrait Studio.' : 'Refreshed in Portrait Studio.');
+      window.setTimeout(() => setStudioSeedStatus(null), 4000);
+    } catch (err) {
+      setStudioSeedStatus(null);
+      setError(err instanceof ApiError ? err.message : 'failed to seed Portrait Studio subject');
+    }
+  }
+
   // Shared by the file-picker input and drag-and-drop: imports each file in turn (a card PNG or
   // JSON per drop is normal, so this is a sequence, not a single import) and lands on whichever one
   // imported last, since selecting all of them at once isn't a thing this editor supports.
@@ -385,7 +357,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   }
 
   if (characters === null) {
-    return <div className="characters-view loading">Loading characters&hellip;</div>;
+    return <div className="characters-view loading">Loading cards&hellip;</div>;
   }
 
   const showEditor = creatingNew || selectedId !== null;
@@ -403,78 +375,9 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
           <span>Drop a character card (PNG or JSON) to import</span>
         </div>
       )}
-      {/* rp-cast-infrastructure-plan.md A4 — the character-describer settings. The roster above
-          is user-gated and always renders; only this fieldset needs the admin key (LocationsView's
-          useAdminUnlock shape). Collapsed to its own section so it never crowds the roster. */}
-      {!checking && (
-        <details className="characters-describer-settings" open={false}>
-          <summary>Describer settings</summary>
-          {!unlocked ? (
-            <div className="characters-describer-unlock">
-              <label>
-                Admin API key
-                <br />
-                <input type="password" value={adminKey} onChange={(e) => setAdminKey(e.target.value)} />
-              </label>
-              <br />
-              <button type="button" onClick={load}>
-                Load
-              </button>
-              {loadError && <div className="error-banner">{loadError}</div>}
-            </div>
-          ) : (
-            <div className="characters-describer-fields">
-              <label>
-                Character-describer prompt {characterSettings?.describerPromptIsDefault && <em>(default)</em>}
-                <br />
-                <textarea
-                  value={selectedDescriberPrompt}
-                  onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
-                  rows={10}
-                  placeholder="[SYSTEM: TASK — CHARACTER ARCHIVIST]… (the built-in default)"
-                />
-              </label>
-              <div className="status">
-                The describer LLM call that turns a newly-minted character's blank persona into a
-                real persona blurb (rp-cast-infrastructure-plan.md). Macros expanded per call are{' '}
-                <code>{'{{character_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
-                <code>Persona:</code> marker fills <code>characters.persona</code>. Empty means the
-                built-in default.
-              </div>
-              <label>
-                Character-describer context (turn-pairs)
-                <br />
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  value={selectedDescriberHistoryPairs}
-                  onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
-                  placeholder="1"
-                />
-              </label>
-              <div className="status">
-                How many trailing turn-pairs the describer reads as narrative context (default 1).
-                Leave empty for the default.
-              </div>
-              <button
-                type="button"
-                onClick={saveCharacterSettings}
-                disabled={
-                  !characterSettings ||
-                  (selectedDescriberPrompt === characterSettings.describerPrompt &&
-                    selectedDescriberHistoryPairs === characterSettings.describerHistoryPairs)
-                }
-              >
-                Save
-              </button>
-              <div className="status">{settingsStatus}</div>
-            </div>
-          )}
-        </details>
-      )}
       <div className="characters-list">
         <div className="characters-list-header">
-          <span>Characters</span>
+          <span>Cards</span>
           <div className="characters-list-header-actions">
             <button type="button" className="characters-import-btn" onClick={() => fileInputRef.current?.click()}>
               Import
@@ -496,7 +399,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
             if (files.length > 0) void handleImportFiles(files);
           }}
         />
-        {characters.length === 0 && <div className="empty-state">No characters yet &mdash; create one or import a card.</div>}
+        {characters.length === 0 && <div className="empty-state">No cards yet &mdash; create one or import a card.</div>}
         {characters.map((c) => (
           <div
             key={c.characterId}
@@ -511,12 +414,12 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
 
       <div className="characters-editor">
         <button type="button" className="characters-back" onClick={() => setMobileShowEditor(false)}>
-          &larr; Characters
+          &larr; Cards
         </button>
 
         {error && <div className="error-banner">{error}</div>}
 
-        {!showEditor && <div className="empty-state">Pick a character, create a new one, or import a card.</div>}
+        {!showEditor && <div className="empty-state">Pick a card, create a new one, or import one.</div>}
 
         {showEditor && !creatingNew && detail === null && <div className="empty-state">Loading&hellip;</div>}
 
@@ -543,6 +446,24 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
               Persona
               <textarea rows={4} value={draft.persona} onChange={(e) => updateDraft({ persona: e.target.value })} />
             </label>
+            {!creatingNew && detail?.found && (
+              <div className="characters-studio-seed">
+                <button
+                  type="button"
+                  className="characters-studio-seed-btn"
+                  disabled={draft.persona.trim() === '' || studioSeedStatus === 'Seeding…'}
+                  title={
+                    draft.persona.trim() === ''
+                      ? 'The character has no persona yet — write one first.'
+                      : 'Create or refresh this character\'s subject entity in Portrait Studio (its persona becomes the entity\'s instructions)'
+                  }
+                  onClick={() => void sendToPortraitStudio()}
+                >
+                  Send to Portrait Studio
+                </button>
+                {studioSeedStatus && <span className="characters-studio-seed-status">{studioSeedStatus}</span>}
+              </div>
+            )}
             <label className="characters-field">
               Scenario
               <textarea rows={3} value={draft.scenario} onChange={(e) => updateDraft({ scenario: e.target.value })} />

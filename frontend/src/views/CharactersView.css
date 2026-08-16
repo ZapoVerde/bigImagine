@@ -207,6 +207,41 @@
   resize: vertical;
 }
 
+/* studio-character-bridge-plan.md Part A — the "Send to Portrait Studio" action under the
+   persona field: seeds/refreshes the character's subject entity in Portrait Studio from the
+   persona. Disabled (with the tooltip explaining why) while the persona is empty. */
+.characters-studio-seed {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.characters-studio-seed-btn {
+  font: inherit;
+  font-size: var(--font-size-sm);
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.characters-studio-seed-btn:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+}
+
+.characters-studio-seed-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.characters-studio-seed-status {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
 .characters-greetings {
   display: flex;
   flex-direction: column;
@@ -353,46 +388,4 @@
 .characters-start-chat-btn:disabled {
   opacity: 0.5;
   cursor: default;
-}
-
-/* The character-describer settings (rp-cast-infrastructure-plan.md A4) — a collapsible details
-   block above the roster, mirroring LocationsView's Room describer fieldset. The roster is
-   user-gated; only this section needs the admin key, so it sits inside its own <details>. */
-.characters-describer-settings {
-  border-bottom: 1px solid var(--color-border);
-  padding: 0.5rem 0.75rem;
-}
-
-.characters-describer-settings summary {
-  cursor: pointer;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
-  letter-spacing: var(--label-letter-spacing, 0.04em);
-  text-transform: uppercase;
-  color: var(--color-text-muted);
-  user-select: none;
-}
-
-.characters-describer-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  margin-top: 0.5rem;
-  font-size: var(--font-size-sm);
-}
-
-.characters-describer-fields textarea,
-.characters-describer-fields input {
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.characters-describer-fields .status {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-xs, 0.72rem);
-}
-
-.characters-describer-unlock {
-  margin-top: 0.5rem;
-  font-size: var(--font-size-sm);
 }
