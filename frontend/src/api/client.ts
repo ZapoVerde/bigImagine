@@ -43,6 +43,16 @@ import type {
   ModelProvidersResult,
   NotificationSettings,
   PersonaSettings,
+  PortraitCandidate,
+  PortraitEntityRow,
+  PortraitFeedbackInput,
+  PortraitFeedbackResult,
+  PortraitGenerateInput,
+  PortraitLayerManifest,
+  PortraitWikiEntry,
+  CreatePortraitEntityInput,
+  UpdatePortraitEntityInput,
+  UpdatePortraitWikiInput,
   ProfileModelsResult,
   PromptPreview,
   ReasoningFrame,
@@ -1530,4 +1540,83 @@ export async function adminSetCleanupSettings(
   });
   if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
   return res.json() as Promise<CleanupSettings>;
+}
+
+// ============================================================================
+// Portrait Studio (docs/plans/portrait-studio-plan.md) — the user-scoped visual_* routes
+// (orchestrator/src/server/portraitRoutes.ts). Entities/wiki/generate/feedback + the layers read
+// are regular user routes (the visual_* tables are user-scoped RLS); only the layers WRITE is
+// admin-gated (a visual_layer_stack settings write), so it takes adminKey like Connections-tab
+// writes do.
+// ============================================================================
+
+/** GET /v1/portraits/entities — the Studio's entity list, ordered by layer then name. */
+export async function listPortraitEntities(apiKey: string | null): Promise<PortraitEntityRow[]> {
+  const body = await jsonRequest<{ entities: PortraitEntityRow[] }>('/v1/portraits/entities', apiKey);
+  return body.entities;
+}
+
+/** POST /v1/portraits/entities — create a visual_entities row. A subject entity requires
+ *  characterId (one subject per character — 409 when one already exists). */
+export function createPortraitEntity(input: CreatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
+  return jsonRequest<PortraitEntityRow>('/v1/portraits/entities', apiKey, { method: 'POST', body: input });
+}
+
+/** GET /v1/portraits/entities/:id — one entity. */
+export function getPortraitEntity(entityId: string, apiKey: string | null): Promise<PortraitEntityRow> {
+  return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey);
+}
+
+/** PATCH /v1/portraits/entities/:id — partial update; null clears
+ *  standingInstructions/template/characterId (not name/slots). */
+export function updatePortraitEntity(entityId: string, input: UpdatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
+  return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'PATCH', body: input });
+}
+
+/** DELETE /v1/portraits/entities/:id. */
+export async function deletePortraitEntity(entityId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
+  return jsonRequest<{ deleted: boolean }>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'DELETE' });
+}
+
+/** GET /v1/portraits/wiki — the Studio wiki's entries. */
+export async function listPortraitWikiEntries(apiKey: string | null): Promise<PortraitWikiEntry[]> {
+  const body = await jsonRequest<{ entries: PortraitWikiEntry[] }>('/v1/portraits/wiki', apiKey);
+  return body.entries;
+}
+
+/** PATCH /v1/portraits/wiki/:id — partial edit; subscriptions replaces, not merges. */
+export function updatePortraitWikiEntry(entryId: string, input: UpdatePortraitWikiInput, apiKey: string | null): Promise<PortraitWikiEntry> {
+  return jsonRequest<PortraitWikiEntry>(`/v1/portraits/wiki/${encodeURIComponent(entryId)}`, apiKey, { method: 'PATCH', body: input });
+}
+
+/** DELETE /v1/portraits/wiki/:id. */
+export async function deletePortraitWikiEntry(entryId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
+  return jsonRequest<{ deleted: boolean }>(`/v1/portraits/wiki/${encodeURIComponent(entryId)}`, apiKey, { method: 'DELETE' });
+}
+
+/** GET /v1/portraits/layers — the active layer manifest (user-gated read; seeds the default
+ *  four-layer manifest on first read). */
+export async function getPortraitLayerManifest(apiKey: string | null): Promise<PortraitLayerManifest> {
+  const body = await jsonRequest<{ manifest: PortraitLayerManifest }>('/v1/portraits/layers', apiKey);
+  return body.manifest;
+}
+
+/** POST /v1/portraits/layers — replace the layer manifest. Admin-gated: visual_layer_stack is
+ *  an orchestrator_settings write, and every settings write on the server is admin-gated. */
+export async function setPortraitLayerManifest(manifest: PortraitLayerManifest, adminKey: string | null): Promise<PortraitLayerManifest> {
+  const body = await jsonRequest<{ manifest: PortraitLayerManifest }>('/v1/portraits/layers', adminKey, { method: 'POST', body: manifest });
+  return body.manifest;
+}
+
+/** POST /v1/portraits/generate — run one generation round; returns the round's candidates in
+ *  grid order (imageUrl null = that candidate's render failed and it is omitted from the grid). */
+export async function generatePortraitCandidates(input: PortraitGenerateInput, apiKey: string | null): Promise<PortraitCandidate[]> {
+  const body = await jsonRequest<{ candidates: PortraitCandidate[] }>('/v1/portraits/generate', apiKey, { method: 'POST', body: input });
+  return body.candidates;
+}
+
+/** POST /v1/portraits/feedback — record the round's evaluation and run the Reflection
+ *  Investigation; the response carries the episode id and the wiki write it produced. */
+export function submitPortraitFeedback(input: PortraitFeedbackInput, apiKey: string | null): Promise<PortraitFeedbackResult> {
+  return jsonRequest<PortraitFeedbackResult>('/v1/portraits/feedback', apiKey, { method: 'POST', body: input });
 }

@@ -129,7 +129,13 @@ import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore, SettingName } from '../io/orchestratorSettings.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
-import type { ImageConnectionInit, ImageConnectionKind, ImageConnectionPatch, ImageConnectionStore } from '../io/imageConnections.js';
+import type {
+  ImageConnectionInit,
+  ImageConnectionKind,
+  ImageConnectionPatch,
+  ImageConnectionPurpose,
+  ImageConnectionStore,
+} from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
 import { synthesizeImagePrompt, IMAGE_GEN_SEED } from '../util/synthesizeImagePrompt.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../io/chatMemory/classifyChatChunk.js';
@@ -393,6 +399,10 @@ function isImageKind(value: unknown): value is ImageConnectionKind {
   return typeof value === 'string' && (IMAGE_KINDS as readonly string[]).includes(value);
 }
 
+function isImagePurpose(value: unknown): value is ImageConnectionPurpose {
+  return value === 'background' || value === 'portrait';
+}
+
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -413,11 +423,13 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     masterPositiveStylePrefix,
     masterNegativePrompt,
     workflowParameters,
+    purpose,
   } = raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
   if (!isImageKind(kind)) return undefined;
   if (typeof model !== 'string' || !model) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
+  if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
   if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 64 || width > 8192)) {
     return undefined;
@@ -438,6 +450,7 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     kind,
     model,
     apiKey: typeof apiKey === 'string' ? apiKey : undefined,
+    purpose: isImagePurpose(purpose) ? purpose : undefined,
     baseUrl: typeof baseUrl === 'string' ? baseUrl : undefined,
     width: typeof width === 'number' ? width : undefined,
     height: typeof height === 'number' ? height : undefined,
@@ -469,10 +482,12 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
     masterPositiveStylePrefix,
     masterNegativePrompt,
     workflowParameters,
+    purpose,
   } = raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
   if (kind !== undefined && !isImageKind(kind)) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
+  if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
   // apiKey undefined leaves the stored key untouched; empty string is rejected (there's no
   // "clear the key" — keyless connections are created without one, not rotated to nothing).
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
@@ -500,6 +515,7 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   if (name !== undefined) patch.name = (name as string).trim();
   if (kind !== undefined) patch.kind = kind as ImageConnectionKind;
   if (model !== undefined) patch.model = model as string;
+  if (purpose !== undefined) patch.purpose = purpose as ImageConnectionPurpose;
   if (apiKey !== undefined) patch.apiKey = apiKey as string;
   if (baseUrl !== undefined) patch.baseUrl = baseUrl as string | null;
   if (width !== undefined) patch.width = width as number;

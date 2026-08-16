@@ -230,6 +230,18 @@
  * setup block alongside the header/footer regex fields, per the plan's §13/§17 alignment with
  * the cleanup config's existing scope.
  *
+ * visual_layer_stack/visual_mutation_candidate_count/visual_mutation_system_prompt_override/
+ * visual_reflection_system_prompt_override/visual_wiki_investigation_max_turns (migration 0105,
+ * docs/plans/portrait-studio-plan.md) are the Portrait Studio's five settings. visual_layer_stack
+ * is the manifest JSON (default {layers:[subject/outfit/style/expression], template} — the
+ * generative portraits subsystem's whole configuration), visual_mutation_candidate_count is how
+ * many mutated candidate chromosomes a generation round produces (integer-as-text, default '3'),
+ * the two *_system_prompt_override keys are the mutation/reflection loop's "default + bespoke"
+ * prompt overrides (empty = the built-in default in portraits/evoprompt.ts, the same §17 fallback
+ * as every prompt key), and visual_wiki_investigation_max_turns caps the Reflection Investigation
+ * loop's tool-calling turns (integer-as-text, default '6'). All five are read live on every call,
+ * no restart, editable from the admin-gated Settings fieldset.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -327,6 +339,11 @@ export const SETTING_NAMES = [
   'lorebook_recursion_enabled',
   'reasoning_open_tag',
   'reasoning_close_tag',
+  'visual_layer_stack',
+  'visual_mutation_candidate_count',
+  'visual_mutation_system_prompt_override',
+  'visual_reflection_system_prompt_override',
+  'visual_wiki_investigation_max_turns',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

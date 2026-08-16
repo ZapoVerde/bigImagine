@@ -1,0 +1,119 @@
+/* Portrait Studio candidate grid — one card per rendered candidate, winner-pick + rating +
+   note. Mobile-first (Principle 18): the grid drops to a single column at the shared 768px
+   breakpoint; the goal line truncates instead of wrapping the header. */
+
+.portrait-grid-section {
+  margin-top: 1.2rem;
+}
+
+.portrait-grid-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+}
+
+.portrait-grid-header h3 {
+  margin: 0;
+}
+
+.portrait-grid-goal {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.portrait-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.portrait-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.6rem;
+  background: var(--color-surface, transparent);
+}
+
+.portrait-card-img {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.portrait-card-prompt summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-card-prompt pre {
+  margin: 0.4rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--font-size-sm, 0.85rem);
+  color: var(--color-text-secondary);
+}
+
+.portrait-card-rating {
+  display: flex;
+  align-items: center;
+  gap: 0.15rem;
+}
+
+.portrait-star {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.1rem;
+  color: var(--color-border);
+  padding: 0.1rem 0.15rem;
+}
+
+.portrait-star.active {
+  color: var(--color-accent);
+}
+
+.portrait-star:disabled {
+  cursor: default;
+}
+
+.portrait-rating-value {
+  margin-left: 0.4rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.portrait-card-note {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.portrait-card-note summary {
+  cursor: pointer;
+}
+
+.portrait-card-note textarea {
+  font-family: inherit;
+}
+
+.portrait-card-pick {
+  align-self: stretch;
+}
+
+@media (max-width: 768px) {
+  .portrait-grid {
+    grid-template-columns: 1fr;
+  }
+}

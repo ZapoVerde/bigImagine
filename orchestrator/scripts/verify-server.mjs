@@ -166,7 +166,7 @@ function createFakeImageConnectionStore(seedRows = []) {
   let nextId = 1;
   function toPublic(row) {
     const { apiKey, ...rest } = row;
-    return { ...rest, hasApiKey: apiKey != null };
+    return { ...rest, hasApiKey: apiKey != null, purpose: rest.purpose ?? 'background' };
   }
   function toProfile(row) {
     return {
@@ -182,6 +182,7 @@ function createFakeImageConnectionStore(seedRows = []) {
       masterPositiveStylePrefix: row.masterPositiveStylePrefix ?? null,
       masterNegativePrompt: row.masterNegativePrompt ?? null,
       workflowParameters: row.workflowParameters ?? null,
+      purpose: row.purpose ?? 'background',
     };
   }
   return {
@@ -208,6 +209,7 @@ function createFakeImageConnectionStore(seedRows = []) {
         workflowParameters: init.workflowParameters ?? null,
         isActive: false,
         updatedAt: new Date().toISOString(),
+        purpose: init.purpose ?? 'background',
       };
       rows.set(id, row);
       return toPublic(row);

@@ -22,6 +22,7 @@ import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
 import CleanupView from './views/CleanupView';
 import ConnectionsView from './views/ConnectionsView';
+import PortraitStudioView from './views/PortraitStudioView';
 import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
 import PromptStacksView from './views/PromptStacksView';
@@ -294,6 +295,7 @@ export default function App() {
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}
+            {tab.type === 'portraits' && <PortraitStudioView apiKey={apiKey} />}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}
             {tab.type === 'locations' && <LocationsView />}

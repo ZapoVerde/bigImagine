@@ -3,6 +3,10 @@
 //   - io/imageConnections.ts's store CRUD against a fake pool: create with/without a key,
 //     list (redacted — no apiKey ever), update, activate (single active enforced in the fake),
 //     remove (refuses the active row), resolveActive returning the decrypted profile;
+//   - the migration 0105 purpose split: create/update carry purpose (default 'background'),
+//     resolveActive() defaults to 'background' (pre-split call sites unchanged), activate()
+//     demotes only same-purpose rivals, and one active row per purpose coexists — the rebuilt
+//     image_connections_one_active_per_purpose partial unique index;
 //   - util/synthesizeImagePrompt.ts + io/imageGen dispatch are exercised indirectly through
 //     generateLocationImage below (the pollinations adapter needs no fetch, so it works with no
 //     network at all), and io/imageGen/runware.ts's wire shape is pinned directly against a
@@ -67,28 +71,30 @@ function createFakePool() {
           }
 
           // --- imageConnections store queries ---
-          if (sql.includes('from image_connections') && !sql.includes('select id from')) {
+          if (sql.includes('select id, purpose from image_connections')) {
+            const row = imageConnections.find((c) => c.id === params[0]);
+            return { rows: row ? [{ id: row.id, purpose: row.purpose }] : [] };
+          }
+          if (sql.includes('from image_connections') && !sql.includes('select id, purpose from')) {
             const whereIsActive = sql.includes('where is_active');
             const whereId = sql.includes('where id = $1');
+            const wherePurpose = sql.includes('purpose = $1');
             const rows = imageConnections
               .filter((c) => (whereIsActive ? c.is_active : true))
               .filter((c) => (whereId ? c.id === params[0] : true))
+              .filter((c) => (wherePurpose ? c.purpose === params[0] : true))
               .sort((a, b) => a.name.localeCompare(b.name));
             // node-postgres returns `numeric` (cfg_scale) and `bigint` (locations.seed) columns as
             // STRINGS — mimic that at this boundary so the store's Number() coercion is what's
             // under test (the real-pg behavior that stringified seed/CFGScale onto the runware wire).
             return { rows: rows.map((c) => ({ ...c, cfg_scale: c.cfg_scale == null ? null : String(c.cfg_scale) })) };
           }
-          if (sql.includes('select id from image_connections')) {
-            const row = imageConnections.find((c) => c.id === params[0]);
-            return { rows: row ? [{ id: row.id }] : [] };
-          }
           if (sql.includes('select api_key_ciphertext from image_connections')) {
             const row = imageConnections.find((c) => c.id === params[0]);
             return { rows: row ? [{ api_key_ciphertext: row.api_key_ciphertext }] : [] };
           }
           if (sql.startsWith('insert into image_connections')) {
-            const [name, kind, model, apiKeyCiphertext, baseUrl, width, height, samplingSteps, cfgScale, samplerName, prefix, negative, workflow] = params;
+            const [name, kind, model, apiKeyCiphertext, baseUrl, width, height, samplingSteps, cfgScale, samplerName, prefix, negative, workflow, purpose] = params;
             const row = {
               id: `img-conn-${++connCounter}`,
               name,
@@ -106,12 +112,14 @@ function createFakePool() {
               workflow_parameters: workflow ? JSON.parse(workflow) : null,
               is_active: false,
               updated_at: now(),
+              purpose: purpose ?? 'background',
             };
             imageConnections.push(row);
             return { rows: [{ ...row }] };
           }
           if (sql.startsWith('update image_connections set is_active = false')) {
-            for (const c of imageConnections) if (c.is_active && c.id !== params[0]) c.is_active = false;
+            // purpose-scoped demotion (migration 0105): only same-purpose rivals lose active.
+            for (const c of imageConnections) if (c.is_active && c.id !== params[0] && c.purpose === params[1]) c.is_active = false;
             return { rows: [] };
           }
           if (sql.startsWith('update image_connections set is_active = true')) {
@@ -264,6 +272,39 @@ assert(typeof active?.cfgScale === 'number' && active.cfgScale === 7, 'resolveAc
 
 const profileById = await imageConnections.resolveById(keyless.id);
 assert(profileById?.apiKey === null, 'resolveById of a keyless connection yields apiKey null');
+
+// --- purpose split (migration 0105): one active row per purpose; resolveActive() defaults to
+// --- 'background' (so every pre-0105 call site resolves exactly the row it did before); an
+// --- activation demotes only same-purpose rivals. -------------------------------------------------
+const ptA = await imageConnections.create({ name: 'pt-prod', kind: 'runware', model: 'runware:100@1', apiKey: 'sk-pt', purpose: 'portrait' });
+assert(ptA.purpose === 'portrait' && withKey.purpose === 'background', 'create honors an explicit purpose and defaults the column to background');
+
+// withKey (background, key sk-runware-secret) is the active row; activating a portrait
+// connection must leave it alone. The profile has no id — apiKey is its identity proxy.
+await imageConnections.activate(ptA.id);
+const bgActive = await imageConnections.resolveActive();
+const ptActive = await imageConnections.resolveActive('portrait');
+assert(bgActive?.apiKey === 'sk-runware-secret', 'activating a portrait connection leaves the active background row untouched');
+assert(ptActive?.apiKey === 'sk-pt', "resolveActive('portrait') returns the decrypted portrait profile");
+assert(
+  pool.imageConnections.filter((c) => c.purpose === 'background' && c.is_active).length === 1
+    && pool.imageConnections.filter((c) => c.purpose === 'portrait' && c.is_active).length === 1,
+  'one active row per purpose coexists (the per-purpose partial unique index)',
+);
+
+// A second portrait activation demotes the first portrait row only — background stays put.
+const ptB = await imageConnections.create({ name: 'pt-b', kind: 'fal-ai', model: 'fal-ai/flux/dev', apiKey: 'sk-pt-b', purpose: 'portrait' });
+await imageConnections.activate(ptB.id);
+assert((await imageConnections.resolveActive())?.apiKey === 'sk-runware-secret', 'the background active row survives a portrait-side switch');
+assert((await imageConnections.resolveActive('portrait'))?.apiKey === 'sk-pt-b', 'a second portrait activation demotes the first portrait row (per-purpose single active)');
+assert(
+  pool.imageConnections.filter((c) => c.purpose === 'portrait' && c.is_active).length === 1,
+  'exactly one active portrait row after the switch',
+);
+
+// update() can move a connection between purposes.
+const moved = await imageConnections.update(ptB.id, { purpose: 'background' });
+assert(moved?.purpose === 'background', 'update can move a connection between purposes');
 
 // --- update: rotate key + change dimensions ---
 const patched = await imageConnections.update(keyless.id, { width: 1024, height: 1024, masterNegativePrompt: 'blurry' });

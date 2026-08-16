@@ -19,6 +19,7 @@ import type { ImageConnectionSummary, ImageConnectionTestResult } from '../../ap
 interface Draft {
   name: string;
   kind: ImageConnectionSummary['kind'];
+  purpose: ImageConnectionSummary['purpose'];
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -36,6 +37,7 @@ function emptyDraft(): Draft {
   return {
     name: '',
     kind: 'fal-ai',
+    purpose: 'background',
     model: 'fal-ai/z-image/turbo',
     apiKey: '',
     baseUrl: '',
@@ -54,6 +56,7 @@ function draftFromConnection(c: ImageConnectionSummary): Draft {
   return {
     name: c.name,
     kind: c.kind,
+    purpose: c.purpose,
     model: c.model,
     apiKey: '',
     baseUrl: c.baseUrl ?? '',
@@ -72,6 +75,7 @@ function draftEqualsConnection(draft: Draft, c: ImageConnectionSummary): boolean
   return (
     draft.name === c.name &&
     draft.kind === c.kind &&
+    draft.purpose === c.purpose &&
     draft.model === c.model &&
     draft.apiKey === '' &&
     draft.baseUrl === (c.baseUrl ?? '') &&
@@ -158,6 +162,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
           {
             name: draft.name.trim(),
             kind: draft.kind,
+            purpose: draft.purpose,
             model: draft.model.trim(),
             apiKey: draft.apiKey.trim() || undefined,
             baseUrl: draft.baseUrl.trim() || undefined,
@@ -179,6 +184,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
           {
             name: draft.name.trim(),
             kind: draft.kind,
+            purpose: draft.purpose,
             model: draft.model.trim(),
             ...(draft.apiKey.trim() ? { apiKey: draft.apiKey.trim() } : {}),
             baseUrl: draft.baseUrl.trim() || null,
@@ -294,6 +300,17 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               <option value="fal-ai">fal.ai</option>
               <option value="comfyui">ComfyUI (self-hosted)</option>
               <option value="openai-images">OpenAI / DALL-E</option>
+            </select>
+          </label>
+
+          <label>
+            Purpose
+            <select
+              value={draft.purpose}
+              onChange={(e) => setDraft((d) => ({ ...d, purpose: e.target.value as Draft['purpose'] }))}
+            >
+              <option value="background">Background — location renders</option>
+              <option value="portrait">Portrait — Portrait Studio candidates</option>
             </select>
           </label>
 

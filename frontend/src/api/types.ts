@@ -223,6 +223,9 @@ export interface ImageConnectionSummary {
   workflowParameters: Record<string, unknown> | null;
   isActive: boolean;
   updatedAt: string;
+  /** migration 0105: 'background' (the Vistalyze location renders) or 'portrait' (the Portrait
+   *  Studio's candidate renders) — the active row is enforced per purpose, one each. */
+  purpose: 'background' | 'portrait';
 }
 
 // orchestrator/src/server/adminServer.ts parseCreateImageConnectionBody's expected shape
@@ -241,6 +244,8 @@ export interface CreateImageConnectionInput {
   masterPositiveStylePrefix?: string;
   masterNegativePrompt?: string;
   workflowParameters?: Record<string, unknown>;
+  /** Defaults to 'background' when omitted. */
+  purpose?: 'background' | 'portrait';
 }
 
 // orchestrator/src/server/adminServer.ts parseUpdateImageConnectionBody's expected shape
@@ -261,6 +266,8 @@ export interface UpdateImageConnectionInput {
   masterPositiveStylePrefix?: string | null;
   masterNegativePrompt?: string | null;
   workflowParameters?: Record<string, unknown> | null;
+  /** Omit to leave the connection's purpose unchanged. */
+  purpose?: 'background' | 'portrait';
 }
 
 // orchestrator/src/server/adminServer.ts ImageConnectionTestResult — endpoint.md §3.3's diagnostic
@@ -1258,4 +1265,132 @@ export interface TurnTimelineEventDetail {
     | 'display-settle';
   region?: 'header' | 'body' | 'footer';
   tsMs: number;
+}
+
+// ============================================================================
+// Portrait Studio (docs/plans/portrait-studio-plan.md) — the user-scoped visual_* tables'
+// wire shapes, mirroring orchestrator/src/server/portraitRoutes.ts exactly.
+// ============================================================================
+
+/** One layer of the active layer manifest — promptable layers carry chromosome slots; the
+ *  `subject` layer is mandatory (Manage Layers never offers to remove it). */
+export interface PortraitLayerDefinition {
+  id: string;
+  label: string;
+  promptable: boolean;
+  boundary: string;
+}
+
+/** The stored visual_layer_stack manifest: the layer list + the composed-prompt template
+ *  ({{slot}} / {{<layerId>_overflow}} tokens). */
+export interface PortraitLayerManifest {
+  layers: PortraitLayerDefinition[];
+  template: string;
+}
+
+/** One visual_entities row as the Studio sees it — full, nothing redacted. */
+export interface PortraitEntityRow {
+  entity_id: string;
+  layer_id: string;
+  character_id: string | null;
+  name: string;
+  slots: Record<string, string>;
+  standing_instructions: string;
+  template: string | null;
+  last_image_url: string | null;
+  current_best_candidate_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** POST /v1/portraits/entities body — characterId is required for the subject layer (one
+ *  subject per character, validated server-side). */
+export interface CreatePortraitEntityInput {
+  layerId: string;
+  characterId?: string | null;
+  name: string;
+  slots?: Record<string, string>;
+  standingInstructions?: string;
+  template?: string | null;
+}
+
+/** PATCH /v1/portraits/entities/:id body — every field optional; null clears
+ *  standingInstructions/template/characterId (not name/slots — an entity always has a name). */
+export interface UpdatePortraitEntityInput {
+  name?: string;
+  characterId?: string | null;
+  slots?: Record<string, string>;
+  standingInstructions?: string;
+  template?: string | null;
+}
+
+/** One wiki subscription — entity-specific when layerEntityId is set, whole-layer-type when
+ *  null (reaches every entity of that layer type). */
+export interface PortraitWikiSubscription {
+  layerType: string;
+  layerEntityId: string | null;
+}
+
+/** One visual_wiki_entries row shaped for the Studio's Wiki panel. */
+export interface PortraitWikiEntry {
+  entry_id: string;
+  title: string;
+  body: string;
+  tags: string[];
+  subscriptions: PortraitWikiSubscription[];
+  origin_episode_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** PATCH /v1/portraits/wiki/:id body — subscriptions replaces, not merges. */
+export interface UpdatePortraitWikiInput {
+  title?: string;
+  body?: string;
+  tags?: string[];
+  subscriptions?: PortraitWikiSubscription[];
+}
+
+/** One candidate from a generation round — the grid's card shape. imageUrl null = the render
+ *  failed (row still written; card omitted from the grid). */
+export interface PortraitCandidate {
+  candidateId: string;
+  chromosome: {
+    slots: Record<string, Record<string, string>>;
+    negative_prompt?: string;
+  };
+  composedPrompt: string;
+  imageUrl: string | null;
+  failed?: string;
+}
+
+/** POST /v1/portraits/generate body — entityIds is the round's { [layerId]: entityId } map. */
+export interface PortraitGenerateInput {
+  entityIds: Record<string, string>;
+  goal: string;
+  pendingFeedback?: string;
+}
+
+/** POST /v1/portraits/feedback body — ratings are 1-5 integers (server 400s otherwise). */
+export interface PortraitFeedbackInput {
+  entityIds: Record<string, string>;
+  goal: string;
+  candidateIds: string[];
+  winnerId: string;
+  ratings?: Record<string, number>;
+  notes?: Record<string, string>;
+  rationale?: string;
+}
+
+/** The Reflection Investigation outcome returned with the feedback response. */
+export interface PortraitReflectionOutcome {
+  action: 'created' | 'amended' | 'failed';
+  entryId?: string;
+  reason?: string;
+}
+
+/** POST /v1/portraits/feedback response. */
+export interface PortraitFeedbackResult {
+  episodeId: string;
+  reflection: PortraitReflectionOutcome;
 }

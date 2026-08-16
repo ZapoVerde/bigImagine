@@ -19,6 +19,7 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'rag', label: 'RAG', icon: '🧠' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
   { type: 'connections', label: 'Connections', icon: '🔌' },
+  { type: 'portraits', label: 'Portraits', icon: '🎨' },
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
   { type: 'locations', label: 'Locations', icon: '📍' },
   { type: 'lorebooks', label: 'Lorebooks', icon: '📖' },

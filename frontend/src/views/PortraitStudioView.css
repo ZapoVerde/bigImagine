@@ -1,0 +1,287 @@
+/* Portrait Studio (docs/plans/portrait-studio-plan.md §Frontend) — a specialist view same tier
+   as Settings/Connections. Mobile-first (Principle 18): pickers, the candidate grid, wiki and
+   entities stack to a single column at the shared 768px breakpoint; the Manage Layers row
+   reflows to a column on small screens. */
+
+.portrait-studio-view {
+  padding: 1.2rem 1.6rem;
+  overflow-y: auto;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+.portrait-studio-view.loading {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+}
+
+.portrait-studio-header h2 {
+  margin: 0;
+}
+
+.portrait-studio-sub {
+  margin: 0.2rem 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-pickers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+}
+
+.portrait-picker {
+  flex: 1 1 220px;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.portrait-picker-label {
+  font-weight: 600;
+  font-size: var(--font-size-md);
+}
+
+.portrait-picker-id {
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+.portrait-picker-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.portrait-picker-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+.portrait-create {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding-top: 0.3rem;
+  border-top: 1px solid var(--color-border-subtle);
+}
+
+.portrait-generate {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+
+.portrait-generate label {
+  flex: 1 1 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.portrait-submitting {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-banner {
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.8rem;
+  font-size: var(--font-size-md);
+}
+
+.portrait-empty {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-wiki,
+.portrait-entities,
+.portrait-layers {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.8rem 1rem;
+}
+
+.portrait-wiki h3,
+.portrait-entities h3,
+.portrait-layers h3 {
+  margin: 0 0 0.6rem;
+}
+
+.portrait-wiki-entry {
+  border-top: 1px solid var(--color-border-subtle);
+  padding: 0.6rem 0;
+}
+
+.portrait-wiki-entry:first-of-type {
+  border-top: none;
+}
+
+.portrait-wiki-entry-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.portrait-wiki-title {
+  font-weight: 600;
+}
+
+.portrait-wiki-tags {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm, 0.85rem);
+  flex: 1;
+  min-width: 0;
+}
+
+.portrait-wiki-body {
+  margin: 0.4rem 0;
+  white-space: pre-wrap;
+  font-size: var(--font-size-md);
+}
+
+.portrait-wiki-meta {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.portrait-wiki-actions {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.portrait-wiki-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.portrait-entity-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.portrait-entity-row {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.6rem;
+}
+
+.portrait-entity-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.portrait-entity-name {
+  font-weight: 600;
+}
+
+.portrait-entity-layer,
+.portrait-entity-char {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-entity-thumb {
+  width: 2.2rem;
+  height: 2.2rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 6px);
+}
+
+.portrait-si-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.portrait-saved-note {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+}
+
+.portrait-layers-unlock {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.portrait-layers-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.portrait-layers-editor label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
+.portrait-layer-row,
+.portrait-layer-add {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--color-border-subtle);
+  padding-top: 0.5rem;
+}
+
+.portrait-layer-id {
+  font-weight: 600;
+  min-width: 5rem;
+}
+
+.portrait-layer-promptable {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 0.3rem !important;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .portrait-studio-view {
+    padding: 1rem;
+  }
+
+  .portrait-pickers {
+    flex-direction: column;
+  }
+
+  .portrait-picker {
+    flex: none;
+  }
+
+  .portrait-layer-row,
+  .portrait-layer-add {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .portrait-layer-promptable {
+    flex-direction: row !important;
+  }
+}

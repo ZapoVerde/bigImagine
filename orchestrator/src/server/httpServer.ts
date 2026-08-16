@@ -252,6 +252,14 @@ import { handleTurnDisplayMetrics } from './handleTurnDisplayMetrics.js';
 import { handleLlmStatsGet, handleTurnDisplayStatsGet } from './handleAdminStats.js';
 import { buildModelsList } from './openai.js';
 import { handleLocationImageBroken } from './locationImages.js';
+import {
+  handlePortraitEntities,
+  handlePortraitFeedback,
+  handlePortraitGenerate,
+  handlePortraitLayersGet,
+  handlePortraitLayersSet,
+  handlePortraitWiki,
+} from './portraitRoutes.js';
 
 export interface HttpServerDeps {
   llm: LlmProvider;
@@ -611,6 +619,22 @@ const routes: Route[] = [
   // case is how every query-param endpoint in this table stays reachable.
   { method: 'GET', family: ['/v1/admin/llm-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLlmStatsGet(req, res, deps); }) },
   { method: 'GET', family: ['/v1/admin/turn-display-stats'], run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTurnDisplayStatsGet(req, res, deps); }) },
+
+  // ---- Portrait Studio (docs/plans/portrait-studio-plan.md) ----
+  // User-scoped surfaces (visual_* tables are user_scoped RLS, migration 0105): entity CRUD,
+  // wiki browse/edit, the generate/feedback actions. The layers write is the one admin-gated
+  // route — visual_layer_stack is an orchestrator_settings write, and every settings write on
+  // this server is admin-gated; the layers read stays user-gated so the tab renders for anyone.
+  { method: '*', family: '/v1/portraits/entities', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitEntities(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: '*', family: '/v1/portraits/wiki', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitWiki(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: 'GET', path: '/v1/portraits/layers', run: async (req, res, deps) => withUser(req, res, deps, async () => { await handlePortraitLayersGet(res, deps); }) },
+  { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
+  { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
+  { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
 ];
 
 async function handleRequest(

@@ -17,14 +17,19 @@
  * only a local ComfyUI endpoint legitimately has no key — every cloud provider (Runware, fal.ai,
  * Pollinations, OpenAI) requires one — so hasApiKey is reported rather than assumed.
  *
- * is_active is enforced to at most one row by 0068's partial unique index, exactly like 0062's
- * llm_connections_one_active; activate() uses the same sequential-statement-within-one-transaction
- * shape llmConnections.ts's activate() settles on (a single writable-CTE statement hits the
- * partial unique index because both sub-updates run against the same snapshot). There is no
- * restart on switch — resolveActive() reads the column live on every generation call
- * (bi_principles.md §13), so the new active connection takes effect on the very next render.
- * remove() refuses to delete the active connection — the admin must activate a different one
- * first, the same "explicit successor" shape as llmConnections.
+ * is_active is enforced to at most one row *per purpose* by 0105's partial unique index
+ * (image_connections_one_active_per_purpose, the 0068 index rebuilt scoped to (purpose) where
+ * is_active — a background and a portrait connection can be active simultaneously, one each,
+ * db/migrations/0105_visual_studio.sql); activate() uses the same sequential-statement-within-one-
+ * transaction shape llmConnections.ts's activate() settles on (a single writable-CTE statement
+ * hits the partial unique index because both sub-updates run against the same snapshot), scoped
+ * to the target row's purpose: it reads the row's purpose first, then deactivates only
+ * same-purpose rivals. There is no restart on switch — resolveActive() reads the column live on
+ * every generation call (bi_principles.md §13), so the new active connection takes effect on the
+ * very next render. resolveActive() defaults to the 'background' purpose, which keeps every
+ * pre-0105 call site (generateLocationImage.ts) resolving exactly the row it did before the
+ * column existed. remove() refuses to delete the active connection — the admin must activate a
+ * different one first, the same "explicit successor" shape as llmConnections.
  *
  * @api-declaration
  * ImageConnectionRow — the redacted shape returned to callers (no apiKey plaintext or ciphertext;
@@ -34,13 +39,16 @@
  * createImageConnectionStore(db, cipher) -> ImageConnectionStore
  *   .list() -> Promise<ImageConnectionRow[]>
  *   .create(init) -> Promise<ImageConnectionRow> — apiKey optional (only a local comfyui endpoint
- *     has none; every cloud provider, Pollinations included, requires one)
+ *     has none; every cloud provider, Pollinations included, requires one); purpose optional
+ *     (default 'background')
  *   .update(id, patch) -> Promise<ImageConnectionRow | undefined> — undefined if id doesn't exist
  *   .remove(id) -> Promise<'ok' | 'not_found' | 'is_active'>
- *   .activate(id) -> Promise<boolean> — false if id doesn't exist
+ *   .activate(id) -> Promise<boolean> — false if id doesn't exist; deactivates same-purpose rows
+ *     only, so a background and a portrait connection can stay active at once
  *   .resolveById(id) -> Promise<ImageConnectionProfile | undefined> — decrypts apiKey; server-side
  *     only, backs the Connections tab's Test button (adminServer.ts)
- *   .resolveActive() -> Promise<ImageConnectionProfile | undefined>
+ *   .resolveActive(purpose?) -> Promise<ImageConnectionProfile | undefined> — purpose defaults to
+ *     'background'
  *
  * @contract
  *   assertions:
@@ -53,6 +61,8 @@ import type { FieldCipher } from './fieldCipher.js';
 import type { PostgresClient } from './postgres.js';
 
 /** The redacted row shape — never exposes the API key in any form, only whether one is set. */
+export type ImageConnectionPurpose = 'background' | 'portrait';
+
 export interface ImageConnectionRow {
   id: string;
   name: string;
@@ -70,6 +80,7 @@ export interface ImageConnectionRow {
   workflowParameters: Record<string, unknown> | null;
   isActive: boolean;
   updatedAt: string;
+  purpose: ImageConnectionPurpose;
 }
 
 /** The decrypted shape handed to io/imageGen/index.ts — plaintext key exists only here. */
@@ -86,6 +97,7 @@ export interface ImageConnectionProfile {
   masterPositiveStylePrefix: string | null;
   masterNegativePrompt: string | null;
   workflowParameters: Record<string, unknown> | null;
+  purpose: ImageConnectionPurpose;
 }
 
 /** The closed vocabulary of implemented provider adapters (endpoint.md §3.2) — a row's kind names
@@ -108,6 +120,9 @@ export interface ImageConnectionInit {
   masterPositiveStylePrefix?: string;
   masterNegativePrompt?: string;
   workflowParameters?: Record<string, unknown>;
+  /** Optional — defaults to 'background'; 'portrait' marks the connection for the Portrait
+   *  Studio's candidate renders (migration 0105's purpose split). */
+  purpose?: ImageConnectionPurpose;
 }
 
 export interface ImageConnectionPatch {
@@ -125,6 +140,7 @@ export interface ImageConnectionPatch {
   masterPositiveStylePrefix?: string | null;
   masterNegativePrompt?: string | null;
   workflowParameters?: Record<string, unknown> | null;
+  purpose?: ImageConnectionPurpose;
 }
 
 export interface ImageConnectionStore {
@@ -134,7 +150,7 @@ export interface ImageConnectionStore {
   remove(id: string): Promise<'ok' | 'not_found' | 'is_active'>;
   activate(id: string): Promise<boolean>;
   resolveById(id: string): Promise<ImageConnectionProfile | undefined>;
-  resolveActive(): Promise<ImageConnectionProfile | undefined>;
+  resolveActive(purpose?: ImageConnectionPurpose): Promise<ImageConnectionProfile | undefined>;
 }
 
 interface ImageConnectionDbRow {
@@ -154,11 +170,12 @@ interface ImageConnectionDbRow {
   workflow_parameters: Record<string, unknown> | null;
   is_active: boolean;
   updated_at: string;
+  purpose: ImageConnectionPurpose;
 }
 
 const ROW_COLUMNS = `id, name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps,
   cfg_scale, sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters,
-  is_active, updated_at`;
+  is_active, updated_at, purpose`;
 
 function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
   return {
@@ -182,6 +199,7 @@ function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
     workflowParameters: row.workflow_parameters,
     isActive: row.is_active,
     updatedAt: row.updated_at,
+    purpose: row.purpose,
   };
 }
 
@@ -199,6 +217,7 @@ function toProfile(row: ImageConnectionDbRow, cipher: FieldCipher): ImageConnect
     masterPositiveStylePrefix: row.master_positive_style_prefix,
     masterNegativePrompt: row.master_negative_prompt,
     workflowParameters: row.workflow_parameters,
+    purpose: row.purpose,
   };
 }
 
@@ -216,8 +235,8 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
         session.query<ImageConnectionDbRow>(
           `insert into image_connections
              (name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps, cfg_scale,
-              sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters, purpose)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            returning ${ROW_COLUMNS}`,
           [
             init.name,
@@ -233,6 +252,7 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
             init.masterPositiveStylePrefix ?? null,
             init.masterNegativePrompt ?? null,
             init.workflowParameters ? JSON.stringify(init.workflowParameters) : null,
+            init.purpose ?? 'background',
           ],
         ),
       );
@@ -261,6 +281,7 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
       if (patch.workflowParameters !== undefined) {
         set('workflow_parameters', patch.workflowParameters ? JSON.stringify(patch.workflowParameters) : null);
       }
+      if (patch.purpose !== undefined) set('purpose', patch.purpose);
       if (sets.length === 0) {
         const rows = await db.withSystemScope((session) =>
           session.query<ImageConnectionDbRow>(`select ${ROW_COLUMNS} from image_connections where id = $1`, [id]),
@@ -291,15 +312,24 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
     async activate(id) {
       // Sequential statements inside one withSystemScope transaction — the same shape
       // llmConnections.ts's activate() uses: a single writable-CTE statement would hit
-      // image_connections_one_active (0068's partial unique index) because both sub-updates run
-      // against the same query-start snapshot, while sequential statements see each other's
-      // effect and never expose a window with zero or two active rows. The existence probe comes
-      // first so a nonexistent id (404 at the route) leaves the current active row untouched —
-      // never a cleared active flag on a failed activation.
+      // image_connections_one_active_per_purpose (0105's partial unique index) because both
+      // sub-updates run against the same query-start snapshot, while sequential statements see
+      // each other's effect and never expose a window with zero or two active rows. The
+      // existence probe comes first so a nonexistent id (404 at the route) leaves the current
+      // active rows untouched — never a cleared active flag on a failed activation. The probe
+      // also reads the target's purpose, and the deactivation is scoped to that purpose: a
+      // portrait connection's activation must not demote the active background row (or vice
+      // versa) — each purpose keeps its own single active row.
       return db.withSystemScope(async (session) => {
-        const existing = await session.query<{ id: string }>('select id from image_connections where id = $1', [id]);
+        const existing = await session.query<{ id: string; purpose: ImageConnectionPurpose }>(
+          'select id, purpose from image_connections where id = $1',
+          [id],
+        );
         if (!existing[0]) return false;
-        await session.query('update image_connections set is_active = false where is_active and id != $1', [id]);
+        await session.query('update image_connections set is_active = false where is_active and id != $1 and purpose = $2', [
+          id,
+          existing[0].purpose,
+        ]);
         const rows = await session.query<{ id: string }>(
           'update image_connections set is_active = true, updated_at = now() where id = $1 returning id',
           [id],
@@ -321,9 +351,12 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
       return rows[0] ? toProfile(rows[0], cipher) : undefined;
     },
 
-    async resolveActive() {
+    async resolveActive(purpose = 'background') {
       const rows = await db.withSystemScope((session) =>
-        session.query<ImageConnectionDbRow>(`select ${ROW_COLUMNS} from image_connections where is_active`),
+        session.query<ImageConnectionDbRow>(
+          `select ${ROW_COLUMNS} from image_connections where is_active and purpose = $1`,
+          [purpose],
+        ),
       );
       return rows[0] ? toProfile(rows[0], cipher) : undefined;
     },
