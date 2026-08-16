@@ -625,16 +625,27 @@ export async function handlePortraitLayersSet(req: IncomingMessage, res: ServerR
   }
   // In-use guard: the current manifest's layers that the new manifest drops must have no
   // entities attached anywhere (the plan's no-cascading-delete rule). Cross-user — the manifest
-  // is global, so any user's entities block a removal.
+  // is global, so any user's entities block a removal. visual_entities is FORCE ROW LEVEL
+  // SECURITY (migration 0105), so withSystemScope alone can never see a row in it — it sets no
+  // app.current_user_id, and the user_id = app_current_user_id() policy then excludes every row.
+  // Same shape adminServer.ts's getChatMemorySyncStatus already established for this exact
+  // problem: roster every user_id via withSystemScope (the users table itself isn't RLS-forced),
+  // then check each one under its own withUserScope. Early-exits on the first hit — this is a
+  // yes/no gate, not a report, so there's no reason to keep querying once one user blocks it.
   const { manifest: current } = await resolveManifest(deps);
   const dropped = current.layers.filter((l) => !parsed.layers.some((n) => n.id === l.id));
-  for (const layer of dropped) {
-    const inUse = await deps.db.withSystemScope((session) =>
-      session.query<{ entity_id: string }>('select entity_id from visual_entities where layer_id = $1 limit 1', [layer.id]),
-    );
-    if (inUse[0]) {
-      sendJson(res, 409, { error: `cannot remove layer "${layer.id}" — entities are still attached to it` });
-      return;
+  if (dropped.length > 0) {
+    const users = await deps.db.withSystemScope((session) => session.query<{ user_id: string }>('select user_id from users'));
+    for (const layer of dropped) {
+      for (const { user_id: uid } of users) {
+        const inUse = await deps.db.withUserScope(uid, (session) =>
+          session.query<{ entity_id: string }>('select entity_id from visual_entities where layer_id = $1 limit 1', [layer.id]),
+        );
+        if (inUse[0]) {
+          sendJson(res, 409, { error: `cannot remove layer "${layer.id}" — entities are still attached to it` });
+          return;
+        }
+      }
     }
   }
   await deps.settings.set('visual_layer_stack', JSON.stringify(parsed, null, 2));
