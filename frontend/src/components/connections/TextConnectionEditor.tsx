@@ -8,6 +8,7 @@ import {
   adminListConnectionModels,
   adminListConnectionProviders,
   adminStartReliabilitySweep,
+  adminStopReliabilitySweep,
   adminTestConnection,
   adminUpdateConnection,
 } from '../../api/client';
@@ -126,7 +127,7 @@ function providerOrderFromDraft(draft: Draft): string[] | undefined {
 function openRouterPricingFor(
   draft: Draft,
   modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
-  providerOptions: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[],
+  providerOptions: { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[],
 ): { inputPerMillion: string; outputPerMillion: string } | null {
   const pinned = providerOptions.find((p) => p.tag === draft.providerPrimary)?.pricing;
   const pricing = pinned ?? modelOptions.find((m) => m.id === draft.model)?.pricing;
@@ -186,16 +187,19 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
   const [modelOptions, setModelOptions] = useState<{ id: string; pricing?: { prompt: string; completion: string } }[]>([]);
   const [modelsError, setModelsError] = useState('');
-  const [providerOptions, setProviderOptions] = useState<{ name: string; tag: string; pricing?: { prompt: string; completion: string } }[]>(
-    [],
-  );
+  const [providerOptions, setProviderOptions] = useState<
+    { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[]
+  >([]);
   const [providersError, setProvidersError] = useState('');
   // Provider-reliability sweep (io/providerReliability.ts) — the live per-provider tally for this
   // saved connection. null = no state loaded yet; the snapshot's own status distinguishes 'idle'
-  // (never run) from running/done.
+  // (never run) from running/done/cancelled.
   const [reliability, setReliability] = useState<ReliabilitySweepSnapshot | null>(null);
   const [reliabilityError, setReliabilityError] = useState('');
   const [reliabilityAttempts, setReliabilityAttempts] = useState(3);
+  // The sweep's quantization filter — '' means unfiltered. The dropdown options are the distinct
+  // quantizations the model's endpoints report (union of providerOptions[].quantizations).
+  const [reliabilityQuantization, setReliabilityQuantization] = useState('');
   const pollRef = useRef<number | null>(null);
 
   function stopSweepPolling() {
@@ -319,6 +323,11 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
 
   const dirty = isNew || (selected != null && !draftEqualsConnection(draft, selected));
   const sweepRunning = reliability?.status === 'running';
+  // The sweep's Quantization dropdown options — the distinct quantization formats the model's
+  // endpoints report, in the panel's own order (first-seen across providers, deduped).
+  const reliabilityQuantizationOptions = [
+    ...new Set(providerOptions.flatMap((p) => p.quantizations ?? [])),
+  ];
 
   async function save() {
     if (!draft.name.trim() || !draft.model.trim()) {
@@ -425,7 +434,14 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     const sweptId = selected.id;
     setReliabilityError('');
     try {
-      await adminStartReliabilitySweep(sweptId, { attemptsPerProvider: reliabilityAttempts }, adminKey);
+      await adminStartReliabilitySweep(
+        sweptId,
+        {
+          attemptsPerProvider: reliabilityAttempts,
+          quantizations: reliabilityQuantization ? [reliabilityQuantization] : undefined,
+        },
+        adminKey,
+      );
     } catch (err) {
       if (sweptId !== selectedIdRef.current) return;
       if (!(err instanceof ApiError && err.status === 409)) {
@@ -440,6 +456,27 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
         if (sweptId === selectedIdRef.current) setReliability(snapshot);
       })
       .catch(() => {});
+  }
+
+  // Stop a running sweep: the server marks it 'cancelled' and aborts every in-flight probe. A 404
+  // (no sweep exists — the poll already saw it finish) is a normal race, not an error: the poll
+  // below converges on the final state either way.
+  async function stopReliabilitySweep() {
+    if (!selected) return;
+    const sweptId = selected.id;
+    setReliabilityError('');
+    try {
+      const state = await adminStopReliabilitySweep(sweptId, adminKey);
+      if (sweptId === selectedIdRef.current) setReliability(state);
+    } catch (err) {
+      if (sweptId !== selectedIdRef.current) return;
+      if (!(err instanceof ApiError && err.status === 404)) {
+        setReliabilityError(err instanceof ApiError ? err.message : 'failed to stop the reliability sweep');
+        return;
+      }
+    }
+    if (sweptId !== selectedIdRef.current) return;
+    startSweepPolling(sweptId); // converges on the 'cancelled' snapshot
   }
 
   async function activate() {
@@ -650,8 +687,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             <fieldset className="connections-provider-pin">
               <legend>Provider routing (OpenRouter only)</legend>
               <div className="status">
-                Pin this model to a primary provider, plus an optional fallback, instead of accepting OpenRouter's
-                default routing across its whole provider set.
+                Pin this model to a primary provider instead of accepting OpenRouter's default routing. OpenRouter
+                always serves exactly the pinned provider — if the primary fails, the app itself retries the fallback
+                once, so the reported price matches the provider that actually served.
               </div>
               <div className="connections-provider-row">
                 <label>
@@ -698,7 +736,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   checked={draft.allowFallbacks}
                   onChange={(e) => setDraft((d) => ({ ...d, allowFallbacks: e.target.checked }))}
                 />
-                {' '}Allow OpenRouter to fall back to other providers if the pinned one is unavailable
+                {' '}If the primary provider fails, retry with the fallback provider
               </label>
               <label>
                 Quantization filter (comma-separated, optional)
@@ -734,6 +772,21 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   ))}
                 </select>
               </label>
+              <label>
+                Quantization filter
+                <select
+                  value={reliabilityQuantization}
+                  onChange={(e) => setReliabilityQuantization(e.target.value)}
+                  disabled={sweepRunning}
+                >
+                  <option value="">(all)</option>
+                  {reliabilityQuantizationOptions.map((q) => (
+                    <option key={q} value={q}>
+                      {q}
+                    </option>
+                  ))}
+                </select>
+              </label>
               {reliabilityError && <div className="error-banner">{reliabilityError}</div>}
               {!reliability || reliability.status === 'idle' ? (
                 <div className="status">No sweep has run for this connection yet.</div>
@@ -764,22 +817,30 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   <div className="status">
                     {reliability.status === 'running'
                       ? `Sweep running since ${new Date(reliability.startedAt).toLocaleTimeString()} — this page updates as attempts land.`
-                      : `Finished at ${reliability.finishedAt ? new Date(reliability.finishedAt).toLocaleTimeString() : '…'} — ${
+                      : `${
+                          reliability.status === 'cancelled' ? 'Stopped' : 'Finished'
+                        } at ${reliability.finishedAt ? new Date(reliability.finishedAt).toLocaleTimeString() : '…'} — ${
                           reliability.providers.filter((p) => p.total > 0 && p.ok === p.total).length
                         } of ${reliability.providers.length} providers fully reliable.`}
                   </div>
                 </>
               )}
               <div className="connections-actions">
-                <button
-                  type="button"
-                  className="connections-test-btn"
-                  onClick={runReliabilitySweep}
-                  disabled={isNew || dirty || sweepRunning}
-                  title={dirty ? 'Save your changes first — the sweep probes the saved connection' : undefined}
-                >
-                  {sweepRunning ? 'Sweeping…' : 'Run reliability sweep'}
-                </button>
+                {sweepRunning ? (
+                  <button type="button" className="connections-stop-btn" onClick={stopReliabilitySweep}>
+                    Stop sweep
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="connections-test-btn"
+                    onClick={runReliabilitySweep}
+                    disabled={isNew || dirty}
+                    title={dirty ? 'Save your changes first — the sweep probes the saved connection' : undefined}
+                  >
+                    Run reliability sweep
+                  </button>
+                )}
               </div>
             </fieldset>
           )}

@@ -6,8 +6,9 @@
  * The server-side form of scripts/probe-provider-reliability.mjs: instead of a hardcoded provider
  * list run from the CLI, this runs a sweep against the live provider catalog for one saved
  * connection's model (openaiCompatible.ts's listProviders), firing one isolated probe per provider
- * ({ provider: { order: [name], allow_fallbacks: false } } — the exact request shape pinning sends)
- * and recording how many attempts actually produced content. A reasoning-capable model routed
+ * ({ provider: { order: [name], allow_fallbacks: false } } — the exact request shape pinning sends,
+ * plus provider.quantizations when the sweep is run under a quantization filter) and recording how
+ * many attempts actually produced content. A reasoning-capable model routed
  * through OpenRouter can silently return finish_reason "stop" with zero content and zero reasoning
  * tokens, and how often that happens turned out to depend entirely on which upstream provider
  * OpenRouter picked (2026-08-16 investigation); this is the "which providers are good today"
@@ -34,6 +35,10 @@
  *   catalog to sweep (no_provider_catalog — every non-OpenRouter kind), or a sweep is already
  *   running (already_running)
  * getProviderReliabilitySweep(connectionId) — the live state, undefined when no sweep has ever run
+ * stopProviderReliabilitySweep(connectionId) — stops an in-flight sweep: marks the state
+ *   'cancelled' and aborts every live probe (each in-flight attempt then records a 'cancelled'
+ *   note, never an ok), so a sweep hammering a 429-prone provider can be stopped from the UI;
+ *   idempotent — a finished sweep is returned unchanged — and undefined when no sweep exists
  * ProviderReliabilityRow / ProviderReliabilityAttempt / ReliabilitySweepState — the wire shapes the
  *   Connections tab renders (ok/total per provider, per-attempt notes, live status)
  *
@@ -65,11 +70,15 @@ export interface ProviderReliabilityRow {
 export interface ReliabilitySweepState {
   connectionId: string;
   model: string;
-  status: 'running' | 'done';
+  status: 'running' | 'done' | 'cancelled';
   startedAt: number;
   finishedAt?: number;
   attemptsPerProvider: number;
   delayMs: number;
+  /** The quantization filter this sweep was run under (e.g. ["int8"]), forwarded as
+   *  provider.quantizations on every probe — so results reflect the int8-serving path, not
+   *  whatever quantizations OpenRouter's default routing would have used. Undefined = unfiltered. */
+  quantizations?: string[];
   providers: ProviderReliabilityRow[];
 }
 
@@ -77,6 +86,9 @@ export interface ReliabilitySweepParams {
   attemptsPerProvider?: number;
   delayMs?: number;
   requestTimeoutMs?: number;
+  /** Filter every probe to the given quantization formats (e.g. ["int8"]) — an empty or absent
+   *  array leaves the sweep unfiltered. */
+  quantizations?: string[];
 }
 
 export type StartReliabilitySweepResult =
@@ -84,6 +96,12 @@ export type StartReliabilitySweepResult =
   | { ok: false; reason: 'not_found' | 'no_provider_catalog' | 'already_running' };
 
 const sweeps = new Map<string, ReliabilitySweepState>();
+
+// Live AbortControllers for every in-flight probe, keyed by connection id — what
+// stopProviderReliabilitySweep aborts to cut a sweep short. Entries exist only while a sweep is
+// running (created at start, cleared on 'done' and on stop), and each probe deletes its own
+// controller from the set in its finally, so the set can never grow stale.
+const activeControllers = new Map<string, Set<AbortController>>();
 
 // The same fixed, innocuous, synthetic prompt scripts/probe-provider-reliability.mjs sends — never
 // real chat/character content, so the sweep is safe to fire at any time without touching private
@@ -103,8 +121,14 @@ function sleep(ms: number): Promise<void> {
 // fetch, no retry (fetchWithRetry): the point is to score this one attempt honestly, and retrying
 // would just double-bill while hiding a provider's real failure rate. Never throws — every failure
 // mode lands in the row's attempts list as a { ok: false, note } entry.
-async function probeOnce(profile: LlmProfile, row: ProviderReliabilityRow, requestTimeoutMs: number): Promise<void> {
+async function probeOnce(
+  profile: LlmProfile,
+  state: ReliabilitySweepState,
+  row: ProviderReliabilityRow,
+  requestTimeoutMs: number,
+): Promise<void> {
   const controller = new AbortController();
+  activeControllers.get(state.connectionId)?.add(controller);
   const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
   let attempt: ProviderReliabilityAttempt;
   try {
@@ -115,7 +139,13 @@ async function probeOnce(profile: LlmProfile, row: ProviderReliabilityRow, reque
         model: profile.model,
         max_tokens: 16384,
         messages: [{ role: 'system', content: INNOCUOUS_PROMPT }],
-        provider: { order: [row.name], allow_fallbacks: false },
+        provider: {
+          order: [row.name],
+          allow_fallbacks: false,
+          ...(state.quantizations && state.quantizations.length > 0
+            ? { quantizations: state.quantizations }
+            : {}),
+        },
         reasoning: { exclude: true },
         stream: true,
         stream_options: { include_usage: true },
@@ -140,12 +170,18 @@ async function probeOnce(profile: LlmProfile, row: ProviderReliabilityRow, reque
       attempt = { ok: contentLen > 0, note: contentLen > 0 ? `${contentLen} chars` : 'empty' };
     }
   } catch (err) {
+    // A controller aborts for two distinct reasons — the per-attempt timeout, or the admin
+    // stopping the sweep. stopProviderReliabilitySweep flips status to 'cancelled' before it
+    // aborts, so the note tells them apart here: a stop scores 'cancelled', a timeout its ms.
     attempt =
       err instanceof Error && err.name === 'AbortError'
-        ? { ok: false, note: `timed out after ${requestTimeoutMs}ms` }
+        ? state.status === 'cancelled'
+          ? { ok: false, note: 'cancelled' }
+          : { ok: false, note: `timed out after ${requestTimeoutMs}ms` }
         : { ok: false, note: `fetch failed: ${err instanceof Error ? err.message : String(err)}` };
   } finally {
     clearTimeout(timer);
+    activeControllers.get(state.connectionId)?.delete(controller);
   }
   row.attempts.push(attempt);
   row.total += 1;
@@ -177,7 +213,7 @@ async function runSweep(profile: LlmProfile, state: ReliabilitySweepState, reque
       if (row.total >= attemptsPerProvider || inFlight.has(row.tag)) continue;
       cursor = (cursor + offset + 1) % rows.length;
       inFlight.add(row.tag);
-      void probeOnce(profile, row, requestTimeoutMs).finally(() => inFlight.delete(row.tag));
+      void probeOnce(profile, state, row, requestTimeoutMs).finally(() => inFlight.delete(row.tag));
       fired = true;
       break;
     }
@@ -185,6 +221,7 @@ async function runSweep(profile: LlmProfile, state: ReliabilitySweepState, reque
       if (rows.every((r) => r.total >= attemptsPerProvider)) {
         state.status = 'done';
         state.finishedAt = Date.now();
+        activeControllers.delete(state.connectionId); // all probes resolved — nothing left to abort
         return;
       }
       // everything left is in flight — yield a tick so those probes can resolve
@@ -227,13 +264,37 @@ export async function startProviderReliabilitySweep(
     startedAt: Date.now(),
     attemptsPerProvider: params.attemptsPerProvider ?? 3,
     delayMs: params.delayMs ?? 2000,
+    quantizations:
+      params.quantizations && params.quantizations.length > 0 ? params.quantizations : undefined,
     providers: catalog.map((p) => ({ name: p.name, tag: p.tag, ok: 0, total: 0, attempts: [] })),
   };
   sweeps.set(connectionId, state);
+  activeControllers.set(connectionId, new Set());
   void runSweep(profile, state, params.requestTimeoutMs ?? 30000);
   return { ok: true, state };
 }
 
 export function getProviderReliabilitySweep(connectionId: string): ReliabilitySweepState | undefined {
   return sweeps.get(connectionId);
+}
+
+/** Stop a running sweep: flip the state to 'cancelled' and abort every in-flight probe (each
+ *  aborted attempt then records a 'cancelled' note rather than an ok or a timeout). The sweep
+ *  driver's `while (state.status === 'running')` exits on the next wake, and nothing more starts.
+ *  Idempotent — a sweep already 'done' or 'cancelled' is returned unchanged. Undefined when no
+ *  sweep has ever run for the connection (the caller 404s). */
+export function stopProviderReliabilitySweep(connectionId: string): ReliabilitySweepState | undefined {
+  const state = sweeps.get(connectionId);
+  if (!state) return undefined;
+  if (state.status === 'running') {
+    state.status = 'cancelled';
+    state.finishedAt = Date.now();
+    const controllers = activeControllers.get(connectionId);
+    if (controllers) {
+      for (const controller of controllers) controller.abort();
+      activeControllers.delete(connectionId);
+    }
+    log.info(`provider reliability: sweep for connection "${connectionId}" stopped by admin`);
+  }
+  return state;
 }

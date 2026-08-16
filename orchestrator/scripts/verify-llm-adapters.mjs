@@ -54,8 +54,18 @@ async function withMockedFetch(responses, fn) {
     if (!response) throw new Error('mock fetch called more times than scripted responses provided');
     // A real Response (streaming path) is passed through untouched so completeStream reads
     // response.body as a live ReadableStream; a plain object (non-streaming path) is wrapped the
-    // way the existing fixtures expect.
+    // way the existing fixtures expect. An { ok: false } object scripts an HTTP-level failure the
+    // way a real upstream would surface it (fetchWithRetry only retries thrown, not non-ok, so
+    // the adapter's own error handling owns the case).
     if (response instanceof Response) return response;
+    if (response && response.ok === false) {
+      return {
+        ok: false,
+        status: response.status ?? 500,
+        json: async () => ({}),
+        text: async () => response.errorBody ?? `mock error ${response.status}`,
+      };
+    }
     return { ok: true, json: async () => response, text: async () => JSON.stringify(response) };
   };
   try {
@@ -558,6 +568,124 @@ await withMockedFetch([sseResponse([{ id: 'x', choices: [{ delta: {} }] }])], as
   }
   assert(threw, 'OpenAI-compatible completeStream: a non-empty tools array throws, never silently misbehaves');
 });
+
+// --- App-level fallback routing (always single provider, deliberate secondary on failure) ---
+// The pin sends OpenRouter exactly ONE provider with allow_fallbacks: false — OR can never route
+// across its own provider set, so the provider that served is always one the admin priced. When
+// the primary fails (an error, or a blank reply) and a fallback is configured AND enabled, the
+// adapter deliberately re-pins the secondary once. This is what keeps pricing honest.
+const fallbackConfig = {
+  apiKey: 'test-key',
+  model: 'test-model',
+  baseUrl: 'https://example.invalid/v1',
+  provider: { order: ['Primary Co', 'Backup Co'], allowFallbacks: true },
+};
+
+// Primary errors (HTTP 503) -> fallback serves.
+await withMockedFetch(
+  [
+    { ok: false, status: 503, errorBody: 'upstream down' },
+    { choices: [{ message: { content: 'from backup' } }] },
+  ],
+  async (requests) => {
+    const llm = createOpenAiCompatibleLlmProvider(fallbackConfig);
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(turn.message.content === 'from backup', 'openai-compatible: a failed primary falls back to the secondary');
+    assert(requests.length === 2, 'openai-compatible: exactly two requests when the primary fails');
+    assert(
+      JSON.stringify(requests[0].body.provider) === JSON.stringify({ order: ['Primary Co'], allow_fallbacks: false }) &&
+        JSON.stringify(requests[1].body.provider) === JSON.stringify({ order: ['Backup Co'], allow_fallbacks: false }),
+      'openai-compatible: each request pins exactly one provider with allow_fallbacks: false',
+    );
+  },
+);
+
+// Primary blank reply -> fallback serves.
+await withMockedFetch(
+  [
+    { choices: [{ message: { content: '' } }] },
+    { choices: [{ message: { content: 'from backup' } }] },
+  ],
+  async (requests) => {
+    const llm = createOpenAiCompatibleLlmProvider(fallbackConfig);
+    const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+    assert(turn.message.content === 'from backup', 'openai-compatible: a blank primary reply falls back to the secondary');
+    assert(requests.length === 2, 'openai-compatible: exactly two requests when the primary is blank');
+  },
+);
+
+// Healthy primary -> no fallback, single request pinned to the primary only.
+await withMockedFetch([{ choices: [{ message: { content: 'from primary' } }] }], async (requests) => {
+  const llm = createOpenAiCompatibleLlmProvider(fallbackConfig);
+  const turn = await llm.complete([{ role: 'user', content: 'hi' }], []);
+  assert(turn.message.content === 'from primary', 'openai-compatible: a healthy primary serves with no fallback');
+  assert(requests.length === 1, 'openai-compatible: exactly one request when the primary serves');
+});
+
+// allowFallbacks off -> no secondary retry even on error; the error surfaces.
+await withMockedFetch([{ ok: false, status: 503, errorBody: 'upstream down' }], async () => {
+  const llm = createOpenAiCompatibleLlmProvider({
+    apiKey: 'test-key',
+    model: 'test-model',
+    baseUrl: 'https://example.invalid/v1',
+    provider: { order: ['Primary Co', 'Backup Co'], allowFallbacks: false },
+  });
+  let threw = false;
+  try {
+    await llm.complete([{ role: 'user', content: 'hi' }], []);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'openai-compatible: allowFallbacks off means no secondary retry — the error surfaces');
+});
+
+// Streaming: a blank primary stream -> fallback; deltas come only from the secondary.
+await withMockedFetch(
+  [
+    sseResponse([
+      { id: 'x', choices: [{ delta: {} }] },
+      { id: 'x', choices: [{ finish_reason: 'stop' }] },
+    ]),
+    sseResponse([
+      { id: 'x', choices: [{ delta: { content: 'streamed from backup' } }] },
+      { id: 'x', choices: [] },
+    ]),
+  ],
+  async (requests) => {
+    const llm = createOpenAiCompatibleLlmProvider(fallbackConfig);
+    const deltas = [];
+    const turn = await llm.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d));
+    assert(
+      deltas.join('') === 'streamed from backup' && turn.message.content === 'streamed from backup',
+      'openai-compatible completeStream: a blank primary stream falls back; deltas come only from the secondary',
+    );
+    assert(requests.length === 2, 'openai-compatible completeStream: two requests when the primary stream is blank');
+    assert(
+      JSON.stringify(requests[0].body.provider) === JSON.stringify({ order: ['Primary Co'], allow_fallbacks: false }) &&
+        JSON.stringify(requests[1].body.provider) === JSON.stringify({ order: ['Backup Co'], allow_fallbacks: false }),
+      'openai-compatible completeStream: both requests pin a single provider with allow_fallbacks: false',
+    );
+  },
+);
+
+// Streaming: once content is relayed, a retry could never reconcile — no fallback fires.
+await withMockedFetch(
+  [
+    sseResponse([
+      { id: 'x', choices: [{ delta: { content: 'partial' } }] },
+      { id: 'x', choices: [{ delta: { content: 'more' } }] },
+    ]),
+  ],
+  async (requests) => {
+    const llm = createOpenAiCompatibleLlmProvider(fallbackConfig);
+    const deltas = [];
+    const turn = await llm.completeStream([{ role: 'user', content: 'hi' }], [], (d) => deltas.push(d));
+    assert(
+      deltas.join('') === 'partialmore' && turn.message.content === 'partialmore' && requests.length === 1,
+      'openai-compatible completeStream: a producing primary never triggers the fallback',
+    );
+  },
+);
 
 if (process.exitCode) {
   console.error('\nLLM adapter verification FAILED');

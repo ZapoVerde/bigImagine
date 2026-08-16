@@ -6,12 +6,15 @@
 //   * the probe request shape ({ provider: { order: [name], allow_fallbacks: false }, stream,
 //     reasoning: { exclude: true } }) — exactly what pinning sends
 //   * a hung provider is scored a per-request timeout and can't wedge the rest of the sweep
+//   * stopProviderReliabilitySweep aborts in-flight probes ('cancelled' notes) and never starts more
+//   * a quantizations filter is forwarded as provider.quantizations on every probe
 //   * not_found / no_provider_catalog / already_running error reasons
 
 import { createLlmProviderForProfile } from '../dist/io/llm/index.js';
 import {
   getProviderReliabilitySweep,
   startProviderReliabilitySweep,
+  stopProviderReliabilitySweep,
 } from '../dist/io/providerReliability.js';
 import { parseReliabilitySweepBody } from '../dist/server/adminServer.js';
 
@@ -44,6 +47,16 @@ function sleep(ms) {
   assert(parseReliabilitySweepBody({ attemptsPerProvider: 1.5 }) === undefined, 'parseReliabilitySweepBody rejects a non-integer attemptsPerProvider');
   assert(parseReliabilitySweepBody({ delayMs: 100 }) === undefined, 'parseReliabilitySweepBody rejects delayMs below 500');
   assert(parseReliabilitySweepBody({ delayMs: 12000 }) === undefined, 'parseReliabilitySweepBody rejects delayMs above 10000');
+  assert(
+    parseReliabilitySweepBody({ quantizations: ['int8', 'bf16'] })?.quantizations?.join(',') === 'int8,bf16',
+    'parseReliabilitySweepBody accepts an array of quantization strings',
+  );
+  assert(
+    parseReliabilitySweepBody({ quantizations: [] })?.quantizations === undefined,
+    'parseReliabilitySweepBody treats an empty quantization array as unfiltered',
+  );
+  assert(parseReliabilitySweepBody({ quantizations: ['int8', 5] }) === undefined, 'parseReliabilitySweepBody rejects non-string quantizations');
+  assert(parseReliabilitySweepBody({ quantizations: ['  '] }) === undefined, 'parseReliabilitySweepBody rejects blank quantization entries');
   assert(parseReliabilitySweepBody('not an object') === undefined, 'parseReliabilitySweepBody rejects a non-object body');
   assert(parseReliabilitySweepBody(null) === undefined, 'parseReliabilitySweepBody rejects null');
 }
@@ -130,6 +143,15 @@ async function waitForDone(id, timeoutMs = 2000) {
   return undefined;
 }
 
+async function waitFor(cond, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await sleep(10);
+  }
+  return cond();
+}
+
 // --- not_found ---
 {
   const result = await startProviderReliabilitySweep(fakeStore, 'missing');
@@ -209,6 +231,71 @@ async function waitForDone(id, timeoutMs = 2000) {
   assert(dRow && dRow.total === 2 && dRow.ok === 0, 'the hung provider scores ok 0/2');
   assert(dRow && dRow.attempts.every((a) => a.note.includes('timed out')), 'the hung provider scores a per-request timeout note, not a hang');
   assert(done.providers.filter((p) => p.name !== 'D').every((p) => p.total === 2 && p.ok === 2), 'non-hung providers stay ok in the same sweep');
+}
+
+// --- quantization filter: forwarded as provider.quantizations on every probe ---
+{
+  events.length = 0;
+  probeCalls.length = 0;
+  router.providers = ['A', 'B'];
+  router.hangProvider = null;
+
+  const result = await startProviderReliabilitySweep(fakeStore, 'conn-quant', {
+    attemptsPerProvider: 1,
+    delayMs: 1,
+    quantizations: ['int8'],
+  });
+  assert(result.ok === true, 'a sweep with a quantization filter starts');
+  const done = await waitForDone('conn-quant');
+  assert(done !== undefined, 'a quantized sweep reaches done');
+  assert(
+    probeCalls.every((c) => JSON.stringify(c.body.provider) === JSON.stringify({ order: [c.body.provider.order[0]], allow_fallbacks: false, quantizations: ['int8'] })),
+    'every probe forwards the sweep quantization filter as provider.quantizations',
+  );
+  assert(
+    done.quantizations?.[0] === 'int8',
+    'the finished sweep records the quantization filter it ran under',
+  );
+}
+
+// --- stop: admin cancellation aborts in-flight probes and never starts more ---
+{
+  events.length = 0;
+  probeCalls.length = 0;
+  router.providers = ['A', 'D'];
+  router.hangProvider = 'D';
+
+  const result = await startProviderReliabilitySweep(fakeStore, 'conn-stop', {
+    attemptsPerProvider: 2,
+    delayMs: 1,
+    requestTimeoutMs: 100000, // the hung provider must not time out on its own — only the stop aborts it
+  });
+  assert(result.ok === true, 'a sweep to be stopped starts');
+
+  // Wait until D is actually in flight (the abort path is what the stop exercises), then stop.
+  assert(await waitFor(() => events.some((e) => e === 'start:D')), 'the hung provider enters flight before the stop');
+  const startedBeforeStop = events.filter((e) => e.startsWith('start:')).length;
+
+  const stopped = stopProviderReliabilitySweep('conn-stop');
+  assert(stopped !== undefined && stopped.status === 'cancelled', 'stopping a running sweep returns a state marked cancelled');
+  assert(stopped?.finishedAt !== undefined, 'a stopped sweep records finishedAt');
+
+  // In-flight probes land as 'cancelled' notes, and nothing further starts.
+  await sleep(150);
+  const after = getProviderReliabilitySweep('conn-stop');
+  assert(after?.status === 'cancelled', 'a stopped sweep stays cancelled (never flips to done)');
+  assert(
+    after ? events.filter((e) => e.startsWith('start:')).length === startedBeforeStop : false,
+    'no new probes start after the stop',
+  );
+  const dRow = after?.providers.find((p) => p.name === 'D');
+  assert(dRow && dRow.attempts.some((a) => a.note === 'cancelled'), 'an in-flight probe records a cancelled note, not a timeout');
+  assert(dRow && dRow.ok === 0 && dRow.total === 1, 'the aborted provider is scored failed, never ok');
+
+  // Idempotent + undefined-when-absent semantics.
+  const again = stopProviderReliabilitySweep('conn-stop');
+  assert(again?.status === 'cancelled', 'stopping an already-cancelled sweep is a no-op returning the same state');
+  assert(stopProviderReliabilitySweep('never-existed') === undefined, 'stopping a sweep that never existed returns undefined');
 }
 
 if (process.exitCode) {

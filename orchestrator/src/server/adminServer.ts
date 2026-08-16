@@ -229,14 +229,17 @@ function isPrice(value: unknown): value is number {
 // io/providerReliability.ts). Every field optional — absent fields fall back to the module's own
 // defaults (3 attempts per provider, 2s start cadence). Bounded so an admin can't accidentally
 // launch a runaway billed sweep: attempts per provider 1-10, start cadence 500-10000ms.
+// quantizations filters every probe to the given formats (e.g. ["int8"]) — validated as a plain
+// array of non-empty strings; an empty array means "unfiltered", same as absent.
 export interface ReliabilitySweepBody {
   attemptsPerProvider?: number;
   delayMs?: number;
+  quantizations?: string[];
 }
 
 export function parseReliabilitySweepBody(raw: unknown): ReliabilitySweepBody | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { attemptsPerProvider, delayMs } = raw as Record<string, unknown>;
+  const { attemptsPerProvider, delayMs, quantizations } = raw as Record<string, unknown>;
   if (
     attemptsPerProvider !== undefined &&
     (typeof attemptsPerProvider !== 'number' || !Number.isInteger(attemptsPerProvider) || attemptsPerProvider < 1 || attemptsPerProvider > 10)
@@ -246,9 +249,14 @@ export function parseReliabilitySweepBody(raw: unknown): ReliabilitySweepBody | 
   if (delayMs !== undefined && (typeof delayMs !== 'number' || !Number.isInteger(delayMs) || delayMs < 500 || delayMs > 10000)) {
     return undefined;
   }
+  if (quantizations !== undefined && (!Array.isArray(quantizations) || quantizations.some((q) => typeof q !== 'string' || q.trim() === ''))) {
+    return undefined;
+  }
+  const quantizationsDefined = Array.isArray(quantizations) ? quantizations : undefined;
   return {
     ...(attemptsPerProvider !== undefined ? { attemptsPerProvider } : {}),
     ...(delayMs !== undefined ? { delayMs } : {}),
+    ...(quantizationsDefined && quantizationsDefined.length > 0 ? { quantizations: quantizationsDefined } : {}),
   };
 }
 

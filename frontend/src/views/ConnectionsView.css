@@ -423,6 +423,19 @@
   color: var(--color-text-primary) !important;
 }
 
+/* The sweep's Stop button — deliberately tinted so it reads as "cut this off", the escape hatch
+   when a sweep is hammering a 429-prone provider. */
+.connections-stop-btn {
+  background: transparent !important;
+  border: 1px solid var(--color-danger, #b45309) !important;
+  color: var(--color-danger, #b45309) !important;
+}
+
+.connections-stop-btn:hover:not(:disabled) {
+  background: var(--color-danger, #b45309) !important;
+  color: var(--color-bg-primary, #fff) !important;
+}
+
 .saved-note {
   color: var(--color-success);
   font-size: var(--font-size-sm);

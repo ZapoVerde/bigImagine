@@ -189,7 +189,12 @@ export interface ProfileModelsResult {
 
 // orchestrator/src/server/adminServer.ts ModelProvidersResult — OpenRouter-only routing table
 export interface ModelProvidersResult {
-  providers: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[];
+  providers: {
+    name: string;
+    tag: string;
+    quantizations?: string[];
+    pricing?: { prompt: string; completion: string };
+  }[];
 }
 
 // orchestrator/src/server/adminServer.ts ConnectionTestResult — a real, capped-tokens round trip
@@ -224,11 +229,14 @@ export interface ProviderReliabilityRow {
 export interface ReliabilitySweepState {
   connectionId: string;
   model: string;
-  status: 'running' | 'done';
+  status: 'running' | 'done' | 'cancelled';
   startedAt: number;
   finishedAt?: number;
   attemptsPerProvider: number;
   delayMs: number;
+  /** The quantization filter the sweep was run under (e.g. ["int8"]) — the "8" selection in the
+   *  panel's Quantization dropdown. Undefined = unfiltered. */
+  quantizations?: string[];
   providers: ProviderReliabilityRow[];
 }
 

@@ -794,18 +794,33 @@ export async function adminTestConnection(id: string, adminKey: string | null): 
  *  background (io/providerReliability.ts): the live provider catalog for the connection's model,
  *  probed one provider at a time ({ provider: { order: [name], allow_fallbacks: false } }) with a
  *  start cadence, so the Connections tab can see which OpenRouter providers are reliable today
- *  before pinning routing to one. Billed diagnostic calls, never real chat content. Resolves with
- *  the initial state; poll adminGetReliabilitySweep to stream results. 409 (thrown as ApiError)
- *  when a sweep is already running, 404 when the connection is gone or has no provider catalog. */
+ *  before pinning routing to one. `quantizations` filters every probe to the given formats
+ *  (forwarded as provider.quantizations), so results reflect e.g. the int8 path. Billed diagnostic
+ *  calls, never real chat content. Resolves with the initial state; poll adminGetReliabilitySweep
+ *  to stream results. 409 (thrown as ApiError) when a sweep is already running, 404 when the
+ *  connection is gone or has no provider catalog. */
 export async function adminStartReliabilitySweep(
   id: string,
-  input: { attemptsPerProvider?: number; delayMs?: number },
+  input: { attemptsPerProvider?: number; delayMs?: number; quantizations?: string[] },
   adminKey: string | null,
 ): Promise<ReliabilitySweepState> {
   const body = await jsonRequest<{ state: ReliabilitySweepState }>(
     `/v1/admin/connections/${encodeURIComponent(id)}/reliability`,
     adminKey,
     { method: 'POST', body: input },
+  );
+  return body.state;
+}
+
+/** POST /v1/admin/connections/:id/reliability/stop — stops a running sweep: the server marks the
+ *  state 'cancelled' and aborts every in-flight probe (each records a 'cancelled' note). 404
+ *  (thrown as ApiError) when no sweep exists for the connection — a normal race, since the poll
+ *  may already have seen it finish. */
+export async function adminStopReliabilitySweep(id: string, adminKey: string | null): Promise<ReliabilitySweepState> {
+  const body = await jsonRequest<{ state: ReliabilitySweepState }>(
+    `/v1/admin/connections/${encodeURIComponent(id)}/reliability/stop`,
+    adminKey,
+    { method: 'POST' },
   );
   return body.state;
 }

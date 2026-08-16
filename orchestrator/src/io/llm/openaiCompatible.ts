@@ -66,10 +66,17 @@ export interface OpenAiCompatibleConfig {
   baseUrl: string;
   maxTokens?: number;
   supportsVision?: boolean;
-  /** OpenRouter's own per-request `provider` object — set from the resolved LlmProfile's own
-   *  `provider` field (io/llm/profiles.ts) by io/llm/index.ts's createLlmProviderForProfile.
-   *  Undefined means "send no provider override", the pre-existing behavior; a non-OpenRouter
-   *  openai-compatible endpoint that doesn't recognize this field simply ignores it. */
+  /** OpenRouter provider pinning — set from the resolved LlmProfile's own `provider` field
+   *  (io/llm/profiles.ts) by io/llm/index.ts's createLlmProviderForProfile. Undefined means
+   *  "send no provider override"; a non-OpenRouter openai-compatible endpoint that doesn't
+   *  recognize this field simply ignores it.
+   *
+   *  Semantics: `order` is [primary, optional fallback]. The request always pins a SINGLE
+   *  provider to OpenRouter (`allow_fallbacks: false` — OR is never asked to route across its
+   *  own provider set), so the provider actually serving is always one the admin picked and
+   *  priced. `allowFallbacks` does not reach the wire; it only gates the app-level retry in
+   *  complete()/completeStream(): when the primary fails (error or blank reply) and a fallback
+   *  is configured, the request is deliberately re-sent pinned to the fallback once. */
   provider?: {
     order?: string[];
     allowFallbacks: boolean;
@@ -174,6 +181,7 @@ function buildOaiRequest(
   messages: OaiMessage[],
   tools: ToolDefinition[],
   stream: boolean,
+  providerOrder?: string[],
 ): Record<string, unknown> {
   return {
     model: options?.model ?? config.model,
@@ -192,8 +200,13 @@ function buildOaiRequest(
     ...(config.provider
       ? {
           provider: {
-            ...(config.provider.order ? { order: config.provider.order } : {}),
-            allow_fallbacks: config.provider.allowFallbacks,
+            ...((providerOrder ?? config.provider.order)?.length
+              ? { order: providerOrder ?? config.provider.order }
+              : {}),
+            // Always single-provider now: OpenRouter is never asked to fall back across its own
+            // provider set — that is what let arbitrary routed providers (and their pricing) in.
+            // App-level fallback to the configured secondary is done in complete()/completeStream().
+            allow_fallbacks: false,
             ...(config.provider.quantizations ? { quantizations: config.provider.quantizations } : {}),
           },
         }
@@ -258,13 +271,18 @@ export async function listOpenAiCompatibleModels(
  *  own default routing would pick across the full set. `name` is the provider's own display name
  *  (e.g. "OpenAI", "Fireworks") — the value OpenRouter's request-level `provider.order` expects;
  *  `tag` is its more specific routing slug (occasionally a region-qualified variant of the same
- *  provider, e.g. "azure/swedencentral"), kept alongside since `name` alone can collide. No auth
+ *  provider, e.g. "azure/swedencentral"), kept alongside since `name` alone can collide; and
+ *  `quantizations` is the set of quantization formats the endpoint serves (e.g. ["bf16","int8"])
+ *  when the vendor reports any — the source of the Connections tab's quantization dropdown, and
+ *  forwarded as `provider.quantizations` when a sweep or pinned request filters by it. No auth
  *  required by OpenRouter for this route either, same as listOpenAiCompatibleModels, but the key
  *  is sent anyway for the same reason. */
 export async function listOpenAiCompatibleModelProviders(
   config: Pick<OpenAiCompatibleConfig, 'baseUrl' | 'apiKey'>,
   modelId: string,
-): Promise<{ name: string; tag: string; pricing?: { prompt: string; completion: string } }[]> {
+): Promise<
+  { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[]
+> {
   const response = await fetchWithRetry(`${config.baseUrl}/models/${modelId}/endpoints`, {
     headers: { authorization: `Bearer ${config.apiKey}` },
   });
@@ -274,7 +292,12 @@ export async function listOpenAiCompatibleModelProviders(
   }
   const payload = (await response.json()) as {
     data?: {
-      endpoints?: { provider_name?: unknown; tag?: unknown; pricing?: { prompt?: unknown; completion?: unknown } }[];
+      endpoints?: {
+        provider_name?: unknown;
+        tag?: unknown;
+        quantizations?: unknown;
+        pricing?: { prompt?: unknown; completion?: unknown };
+      }[];
     };
   };
   const endpoints = payload.data?.endpoints ?? [];
@@ -286,11 +309,174 @@ export async function listOpenAiCompatibleModelProviders(
           ? { prompt: e.pricing.prompt, completion: e.pricing.completion }
           : undefined;
       const tag = typeof e.tag === 'string' ? e.tag : e.provider_name;
+      const quantizations = Array.isArray(e.quantizations)
+        ? e.quantizations.filter((q): q is string => typeof q === 'string')
+        : undefined;
+      const quantizationsDefined = quantizations && quantizations.length > 0 ? quantizations : undefined;
+      if (quantizationsDefined) return { name: e.provider_name, tag, quantizations: quantizationsDefined, ...(pricing ? { pricing } : {}) };
       return pricing ? { name: e.provider_name, tag, pricing } : { name: e.provider_name, tag };
     });
 }
 
+/** A blank final reply — empty/whitespace content with no tool calls — counts as a primary
+ *  failure eligible for the fallback retry, the same judgement loop.ts/streamingTurn.ts apply
+ *  ("empty reply after N retries"). A turn that did produce tool calls is never blank. */
+function isBlankLlmTurn(turn: LlmTurn): boolean {
+  return turn.toolCalls.length === 0 && turn.message.content.trim() === '';
+}
+
+/** An abort (the caller's own signal) is never a provider failure — rethrown so the fallback
+ *  retry can't fire after the turn was cancelled. */
+function isAbortError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig): LlmProvider {
+  const providerOrder = config.provider?.order;
+  // App-level fallback is deliberate and opt-in (the connection's allow_fallbacks toggle): the
+  // request pins [primary], and only when the primary fails — an error, or a blank reply — is the
+  // request re-pinned to the secondary once. Without a configured secondary there's nothing to
+  // fall back to, so the stored order (if any) is sent as-is with allow_fallbacks: false.
+  const fallbackOrder =
+    config.provider?.allowFallbacks && providerOrder && providerOrder.length >= 2
+      ? ([providerOrder[0], providerOrder[1]] as const)
+      : undefined;
+
+  async function completeOnce(
+    messages: LlmMessage[],
+    tools: ToolDefinition[],
+    options: LlmCompleteOptions | undefined,
+    order: string[] | undefined,
+  ): Promise<LlmTurn> {
+    const response = await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${config.apiKey}`,
+      },
+      signal: options?.signal,
+      body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, false, order)),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`OpenAI-compatible API error ${response.status}: ${body}`);
+    }
+
+    const payload = (await response.json()) as {
+      choices: { message: { content: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
+      usage?: {
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        // DeepSeek's OpenAI-compatible endpoint reports which prompt tokens came from its
+        // prompt cache; other OpenAI-compatible providers (most OpenRouter-routed models)
+        // omit it entirely. Optional here so the two are distinguishable — see below.
+        prompt_cache_hit_tokens?: number;
+      };
+    };
+    const choice = payload.choices[0];
+    if (!choice) throw new Error('OpenAI-compatible API returned no choices');
+    const usage = payload.usage ? usageFromStreamChunk(payload.usage) : undefined;
+    return fromOaiResponse(choice.message, choice.finish_reason, usage);
+  }
+
+  async function completeStreamOnce(
+    messages: LlmMessage[],
+    tools: ToolDefinition[],
+    onDelta: (textDelta: string) => void,
+    options: LlmCompleteOptions | undefined,
+    order: string[] | undefined,
+  ): Promise<LlmTurn> {
+    // RP-only by contract (see LlmProvider.completeStream's doc): a non-empty tools array is a
+    // caller bug — this implementation has no tool-call streaming, and silently dropping the
+    // tools would make the turn behave differently than the caller expects.
+    if (tools.length > 0) {
+      throw new Error('openai-compatible completeStream: tool-call streaming is not supported (RP turns never pass tools)');
+    }
+    const response = await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${config.apiKey}`,
+      },
+      signal: options?.signal,
+      body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, true, order)),
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`OpenAI-compatible API error ${response.status}: ${body}`);
+    }
+    if (!response.body) {
+      throw new Error('OpenAI-compatible streaming response had no body');
+    }
+
+    let text = '';
+    let usage: LlmUsage | undefined;
+    // finish_reason/provider off the last chunk that carried one — kept only to log if the
+    // stream ends with zero content (see below), never surfaced when there's real output.
+    let lastFinishReason: string | undefined;
+    let lastProvider: string | undefined;
+    for await (const data of readSseDataPayloads(response.body)) {
+      if (data === '[DONE]') break;
+      let chunk: {
+        choices?: { delta?: { content?: string | null }; finish_reason?: string }[];
+        usage?: {
+          prompt_tokens: number;
+          completion_tokens: number;
+          total_tokens: number;
+          prompt_cache_hit_tokens?: number;
+        };
+        provider?: string;
+        // OpenRouter can send a mid-stream failure as a data chunk shaped { error: {...} }
+        // instead of an HTTP error status, since the stream (and its 200) already started —
+        // undetected, this silently produced a blank completion (confirmed live 2026-08-16:
+        // an OpenRouter-routed reasoning model returning finish_reason "stop" with zero content
+        // and zero reasoning tokens, most likely a routed provider's own content moderation —
+        // DeepSeek's native endpoint has no equivalent filter). Surfacing it as a thrown error
+        // at least makes that case loud instead of indistinguishable from a genuine empty reply.
+        error?: { message?: string; code?: unknown };
+      };
+      try {
+        chunk = JSON.parse(data);
+      } catch {
+        continue; // a non-JSON SSE line (keep-alive comment) — skip
+      }
+      if (chunk.error) {
+        throw new Error(`OpenAI-compatible streaming API returned an inline error: ${chunk.error.message ?? JSON.stringify(chunk.error)}`);
+      }
+      // Usage arrives on the terminal chunk (stream_options.include_usage), the one whose
+      // choices array is empty — a delta chunk never carries it, so the two can't collide.
+      if (chunk.usage) {
+        usage = usageFromStreamChunk(chunk.usage);
+      }
+      if (chunk.choices?.[0]?.finish_reason) {
+        lastFinishReason = chunk.choices[0].finish_reason;
+        lastProvider = chunk.provider;
+      }
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (delta) {
+        text += delta;
+        onDelta(delta);
+      }
+    }
+    if (text.length === 0 && lastFinishReason) {
+      // No thrown error, no content, but the vendor did report a clean finish — worth knowing
+      // which upstream provider and finish_reason produced it (OpenRouter can route the same
+      // model to several, only some of which behave this way on identical input).
+      log.warn('openai-compatible completeStream produced an empty completion', {
+        finishReason: lastFinishReason,
+        provider: lastProvider,
+      });
+    }
+    return fromOaiResponse({ content: text }, undefined, usage);
+  }
+
   return {
     name: 'openai-compatible',
     supportsVision: config.supportsVision ?? false,
@@ -299,37 +485,21 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
       tools: ToolDefinition[],
       options?: LlmCompleteOptions,
     ): Promise<LlmTurn> {
-      const response = await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${config.apiKey}`,
-        },
-        signal: options?.signal,
-        body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, false)),
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`OpenAI-compatible API error ${response.status}: ${body}`);
+      if (!fallbackOrder) return completeOnce(messages, tools, options, providerOrder);
+      try {
+        const turn = await completeOnce(messages, tools, options, [fallbackOrder[0]]);
+        if (!isBlankLlmTurn(turn)) return turn;
+        log.warn(
+          `openai-compatible: primary provider "${fallbackOrder[0]}" returned a blank reply, retrying via fallback "${fallbackOrder[1]}"`,
+        );
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        log.warn(
+          `openai-compatible: primary provider "${fallbackOrder[0]}" failed, retrying via fallback "${fallbackOrder[1]}"`,
+          { error: errorMessage(err) },
+        );
       }
-
-      const payload = (await response.json()) as {
-        choices: { message: { content: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
-        usage?: {
-          prompt_tokens: number;
-          completion_tokens: number;
-          total_tokens: number;
-          // DeepSeek's OpenAI-compatible endpoint reports which prompt tokens came from its
-          // prompt cache; other OpenAI-compatible providers (most OpenRouter-routed models)
-          // omit it entirely. Optional here so the two are distinguishable — see below.
-          prompt_cache_hit_tokens?: number;
-        };
-      };
-      const choice = payload.choices[0];
-      if (!choice) throw new Error('OpenAI-compatible API returned no choices');
-      const usage = payload.usage ? usageFromStreamChunk(payload.usage) : undefined;
-      return fromOaiResponse(choice.message, choice.finish_reason, usage);
+      return completeOnce(messages, tools, options, [fallbackOrder[1]]);
     },
     async completeStream(
       messages: LlmMessage[],
@@ -337,89 +507,35 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
       onDelta: (textDelta: string) => void,
       options?: LlmCompleteOptions,
     ): Promise<LlmTurn> {
-      // RP-only by contract (see LlmProvider.completeStream's doc): a non-empty tools array is a
-      // caller bug — this implementation has no tool-call streaming, and silently dropping the
-      // tools would make the turn behave differently than the caller expects.
-      if (tools.length > 0) {
-        throw new Error('openai-compatible completeStream: tool-call streaming is not supported (RP turns never pass tools)');
+      if (!fallbackOrder) return completeStreamOnce(messages, tools, onDelta, options, providerOrder);
+      // Deltas are relayed live to the caller; once any real content has gone out, a retry could
+      // never be reconciled with what the client already saw, so the fallback only fires when the
+      // primary produced nothing (blank reply) or failed before emitting any content.
+      let relayedNonBlank = false;
+      try {
+        const turn = await completeStreamOnce(
+          messages,
+          tools,
+          (delta) => {
+            if (delta.trim() !== '') relayedNonBlank = true;
+            onDelta(delta);
+          },
+          options,
+          [fallbackOrder[0]],
+        );
+        if (relayedNonBlank) return turn;
+        log.warn(
+          `openai-compatible: primary provider "${fallbackOrder[0]}" streamed a blank reply, retrying via fallback "${fallbackOrder[1]}"`,
+        );
+      } catch (err) {
+        if (isAbortError(err)) throw err;
+        if (relayedNonBlank) throw err; // partial content already sent — surface, never double-send
+        log.warn(
+          `openai-compatible: primary provider "${fallbackOrder[0]}" stream failed, retrying via fallback "${fallbackOrder[1]}"`,
+          { error: errorMessage(err) },
+        );
       }
-      const response = await fetchWithRetry(`${config.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${config.apiKey}`,
-        },
-        signal: options?.signal,
-        body: JSON.stringify(buildOaiRequest(config, options, toOaiMessages(messages), tools, true)),
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`OpenAI-compatible API error ${response.status}: ${body}`);
-      }
-      if (!response.body) {
-        throw new Error('OpenAI-compatible streaming response had no body');
-      }
-
-      let text = '';
-      let usage: LlmUsage | undefined;
-      // finish_reason/provider off the last chunk that carried one — kept only to log if the
-      // stream ends with zero content (see below), never surfaced when there's real output.
-      let lastFinishReason: string | undefined;
-      let lastProvider: string | undefined;
-      for await (const data of readSseDataPayloads(response.body)) {
-        if (data === '[DONE]') break;
-        let chunk: {
-          choices?: { delta?: { content?: string | null }; finish_reason?: string }[];
-          usage?: {
-            prompt_tokens: number;
-            completion_tokens: number;
-            total_tokens: number;
-            prompt_cache_hit_tokens?: number;
-          };
-          provider?: string;
-          // OpenRouter can send a mid-stream failure as a data chunk shaped { error: {...} }
-          // instead of an HTTP error status, since the stream (and its 200) already started —
-          // undetected, this silently produced a blank completion (confirmed live 2026-08-16:
-          // an OpenRouter-routed reasoning model returning finish_reason "stop" with zero content
-          // and zero reasoning tokens, most likely a routed provider's own content moderation —
-          // DeepSeek's native endpoint has no equivalent filter). Surfacing it as a thrown error
-          // at least makes that case loud instead of indistinguishable from a genuine empty reply.
-          error?: { message?: string; code?: unknown };
-        };
-        try {
-          chunk = JSON.parse(data);
-        } catch {
-          continue; // a non-JSON SSE line (keep-alive comment) — skip
-        }
-        if (chunk.error) {
-          throw new Error(`OpenAI-compatible streaming API returned an inline error: ${chunk.error.message ?? JSON.stringify(chunk.error)}`);
-        }
-        // Usage arrives on the terminal chunk (stream_options.include_usage), the one whose
-        // choices array is empty — a delta chunk never carries it, so the two can't collide.
-        if (chunk.usage) {
-          usage = usageFromStreamChunk(chunk.usage);
-        }
-        if (chunk.choices?.[0]?.finish_reason) {
-          lastFinishReason = chunk.choices[0].finish_reason;
-          lastProvider = chunk.provider;
-        }
-        const delta = chunk.choices?.[0]?.delta?.content;
-        if (delta) {
-          text += delta;
-          onDelta(delta);
-        }
-      }
-      if (text.length === 0 && lastFinishReason) {
-        // No thrown error, no content, but the vendor did report a clean finish — worth knowing
-        // which upstream provider and finish_reason produced it (OpenRouter can route the same
-        // model to several, only some of which behave this way on identical input).
-        log.warn('openai-compatible completeStream produced an empty completion', {
-          finishReason: lastFinishReason,
-          provider: lastProvider,
-        });
-      }
-      return fromOaiResponse({ content: text }, undefined, usage);
+      return completeStreamOnce(messages, tools, onDelta, options, [fallbackOrder[1]]);
     },
     listModels: () => listOpenAiCompatibleModels(config),
     listProviders: (modelId: string) => listOpenAiCompatibleModelProviders(config, modelId),

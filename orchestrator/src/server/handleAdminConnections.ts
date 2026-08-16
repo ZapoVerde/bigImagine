@@ -12,7 +12,9 @@
  * - LLM connections (io/llmConnections.ts): GET/POST /v1/admin/connections; GET/PATCH/DELETE
  *   plus /activate (202+restart, the active llm is a boot-time singleton — bi_principles.md
  *   §14), /models, /providers?model=, /test, and /reliability (io/providerReliability.ts's
- *   background provider sweep, POST starts / GET polls) on one connection by id.
+ *   background provider sweep: POST starts / GET polls / POST :id/reliability/stop aborts one).
+ *   The sweep's optional quantizations filter (provider.quantizations on every probe) rides the
+ *   start body.
  * - Image connections (io/imageConnections.ts, endpoint.md §3): the same id-in-path shape as the
  *   LLM connections handler above without /models or /providers preview routes; activation is a
  *   plain 200, NOT the LLM connections' 202+restart, because the active image connection is
@@ -21,7 +23,7 @@
  * @api-declaration
  * handleAdminCredentialsList(res, deps)                 — GET /v1/admin/credentials
  * handleAdminCredentialsSet(req, res, deps)             — POST /v1/admin/credentials
- * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/:id[/activate|/models|/providers|/test|/reliability]]
+ * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/:id[/activate|/models|/providers|/test|/reliability[/stop]]]
  * handleAdminImageConnectionRoutes(req, res, deps, url) — /v1/admin/image-connections[/:id[/activate|/test]]
  *
  * @contract
@@ -37,6 +39,7 @@ import { log } from '../io/logger.js';
 import {
   getProviderReliabilitySweep,
   startProviderReliabilitySweep,
+  stopProviderReliabilitySweep,
 } from '../io/providerReliability.js';
 import {
   listCredentials,
@@ -251,7 +254,7 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
     const parsed = parseReliabilitySweepBody(raw);
     if (!parsed) {
       sendJson(res, 400, {
-        error: 'expected { attemptsPerProvider?: 1-10, delayMs?: 500-10000 }',
+        error: 'expected { attemptsPerProvider?: 1-10, delayMs?: 500-10000, quantizations?: string[] }',
       });
       return;
     }
@@ -265,6 +268,16 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
       return;
     }
     sendJson(res, 200, { state: result.state });
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'reliability/stop' && req.method === 'POST') {
+    const state = stopProviderReliabilitySweep(id);
+    if (!state) {
+      sendJson(res, 404, { error: 'no reliability sweep exists for this connection' });
+      return;
+    }
+    sendJson(res, 200, { state });
     return;
   }
 
