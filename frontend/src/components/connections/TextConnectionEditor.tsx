@@ -113,6 +113,42 @@ function providerOrderFromDraft(draft: Draft): string[] | undefined {
   return order.length > 0 ? order : undefined;
 }
 
+// OpenRouter-only autofill for the Pricing fieldset (adminServer.ts's listModelsForConnection/
+// listProviders carry per-token USD strings straight from OR's /models and /models/{id}/endpoints).
+// Fills the manual receipt fields from the current source so the admin never copies OR's numbers in
+// by hand — the pinned provider's own rate when one is pinned (the endpoint that actually serves),
+// else the model's platform-wide rate. Converts per-token to the receipt's USD-per-1M-token unit.
+// OR's pricing shape has no cache-hit tier (openaiCompatible.ts reads only prompt/completion), so
+// cache-hit is deliberately left untouched — never guessed. No-op for native DeepSeek and other
+// non-OR endpoints, whose /models carries no pricing field at all (pricing stays undefined).
+function openRouterPricingFor(
+  draft: Draft,
+  modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
+  providerOptions: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[],
+): { inputPerMillion: string; outputPerMillion: string } | null {
+  const pinned = providerOptions.find((p) => p.tag === draft.providerPrimary)?.pricing;
+  const pricing = pinned ?? modelOptions.find((m) => m.id === draft.model)?.pricing;
+  if (!pricing) return null;
+  return {
+    inputPerMillion: (Number(pricing.prompt) * 1_000_000).toString(),
+    outputPerMillion: (Number(pricing.completion) * 1_000_000).toString(),
+  };
+}
+
+// Shared by the model/pin selects' onChange — an explicit selection change refills the price fields,
+// since OR is the authoritative rate for that model+provider ("pricing is OR's, not the admin's").
+// cache-hit is never filled (OR reports no such tier); a no-pricing source (DeepSeek native, etc.)
+// returns `next` unchanged so a non-OR connection keeps whatever the admin typed.
+function withOpenRouterPricing(
+  next: Draft,
+  modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
+  providerOptions: { name: string; tag: string; pricing?: { prompt: string; completion: string } }[],
+): Draft {
+  const pricing = openRouterPricingFor(next, modelOptions, providerOptions);
+  if (!pricing) return next;
+  return { ...next, priceInput: pricing.inputPerMillion, priceOutput: pricing.outputPerMillion };
+}
+
 // The text-LLM half of the Connections tab's unified master-detail pane (io/llmConnections.ts,
 // db/migrations/0062_llm_connections.sql). Owns the editor draft + save/test/activate/delete for
 // LLM connections; the parent ConnectionsView owns the combined list, the text/image toggle, and
@@ -173,7 +209,21 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     setModelsError('');
     adminListConnectionModels(selected.id, adminKey)
       .then((result) => {
-        if (!cancelled) setModelOptions(result.models);
+        if (cancelled) {
+          setModelOptions([]);
+          return;
+        }
+        setModelOptions(result.models);
+        // Autofill for a stored OpenRouter connection that has no prices yet — fills Input/Output
+        // from the loaded model (or pinned provider, if its table already resolved) only when ALL
+        // three fields are empty, so a partially hand-set config is never overwritten. Opens with
+        // the Save button enabled, which is correct: the filled prices aren't persisted yet.
+        setDraft((d) => {
+          if (d.priceInput || d.priceOutput || d.priceCacheHit) return d;
+          const pricing = openRouterPricingFor(d, result.models, providerOptions);
+          if (!pricing) return d;
+          return { ...d, priceInput: pricing.inputPerMillion, priceOutput: pricing.outputPerMillion };
+        });
       })
       .catch((err) => {
         if (!cancelled) setModelsError(err instanceof ApiError ? err.message : 'failed to list models for this connection');
@@ -472,7 +522,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             Model
             <select
               value={draft.model}
-              onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
+              onChange={(e) =>
+                setDraft((d) => withOpenRouterPricing({ ...d, model: e.target.value }, modelOptions, providerOptions))
+              }
               disabled={isNew && modelOptions.length === 0}
             >
               {[draft.model, ...modelOptions.map((m) => m.id)]
@@ -522,7 +574,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   Primary provider
                   <select
                     value={draft.providerPrimary}
-                    onChange={(e) => setDraft((d) => ({ ...d, providerPrimary: e.target.value }))}
+                    onChange={(e) =>
+                      setDraft((d) => withOpenRouterPricing({ ...d, providerPrimary: e.target.value }, modelOptions, providerOptions))
+                    }
                   >
                     <option value="">(no pin — OpenRouter's default routing)</option>
                     {providerOptions.map((p) => (
@@ -578,7 +632,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             <div className="status">
               USD per 1M tokens. Left empty, the inspector shows token counts only — never a
               fabricated $0.00. When only some tiers are set, the cost figure is omitted rather
-              than pricing a tier at the wrong rate.
+              than pricing a tier at the wrong rate. OpenRouter connections autofill Input/Output
+              from the picked model's (or pinned provider's) published rate — cache-hit is never
+              guessed, since OpenRouter reports no such tier.
             </div>
             <div className="connections-pricing-row">
               <label>
