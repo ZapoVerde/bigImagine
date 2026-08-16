@@ -912,7 +912,7 @@ export function adminSetLocationSettings(
   return jsonRequest<LocationSettings>('/v1/admin/location-settings', adminKey, { method: 'POST', body: patch });
 }
 
-/** GET /v1/admin/character-settings — the Characters page's describer settings
+/** GET /v1/admin/character-settings — the Settings tab's Character-describer settings
  *  (rp-cast-infrastructure-plan.md A4): the character-describer LLM pass's prompt/history-pairs,
  *  mirroring the location-settings pair. Admin-gated like every Settings-tab GET. */
 export function adminGetCharacterSettings(adminKey: string | null): Promise<CharacterSettings> {

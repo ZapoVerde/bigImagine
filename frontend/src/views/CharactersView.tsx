@@ -81,7 +81,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
         setCharacters(result);
         setError(null);
       } catch (err) {
-        setError(err instanceof ApiError ? err.message : 'failed to load characters');
+        setError(err instanceof ApiError ? err.message : 'failed to load cards');
       }
       if (selectAfter) setSelectedId(selectAfter);
     },
@@ -96,7 +96,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
         setDetail(result);
         setDraft(draftFromDetail(result));
       } catch (err) {
-        setError(err instanceof ApiError ? err.message : 'failed to load character');
+        setError(err instanceof ApiError ? err.message : 'failed to load card');
       }
     },
     [apiKey],
@@ -205,7 +205,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to save character');
+      setError(err instanceof ApiError ? err.message : 'failed to save card');
     } finally {
       setSaving(false);
     }
@@ -228,7 +228,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
       setMobileShowEditor(false);
       await refresh();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to delete character');
+      setError(err instanceof ApiError ? err.message : 'failed to delete card');
     }
   }
 
@@ -237,7 +237,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
     try {
       await exportCharacterCard(detail.characterId, format, apiKey);
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to export character');
+      setError(err instanceof ApiError ? err.message : 'failed to export card');
     }
   }
 

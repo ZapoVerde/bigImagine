@@ -359,7 +359,7 @@ export interface LocationSettings {
   describerHistoryPairs: string;
 }
 
-// GET /v1/admin/character-settings — the Characters page's describer settings
+// GET /v1/admin/character-settings — the Settings tab's Character-describer settings
 // (rp-cast-infrastructure-plan.md A4): the character-describer LLM pass's prompt/history-pairs,
 // mirroring LocationSettings' describer pair. describerPrompt is always the effective prompt —
 // the built-in default when the stored value is empty (bi_principles.md §17) — with
