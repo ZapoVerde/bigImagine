@@ -236,9 +236,9 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into scene_presence')) {
-            const [sceneId, characterId, userId] = params;
+            const [sceneId, characterId, userId, presenceOrder] = params;
             if (!presence.some((p) => p.scene_id === sceneId && p.character_id === characterId)) {
-              presence.push({ scene_id: sceneId, character_id: characterId, user_id: userId });
+              presence.push({ scene_id: sceneId, character_id: characterId, user_id: userId, presence_order: presenceOrder ?? 0 });
             }
             return { rows: [] };
           }
@@ -341,6 +341,33 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   assert(pool.presence.length === 2, 'scene_presence holds exactly the resolved roster');
 
   assert(ensure.calls.length === 1 && ensure.calls[0].messageId === MSG, 'the turn\'s message is the swipe anchor');
+}
+
+// --- db/migrations/0107: scene_presence.presence_order = the Present: roster's index. ----------
+// The whole point of the migration: the roster's left-to-right order must survive storage so
+// getScenesTool reads character_ids back ordered by presence_order (studio-character-bridge-plan.md
+// Part E). replaceScenePresence writes each character's array index — on a fresh scene AND on a
+// replace, because the header is authoritative for who's here now, so a reordered roster must
+// rewrite the indexes rather than keep stale ones.
+{
+  const pool = poolWithActiveSwipe(createFakePool());
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  const kraken = '[ Late Evening | 🗓️ Wednesday, June 15, 2026 AD | 📍 The Drunken Kraken - Main Hall ]';
+
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, `${kraken}\nPresent: Mair, Seraphina, Talfryn`);
+  const scene = pool.scenes[0];
+  assert(scene && pool.presence.length === 3, 'presence_order: a three-name roster writes three presence rows');
+  const nameOf = (id) => pool.characters.find((c) => c.character_id === id)?.name ?? '?';
+  const order1 = [...pool.presence].sort((a, b) => a.presence_order - b.presence_order).map((p) => nameOf(p.character_id));
+  assert(order1.join(',') === 'Mair,Seraphina,Talfryn', 'presence_order: a fresh scene stores the roster in Present: order (index 0,1,2)');
+  assert(pool.presence.every((p) => Number.isInteger(p.presence_order)), 'presence_order: every written row carries a presence_order');
+
+  // Replaced scene: reorder the roster — the old indexes must be rewritten, not kept.
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, `${kraken}\nPresent: Talfryn, Mair`);
+  assert(pool.presence.length === 2, 'presence_order: a replace removes the now-absent character (Seraphina dropped)');
+  const order2 = [...pool.presence].sort((a, b) => a.presence_order - b.presence_order).map((p) => nameOf(p.character_id));
+  assert(order2.join(',') === 'Talfryn,Mair', 'presence_order: a replaced roster rewrites the indexes (Talfryn now 0, Mair 1)');
 }
 
 // --- scrapeTurnPresence: A1 persona carry-forward ------------------------------------------------

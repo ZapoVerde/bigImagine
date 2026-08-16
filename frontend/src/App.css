@@ -349,6 +349,20 @@ body {
   overflow: auto;
 }
 
+/* studio-character-bridge-plan.md Part E — the rp view container hosts ActivePortrait above
+   ChatView: flex column so the box takes its own row and the chat (height: 100% by default)
+   shrinks to fill the rest instead of overflowing the container. */
+.view-container-rp {
+  display: flex;
+  flex-direction: column;
+}
+
+.view-container-rp > .chat-view {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
 .blank-tab {
   height: 100%;
   display: flex;
@@ -362,6 +376,21 @@ body {
 
 .blank-tab .type-picker {
   flex: 1;
+}
+
+/* portrait-chain-hardening-plan.md: the placeholder an already-open Portraits tab shows when the
+   household kill switch is off — never a silent blank pane. */
+.disabled-pane {
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.disabled-pane-note {
+  padding: 0.75rem 1.25rem;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm, 6px);
 }
 
 .view-container.hidden {

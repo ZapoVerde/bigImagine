@@ -93,6 +93,45 @@
   white-space: nowrap;
 }
 
+/* studio-character-bridge-plan.md Part A — the per-row "Send to Studio" action (RP-born
+   characters only reach Studio from here; the Roster's own listing excludes them). Compact
+   ghost button; a transient per-row status message sits beside the name. */
+.cast-row-studio-btn {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: var(--font-size-xs, 0.7rem);
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.cast-row-studio-btn:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+  color: var(--color-text-primary);
+}
+
+.cast-row-studio-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-row-studio-status {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs, 0.7rem);
+  color: var(--color-text-muted);
+}
+
+.cast-row-studio-status.err {
+  color: var(--color-danger);
+}
+
 /* The live presence indicator: a small dot, filled when the character is in the active scene's
    character_ids (the current Present: roster), outlined otherwise. */
 .cast-presence {

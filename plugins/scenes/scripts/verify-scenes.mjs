@@ -88,6 +88,11 @@ function createFakePool() {
                     const c = characters.find((ch) => ch.character_id === p.character_id && ch.user_id === userId);
                     return c ? eligibleCharacter(c) : true;
                   })
+                  // db/migrations/0107 + getScenesTool.ts: array_agg(... order by presence_order) —
+                  // presence comes back ordered by presence_order, NOT row-insertion order. The
+                  // sort is stable, so equal presence_order (tool-added rows default 0) keeps
+                  // insertion order exactly as before.
+                  .sort((a, b) => (a.presence_order ?? 0) - (b.presence_order ?? 0))
                   .map((p) => p.character_id),
               }));
             return { rows };
@@ -102,10 +107,10 @@ function createFakePool() {
           }
 
           if (sql.startsWith('insert into scene_presence')) {
-            const [sceneId, characterId, userId] = params;
+            const [sceneId, characterId, userId, presenceOrder] = params;
             assert(scopedUserId === userId, 'add_character_to_scene is scoped to the requesting user');
             if (!presence.some((p) => p.scene_id === sceneId && p.character_id === characterId)) {
-              presence.push({ scene_id: sceneId, character_id: characterId, user_id: userId });
+              presence.push({ scene_id: sceneId, character_id: characterId, user_id: userId, presence_order: presenceOrder ?? 0 });
             }
             return { rows: [] };
           }
@@ -321,6 +326,39 @@ assert(!crossUserScenes.some((s) => s.sceneId === otherUsersScene.sceneId), "ano
     stateless.some((s) => s.sceneId === globalScene.sceneId),
     'a stateless get_scenes call still returns user-authored (chat_id null) scenes',
   );
+}
+
+// --- db/migrations/0107: characterIds comes back ordered by presence_order, not insertion order ---
+// The round-trip the migration exists for: the scraper writes each Present: roster index as
+// presence_order, and get_scenes must read it back in that order (studio-character-bridge-plan.md
+// Part E). Presence rows are pushed directly (simulating the scraper's explicit presence_order),
+// with the order inverted from the insertion order so a wrong read-back would fail loudly.
+{
+  const orderedScene = await db.withUserScope(userId, (session) =>
+    createSceneTool.handler({ name: 'Ordered courtyard' }, { userId, db: session }),
+  );
+  // Inserted Z-first, ordered A-first — the read-back must follow presence_order, not the push.
+  pool.characters.push({ character_id: 'ordered-z', user_id: userId, status: null });
+  pool.characters.push({ character_id: 'ordered-a', user_id: userId, status: null });
+  pool.presence.push({ scene_id: orderedScene.sceneId, character_id: 'ordered-z', user_id: userId, presence_order: 1 });
+  pool.presence.push({ scene_id: orderedScene.sceneId, character_id: 'ordered-a', user_id: userId, presence_order: 0 });
+
+  const listing = await db.withUserScope(userId, (session) => getScenesTool.handler({}, { userId, db: session }));
+  const ordered = listing.find((s) => s.sceneId === orderedScene.sceneId);
+  assert(ordered.characterIds.join(',') === 'ordered-a,ordered-z', 'get_scenes: characterIds is ordered by presence_order, not row-insertion order');
+
+  // Equal presence_order (add_character_to_scene defaults 0) keeps insertion order — the stable
+  // tiebreak, so tool-added rows behave exactly as before the migration.
+  const tieScene = await db.withUserScope(userId, (session) =>
+    createSceneTool.handler({ name: 'Insertion-order courtyard' }, { userId, db: session }),
+  );
+  pool.characters.push({ character_id: 'tie-1', user_id: userId, status: null });
+  pool.characters.push({ character_id: 'tie-2', user_id: userId, status: null });
+  await db.withUserScope(userId, (session) => addCharTool.handler({ scene_id: tieScene.sceneId, character_id: 'tie-1' }, { userId, db: session }));
+  await db.withUserScope(userId, (session) => addCharTool.handler({ scene_id: tieScene.sceneId, character_id: 'tie-2' }, { userId, db: session }));
+  const afterTie = await db.withUserScope(userId, (session) => getScenesTool.handler({}, { userId, db: session }));
+  const tie = afterTie.find((s) => s.sceneId === tieScene.sceneId);
+  assert(tie.characterIds.join(',') === 'tie-1,tie-2', 'get_scenes: equal presence_order preserves insertion order (stable tiebreak)');
 }
 
 // --- validation ---

@@ -256,10 +256,14 @@ import { buildModelsList } from './openai.js';
 import { handleLocationImageBroken } from './locationImages.js';
 import {
   handlePortraitEntities,
+  handlePortraitEntityFromCharacter,
+  handlePortraitEntitySetAsAvatar,
   handlePortraitFeedback,
   handlePortraitGenerate,
   handlePortraitLayersGet,
   handlePortraitLayersSet,
+  handlePortraitsEnabledGet,
+  handlePortraitsEnabledSet,
   handlePortraitWiki,
 } from './portraitRoutes.js';
 
@@ -635,6 +639,17 @@ const routes: Route[] = [
   // wiki browse/edit, the generate/feedback actions. The layers write is the one admin-gated
   // route — visual_layer_stack is an orchestrator_settings write, and every settings write on
   // this server is admin-gated; the layers read stays user-gated so the tab renders for anyone.
+  // The two studio-character-bridge-plan.md routes must be registered BEFORE the '*' family
+  // route below (first-match-wins): the exact from-character path would otherwise be swallowed
+  // by the set-as-avatar prefix entry, which in turn would be swallowed by the family entry's
+  // startsWith match. The prefix entry also owns any other unexpected POST under the family
+  // (e.g. /v1/portraits/entities/<uuid>) — its handler 404s those, the same outcome as before.
+  { method: 'POST', path: '/v1/portraits/entities/from-character', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitEntityFromCharacter(req, res, deps, userId);
+    }) },
+  { method: 'POST', prefix: true, path: '/v1/portraits/entities/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitEntitySetAsAvatar(res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
   { method: '*', family: '/v1/portraits/entities', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       await handlePortraitEntities(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
     }) },
@@ -645,6 +660,15 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
   { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
   { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
+  // portrait-chain-hardening-plan.md's kill switch — the read is registered at both a
+  // household-gated public path (the frontend fetches it as a regular authenticated user right
+  // after auth resolves, before anyone would have entered the separate admin key) and an
+  // admin-gated path, with the admin write alongside, the same three-route shape as the
+  // chat-background settings trio. Deliberately NOT gated by the flag itself: the Settings toggle
+  // that flips it must stay reachable regardless of current value.
+  { method: 'GET', path: '/v1/portraits-enabled', run: async (req, res, deps) => withUser(req, res, deps, async () => { await handlePortraitsEnabledGet(res, deps); }) },
+  { method: 'GET', path: '/v1/admin/portraits-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitsEnabledGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/portraits-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitsEnabledSet(req, res, deps); }) },
 ];
 
 async function handleRequest(

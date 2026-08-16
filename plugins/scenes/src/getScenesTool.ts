@@ -65,7 +65,7 @@ export function createGetScenesTool(): RegisteredTool {
         ))`;
       const rows = await ctx.db.query<SceneRow>(
         `select s.scene_id, s.name, s.active_location_id,
-                coalesce(array_agg(sp.character_id) filter (
+                coalesce(array_agg(sp.character_id order by sp.presence_order) filter (
                   where sp.character_id is not null and ${eligibleFor('c', 'character_chat_links', 'character_id')}
                 ), '{}') as character_ids
          from scenes s

@@ -251,6 +251,15 @@
  * loop's tool-calling turns (integer-as-text, default '6'). All five are read live on every call,
  * no restart, editable from the admin-gated Settings fieldset.
  *
+ * visual_portraits_enabled (migration 0108, docs/plans/portrait-chain-hardening-plan.md) is the
+ * household kill switch for the whole Portrait Studio chain — routes under /v1/portraits/* (except
+ * the layer-manifest pair), the Portraits tab, and the ActivePortrait box. Text 'true'/'false',
+ * default 'true' when unset: the feature predates the switch and is already in use, so this is an
+ * opt-out safety valve (unlike notifications_enabled's default-off), the same shape this codebase
+ * already uses for other newly-risky subsystems. Read live by the portrait routes' guard and the
+ * frontend's once-per-load fetch, no restart; not covered: scene-presence ordering
+ * (presence_order), which is a general scene feature independent of Portrait Studio.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -355,6 +364,7 @@ export const SETTING_NAMES = [
   'visual_mutation_system_prompt_override',
   'visual_reflection_system_prompt_override',
   'visual_wiki_investigation_max_turns',
+  'visual_portraits_enabled',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

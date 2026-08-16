@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import './theme/tokens.css';
 import './App.css';
 import { API_KEY_STORAGE_KEY } from './api/authStorage';
-import { whoami } from './api/client';
+import { getPortraitsEnabled, whoami } from './api/client';
 import BackupWarningModal from './components/BackupWarningModal';
 import AppNavDrawer from './components/appNav/AppNavDrawer';
 import ScreenLockOverlay from './components/ScreenLockOverlay';
@@ -20,6 +20,7 @@ import LocationsView from './views/LocationsView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
+import ActivePortrait from './components/chat/ActivePortrait';
 import CleanupView from './views/CleanupView';
 import ConnectionsView from './views/ConnectionsView';
 import PortraitStudioView from './views/PortraitStudioView';
@@ -84,6 +85,21 @@ export default function App() {
   // because App owns activeChatId — the Cast section needs both, and they must come from the
   // same chat.
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+
+  // The Portrait Studio household kill switch (portrait-chain-hardening-plan.md), fetched once
+  // auth resolves — null until the first fetch lands, then the live boolean. Unset behaves as
+  // enabled (the feature predates the switch); a fetch failure fails open to enabled, matching
+  // every other settings key's default shape. No polling: a manual page reload picks up an
+  // admin's change, same as the other household toggles here. Drives the Portraits entry in the
+  // picker/nav, the PortraitStudioView mount, and the ActivePortrait box.
+  const [portraitsEnabled, setPortraitsEnabled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (auth.mode === 'checking' || auth.mode === 'locked') return;
+    getPortraitsEnabled(auth.mode === 'key' ? auth.apiKey : null)
+      .then((r) => setPortraitsEnabled(r.enabled))
+      .catch(() => setPortraitsEnabled(true));
+  }, [auth]);
 
   // Bumped when a character is deleted and its chats were purged server-side, so the sidebar's
   // history browsers (which list those chats) re-fetch and drop them.
@@ -246,10 +262,13 @@ export default function App() {
         )}
         <div className="app-main">
           {tabs.map((tab) => (
-          <div key={tab.id} className={`view-container${tab.id === activeTabId ? '' : ' hidden'}`}>
+          <div key={tab.id} className={`view-container${tab.type === 'rp' ? ' view-container-rp' : ''}${tab.id === activeTabId ? '' : ' hidden'}`}>
             {tab.type === 'blank' && (
               <div className="blank-tab">
-                <TypePicker onPick={(type) => (type === 'chat' ? openChat() : summon(type))} />
+                <TypePicker
+                  onPick={(type) => (type === 'chat' ? openChat() : summon(type))}
+                  portraitsEnabled={portraitsEnabled !== false}
+                />
               </div>
             )}
             {tab.type === 'chat' && (
@@ -269,23 +288,26 @@ export default function App() {
               />
             )}
             {tab.type === 'rp' && (
-              <ChatView
-                apiKey={apiKey}
-                tabId={tab.id}
-                chatId={tab.chatId}
-                active={tab.id === activeTabId}
-                onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
-                onTitleChange={(title) => updateTab(tab.id, { title })}
-                onOpenChat={openChat}
-                onOpenRp={openRp}
-                onChatsDeleted={handleChatsDeleted}
-                onOpenLorebooks={() => summon('lorebooks')}
-                topBarsHidden={topBarsHidden}
-                onTopBarsHiddenChange={setTopBarsHidden}
-                onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
-                onTurnSnapshot={tab.id === activeTabId ? setTurnSnapshot : undefined}
-                onSceneIdChange={tab.id === activeTabId ? setActiveSceneId : undefined}
-              />
+              <>
+                {tab.chatId && portraitsEnabled !== false && <ActivePortrait apiKey={apiKey} chatId={tab.chatId} sceneId={activeSceneId} />}
+                <ChatView
+                  apiKey={apiKey}
+                  tabId={tab.id}
+                  chatId={tab.chatId}
+                  active={tab.id === activeTabId}
+                  onChatCreated={(chatId, title) => updateTab(tab.id, { chatId, title })}
+                  onTitleChange={(title) => updateTab(tab.id, { title })}
+                  onOpenChat={openChat}
+                  onOpenRp={openRp}
+                  onChatsDeleted={handleChatsDeleted}
+                  onOpenLorebooks={() => summon('lorebooks')}
+                  topBarsHidden={topBarsHidden}
+                  onTopBarsHiddenChange={setTopBarsHidden}
+                  onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
+                  onTurnSnapshot={tab.id === activeTabId ? setTurnSnapshot : undefined}
+                  onSceneIdChange={tab.id === activeTabId ? setActiveSceneId : undefined}
+                />
+              </>
             )}
             {tab.type === 'notes' && (
               <NotesView
@@ -304,7 +326,14 @@ export default function App() {
             {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}
-            {tab.type === 'portraits' && <PortraitStudioView apiKey={apiKey} />}
+            {tab.type === 'portraits' &&
+              (portraitsEnabled === false ? (
+                <div className="blank-tab disabled-pane">
+                  <div className="disabled-pane-note">Portrait Studio is disabled — enable it in Settings.</div>
+                </div>
+              ) : (
+                <PortraitStudioView apiKey={apiKey} />
+              ))}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}
             {tab.type === 'locations' && <LocationsView />}
@@ -313,7 +342,12 @@ export default function App() {
         ))}
       </div>
       </div>
-      <AppNavDrawer open={navOpen} onClose={() => setNavOpen(false)} onNavigate={summon} />
+      <AppNavDrawer
+        open={navOpen}
+        onClose={() => setNavOpen(false)}
+        onNavigate={summon}
+        portraitsEnabled={portraitsEnabled !== false}
+      />
     </div>
   );
 }

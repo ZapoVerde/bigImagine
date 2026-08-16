@@ -17,7 +17,7 @@ function assert(cond, message) {
   }
 }
 
-const layers4 = DEFAULT_LAYER_MANIFEST.layers; // subject/outfit/style/expression, all promptable
+const layers4 = DEFAULT_LAYER_MANIFEST.layers; // subject/outfit/style/expression/format, all promptable
 const layers2 = layers4.slice(0, 2); // subject + outfit
 const layers6 = [
   ...layers4,
@@ -25,7 +25,7 @@ const layers6 = [
   { id: 'eyes', label: 'Eyes', promptable: true, boundary: 'Eye color and gaze.' },
 ];
 
-// --- 4-layer default manifest: every slot folds into its layer's overflow bucket. ---
+// --- default manifest: every slot folds into its layer's overflow bucket. ---
 const slots4 = {
   subject: { subject_identity: 'Rin V2', age: '20' },
   outfit: { outfit_style: 'red coat', accessories: 'silver brooch' },
@@ -35,8 +35,8 @@ const slots4 = {
 const out4 = compileTemplate(DEFAULT_LAYER_MANIFEST.template, slots4, layers4);
 assert(
   out4 ===
-    'A portrait of subject_identity: Rin V2, age: 20, wearing outfit_style: red coat, accessories: silver brooch, rendered in style_style: VLZ hybrid, with expression_emotion: calm confidence.',
-  `composer: 4-layer overflow folding -> "${out4}"`,
+    'A portrait of subject_identity: Rin V2, age: 20, wearing outfit_style: red coat, accessories: silver brooch, rendered in style_style: VLZ hybrid, with expression_emotion: calm confidence. Format: .',
+  `composer: default-manifest overflow folding -> "${out4}"`,
 );
 assert(!out4.includes('{{'), 'composer: 4-layer output leaves no unresolved tokens');
 

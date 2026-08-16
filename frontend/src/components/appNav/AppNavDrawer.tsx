@@ -31,13 +31,16 @@ interface AppNavDrawerProps {
   open: boolean;
   onClose: () => void;
   onNavigate: (type: SummonableType) => void;
+  /** portrait-chain-hardening-plan.md: false hides the Portraits entry (the household kill
+   *  switch is off); absent/true shows it. */
+  portraitsEnabled?: boolean;
 }
 
 // App-wide navigation drawer behind the tab-bar's top-left hamburger: the specialist views
 // (principle 5's opt-in escape hatch, formerly the landing-page pills). A left slide-in drawer
 // over a full-screen backdrop — modal, so the story surface underneath stays untouched until an
 // option is picked or the drawer is dismissed.
-export default function AppNavDrawer({ open, onClose, onNavigate }: AppNavDrawerProps) {
+export default function AppNavDrawer({ open, onClose, onNavigate, portraitsEnabled }: AppNavDrawerProps) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
   // Ref so the mount-time effect below never re-subscribes when App re-creates onClose each
@@ -95,7 +98,7 @@ export default function AppNavDrawer({ open, onClose, onNavigate }: AppNavDrawer
           </button>
         </div>
         <nav className="app-nav-list">
-          {APP_NAV_OPTIONS.map((opt) => (
+          {APP_NAV_OPTIONS.filter((o) => o.type !== 'portraits' || portraitsEnabled !== false).map((opt) => (
             <button
               key={opt.type}
               type="button"

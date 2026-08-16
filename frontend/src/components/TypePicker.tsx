@@ -5,6 +5,9 @@ type PickableType = 'chat' | SummonableType;
 
 interface TypePickerProps {
   onPick: (type: PickableType) => void;
+  /** portrait-chain-hardening-plan.md: false hides the Portraits entry (the household kill
+   *  switch is off); absent/true shows it. */
+  portraitsEnabled?: boolean;
 }
 
 const OPTIONS: { type: PickableType; label: string }[] = [
@@ -28,12 +31,12 @@ const OPTIONS: { type: PickableType; label: string }[] = [
 // no longer creates these (new tabs drop straight into chat — see useTabs' openBlank), but a tab
 // left in this state from before that change still needs somewhere to land. Purely user-driven —
 // no auto-selection, no intent detection. Once picked, a tab never changes type again.
-export default function TypePicker({ onPick }: TypePickerProps) {
+export default function TypePicker({ onPick, portraitsEnabled }: TypePickerProps) {
   return (
     <div className="type-picker">
       <h2>What do you want to do here?</h2>
       <div className="type-picker-grid">
-        {OPTIONS.map((opt) => (
+        {OPTIONS.filter((o) => o.type !== 'portraits' || portraitsEnabled !== false).map((opt) => (
           <button key={opt.type} className="type-picker-btn" onClick={() => onPick(opt.type)}>
             {opt.label}
           </button>

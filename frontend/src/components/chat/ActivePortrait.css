@@ -1,0 +1,23 @@
+/* studio-character-bridge-plan.md Part E — the small box above the RP chat showing whoever the
+   current scene's Present: line named first (first-listed, simplest possible selection rule).
+   Sits above ChatView in the rp view container (which becomes a flex column so ChatView yields
+   the box's space instead of overflowing it); renders nothing at all when there's no scene, no
+   present characters, or no avatar yet. */
+
+.active-portrait {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 0.4rem 0 0.35rem;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.active-portrait-img {
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm, 8px);
+  border: 1px solid var(--color-border-subtle);
+}

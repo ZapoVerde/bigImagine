@@ -47,6 +47,7 @@
  *     external_io:     [an OpenAI-compatible chat completions API]
  */
 
+import { log } from '../logger.js';
 import { fetchWithRetry } from '../httpRetry.js';
 import { readSseDataPayloads } from './sse.js';
 import type {
@@ -362,32 +363,61 @@ export function createOpenAiCompatibleLlmProvider(config: OpenAiCompatibleConfig
 
       let text = '';
       let usage: LlmUsage | undefined;
+      // finish_reason/provider off the last chunk that carried one — kept only to log if the
+      // stream ends with zero content (see below), never surfaced when there's real output.
+      let lastFinishReason: string | undefined;
+      let lastProvider: string | undefined;
       for await (const data of readSseDataPayloads(response.body)) {
         if (data === '[DONE]') break;
         let chunk: {
-          choices?: { delta?: { content?: string | null } }[];
+          choices?: { delta?: { content?: string | null }; finish_reason?: string }[];
           usage?: {
             prompt_tokens: number;
             completion_tokens: number;
             total_tokens: number;
             prompt_cache_hit_tokens?: number;
           };
+          provider?: string;
+          // OpenRouter can send a mid-stream failure as a data chunk shaped { error: {...} }
+          // instead of an HTTP error status, since the stream (and its 200) already started —
+          // undetected, this silently produced a blank completion (confirmed live 2026-08-16:
+          // an OpenRouter-routed reasoning model returning finish_reason "stop" with zero content
+          // and zero reasoning tokens, most likely a routed provider's own content moderation —
+          // DeepSeek's native endpoint has no equivalent filter). Surfacing it as a thrown error
+          // at least makes that case loud instead of indistinguishable from a genuine empty reply.
+          error?: { message?: string; code?: unknown };
         };
         try {
           chunk = JSON.parse(data);
         } catch {
           continue; // a non-JSON SSE line (keep-alive comment) — skip
         }
+        if (chunk.error) {
+          throw new Error(`OpenAI-compatible streaming API returned an inline error: ${chunk.error.message ?? JSON.stringify(chunk.error)}`);
+        }
         // Usage arrives on the terminal chunk (stream_options.include_usage), the one whose
         // choices array is empty — a delta chunk never carries it, so the two can't collide.
         if (chunk.usage) {
           usage = usageFromStreamChunk(chunk.usage);
+        }
+        if (chunk.choices?.[0]?.finish_reason) {
+          lastFinishReason = chunk.choices[0].finish_reason;
+          lastProvider = chunk.provider;
         }
         const delta = chunk.choices?.[0]?.delta?.content;
         if (delta) {
           text += delta;
           onDelta(delta);
         }
+      }
+      if (text.length === 0 && lastFinishReason) {
+        // No thrown error, no content, but the vendor did report a clean finish — worth knowing
+        // which upstream provider and finish_reason produced it (OpenRouter can route the same
+        // model to several, only some of which behave this way on identical input).
+        log.warn('openai-compatible completeStream produced an empty completion', {
+          finishReason: lastFinishReason,
+          provider: lastProvider,
+        });
       }
       return fromOaiResponse({ content: text }, undefined, usage);
     },

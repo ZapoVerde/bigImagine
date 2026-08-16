@@ -8,6 +8,7 @@ import {
   getPortraitLayerManifest,
   listPortraitEntities,
   listPortraitWikiEntries,
+  setPortraitEntityAsAvatar,
   setPortraitLayerManifest,
   submitPortraitFeedback,
   updatePortraitEntity,
@@ -78,6 +79,10 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [siSaving, setSiSaving] = useState(false);
   const [siSaved, setSiSaved] = useState(false);
   const [siError, setSiError] = useState<string | null>(null);
+  // studio-character-bridge-plan.md Part C — the explicit "Set as avatar" action on a
+  // subject-layer entity's card: which entity's promotion is in flight + the transient result.
+  const [avatarBusyId, setAvatarBusyId] = useState<string | null>(null);
+  const [avatarMessage, setAvatarMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   // Wiki panel editor.
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -267,6 +272,24 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
       setSiError(errMessage(err, 'failed to save standing instructions'));
     } finally {
       setSiSaving(false);
+    }
+  }
+
+  // studio-character-bridge-plan.md Part C — the deliberate, always-overwrite avatar promotion:
+  // the entity's current winning image becomes the linked character's stored avatar. Distinct
+  // from the automatic fill-when-empty-only promotion inside submitPortraitFeedback; this is an
+  // explicit operator click, shown only on subject-layer entities with a character_id.
+  async function promoteToAvatar(entity: PortraitEntityRow) {
+    setAvatarBusyId(entity.entity_id);
+    setAvatarMessage(null);
+    try {
+      await setPortraitEntityAsAvatar(entity.entity_id, apiKey);
+      setAvatarMessage({ id: entity.entity_id, text: 'Avatar set.', ok: true });
+      window.setTimeout(() => setAvatarMessage((m) => (m?.id === entity.entity_id ? null : m)), 4000);
+    } catch (err) {
+      setAvatarMessage({ id: entity.entity_id, text: errMessage(err, 'failed to set avatar'), ok: false });
+    } finally {
+      setAvatarBusyId(null);
     }
   }
 
@@ -505,6 +528,22 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
                 <span className="portrait-entity-layer">{manifest.layers.find((l) => l.id === entity.layer_id)?.label ?? entity.layer_id}</span>
                 {entity.character_id && <span className="portrait-entity-char">character: {characters?.find((c) => c.characterId === entity.character_id)?.name ?? entity.character_id}</span>}
                 {entity.last_image_url && <img className="portrait-entity-thumb" src={entity.last_image_url} alt={`${entity.name} best`} />}
+                {entity.layer_id === 'subject' && entity.character_id && (
+                  <>
+                    <button
+                      type="button"
+                      className="portrait-entity-avatar-btn"
+                      disabled={avatarBusyId === entity.entity_id}
+                      title="Set this entity's winning image as the linked character's avatar (always overwrites)"
+                      onClick={() => void promoteToAvatar(entity)}
+                    >
+                      {avatarBusyId === entity.entity_id ? '…' : 'Set as avatar'}
+                    </button>
+                    {avatarMessage?.id === entity.entity_id && (
+                      <span className={`portrait-entity-avatar-status${avatarMessage.ok ? '' : ' err'}`}>{avatarMessage.text}</span>
+                    )}
+                  </>
+                )}
                 <button type="button" onClick={() => openSi(entity)}>
                   {siEntityId === entity.entity_id ? 'hide' : 'instructions'}
                 </button>

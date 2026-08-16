@@ -7,8 +7,9 @@
  * The Portrait Studio's layer manifest (docs/plans/completed/portrait-studio-plan.md §Layer manifest): one
  * global JSON value under `orchestrator_settings.visual_layer_stack` (Principle 13 — runtime
  * config, not env/const; editable without a redeploy). Shape:
- * `{ layers: [{ id, label, promptable, boundary }], template }` — the four default layers
- * (`subject`, `outfit`, `style`, `expression`, all `promptable: true`, each `boundary` a short
+ * `{ layers: [{ id, label, promptable, boundary }], template }` — the five default layers
+ * (`subject`, `outfit`, `style`, `expression`, `format` — the fifth added by
+ * studio-character-bridge-plan.md Part D, all `promptable: true`, each `boundary` a short
  * prose description of what belongs there and what explicitly doesn't) plus a default `template`
  * referencing each layer's overflow token. An operator can add/remove/relabel layers afterward
  * from Portrait Studio's "Manage Layers" panel — this is what makes the system genuinely
@@ -73,24 +74,24 @@ export const DEFAULT_LAYER_MANIFEST: LayerManifest = {
       label: 'Subject',
       promptable: true,
       boundary:
-        'The character being depicted: identity, build, hair, eyes, skin, distinguishing features. ' +
-        'Not clothing, not art style, not a momentary facial expression.',
+        'Permanent physical identity — body, face, hair, skin, distinguishing features. ' +
+        'What the character IS. Never clothing, never lighting/rendering.',
     },
     {
       id: 'outfit',
       label: 'Outfit',
       promptable: true,
       boundary:
-        'The clothing and worn accessories on the subject in this portrait: garments, colors, ' +
-        'materials, jewelry. Not the body beneath, not the art style.',
+        'Current worn items — clothing, accessories, materials. What covers the subject right ' +
+        'now; can change scene to scene. Never physical identity, never lighting/rendering.',
     },
     {
       id: 'style',
       label: 'Style',
       promptable: true,
       boundary:
-        'The visual art style of the render: medium, artist/painter reference, lighting mood, ' +
-        'palette, finish. Not the subject\'s appearance, not what they wear.',
+        'Rendering treatment — medium, lighting, camera. How the image is DEPICTED, not who or ' +
+        'what is in it.',
     },
     {
       id: 'expression',
@@ -100,8 +101,19 @@ export const DEFAULT_LAYER_MANIFEST: LayerManifest = {
         'The subject\'s facial expression and emotional state in this portrait: what the face ' +
         'conveys. Not identity features, not art style.',
     },
+    {
+      id: 'format',
+      label: 'Format',
+      promptable: true,
+      boundary:
+        'The composition and shot type of the render: framing, crop, camera angle, how much of ' +
+        'the subject is shown (bust, waist-up, full-body), any transparency/background-intent ' +
+        '(e.g. a VN/game sprite). Not the subject\'s appearance, not what they wear, not the art ' +
+        'style — those belong to their own layers.',
+    },
   ],
-  template: 'A portrait of {{subject_overflow}}, wearing {{outfit_overflow}}, rendered in {{style_overflow}}, with {{expression_overflow}}.',
+  template:
+    'A portrait of {{subject_overflow}}, wearing {{outfit_overflow}}, rendered in {{style_overflow}}, with {{expression_overflow}}. Format: {{format_overflow}}.',
 };
 
 /** Pure: unset/empty/corrupt input falls back to the built-in default — a seeded manifest is

@@ -1,0 +1,21 @@
+-- scene_presence.presence_order — preserves the `Present:` line's left-to-right roster order
+-- through storage (docs/plans/studio-character-bridge-plan.md Part E). Applied by hand against
+-- the dedicated BigImagine database, same as every post-initdb migration:
+--   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0107_scene_presence_order.sql
+--
+-- Today replaceScenePresence deletes and re-inserts the scene's presence rows inside one
+-- transaction, and getScenesTool.ts's character_ids aggregate has no `order by` inside its
+-- array_agg — so the order `resolvePresentCharacters` computed (the `Present:` roster's own
+-- order) is genuinely lost on the way out. scene_presence's existing joined_at can't stand in
+-- for it either: Postgres's now() is fixed for the lifetime of a transaction, so every row from
+-- one turn's presence replace gets an identical joined_at regardless of loop position.
+--
+-- smallint not null default 0: rows written by replaceScenePresence carry their real index
+-- (1, 2, 3...), while rows from the other writer — the model-callable add_character_to_scene
+-- tool, which predates this column and won't set it — land on 0 and therefore sort ahead of
+-- Present:-derived rows until the next cleanup's replace wipes them. That is a documented,
+-- acceptable quirk: a manually-added character showing first is a transient state (the next
+-- replace removes them from presence entirely), and the ActivePortrait box is deliberately the
+-- simplest first-listed rule. Table-level grants already cover new columns, so no grant change.
+
+alter table scene_presence add column presence_order smallint not null default 0;

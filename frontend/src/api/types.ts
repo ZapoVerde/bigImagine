@@ -1342,6 +1342,30 @@ export interface UpdatePortraitEntityInput {
   template?: string | null;
 }
 
+/** POST /v1/portraits/entities/from-character response (studio-character-bridge-plan.md
+ *  Part A) — the seeded or refreshed subject entity and which of the two happened. */
+export interface SeedSubjectFromCharacterResult {
+  entity: PortraitEntityRow;
+  action: 'created' | 'refreshed';
+}
+
+/** POST /v1/portraits/entities/:id/set-as-avatar response (Part C) — the promoted character
+ *  and the always-true confirmation. */
+export interface SetPortraitEntityAsAvatarResult {
+  characterId: string;
+  avatarSet: true;
+}
+
+/** GET /v1/portraits-enabled and GET/POST /v1/admin/portraits-enabled responses
+ *  (portrait-chain-hardening-plan.md) — the household kill switch for the whole Portrait Studio
+ *  chain (routes under /v1/portraits/* except the layer-manifest pair, the Portraits tab, and the
+ *  ActivePortrait box). visual_portraits_enabled stored as text 'true'/'false'; unset behaves as
+ *  'true' — the feature predates the switch and is already in use, an opt-out safety valve, not an
+ *  opt-in gate. */
+export interface PortraitsEnabled {
+  enabled: boolean;
+}
+
 /** One wiki subscription — entity-specific when layerEntityId is set, whole-layer-type when
  *  null (reaches every entity of that layer type). */
 export interface PortraitWikiSubscription {

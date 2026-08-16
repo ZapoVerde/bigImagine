@@ -52,6 +52,9 @@ import type {
   PortraitLayerManifest,
   PortraitWikiEntry,
   CreatePortraitEntityInput,
+  SeedSubjectFromCharacterResult,
+  SetPortraitEntityAsAvatarResult,
+  PortraitsEnabled,
   UpdatePortraitEntityInput,
   UpdatePortraitWikiInput,
   ProfileModelsResult,
@@ -1599,9 +1602,58 @@ export function updatePortraitEntity(entityId: string, input: UpdatePortraitEnti
   return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'PATCH', body: input });
 }
 
+/** POST /v1/portraits/entities/from-character — seed or refresh a subject entity from a
+ *  character's persona (studio-character-bridge-plan.md Part A). Unconditional overwrite of the
+ *  existing entity's standing_instructions on every call; 409 when the persona is empty. */
+export function seedSubjectFromCharacter(
+  characterId: string,
+  apiKey: string | null,
+): Promise<SeedSubjectFromCharacterResult> {
+  return jsonRequest<SeedSubjectFromCharacterResult>('/v1/portraits/entities/from-character', apiKey, {
+    method: 'POST',
+    body: { characterId },
+  });
+}
+
+/** POST /v1/portraits/entities/:id/set-as-avatar — explicit, always-overwrite avatar promotion
+ *  (studio-character-bridge-plan.md Part C): the entity's current winning image becomes the
+ *  linked character's stored avatar. 400 unless the entity is a subject-layer entity with a
+ *  character_id and a winning image. */
+export function setPortraitEntityAsAvatar(entityId: string, apiKey: string | null): Promise<SetPortraitEntityAsAvatarResult> {
+  return jsonRequest<SetPortraitEntityAsAvatarResult>(`/v1/portraits/entities/${encodeURIComponent(entityId)}/set-as-avatar`, apiKey, {
+    method: 'POST',
+  });
+}
+
 /** DELETE /v1/portraits/entities/:id. */
 export async function deletePortraitEntity(entityId: string, apiKey: string | null): Promise<{ deleted: boolean }> {
   return jsonRequest<{ deleted: boolean }>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'DELETE' });
+}
+
+/** GET /v1/portraits-enabled — the Portrait Studio household kill switch (portrait-chain-
+ *  hardening-plan.md), same household-key/Access auth as getChatBackgroundSettings: App.tsx
+ *  fetches it right after auth resolves, before anyone would have entered the separate admin key.
+ *  Unset behaves as enabled: true (the feature predates the switch, an opt-out safety valve). */
+export async function getPortraitsEnabled(apiKey: string | null): Promise<PortraitsEnabled> {
+  const res = await fetch('/v1/portraits-enabled', { headers: authHeaders(apiKey) });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return (await res.json()) as PortraitsEnabled;
+}
+
+/** GET /v1/admin/portraits-enabled — the SettingsView "Portrait Studio" fieldset's saved value,
+ *  admin-gated like every other Settings-tab GET. */
+export function adminGetPortraitsEnabled(adminKey: string | null): Promise<PortraitsEnabled> {
+  return jsonRequest<PortraitsEnabled>('/v1/admin/portraits-enabled', adminKey);
+}
+
+/** POST /v1/admin/portraits-enabled — the SettingsView "Portrait Studio" fieldset's toggle
+ *  (portrait-chain-hardening-plan.md): { enabled: boolean }. No restart: every gated route reads
+ *  the value live, and App.tsx re-fetches it on the next page load. */
+export function adminSetPortraitsEnabled(value: PortraitsEnabled, adminKey: string | null): Promise<PortraitsEnabled> {
+  return jsonRequest<PortraitsEnabled>('/v1/admin/portraits-enabled', adminKey, {
+    method: 'POST',
+    body: value,
+  });
 }
 
 /** GET /v1/portraits/wiki — the Studio wiki's entries. */

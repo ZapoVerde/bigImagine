@@ -213,7 +213,8 @@ function makeDb() {
       return [{ episode_id: episodeId }];
     }
     if (s.startsWith('update visual_entities')) {
-      state.promoted.push({ entityIds: params[4], imageUrl: params[1], candidateId: params[2] });
+      const entityId = s.includes('slots = $4') ? params[5] : params[4];
+      state.promoted.push({ entityId, imageUrl: params[1], candidateId: params[2] });
       return [];
     }
     if (s.includes('update visual_candidates set rating')) {
@@ -310,7 +311,9 @@ const input = {
   assert(finalCall.options?.forceTool === 'submit_conclusion', 'feedback: final call is forced onto submit_conclusion');
   assert(calls[0].tools.length === 2 && !calls[0].options?.forceTool, 'feedback: pre-cap calls see both tools and no forceTool');
   assert(
-    db.state.promoted.length === 1 && db.state.promoted[0].entityIds.length === 4 && db.state.promoted[0].imageUrl === 'https://img/c1.png',
+    db.state.promoted.length === 4
+      && db.state.promoted.every((p) => p.imageUrl === 'https://img/c1.png' && p.candidateId === 'c1')
+      && ['e-sub', 'e-out', 'e-style', 'e-expr'].every((id) => db.state.promoted.some((p) => p.entityId === id)),
     'feedback: winner entity ids promoted with the winner image',
   );
   assert(db.state.ratingWrites.length === 2 && db.state.ratingWrites.some((w) => w.candidateId === 'c1' && w.rating === 5), 'feedback: ratings written through');

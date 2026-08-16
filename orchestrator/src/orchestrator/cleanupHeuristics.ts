@@ -518,7 +518,10 @@ export const DEFAULT_CLEANUP_CONFIG = {
     '- Era: AD/BC by default, or the story\'s own established calendar era (e.g. "41st Millennium", "3 ABY").\n' +
     '- Location: "General Area - Specific Room" when a specific spot is known, otherwise just the general area.\n' +
     '- Present: the comma-separated roster of every character physically in the room at the end of ' +
-    'this turn, from the history — never invented, never guessed from off-screen mentions.\n' +
+    'this turn, from the history — never invented, never guessed from off-screen mentions. ' +
+    'List whoever is currently most narratively active or central to the turn first (the ' +
+    'character speaking, acting, or otherwise the scene\'s focus), with the rest following in ' +
+    'no required order — this ordering is preserved and displayed, so first place matters.\n' +
     '{{known_locations}}\n' +
     '\n' +
     'Recent conversation:\n' +

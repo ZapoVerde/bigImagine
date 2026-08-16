@@ -6,11 +6,14 @@
  *   episode logging / §Reflection Investigation)
  * @description
  * The feedback half of Portrait Studio: submitPortraitFeedback writes the visual_episodes row,
- * promotes the winner (entities' last_image_url + current_best_candidate_id), persists
- * per-candidate ratings/notes, then runs the Reflection Investigation — the plan's genuinely new
- * loop: build a Path-2 title+tags wiki index (wiki.ts buildWikiIndex), let the model pull full
- * entries and conclude with a two-tool schema, capped at visual_wiki_investigation_max_turns
- * (default 6) with a forced final submit_conclusion so a round never silently drops its lesson.
+ * promotes the winner per-entity, per-layer (each entity's own slots from the winning
+ * chromosome — studio-character-bridge-plan.md Part B — plus last_image_url /
+ * current_best_candidate_id), promotes the winner image to the linked character's avatar
+ * fill-when-empty (Part C), persists per-candidate ratings/notes, then runs the Reflection
+ * Investigation — the plan's genuinely new loop: build a Path-2 title+tags wiki index (wiki.ts
+ * buildWikiIndex), let the model pull full entries and conclude with a two-tool schema, capped
+ * at visual_wiki_investigation_max_turns (default 6) with a forced final submit_conclusion so a
+ * round never silently drops its lesson.
  *
  * The loop's mechanics (plan §Reflection Investigation):
  *   1. Build the index across the *whole* active manifest's layers (not just the round's) —
@@ -52,6 +55,7 @@
  */
 
 import { log } from '../io/logger.js';
+import { writeAvatar } from '../io/characterMedia.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider, LlmTurn, ToolCall, ToolDefinition } from '../io/llm/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -478,19 +482,80 @@ export async function submitPortraitFeedback(
     );
     const episodeId = episode[0].episode_id;
 
-    // Winner promotion — last write wins, same posture as generateLocationImage.ts for
-    // non-critical convenience fields (plan §Edge Cases): the winner's own entity_ids (the
-    // round's authoritative record) are the entities promoted.
+    // Winner promotion — per-entity, per-layer (studio-character-bridge-plan.md Part B): each
+    // [layerId, entityId] pair in the winning candidate's entity_ids (the round's authoritative
+    // record) gets its own layer's values from the winning chromosome written onto its `slots`
+    // column — never another layer's values, never the whole chromosome, and a layer absent
+    // from the chromosome (malformed data, shouldn't happen — every promptable layer is always
+    // populated per buildParentChromosome) leaves that entity's slots untouched rather than
+    // overwriting hand-tuned values with an empty object. This makes the winning shape the
+    // entity's durable state, so the next round's ensureEntityForLayer read — and the next
+    // mutation call's parentSlots — refines it instead of the original placeholder. Fail-open
+    // (§11): an entity deleted mid-round simply affects zero rows.
     const winner = candidates.find((c) => c.candidate_id === input.winnerId)!;
-    const winnerEntityIds = Object.values(winner.entity_ids ?? {});
-    if (winnerEntityIds.length > 0) {
+    const winnerSlots = winner.chromosome?.slots ?? {};
+    let subjectCharacterId: string | null = null;
+    for (const [layerId, entityId] of Object.entries(winner.entity_ids ?? {})) {
+      const layerSlots = winnerSlots[layerId];
       await deps.db.withUserScope(userId, (session) =>
         session.query(
-          `update visual_entities set last_image_url = $2, current_best_candidate_id = $3, updated_at = now()
-           where user_id = $4 and entity_id = any($5::uuid[])`,
-          [userId, winner.image_url, winner.candidate_id, userId, winnerEntityIds],
+          layerSlots !== undefined
+            ? `update visual_entities set last_image_url = $2, current_best_candidate_id = $3, slots = $4::jsonb, updated_at = now()
+               where user_id = $5 and entity_id = $6`
+            : `update visual_entities set last_image_url = $2, current_best_candidate_id = $3, updated_at = now()
+               where user_id = $4 and entity_id = $5`,
+          layerSlots !== undefined
+            ? [userId, winner.image_url, winner.candidate_id, JSON.stringify(layerSlots), userId, entityId]
+            : [userId, winner.image_url, winner.candidate_id, userId, entityId],
         ),
       );
+      // Avatar promotion (Part C) needs the subject entity's character_id read fresh at
+      // promotion time — the entity may have been repointed via PATCH since the round began,
+      // and the value cached at round start would be stale.
+      if (layerId === 'subject') {
+        const rows = await deps.db.withUserScope(userId, (session) =>
+          session.query<{ character_id: string | null }>(
+            'select character_id from visual_entities where entity_id = $1 and user_id = $2',
+            [entityId, userId],
+          ),
+        );
+        subjectCharacterId = rows[0]?.character_id ?? null;
+      }
+    }
+
+    // Winner image promotes to the linked character's avatar (Part C) — fill-when-empty only,
+    // mirroring the "explicit signal outranks inferred" posture (§3): a character with an
+    // avatar already set — imported, manually uploaded, or from an earlier Studio promotion —
+    // is never silently overwritten by a later round's winner. The deliberate-override case is
+    // the explicit POST /v1/portraits/entities/:id/set-as-avatar route, which always overwrites.
+    // image_url is always a URL our own resolved image_connections profile produced — never a
+    // value a user typed in — so a plain fetch is the right trust tier here. Fail-open: a
+    // fetch failure or a character row vanishing mid-round logs and moves on.
+    if (subjectCharacterId && winner.image_url) {
+      const avatarRows = await deps.db.withUserScope(userId, (session) =>
+        session.query<{ avatar_path: string | null }>(
+          'select avatar_path from characters where character_id = $1 and user_id = $2',
+          [subjectCharacterId, userId],
+        ),
+      );
+      if (avatarRows[0]?.avatar_path === null) {
+        try {
+          const imageRes = await fetch(winner.image_url);
+          if (!imageRes.ok) throw new Error(`image fetch returned ${imageRes.status}`);
+          const bytes = Buffer.from(await imageRes.arrayBuffer());
+          await writeAvatar(subjectCharacterId, bytes);
+          await deps.db.withUserScope(userId, (session) =>
+            session.query('update characters set avatar_path = $2 where character_id = $1 and user_id = $3', [
+              subjectCharacterId,
+              'local',
+              userId,
+            ]),
+          );
+          log.info('portraitFeedback: winner image promoted as character avatar (fill-when-empty)', { characterId: subjectCharacterId, episodeId });
+        } catch (err) {
+          log.warn('portraitFeedback: avatar promotion skipped — image fetch failed', { characterId: subjectCharacterId, episodeId, err });
+        }
+      }
     }
 
     // Per-candidate ratings/notes — pass through; the 1-5 range is the migration's CHECK, and a

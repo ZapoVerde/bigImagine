@@ -5,6 +5,7 @@ import {
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
+  adminGetPortraitsEnabled,
   adminGetScreenLockSettings,
   adminGetTimezone,
   adminListCredentials,
@@ -13,11 +14,12 @@ import {
   adminSetNotificationSettings,
   adminSetPersonaSettings,
   adminSetPiaProxyUrl,
+  adminSetPortraitsEnabled,
   adminSetScreenLockSettings,
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, ScreenLockSettings } from '../api/types';
+import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, PortraitsEnabled, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
@@ -127,6 +129,17 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
   const [characterSettingsStatus, setCharacterSettingsStatus] = useState('');
 
+  // Portrait Studio's household kill switch (portrait-chain-hardening-plan.md) — one boolean,
+  // default-on (the feature predates the switch, an opt-out safety valve, not an opt-in gate).
+  const [portraitsEnabled, setPortraitsEnabled] = useState(true);
+  const [selectedPortraitsEnabled, setSelectedPortraitsEnabled] = useState(true);
+  const [portraitsEnabledStatus, setPortraitsEnabledStatus] = useState('');
+
+  function applyPortraitsEnabled(settings: PortraitsEnabled) {
+    setPortraitsEnabled(settings.enabled);
+    setSelectedPortraitsEnabled(settings.enabled);
+  }
+
   function applyCharacterSettings(settings: CharacterSettings) {
     setCharacterSettings(settings);
     setSelectedDescriberPrompt(settings.describerPrompt);
@@ -159,7 +172,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, characterSettingsResult] = await Promise.all([
+      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, characterSettingsResult, portraitsEnabledResult] = await Promise.all([
         adminListCredentials(key),
         adminGetTimezone(key),
         adminGetNotificationSettings(key),
@@ -167,6 +180,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         adminGetPersonaSettings(key),
         adminGetScreenLockSettings(key),
         adminGetCharacterSettings(key),
+        adminGetPortraitsEnabled(key),
       ]);
       setCredentials(creds);
       setSelectedName(creds[0]?.name ?? '');
@@ -178,6 +192,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
       applyCharacterSettings(characterSettingsResult);
+      applyPortraitsEnabled(portraitsEnabledResult);
       return { ok: true };
     } catch (error) {
       return { ok: false, error };
@@ -282,6 +297,17 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setCharacterSettingsStatus('Saved.');
     } catch (err) {
       setCharacterSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
+    }
+  }
+
+  async function savePortraitsEnabled() {
+    if (selectedPortraitsEnabled === portraitsEnabled) return;
+    setPortraitsEnabledStatus('');
+    try {
+      applyPortraitsEnabled(await adminSetPortraitsEnabled({ enabled: selectedPortraitsEnabled }, adminKey));
+      setPortraitsEnabledStatus(selectedPortraitsEnabled ? 'Enabled — the Portraits tab is back on the next page load.' : 'Disabled — every portrait route, the Portraits tab, and the active-portrait box are off.');
+    } catch (err) {
+      setPortraitsEnabledStatus(err instanceof ApiError ? `error: ${err.message}` : 'failed to save');
     }
   }
 
@@ -498,6 +524,30 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
           </button>
           <div className="status">{characterSettingsStatus}</div>
         </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Portrait Studio</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={selectedPortraitsEnabled}
+            onChange={(e) => setSelectedPortraitsEnabled(e.target.checked)}
+          />
+          Enable Portrait Studio (household kill switch)
+        </label>
+        <div className="status">
+          The whole Studio chain — every <code>/v1/portraits/*</code> route except the layer-manifest
+          pair, the Portraits tab, and the active-portrait box above the RP chat
+          (portrait-chain-hardening-plan.md). Unset behaves as enabled: the feature predates the
+          switch, so this is an opt-out safety valve. Takes effect on the next page load and on the
+          very next route call — no restart needed.
+        </div>
+        <br />
+        <button onClick={savePortraitsEnabled} disabled={selectedPortraitsEnabled === portraitsEnabled}>
+          Save
+        </button>
+        <div className="status">{portraitsEnabledStatus}</div>
       </fieldset>
 
       <fieldset>

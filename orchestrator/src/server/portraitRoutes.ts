@@ -30,12 +30,21 @@
  *
  * @api-declaration
  * parseCreateEntityBody / parseUpdateEntityBody / parseLayerManifestBody / parseGenerateBody /
- *   parseFeedbackBody / parseWikiPatchBody — pure body parsers (undefined = invalid)
+ *   parseFeedbackBody / parseWikiPatchBody / parseFromCharacterBody — pure body parsers
+ *   (undefined = invalid)
  * handlePortraitEntities(req, res, deps, userId, url) — CRUD on /v1/portraits/entities
+ * handlePortraitEntityFromCharacter(req, res, deps, userId) — POST /v1/portraits/entities/from-character
+ *   (studio-character-bridge-plan.md Part A — seed-or-refresh a subject entity from a character's persona)
+ * handlePortraitEntitySetAsAvatar(req, res, deps, userId, url) — POST /v1/portraits/entities/:id/set-as-avatar
+ *   (Part C — explicit, always-overwrites avatar promotion)
  * handlePortraitWiki(req, res, deps, userId, url) — list/edit/delete on /v1/portraits/wiki
  * handlePortraitLayersGet / handlePortraitLayersSet — GET/POST /v1/portraits/layers
  * handlePortraitGenerate / handlePortraitFeedback — POST /v1/portraits/generate,
  *   /v1/portraits/feedback
+ * handlePortraitsEnabledGet / handlePortraitsEnabledSet — GET /v1/portraits-enabled and
+ *   GET/POST /v1/admin/portraits-enabled (portrait-chain-hardening-plan.md's kill switch)
+ * requirePortraitsEnabled(deps, res) — the shared 403 gate every gated handler opens with
+ *   (returns false and answers 403 when visual_portraits_enabled reads 'false')
  *
  * @contract
  *   assertions:
@@ -51,6 +60,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { log } from '../io/logger.js';
 import type { PostgresClient } from '../io/postgres.js';
+import { writeAvatar } from '../io/characterMedia.js';
 import { loadLayerManifest, type LayerDefinition, type LayerManifest } from '../portraits/layerStack.js';
 import type { WikiSubscription } from '../portraits/wiki.js';
 import { runPortraitGenerationRound } from '../orchestrator/portraitGeneration.js';
@@ -166,6 +176,31 @@ export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefine
     out.template = typeof raw.template === 'string' ? raw.template : null;
   }
   return out;
+}
+
+/** POST /v1/portraits/entities/from-character — { characterId: string }. The seed-or-refresh
+ *  action (studio-character-bridge-plan.md Part A): resolves the caller's own character, then
+ *  either creates a subject entity from its name + persona or refreshes an existing one's
+ *  standing_instructions in place (unconditional on every call — the button is an explicit act). */
+export interface FromCharacterBody {
+  characterId: string;
+}
+
+export function parseFromCharacterBody(raw: unknown): FromCharacterBody | undefined {
+  if (!isRecord(raw) || typeof raw.characterId !== 'string' || !raw.characterId.trim()) return undefined;
+  return { characterId: raw.characterId.trim() };
+}
+
+/** POST /v1/admin/portraits-enabled — { enabled: boolean }. The kill switch's write side
+ *  (portrait-chain-hardening-plan.md): one boolean, strict — a missing or non-boolean value is a
+ *  400, no coercion. */
+export interface SetPortraitsEnabledBody {
+  enabled: boolean;
+}
+
+export function parseSetPortraitsEnabledBody(raw: unknown): SetPortraitsEnabledBody | undefined {
+  if (!isRecord(raw) || typeof raw.enabled !== 'boolean') return undefined;
+  return { enabled: raw.enabled };
 }
 
 /** POST /v1/portraits/layers — { layers: [{ id, label, promptable, boundary }], template }.
@@ -318,6 +353,54 @@ async function subjectExistsForCharacter(db: PostgresClient, userId: string, cha
 
 // ---- Handlers -------------------------------------------------------------------
 
+/** portrait-chain-hardening-plan.md's kill switch read: visual_portraits_enabled as a boolean,
+ *  unset meaning 'true' — the feature predates the switch and is already in use, so this is an
+ *  opt-out safety valve, not an opt-in gate (fail-open-to-existing-behavior, matching every other
+ *  settings key's unset shape in orchestratorSettings.ts). */
+export async function readPortraitsEnabled(settings: HttpServerDeps['settings']): Promise<boolean> {
+  const raw = await settings.get('visual_portraits_enabled');
+  return raw !== 'false';
+}
+
+/** The shared 403 gate every gated portrait handler opens with (portrait-chain-hardening-plan.md):
+ *  reads the kill switch live — no restart, no partial DB reads or external fetches when off — and
+ *  on 'false' answers 403 and returns false so the handler returns immediately. The layer-manifest
+ *  pair is deliberately NOT gated (see httpServer.ts's route comment); scene-presence ordering is a
+ *  general scene feature and is also unaffected. */
+async function requirePortraitsEnabled(deps: HttpServerDeps, res: ServerResponse): Promise<boolean> {
+  if (await readPortraitsEnabled(deps.settings)) return true;
+  sendJson(res, 403, { error: 'portrait studio is disabled — enable it in Settings' });
+  return false;
+}
+
+/** GET /v1/portraits-enabled — the kill switch's read side for the frontend (household-gated via
+ *  the withUser route registration; nothing secret here, and App.tsx fetches it as a regular
+ *  authenticated user before anyone would have entered the separate admin key). */
+export async function handlePortraitsEnabledGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { enabled: await readPortraitsEnabled(deps.settings) });
+}
+
+/** GET/POST /v1/admin/portraits-enabled — the admin-gated mirror of the pair above: the admin
+ *  Settings toggle reads the same live value and writes { enabled: boolean } → 200 echoing the new
+ *  value; a missing/non-boolean enabled is a 400. Same three-route shape as the chat-background
+ *  settings trio, same no-restart semantics (the very next gated route call reads it live). */
+export async function handlePortraitsEnabledSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetPortraitsEnabledBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { enabled: boolean }' });
+    return;
+  }
+  await deps.settings.set('visual_portraits_enabled', parsed.enabled ? 'true' : 'false');
+  sendJson(res, 200, { enabled: parsed.enabled });
+}
+
 /** CRUD family on /v1/portraits/entities (user-scoped). */
 export async function handlePortraitEntities(
   req: IncomingMessage,
@@ -326,6 +409,7 @@ export async function handlePortraitEntities(
   userId: string,
   url: URL,
 ): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
   const rest = url.pathname.slice('/v1/portraits/entities'.length);
   const segments = rest.split('/').filter(Boolean);
 
@@ -509,6 +593,140 @@ export async function handlePortraitEntities(
   sendJson(res, 404, { error: 'not found' });
 }
 
+/** POST /v1/portraits/entities/from-character (studio-character-bridge-plan.md Part A) — seed
+ *  or refresh a subject entity from a character's persona. The operator-facing button on both
+ *  surfaces (CharactersView editor pane, CastSection cast row) calls this on purpose each time:
+ *  an existing subject entity's standing_instructions is overwritten unconditionally with the
+ *  character's current persona — there is no "already seeded, skip" rule, clicking again is how
+ *  the operator deliberately refreshes Studio's instructions after the persona changed (§3:
+ *  explicit signal outranks inferred). Declines outright (409, no entity touched) on a blank
+ *  persona rather than seeding empty instructions. */
+export async function handlePortraitEntityFromCharacter(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: HttpServerDeps,
+  userId: string,
+): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseFromCharacterBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { characterId: non-empty string }' });
+    return;
+  }
+  const chars = await deps.db.withUserScope(userId, (session) =>
+    session.query<{ character_id: string; name: string; persona: string }>(
+      'select character_id, name, persona from characters where character_id = $1 and user_id = $2',
+      [parsed.characterId, userId],
+    ),
+  );
+  const character = chars[0];
+  if (!character) {
+    sendJson(res, 404, { error: 'character not found' });
+    return;
+  }
+  const persona = character.persona.trim();
+  if (persona === '') {
+    sendJson(res, 409, { error: 'persona is empty' });
+    return;
+  }
+  // One subject entity per character (the same app-level guard the create path enforces).
+  if (await subjectExistsForCharacter(deps.db, userId, character.character_id)) {
+    const rows = await deps.db.withUserScope(userId, (session) =>
+      session.query<PortraitEntityRow>(
+        `update visual_entities set standing_instructions = $3, updated_at = now()
+         where entity_id in (
+           select entity_id from visual_entities
+           where user_id = $1 and layer_id = 'subject' and character_id = $2
+         )
+         returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+                   last_image_url, current_best_candidate_id, created_at, updated_at`,
+        [userId, character.character_id, persona],
+      ),
+    );
+    const entity = rows[0]!;
+    log.info('portraitRoutes: subject entity refreshed from character persona', { characterId: character.character_id, entityId: entity.entity_id });
+    sendJson(res, 200, { entity, action: 'refreshed' });
+    return;
+  }
+  const created = await deps.db.withUserScope(userId, (session) =>
+    session.query<PortraitEntityRow>(
+      `insert into visual_entities (user_id, layer_id, character_id, name, slots, standing_instructions, template)
+       values ($1, 'subject', $2, $3, '{}'::jsonb, $4, null)
+       returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+                 last_image_url, current_best_candidate_id, created_at, updated_at`,
+      [userId, character.character_id, character.name, persona],
+    ),
+  );
+  const entity = created[0]!;
+  log.info('portraitRoutes: subject entity seeded from character persona', { characterId: character.character_id, entityId: entity.entity_id });
+  sendJson(res, 200, { entity, action: 'created' });
+}
+
+/** POST /v1/portraits/entities/:id/set-as-avatar (studio-character-bridge-plan.md Part C) — the
+ *  deliberate, always-overwrite avatar promotion: an explicit operator click on a subject
+ *  entity's card, the counterweight to the automatic fill-when-empty-only rule inside
+ *  submitPortraitFeedback. Takes the entity's current winning image (last_image_url — always a
+ *  URL our own resolved image_connections profile produced, never a user-typed value, so a plain
+ *  fetch is the right trust tier) and writes it as the linked character's stored avatar
+ *  (writeAvatar + the 'local' avatar_path sentinel insertCharacterFromCard.ts already uses). */
+export async function handlePortraitEntitySetAsAvatar(
+  res: ServerResponse,
+  deps: HttpServerDeps,
+  userId: string,
+  url: URL,
+): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
+  const segments = url.pathname.slice('/v1/portraits/entities'.length).split('/').filter(Boolean);
+  if (segments.length !== 2 || segments[1] !== 'set-as-avatar') {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  const entity = await getEntity(deps.db, userId, decodeURIComponent(segments[0]!));
+  if (!entity) {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  if (entity.layer_id !== 'subject') {
+    sendJson(res, 400, { error: 'only a subject-layer entity can promote its image to a character avatar' });
+    return;
+  }
+  if (!entity.character_id) {
+    sendJson(res, 400, { error: 'entity has no linked character — nothing to set as avatar' });
+    return;
+  }
+  if (!entity.last_image_url) {
+    sendJson(res, 400, { error: 'entity has no winning image yet — run a generation round and pick a winner first' });
+    return;
+  }
+  let bytes: Buffer;
+  try {
+    const imageRes = await fetch(entity.last_image_url);
+    if (!imageRes.ok) throw new Error(`image fetch returned ${imageRes.status}`);
+    bytes = Buffer.from(await imageRes.arrayBuffer());
+  } catch (err) {
+    log.error('portraitRoutes: set-as-avatar failed to fetch the winning image', { entityId: entity.entity_id, err });
+    sendJson(res, 500, { error: 'failed to fetch the entity\'s winning image' });
+    return;
+  }
+  await writeAvatar(entity.character_id, bytes);
+  await deps.db.withUserScope(userId, (session) =>
+    session.query('update characters set avatar_path = $2 where character_id = $1 and user_id = $3', [
+      entity.character_id,
+      'local',
+      userId,
+    ]),
+  );
+  log.info('portraitRoutes: entity image promoted as character avatar (explicit)', { entityId: entity.entity_id, characterId: entity.character_id });
+  sendJson(res, 200, { characterId: entity.character_id, avatarSet: true });
+}
+
 /** Wiki family on /v1/portraits/wiki — list / edit / delete (creation is the Reflection pass's
  *  job, plan §Reflection Investigation). */
 export async function handlePortraitWiki(
@@ -518,6 +736,7 @@ export async function handlePortraitWiki(
   userId: string,
   url: URL,
 ): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
   const rest = url.pathname.slice('/v1/portraits/wiki'.length);
   const segments = rest.split('/').filter(Boolean);
 
@@ -657,6 +876,7 @@ export async function handlePortraitLayersSet(req: IncomingMessage, res: ServerR
  *  orchestrator result maps: ok → 200 with the candidates; a structured round failure → 400 with
  *  its stable error code. */
 export async function handlePortraitGenerate(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
   let raw: unknown;
   try {
     raw = await readJsonBody(req);
@@ -680,6 +900,7 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
 /** POST /v1/portraits/feedback — record the human evaluation and run the Reflection
  *  Investigation for the calling user. */
 export async function handlePortraitFeedback(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
   let raw: unknown;
   try {
     raw = await readJsonBody(req);
