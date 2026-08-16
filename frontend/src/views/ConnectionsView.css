@@ -353,6 +353,39 @@
   min-width: 8rem;
 }
 
+/* Provider-reliability sweep table (TextConnectionEditor, io/providerReliability.ts) — the compact
+   per-provider ok/total tally, color-coded green when a provider came through on every attempt. */
+.connections-reliability-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.connections-reliability-table th,
+.connections-reliability-table td {
+  text-align: left;
+  padding: 0.3rem 0.4rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+.connections-reliability-table th {
+  font-weight: var(--font-weight-semibold);
+}
+
+.reliability-ok {
+  color: var(--color-success);
+}
+
+.reliability-fail {
+  color: var(--color-danger);
+}
+
+.reliability-notes {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-xs);
+  word-break: break-word;
+}
+
 .connections-actions {
   display: flex;
   align-items: center;

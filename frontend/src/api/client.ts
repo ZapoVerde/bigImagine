@@ -60,6 +60,8 @@ import type {
   ProfileModelsResult,
   PromptPreview,
   ReasoningFrame,
+  ReliabilitySweepSnapshot,
+  ReliabilitySweepState,
   ScreenLockSettings,
   StagedAttachment,
   StoredChatMessage,
@@ -786,6 +788,33 @@ export async function adminListConnectionProviders(
  *  (id not found, network failure reaching the orchestrator) throws. */
 export async function adminTestConnection(id: string, adminKey: string | null): Promise<ConnectionTestResult> {
   return jsonRequest<ConnectionTestResult>(`/v1/admin/connections/${encodeURIComponent(id)}/test`, adminKey, { method: 'POST' });
+}
+
+/** POST /v1/admin/connections/:id/reliability — starts a provider-reliability sweep in the
+ *  background (io/providerReliability.ts): the live provider catalog for the connection's model,
+ *  probed one provider at a time ({ provider: { order: [name], allow_fallbacks: false } }) with a
+ *  start cadence, so the Connections tab can see which OpenRouter providers are reliable today
+ *  before pinning routing to one. Billed diagnostic calls, never real chat content. Resolves with
+ *  the initial state; poll adminGetReliabilitySweep to stream results. 409 (thrown as ApiError)
+ *  when a sweep is already running, 404 when the connection is gone or has no provider catalog. */
+export async function adminStartReliabilitySweep(
+  id: string,
+  input: { attemptsPerProvider?: number; delayMs?: number },
+  adminKey: string | null,
+): Promise<ReliabilitySweepState> {
+  const body = await jsonRequest<{ state: ReliabilitySweepState }>(
+    `/v1/admin/connections/${encodeURIComponent(id)}/reliability`,
+    adminKey,
+    { method: 'POST', body: input },
+  );
+  return body.state;
+}
+
+/** GET /v1/admin/connections/:id/reliability — the live sweep state ('idle' when none has ever run
+ *  for this connection). Poll while a sweep is running to stream per-provider results as attempts
+ *  land. */
+export async function adminGetReliabilitySweep(id: string, adminKey: string | null): Promise<ReliabilitySweepSnapshot> {
+  return jsonRequest<ReliabilitySweepSnapshot>(`/v1/admin/connections/${encodeURIComponent(id)}/reliability`, adminKey);
 }
 
 /** The Connections tab's image section full list (io/imageConnections.ts, endpoint.md §3) — every

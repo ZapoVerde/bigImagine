@@ -11,7 +11,8 @@
  *   unless-stopped picks it up at boot.
  * - LLM connections (io/llmConnections.ts): GET/POST /v1/admin/connections; GET/PATCH/DELETE
  *   plus /activate (202+restart, the active llm is a boot-time singleton — bi_principles.md
- *   §14), /models, /providers?model=, /test on one connection by id.
+ *   §14), /models, /providers?model=, /test, and /reliability (io/providerReliability.ts's
+ *   background provider sweep, POST starts / GET polls) on one connection by id.
  * - Image connections (io/imageConnections.ts, endpoint.md §3): the same id-in-path shape as the
  *   LLM connections handler above without /models or /providers preview routes; activation is a
  *   plain 200, NOT the LLM connections' 202+restart, because the active image connection is
@@ -20,7 +21,7 @@
  * @api-declaration
  * handleAdminCredentialsList(res, deps)                 — GET /v1/admin/credentials
  * handleAdminCredentialsSet(req, res, deps)             — POST /v1/admin/credentials
- * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/:id[/activate|/models|/providers|/test]]
+ * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/:id[/activate|/models|/providers|/test|/reliability]]
  * handleAdminImageConnectionRoutes(req, res, deps, url) — /v1/admin/image-connections[/:id[/activate|/test]]
  *
  * @contract
@@ -34,11 +35,16 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { log } from '../io/logger.js';
 import {
+  getProviderReliabilitySweep,
+  startProviderReliabilitySweep,
+} from '../io/providerReliability.js';
+import {
   listCredentials,
   listModelsForConnection,
   listProvidersForConnection,
   parseCreateConnectionBody,
   parseCreateImageConnectionBody,
+  parseReliabilitySweepBody,
   parseSetCredentialBody,
   parseUpdateConnectionBody,
   parseUpdateImageConnectionBody,
@@ -87,7 +93,7 @@ export async function handleAdminCredentialsSet(
 // handleFolders.ts's handleFolderRoutes. GET/POST on the collection; GET/PATCH/DELETE plus two
 // catalog-preview sub-routes on one connection by id.
 export async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
-  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test'
+  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test' | '/<id>/reliability'
   const segments = rest.split('/').filter(Boolean);
 
   if (segments.length === 0) {
@@ -223,6 +229,42 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
       return;
     }
     sendJson(res, 200, result);
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'reliability' && req.method === 'GET') {
+    const state = getProviderReliabilitySweep(id);
+    // No sweep has ever run for this connection — a 200 'idle' rather than 404, so the editor's
+    // poll can treat "nothing yet" as a normal first-run state instead of an error.
+    sendJson(res, 200, state ?? { status: 'idle' });
+    return;
+  }
+
+  if (segments.length === 2 && segments[1] === 'reliability' && req.method === 'POST') {
+    let raw: unknown;
+    try {
+      raw = await readJsonBody(req);
+    } catch {
+      sendJson(res, 400, { error: 'expected a JSON request body' });
+      return;
+    }
+    const parsed = parseReliabilitySweepBody(raw);
+    if (!parsed) {
+      sendJson(res, 400, {
+        error: 'expected { attemptsPerProvider?: 1-10, delayMs?: 500-10000 }',
+      });
+      return;
+    }
+    const result = await startProviderReliabilitySweep(deps.llmConnections, id, parsed);
+    if (!result.ok) {
+      if (result.reason === 'already_running') {
+        sendJson(res, 409, { error: 'a reliability sweep is already running for this connection' });
+        return;
+      }
+      sendJson(res, 404, { error: 'not found, or this connection has no provider catalog to sweep' });
+      return;
+    }
+    sendJson(res, 200, { state: result.state });
     return;
   }
 

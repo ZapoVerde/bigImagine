@@ -225,6 +225,33 @@ function isPrice(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
+// The provider-reliability sweep's request body (POST /v1/admin/connections/:id/reliability,
+// io/providerReliability.ts). Every field optional — absent fields fall back to the module's own
+// defaults (3 attempts per provider, 2s start cadence). Bounded so an admin can't accidentally
+// launch a runaway billed sweep: attempts per provider 1-10, start cadence 500-10000ms.
+export interface ReliabilitySweepBody {
+  attemptsPerProvider?: number;
+  delayMs?: number;
+}
+
+export function parseReliabilitySweepBody(raw: unknown): ReliabilitySweepBody | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { attemptsPerProvider, delayMs } = raw as Record<string, unknown>;
+  if (
+    attemptsPerProvider !== undefined &&
+    (typeof attemptsPerProvider !== 'number' || !Number.isInteger(attemptsPerProvider) || attemptsPerProvider < 1 || attemptsPerProvider > 10)
+  ) {
+    return undefined;
+  }
+  if (delayMs !== undefined && (typeof delayMs !== 'number' || !Number.isInteger(delayMs) || delayMs < 500 || delayMs > 10000)) {
+    return undefined;
+  }
+  return {
+    ...(attemptsPerProvider !== undefined ? { attemptsPerProvider } : {}),
+    ...(delayMs !== undefined ? { delayMs } : {}),
+  };
+}
+
 export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,

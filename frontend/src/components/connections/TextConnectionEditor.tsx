@@ -4,13 +4,15 @@ import {
   adminActivateConnection,
   adminCreateConnection,
   adminDeleteConnection,
+  adminGetReliabilitySweep,
   adminListConnectionModels,
   adminListConnectionProviders,
+  adminStartReliabilitySweep,
   adminTestConnection,
   adminUpdateConnection,
 } from '../../api/client';
 import { formatPricePerMillion } from '../../api/pricing';
-import type { ConnectionTestResult, LlmConnectionSummary } from '../../api/types';
+import type { ConnectionTestResult, LlmConnectionSummary, ReliabilitySweepSnapshot } from '../../api/types';
 
 // keySource: '' means "leave the stored key unchanged" (edit only — never valid for a new
 // connection), 'new' means "use the apiKey field below", anything else is another connection's id
@@ -188,6 +190,36 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     [],
   );
   const [providersError, setProvidersError] = useState('');
+  // Provider-reliability sweep (io/providerReliability.ts) — the live per-provider tally for this
+  // saved connection. null = no state loaded yet; the snapshot's own status distinguishes 'idle'
+  // (never run) from running/done.
+  const [reliability, setReliability] = useState<ReliabilitySweepSnapshot | null>(null);
+  const [reliabilityError, setReliabilityError] = useState('');
+  const [reliabilityAttempts, setReliabilityAttempts] = useState(3);
+  const pollRef = useRef<number | null>(null);
+
+  function stopSweepPolling() {
+    if (pollRef.current !== null) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }
+
+  // Keep polling the live sweep state until it finishes. A read failure mid-sweep is transient
+  // (the orchestrator is just busy) — silent here, the next tick picks the state back up.
+  function startSweepPolling(id: string) {
+    stopSweepPolling();
+    const poll = window.setInterval(async () => {
+      try {
+        const snapshot = await adminGetReliabilitySweep(id, adminKey);
+        if (snapshot.status !== 'running') stopSweepPolling();
+        setReliability(snapshot);
+      } catch {
+        // transient — keep polling
+      }
+    }, 1000);
+    pollRef.current = poll;
+  }
 
   useEffect(() => {
     setDraft(selected ? draftFromConnection(selected) : emptyDraft());
@@ -259,7 +291,34 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     };
   }, [selected, isNew, draft.kind, draft.model, adminKey]);
 
+  // Load the reliability sweep state for the selected connection on pick/save; keep polling while
+  // a sweep is running. 'idle' is a normal first-run state, not an error.
+  useEffect(() => {
+    stopSweepPolling();
+    setReliabilityError('');
+    if (!selected || isNew) {
+      setReliability(null);
+      return;
+    }
+    let cancelled = false;
+    adminGetReliabilitySweep(selected.id, adminKey)
+      .then((snapshot) => {
+        if (cancelled) return;
+        setReliability(snapshot);
+        if (snapshot.status === 'running') startSweepPolling(selected.id);
+      })
+      .catch((err) => {
+        if (!cancelled) setReliabilityError(err instanceof ApiError ? err.message : 'failed to read reliability state');
+      });
+    return () => {
+      cancelled = true;
+      stopSweepPolling();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected?.id, selected?.updatedAt, isNew, adminKey]);
+
   const dirty = isNew || (selected != null && !draftEqualsConnection(draft, selected));
+  const sweepRunning = reliability?.status === 'running';
 
   async function save() {
     if (!draft.name.trim() || !draft.model.trim()) {
@@ -356,6 +415,31 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     } finally {
       setTesting(false);
     }
+  }
+
+  // Start a provider-reliability sweep against the *saved* connection (like Test, it never probes
+  // an unsaved draft). 409 = a sweep is already running (raced with another tab) — not an error:
+  // fall through to polling the live state instead of failing.
+  async function runReliabilitySweep() {
+    if (!selected) return;
+    const sweptId = selected.id;
+    setReliabilityError('');
+    try {
+      await adminStartReliabilitySweep(sweptId, { attemptsPerProvider: reliabilityAttempts }, adminKey);
+    } catch (err) {
+      if (sweptId !== selectedIdRef.current) return;
+      if (!(err instanceof ApiError && err.status === 409)) {
+        setReliabilityError(err instanceof ApiError ? err.message : 'failed to start the reliability sweep');
+        return;
+      }
+    }
+    if (sweptId !== selectedIdRef.current) return;
+    startSweepPolling(sweptId);
+    adminGetReliabilitySweep(sweptId, adminKey)
+      .then((snapshot) => {
+        if (sweptId === selectedIdRef.current) setReliability(snapshot);
+      })
+      .catch(() => {});
   }
 
   async function activate() {
@@ -624,6 +708,79 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   placeholder="e.g. fp16, bf16"
                 />
               </label>
+            </fieldset>
+          )}
+
+          {draft.kind === 'openai-compatible' && (
+            <fieldset className="connections-provider-pin">
+              <legend>Provider reliability (OpenRouter)</legend>
+              <div className="status">
+                Fires one isolated, billed probe per provider on this saved connection&rsquo;s model ({draft.model}) —
+                {reliabilityAttempts} attempts each, round-robin, spaced 2s apart. Measures which providers actually
+                stream content back today — some are consistently reliable, others consistently return empty replies —
+                before you pin routing to one.
+              </div>
+              <label>
+                Attempts per provider
+                <select
+                  value={reliabilityAttempts}
+                  onChange={(e) => setReliabilityAttempts(Number(e.target.value))}
+                  disabled={sweepRunning}
+                >
+                  {[1, 2, 3, 5, 6, 10].map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {reliabilityError && <div className="error-banner">{reliabilityError}</div>}
+              {!reliability || reliability.status === 'idle' ? (
+                <div className="status">No sweep has run for this connection yet.</div>
+              ) : (
+                <>
+                  <table className="connections-reliability-table">
+                    <thead>
+                      <tr>
+                        <th>Provider</th>
+                        <th>Result</th>
+                        <th>Attempts</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reliability.providers.map((p) => (
+                        <tr key={p.tag}>
+                          <td>{p.name}</td>
+                          <td className={p.total > 0 && p.ok === p.total ? 'reliability-ok' : 'reliability-fail'}>
+                            {p.total === 0 ? '…' : `${p.ok}/${p.total}`}
+                          </td>
+                          <td className="reliability-notes">
+                            {p.attempts.length === 0 ? 'pending' : p.attempts.map((a) => a.note).join(', ')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div className="status">
+                    {reliability.status === 'running'
+                      ? `Sweep running since ${new Date(reliability.startedAt).toLocaleTimeString()} — this page updates as attempts land.`
+                      : `Finished at ${reliability.finishedAt ? new Date(reliability.finishedAt).toLocaleTimeString() : '…'} — ${
+                          reliability.providers.filter((p) => p.total > 0 && p.ok === p.total).length
+                        } of ${reliability.providers.length} providers fully reliable.`}
+                  </div>
+                </>
+              )}
+              <div className="connections-actions">
+                <button
+                  type="button"
+                  className="connections-test-btn"
+                  onClick={runReliabilitySweep}
+                  disabled={isNew || dirty || sweepRunning}
+                  title={dirty ? 'Save your changes first — the sweep probes the saved connection' : undefined}
+                >
+                  {sweepRunning ? 'Sweeping…' : 'Run reliability sweep'}
+                </button>
+              </div>
             </fieldset>
           )}
 

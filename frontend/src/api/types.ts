@@ -203,6 +203,41 @@ export interface ConnectionTestResult {
   error?: string;
 }
 
+// orchestrator/src/io/providerReliability.ts — the provider-reliability sweep the Connections tab's
+// "Provider reliability" panel runs and polls. A background sweep fires one isolated probe per
+// OpenRouter provider ({ provider: { order: [name], allow_fallbacks: false } }) on the connection's
+// model, round-robin interleaved with a start cadence, and tallies how many attempts actually
+// streamed content back — the server-side form of scripts/probe-provider-reliability.mjs.
+export interface ProviderReliabilityAttempt {
+  ok: boolean;
+  note: string;
+}
+
+export interface ProviderReliabilityRow {
+  name: string;
+  tag: string;
+  ok: number;
+  total: number;
+  attempts: ProviderReliabilityAttempt[];
+}
+
+export interface ReliabilitySweepState {
+  connectionId: string;
+  model: string;
+  status: 'running' | 'done';
+  startedAt: number;
+  finishedAt?: number;
+  attemptsPerProvider: number;
+  delayMs: number;
+  providers: ProviderReliabilityRow[];
+}
+
+/** GET /v1/admin/connections/:id/reliability returns either the live sweep state or 'idle' when no
+ *  sweep has ever run for this connection. */
+export type ReliabilitySweepSnapshot =
+  | { status: 'idle' }
+  | ReliabilitySweepState;
+
 // orchestrator/src/io/imageConnections.ts ImageConnectionRow — the Connections tab's image section
 // list/detail shape. No apiKey field (write-only, same as LlmConnectionSummary); hasApiKey instead,
 // since a local comfyui endpoint legitimately has none (every cloud provider requires one).
