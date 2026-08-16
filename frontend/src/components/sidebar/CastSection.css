@@ -1,0 +1,109 @@
+/* The RP sidebar's Cast section (rp-cast-infrastructure-plan.md Part C): who's known to this
+   chat, with a live presence dot for whoever the current scene's Present: line says is here.
+   Default expanded (the feature), still collapsible; same structural shape as the Timing
+   section (TurnDrawerSection.css) so the two stack consistently in sidebar-rp-sections. */
+
+.cast-section {
+  flex-shrink: 0;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg-surface);
+}
+
+.cast-header {
+  display: flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+}
+
+.cast-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  padding: 0.35rem 0.5rem;
+}
+
+.cast-toggle:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+.cast-chevron {
+  font-size: 0.65rem;
+  flex-shrink: 0;
+}
+
+.cast-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.25rem 0.9rem 0.9rem;
+  overflow-y: auto;
+  max-height: min(30vh, 16rem);
+}
+
+.cast-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-danger);
+}
+
+.cast-empty {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.cast-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.cast-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-primary);
+}
+
+.cast-row-avatar {
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.cast-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The live presence indicator: a small dot, filled when the character is in the active scene's
+   character_ids (the current Present: roster), outlined otherwise. */
+.cast-presence {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  border: 1px solid var(--color-border-strong, var(--color-text-muted));
+  flex-shrink: 0;
+}
+
+.cast-presence.on {
+  background: var(--color-accent, #2e9e5b);
+  border-color: var(--color-accent, #2e9e5b);
+}

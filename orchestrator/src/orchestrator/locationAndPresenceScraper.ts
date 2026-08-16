@@ -39,9 +39,10 @@
  * @api-declaration
  * parseStoryHeader(text) -> StoryHeader | null — pure; the two-line header parse, no IO
  * splitLocationName(name) -> { parent, sub } — pure; the " - " parent/sub split (location.md §3.1)
- * scrapeTurnPresence(deps, userId, chatId, messageId, text, mode) -> Promise<string | undefined> —
+ * scrapeTurnPresence(deps, userId, chatId, messageId, text, mode) -> Promise<{ locationId: string; characterIds: string[] } | undefined> —
  *   fail-open; parse, anchor the turn's active swipe, then extract location/scene/characters/
- *   presence, returning the resolved location id (the async image-gen trigger's target). mode is
+ *   presence, returning the resolved location id and the resolved `Present:` roster's character
+ *   ids (the async image-gen trigger's target and the cast-description fan-out's targets). mode is
  *   'extend' for a genuinely new turn (a location change advances chat_sessions.previous_scene_id)
  *   or 'replace' for a swipe regeneration (the replaced turn's location must NOT become the
  *   previous one — the revert target stays the last settled location, endpoint.md §5.1.8)
@@ -143,9 +144,12 @@ export interface TurnPresenceScrapeDeps {
  * (post-cleanup) and the message is persisted. Fail-open end to end: any step logs and returns
  * undefined; a turn is never blocked or degraded by this (segway.md §1).
  *
- * Returns the resolved location id (segway.md §4.2) when extraction succeeded — server/httpServer.ts
- * uses it to fire the async location-image generation pass (endpoint.md §5, decoupled, never
- * awaited inline). undefined when extraction was skipped or failed.
+ * Returns the resolved location id (segway.md §4.2) and the resolved `Present:` roster's
+ * character ids when extraction succeeded — server/httpServer.ts uses the location id to fire
+ * the async location-image generation pass (endpoint.md §5, decoupled, never awaited inline)
+ * and the character ids to fan out the fire-and-forget character describer
+ * (describeCharacter.ts, A2 of rp-cast-infrastructure-plan.md). undefined when extraction was
+ * skipped or failed.
  */
 export async function scrapeTurnPresence(
   deps: TurnPresenceScrapeDeps,
@@ -154,7 +158,7 @@ export async function scrapeTurnPresence(
   messageId: string,
   text: string,
   mode: 'extend' | 'replace' = 'extend',
-): Promise<string | undefined> {
+): Promise<{ locationId: string; characterIds: string[] } | undefined> {
   try {
     const header = parseStoryHeader(text);
     if (!header) {
@@ -213,7 +217,7 @@ async function extractFromHeader(
   header: StoryHeader,
   mode: 'extend' | 'replace',
   splitEnabled: boolean,
-): Promise<string> {
+): Promise<{ locationId: string; characterIds: string[] }> {
   const locationId = await resolveLocation(session, userId, chatId, swipeId, header, splitEnabled);
   const sceneId = await resolveScene(session, userId, chatId, locationId, mode);
   const characterIds = await resolvePresentCharacters(session, userId, chatId, swipeId, header.present);
@@ -224,7 +228,7 @@ async function extractFromHeader(
     sceneId,
     present: characterIds.length,
   });
-  return locationId;
+  return { locationId, characterIds };
 }
 
 /** segway.md §4.2 + location.md §3.2: resolve-or-create the location, parent first. The header
@@ -441,8 +445,12 @@ async function resolveScene(
  *  ordered user-authored first, then permanent, then transient, with a stable id tiebreak, so a
  *  same-named roster resolves deterministically); a matched transient character is re-anchored
  *  to this turn's swipe, same "continued presence follows the live timeline" rule as locations.
- *  Anything else becomes a placeholder identity — transient, anchored to this turn, every other
- *  field at its default (a user can flesh it out from the Characters view later). */
+ *  Anything else becomes a placeholder identity — transient, anchored to this turn — but carrying
+ *  the most recent same-named prior row's real `persona`/`avatar_path` forward when one exists
+ *  (A1 of rp-cast-infrastructure-plan.md: the same-phase parity location parity as
+ *  resolveOrCreateLocationRow's same-place carry — a character who appeared before, anywhere,
+ *  gets their real persona back instead of a blank stub). The carry is deliberately not
+ *  chat-scoped (any prior row, any status): a persona is identity, not timeline state. */
 async function resolvePresentCharacters(
   session: DbSession,
   userId: string,
@@ -471,9 +479,21 @@ async function resolvePresentCharacters(
       }
       continue;
     }
-    const [created] = await session.query<{ character_id: string }>(
-      `insert into characters (user_id, name, status) values ($1, $2, 'transient') returning character_id`,
+    // A1 carry-forward: the most recent same-named row with a real persona (any status, any
+    // chat — a persona is identity, not timeline state). The describer's skip rule
+    // (describeCharacter.ts) sees a carried persona as "already described" — no duplicate LLM
+    // call for a character who was fleshed out before.
+    const [prior] = await session.query<{ persona: string; avatar_path: string | null }>(
+      `select persona, avatar_path from characters
+       where user_id = $1 and name = $2 and persona <> ''
+       order by created_at desc, character_id
+       limit 1`,
       [userId, name],
+    );
+    const [created] = await session.query<{ character_id: string }>(
+      `insert into characters (user_id, name, persona, avatar_path, status)
+       values ($1, $2, $3, $4, 'transient') returning character_id`,
+      [userId, name, prior?.persona ?? '', prior?.avatar_path ?? null],
     );
     await session.query('insert into character_chat_links (character_id, chat_id, anchor_swipe_id) values ($1, $2, $3)', [
       created!.character_id,

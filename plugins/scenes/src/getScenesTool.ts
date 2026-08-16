@@ -17,6 +17,12 @@
  * With no chat context (ctx.chatId unset), no auto-registered row can be linked, so only
  * user-authored rows surface — the conservative reading of the spec.
  *
+ * rp-cast-infrastructure-plan.md Part C fix 1: the returned scenes are also scoped to the
+ * calling chat — `and (s.chat_id = $2 or s.chat_id is null)` — so a chat-scoped call (the Cast
+ * sidebar's presence read) sees only its own scenes plus user-authored ones (create_scene mints
+ * rows with no chat_id, which stay visible everywhere). A stateless call ($2 null) surfaces only
+ * user-authored scenes rather than every scene the user has.
+ *
  * @api-declaration
  * createGetScenesTool() — returns the get_scenes RegisteredTool
  *
@@ -66,6 +72,7 @@ export function createGetScenesTool(): RegisteredTool {
          left join scene_presence sp on sp.scene_id = s.scene_id
          left join characters c on c.character_id = sp.character_id
          where s.user_id = $1
+           and (s.chat_id = $2 or s.chat_id is null)
            and (s.active_location_id is null
                 or exists (
                   select 1 from locations l

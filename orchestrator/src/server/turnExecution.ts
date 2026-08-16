@@ -22,7 +22,7 @@
  * @api-declaration
  * resolveTurnLlm(deps, sessionParams, chatId) — { turnLlm, turnDefaultModel, turnPrice }
  * regenerateSwipe(deps, userId, chatId, detail, messageId, stream?, onDelta?, onCleanupEvent?,
- *   onReasoningDelta?) — { ok: true, message, locationId? } | { ok: false, aborted?, error }
+ *   onReasoningDelta?) — { ok: true, message, locationId?, characterIds? } | { ok: false, aborted?, error }
  *
  * @contract
  *   assertions:
@@ -42,6 +42,7 @@ import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, ty
 import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
 import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import { fireLocationImageGeneration } from './locationImages.js';
+import { fireCharacterDescription } from './characterDescription.js';
 import { createToolRegistry, filterToolRegistry } from '../orchestrator/toolRegistry.js';
 import { getHouseholdTimezone } from './adminServer.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
@@ -161,7 +162,7 @@ export async function regenerateSwipe(
   // swipes), and the accumulated reasoning is returned to the caller via the persisted
   // message's `reasoning` field either way.
   onReasoningDelta?: (reasoningDelta: string) => void,
-): Promise<{ ok: true; message: StoredChatMessage; locationId?: string } | { ok: false; aborted?: boolean; error: string }> {
+): Promise<{ ok: true; message: StoredChatMessage; locationId?: string; characterIds?: string[] } | { ok: false; aborted?: boolean; error: string }> {
   const { db, settings, chats } = deps;
   const { session } = detail;
   const priorMessages = detail.messages.slice(0, -1);
@@ -227,6 +228,10 @@ export async function regenerateSwipe(
     settings,
     chats,
     onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
+    // rp-cast-infrastructure-plan.md A3: the character analogue — a swipe regeneration that
+    // lands a `Present:` roster fires each character's describer on the deferred scrape path.
+    onCharactersScraped: (u, c, characterIds) =>
+      characterIds.forEach((characterId) => fireCharacterDescription(deps, u, c, characterId)),
   };
   let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
   let cleanupAbortController: AbortController | undefined;
@@ -377,9 +382,9 @@ export async function regenerateSwipe(
   // target must survive a chain of swipes.
   // location.md §4.2's header-good gate: only scrape when the reply's header parses — a bad
   // header is left to the cleanup subloop, which repairs it and then fires the deferred scrape
-  // on the repaired text (cleanupLoop.ts's onLocationScraped hook), so nothing re-scrapes a
-  // headerless text and no wasted ensureActiveSwipe row is minted for it.
-  const locationId = parseStoryHeader(reply)
+  // on the repaired text (cleanupLoop.ts's onLocationScraped/onCharactersScraped hooks), so
+  // nothing re-scrapes a headerless text and no wasted ensureActiveSwipe row is minted for it.
+  const presence = parseStoryHeader(reply)
     ? await scrapeTurnPresence(
         { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
         userId,
@@ -392,5 +397,5 @@ export async function regenerateSwipe(
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
   }
-  return { ok: true, message: swipeResult!, locationId };
+  return { ok: true, message: swipeResult!, locationId: presence?.locationId, characterIds: presence?.characterIds };
 }

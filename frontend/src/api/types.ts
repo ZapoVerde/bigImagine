@@ -359,6 +359,18 @@ export interface LocationSettings {
   describerHistoryPairs: string;
 }
 
+// GET /v1/admin/character-settings — the Characters page's describer settings
+// (rp-cast-infrastructure-plan.md A4): the character-describer LLM pass's prompt/history-pairs,
+// mirroring LocationSettings' describer pair. describerPrompt is always the effective prompt —
+// the built-in default when the stored value is empty (bi_principles.md §17) — with
+// describerPromptIsDefault flagging which one it is; describerHistoryPairs is the stored raw
+// string ('' = default), integer-as-text, default '1'.
+export interface CharacterSettings {
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
+}
+
 // GET /v1/admin/locations — one row of the Locations page's read-only known-locations browser
 // (location.md §6.2.4): the location with its parent place (via parent_location_id) and its
 // lifecycle status.
@@ -416,6 +428,12 @@ export interface ChatSessionRow {
   kind: 'chat' | 'rp';
   /** Which character this chat is playing, if any — set by apply_character_to_chat. */
   characterId: string | null;
+  /** The scene_id cache pointer (segway.md §2.2) — which scene this chat's story currently
+   *  stands in, stamped by the post-turn scraper. Backend has always sent it (chatSessions.ts's
+   *  toSessionRow); the frontend type just never surfaced it — the RP sidebar's Cast section
+   *  (rp-cast-infrastructure-plan.md Part C) matches get_scenes' returned scene rows against it
+   *  to read the active scene's presence. Null when no turn has landed a header yet. */
+  sceneId: string | null;
   /** The last context_stack_presets row applied via apply_prompt_stack_to_chat, if any. */
   promptStackPresetId: string | null;
   /** The retired preset-based cleanup pass's per-chat preset id — the inline runCleanupPass is

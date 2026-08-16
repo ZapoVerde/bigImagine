@@ -210,6 +210,8 @@ import {
   handleLocationsGet,
   handleLocationSettingsGet,
   handleLocationSettingsSet,
+  handleCharacterSettingsGet,
+  handleCharacterSettingsSet,
   handleLorebookSettingsGet,
   handleLorebookSettingsSet,
   handleTimezoneGet,
@@ -320,7 +322,13 @@ async function handleToolInvoke(
     return;
   }
 
-  const { status, body } = await invokeTool(deps.db, deps.tools, deps.embeddings, userId, toolName, args);
+  // rp-cast-infrastructure-plan.md Part B: the caller may scope the invocation to a chat via
+  // ?chat_id=… (the Cast sidebar passes the active RP chat's id so chat-scoped tools like
+  // get_characters/get_scenes surface that chat's auto-registered rows). Absent = undefined,
+  // exactly the stateless behavior every existing call site has today.
+  const chatId = new URL(req.url!, 'http://placeholder').searchParams.get('chat_id') ?? undefined;
+
+  const { status, body } = await invokeTool(deps.db, deps.tools, deps.embeddings, userId, toolName, args, chatId);
   sendJson(res, status, body);
 }
 
@@ -580,6 +588,8 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/admin/image-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleImageSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/location-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationSettingsGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/location-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/character-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/character-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/locations', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationsGet(res, deps); }) },
   { method: 'GET', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneSet(req, res, deps); }) },

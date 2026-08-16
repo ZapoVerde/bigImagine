@@ -218,8 +218,17 @@
  * prompt template ({{location_name}}, {{context}}; empty = the built-in default in
  * describeLocation.ts — same §17 fallback as every prompt key), describer_history_pairs is how
  * many trailing turn-pairs form the narrative context (integer-as-text, default '1', VLZ's
- * describerHistory). Read live on every pass, no restart, editable from the Settings tab's Image
- * Generation fieldset.
+ * describerHistory). Read live on every pass, no restart, editable from the Locations page's
+ * Room describer fieldset.
+ *
+ * character_describer_prompt/character_describer_history_pairs (rp-cast-infrastructure-plan.md
+ * A2/A4) are the character-description pass's two keys — the analogue that turns a freshly-
+ * minted characters row's empty persona into a real persona blurb, fired fire-and-forget off the
+ * response 'finish' event. Same shape as the location pair: describer_prompt is the full prompt
+ * template ({{character_name}}, {{context}}; empty = the built-in default in
+ * describeCharacter.ts), describer_history_pairs is the trailing turn-pairs context
+ * (integer-as-text, default '1'). Read live on every pass, no restart, editable from the
+ * Characters page's fieldset.
  *
  * reasoning_open_tag/reasoning_close_tag (migration 0095, docs/plans/reasoning-blocks-plan.md)
  * are the reasoning-block tag pair — the open/close markers whose wrapped span a model's reply
@@ -330,6 +339,8 @@ export const SETTING_NAMES = [
   'chat_legibility_halo_strength',
   'location_describer_prompt',
   'location_describer_history_pairs',
+  'character_describer_prompt',
+  'character_describer_history_pairs',
   'location_split_enabled',
   'location_injection_enabled',
   'location_injection_prompt',

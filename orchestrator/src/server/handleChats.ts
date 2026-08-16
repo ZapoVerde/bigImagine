@@ -57,9 +57,24 @@ import {
   fireLocationImageGeneration,
   resolveChatLocationImage,
 } from './locationImages.js';
+import { fireCharacterDescription } from './characterDescription.js';
 import { regenerateSwipe } from './turnExecution.js';
 import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import type { HttpServerDeps } from './httpServer.js';
+
+/** The decoupled post-regeneration trigger shared by both finish-event sites (rp-cast-
+ *  infrastructure-plan.md A3): fires the location-image generation pass for the scraped
+ *  location AND the fire-and-forget character describer for every resolved `Present:` character.
+ *  Both are no-op safe for already-described rows (their own skip rules). */
+function fireSwipedPresenceTriggers(
+  deps: HttpServerDeps,
+  userId: string,
+  chatId: string,
+  result: { locationId?: string; characterIds?: string[] },
+): void {
+  if (result.locationId) fireLocationImageGeneration(deps, userId, chatId, result.locationId);
+  result.characterIds?.forEach((characterId) => fireCharacterDescription(deps, userId, chatId, characterId));
+}
 
 export function isChatPatchBody(value: unknown): value is {
   title?: string;
@@ -601,20 +616,20 @@ export async function handleChatRoutes(
           res.write('data: [DONE]\n\n');
           res.end();
           req.off('close', onClientClose);
-          // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-          // sent — a provider round-trip has no place in the request path, so the trigger rides the
+          // endpoint.md §5: fire the decoupled passes only once the reply is actually sent — a
+          // provider round-trip has no place in the request path, so the triggers ride the
           // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
-          if (result.locationId) {
-            res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
+          if (result.locationId || (result.characterIds?.length ?? 0) > 0) {
+            res.once('finish', () => fireSwipedPresenceTriggers(deps, userId, chatId, result));
           }
           return;
         }
         sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, result.message) });
-        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-        // sent — a provider round-trip has no place in the request path, so the trigger rides the
+        // endpoint.md §5: fire the decoupled passes only once the reply is actually sent — a
+        // provider round-trip has no place in the request path, so the triggers ride the
         // response's 'finish' event, decoupled the same way chatMemorySync.ts's tick is.
-        if (result.locationId) {
-          res.once('finish', () => fireLocationImageGeneration(deps, userId, chatId, result.locationId!));
+        if (result.locationId || (result.characterIds?.length ?? 0) > 0) {
+          res.once('finish', () => fireSwipedPresenceTriggers(deps, userId, chatId, result));
         }
         return;
       } finally {

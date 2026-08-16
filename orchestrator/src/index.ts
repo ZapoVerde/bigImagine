@@ -69,6 +69,7 @@ import { createToolRegistry } from './orchestrator/toolRegistry.js';
 import { loadPlugins } from './orchestrator/pluginLoader.js';
 import { createApiKeyStore } from './server/apiKeyStore.js';
 import { fireLocationImageGeneration } from './server/locationImages.js';
+import { fireCharacterDescription } from './server/characterDescription.js';
 import { startHttpServer } from './server/httpServer.js';
 
 function requireEnv(name: string): string {
@@ -238,6 +239,8 @@ async function main(): Promise<void> {
     settings,
     chats,
     onLocationScraped: (userId, chatId, locationId) => fireLocationImageGeneration(httpDeps, userId, chatId, locationId, llm),
+    onCharactersScraped: (userId, chatId, characterIds) =>
+      characterIds.forEach((characterId) => fireCharacterDescription(httpDeps, userId, chatId, characterId, llm)),
   });
 
   startHttpServer(httpDeps);

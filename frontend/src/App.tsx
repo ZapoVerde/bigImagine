@@ -78,6 +78,13 @@ export default function App() {
   // under a different chat's cost line after a tab switch.
   const [turnSnapshot, setTurnSnapshot] = useState<TurnSnapshot | undefined>(undefined);
 
+  // The active RP chat's scene_id (rp-cast-infrastructure-plan.md Part C): ChatView up-reports
+  // it whenever the loaded session's sceneId changes, and Sidebar's Cast section matches
+  // get_scenes' returned rows against it to read the active scene's presence. App owns it
+  // because App owns activeChatId — the Cast section needs both, and they must come from the
+  // same chat.
+  const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+
   // Bumped when a character is deleted and its chats were purged server-side, so the sidebar's
   // history browsers (which list those chats) re-fetch and drop them.
   const [chatsRefreshKey, setChatsRefreshKey] = useState(0);
@@ -216,6 +223,7 @@ export default function App() {
           onDeselectNote={() => setSelectedNoteId(null)}
           notesRefreshKey={notesRefreshKey}
           activeChatId={activeTab?.type === 'rp' ? activeTab.chatId : undefined}
+          activeSceneId={activeTab?.type === 'rp' ? activeSceneId : undefined}
           promptRefreshToken={promptRefreshToken}
           chatsRefreshKey={chatsRefreshKey}
           turnSnapshot={turnSnapshot}
@@ -276,6 +284,7 @@ export default function App() {
                 onTopBarsHiddenChange={setTopBarsHidden}
                 onPromptRefresh={tab.id === activeTabId ? () => setPromptRefreshToken((t) => t + 1) : undefined}
                 onTurnSnapshot={tab.id === activeTabId ? setTurnSnapshot : undefined}
+                onSceneIdChange={tab.id === activeTabId ? setActiveSceneId : undefined}
               />
             )}
             {tab.type === 'notes' && (

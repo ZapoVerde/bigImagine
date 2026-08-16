@@ -42,6 +42,7 @@ import {
 } from '../orchestrator/chatChunkResize.js';
 import {
   getCanonSettings,
+  getCharacterSettings,
   getChatBackgroundSettings,
   getChatLegibilitySettings,
   getChatMemorySettings,
@@ -53,6 +54,7 @@ import {
   getLocationSettings,
   getLorebookSettings,
   parseSetCanonSettingsBody,
+  parseSetCharacterSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetChatBackgroundSettingsBody,
   parseSetChatLegibilitySettingsBody,
@@ -61,6 +63,7 @@ import {
   parseSetLorebookSettingsBody,
   parseSetTimezoneBody,
   setCanonSettings,
+  setCharacterSettings,
   setChatMemorySettings,
   setChatBackgroundSettings,
   setChatLegibilitySettings,
@@ -118,6 +121,32 @@ export async function handleLocationSettingsSet(req: IncomingMessage, res: Serve
   }
   await setLocationSettings(deps.settings, parsed);
   sendJson(res, 200, await getLocationSettings(deps.settings));
+}
+
+// rp-cast-infrastructure-plan.md A4 — the Characters page's describer settings (the
+// character-describer LLM pass's prompt/history-pairs knobs), mirroring the location-settings
+// pair above. Same admin gate + live no-restart shape as every other settings pair.
+export async function handleCharacterSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getCharacterSettings(deps.settings));
+}
+
+export async function handleCharacterSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetCharacterSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected { describer_prompt?, describer_history_pairs? }',
+    });
+    return;
+  }
+  await setCharacterSettings(deps.settings, parsed);
+  sendJson(res, 200, await getCharacterSettings(deps.settings));
 }
 
 // location.md §6.2.4 — the Locations page's read-only known-locations browser (parent/sub

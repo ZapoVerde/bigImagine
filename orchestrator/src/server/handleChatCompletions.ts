@@ -54,6 +54,7 @@ import { getHouseholdTimezone } from './adminServer.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
 import { toPreviewItem, type PromptPreviewItem } from './promptPreview.js';
 import { fireLocationImageGeneration } from './locationImages.js';
+import { fireCharacterDescription } from './characterDescription.js';
 import { resolveTurnLlm } from './turnExecution.js';
 import { buildChatCompletion, buildChatCompletionChunk, isChatCompletionRequestBody } from './openai.js';
 import {
@@ -65,8 +66,24 @@ import {
   writeStreamHeaders,
 } from './httpUtils.js';
 import type { ChatParams } from '../io/chatSessions.js';
-import type { LlmMessage } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { HttpServerDeps } from './httpServer.js';
+
+/** The decoupled post-turn trigger shared by all three finish-event sites (rp-cast-
+ *  infrastructure-plan.md A3): fires the location-image generation pass for the scraped
+ *  location AND the fire-and-forget character describer for every resolved `Present:`
+ *  character. Both are no-op safe to call for already-described rows (their own skip rules),
+ *  so re-firing on every turn costs nothing for a settled cast. */
+function fireScrapedPresenceTriggers(
+  deps: HttpServerDeps,
+  userId: string,
+  chatId: string | undefined,
+  presence: { locationId: string; characterIds: string[] },
+  turnLlm: LlmProvider,
+): void {
+  fireLocationImageGeneration(deps, userId, chatId, presence.locationId, turnLlm);
+  presence.characterIds.forEach((characterId) => fireCharacterDescription(deps, userId, chatId, characterId, turnLlm));
+}
 
 const ALLOWED_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
 
@@ -104,10 +121,11 @@ export async function handleChatCompletions(
     return;
   }
 
-  // The location resolved by Stage 2's scraper (segway.md §4.2) — captured here so endpoint.md
-  // §5's decoupled image-generation trigger can fire after the reply is sent (see the SSE and
-  // sendJson tails of this handler).
-  let scrapedLocationId: string | undefined;
+  // The scene state resolved by Stage 2's scraper (segway.md §4.2 + rp-cast-infrastructure-plan.md
+  // A3) — captured here so endpoint.md §5's decoupled image-generation trigger and the character
+  // describer fan-out can fire after the reply is sent (see the SSE and sendJson tails of this
+  // handler).
+  let scrapedPresence: { locationId: string; characterIds: string[] } | undefined;
 
   const messages: LlmMessage[] = body.messages
     .filter((m) => ALLOWED_ROLES.has(m.role))
@@ -360,6 +378,10 @@ export async function handleChatCompletions(
       // Same deferred post-repair location-scrape trigger the poll tick wires at the composition
       // root (index.ts): a live header repair also lands a location, so the bg pass fires too.
       onLocationScraped: (u, c, locationId) => fireLocationImageGeneration(deps, u, c, locationId),
+      // rp-cast-infrastructure-plan.md A3: the character analogue — a live header repair also
+      // lands a `Present:` roster, so each newly-established character gets its describer fire.
+      onCharactersScraped: (u, c, characterIds) =>
+        characterIds.forEach((characterId) => fireCharacterDescription(deps, u, c, characterId)),
     };
     const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined = liveCleanupActive
       ? (event) => {
@@ -656,7 +678,7 @@ export async function handleChatCompletions(
         // header is left to the cleanup subloop, which repairs it and then fires the deferred
         // scrape on the repaired text (cleanupLoop.ts's onLocationScraped hook). This is the same
         // race ensureFirstTurnHeader.ts already closes for turn 1, generalized to every turn.
-        scrapedLocationId = parseStoryHeader(reply)
+        scrapedPresence = parseStoryHeader(reply)
           ? await scrapeTurnPresence(
               { db, settings, ensureActiveSwipe: (u, c, m) => chats.ensureActiveSwipe(u, c, m) },
               userId,
@@ -750,12 +772,14 @@ export async function handleChatCompletions(
       res.write('data: [DONE]\n\n');
       res.end();
       req.off('close', onClientClose);
-      if (scrapedLocationId) {
-        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-        // sent — never awaited inline (a provider round-trip has no place blocking the reply).
-        // turnLlm is the connection this very turn ran on — the describer uses it too (the same
-        // "the room's description is written by the story's own voice" default VLZ uses).
-        res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+      if (scrapedPresence) {
+        // endpoint.md §5: fire the decoupled passes only once the reply is actually sent — never
+        // awaited inline (a provider round-trip has no place blocking the reply). turnLlm is the
+        // connection this very turn ran on — the describers use it too (the same "the room's
+        // description is written by the story's own voice" default VLZ uses).
+        res.once('finish', () =>
+          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+        );
       }
       return;
     }
@@ -769,22 +793,26 @@ export async function handleChatCompletions(
       res.write(`data: ${JSON.stringify(buildChatCompletionChunk(echoedModel, id, {}, 'stop'))}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
-      if (scrapedLocationId) {
-        // endpoint.md §5: fire the location-image generation pass only once the reply is actually
-        // sent — never awaited inline (a provider round-trip has no place blocking the reply).
-        // turnLlm is the connection this very turn ran on — the describer uses it too (the same
-        // "the room's description is written by the story's own voice" default VLZ uses).
-        res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+      if (scrapedPresence) {
+        // endpoint.md §5: fire the decoupled passes only once the reply is actually sent — never
+        // awaited inline (a provider round-trip has no place blocking the reply). turnLlm is the
+        // connection this very turn ran on — the describers use it too (the same "the room's
+        // description is written by the story's own voice" default VLZ uses).
+        res.once('finish', () =>
+          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+        );
       }
       return;
     }
 
     sendJson(res, 200, buildChatCompletion(echoedModel, reply));
-    if (scrapedLocationId) {
+    if (scrapedPresence) {
       // endpoint.md §5: same decoupled trigger as the streaming branch — the reply is sent, the
-      // image pass starts in the background like chatMemorySync.ts's tick. Same turnLlm threading
-      // as the streaming branch above.
-      res.once('finish', () => fireLocationImageGeneration(deps, userId, body.chat_id, scrapedLocationId!, turnLlm));
+      // passes start in the background like chatMemorySync.ts's tick. Same turnLlm threading as
+      // the streaming branch above.
+      res.once('finish', () =>
+        fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+      );
     }
   } finally {
     if (body.chat_id) endInteractiveTurn(body.chat_id);

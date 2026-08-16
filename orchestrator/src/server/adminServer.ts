@@ -166,6 +166,7 @@ import type { LorebookEntryDraft } from '../util/parseCharacterBookEntries.js';
 import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
 import { DEFAULT_REASONING_CLOSE_TAG, DEFAULT_REASONING_OPEN_TAG } from '../orchestrator/liveReasoning.js';
 import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../orchestrator/describeLocation.js';
+import { DEFAULT_CHARACTER_DESCRIBER_PROMPT } from '../orchestrator/describeCharacter.js';
 import { DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../util/renderLocationBlock.js';
 import { loadSlopRules, replaceSlopRules, type SlopRuleInput } from '../orchestrator/cleanupLoop.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -881,6 +882,60 @@ export async function setLocationSettings(
   if (patch.injection_prompt !== undefined) writes.push(['location_injection_prompt', patch.injection_prompt]);
   if (patch.describer_prompt !== undefined) writes.push(['location_describer_prompt', patch.describer_prompt]);
   if (patch.describer_history_pairs !== undefined) writes.push(['location_describer_history_pairs', patch.describer_history_pairs]);
+  for (const [key, value] of writes) await store.set(key, value);
+}
+
+// rp-cast-infrastructure-plan.md A4 — the Characters page's describer settings, mirroring the
+// location-settings trio above (not the image-settings pair, whose describer_* keys are
+// back-compat only): the character-describer LLM pass's prompt/history-pairs knobs.
+
+export interface CharacterSettings {
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+  describerHistoryPairs: string;
+}
+
+export async function getCharacterSettings(store: OrchestratorSettingsStore): Promise<CharacterSettings> {
+  const [describerPrompt, describerHistoryPairs] = await Promise.all([
+    store.get('character_describer_prompt'),
+    store.get('character_describer_history_pairs'),
+  ]);
+  return {
+    describerPrompt: describerPrompt?.trim() ? describerPrompt : DEFAULT_CHARACTER_DESCRIBER_PROMPT,
+    describerPromptIsDefault: !describerPrompt?.trim(),
+    describerHistoryPairs: describerHistoryPairs ?? '',
+  };
+}
+
+export function parseSetCharacterSettingsBody(
+  raw: unknown,
+):
+  | {
+      describer_prompt?: string;
+      describer_history_pairs?: string;
+    }
+  | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { describer_prompt, describer_history_pairs } = raw as Record<string, unknown>;
+  if (describer_prompt === undefined && describer_history_pairs === undefined) return undefined;
+  if (describer_prompt !== undefined && typeof describer_prompt !== 'string') return undefined;
+  if (describer_history_pairs !== undefined && typeof describer_history_pairs !== 'string') return undefined;
+  return {
+    describer_prompt,
+    describer_history_pairs,
+  };
+}
+
+export async function setCharacterSettings(
+  store: OrchestratorSettingsStore,
+  patch: {
+    describer_prompt?: string;
+    describer_history_pairs?: string;
+  },
+): Promise<void> {
+  const writes: Array<[SettingName, string]> = [];
+  if (patch.describer_prompt !== undefined) writes.push(['character_describer_prompt', patch.describer_prompt]);
+  if (patch.describer_history_pairs !== undefined) writes.push(['character_describer_history_pairs', patch.describer_history_pairs]);
   for (const [key, value] of writes) await store.set(key, value);
 }
 

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
-import { ApiError, callTool, createChat, exportCharacterCard, importCharacterCard, updateChat } from '../api/client';
-import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
+import {
+  ApiError,
+  adminGetCharacterSettings,
+  adminSetCharacterSettings,
+  callTool,
+  createChat,
+  exportCharacterCard,
+  importCharacterCard,
+  updateChat,
+} from '../api/client';
+import type { CharacterDetail, CharacterSettings, CharacterSummary, ContextStackPreset } from '../api/types';
 import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
+import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import './CharactersView.css';
 
 interface CharactersViewProps {
@@ -64,6 +74,51 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   // a counter (rather than a plain boolean) is the standard way to tell "left a child" from "left
   // the whole drop zone" without flicker.
   const dragCounter = useRef(0);
+
+  // --- Character-describer settings (rp-cast-infrastructure-plan.md A4) ---
+  // Same admin-key gate + mount-time no-key-then-stored-key probe as LocationsView's unified
+  // settings surface — the describer endpoints are admin-gated like every Settings-tab pair.
+  const [characterSettings, setCharacterSettings] = useState<CharacterSettings | null>(null);
+  const [selectedDescriberPrompt, setSelectedDescriberPrompt] = useState('');
+  const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
+  const [settingsStatus, setSettingsStatus] = useState('');
+
+  function applyCharacterSettings(settings: CharacterSettings) {
+    setCharacterSettings(settings);
+    setSelectedDescriberPrompt(settings.describerPrompt);
+    setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
+  }
+
+  async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
+    try {
+      applyCharacterSettings(await adminGetCharacterSettings(key));
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+
+  const { adminKey, setAdminKey, checking, unlocked, loadError, load } = useAdminUnlock(attemptLoad);
+
+  async function saveCharacterSettings() {
+    if (!characterSettings) return;
+    const patch: {
+      describer_prompt?: string;
+      describer_history_pairs?: string;
+    } = {};
+    if (selectedDescriberPrompt !== characterSettings.describerPrompt) patch.describer_prompt = selectedDescriberPrompt;
+    if (selectedDescriberHistoryPairs !== characterSettings.describerHistoryPairs) {
+      patch.describer_history_pairs = selectedDescriberHistoryPairs;
+    }
+    if (Object.keys(patch).length === 0) return;
+    setSettingsStatus('Saving…');
+    try {
+      applyCharacterSettings(await adminSetCharacterSettings(patch, adminKey));
+      setSettingsStatus('Saved.');
+    } catch (err) {
+      setSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
+    }
+  }
 
   const refresh = useCallback(
     async (selectAfter?: string) => {
@@ -347,6 +402,75 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
         <div className="characters-drop-overlay">
           <span>Drop a character card (PNG or JSON) to import</span>
         </div>
+      )}
+      {/* rp-cast-infrastructure-plan.md A4 — the character-describer settings. The roster above
+          is user-gated and always renders; only this fieldset needs the admin key (LocationsView's
+          useAdminUnlock shape). Collapsed to its own section so it never crowds the roster. */}
+      {!checking && (
+        <details className="characters-describer-settings" open={false}>
+          <summary>Describer settings</summary>
+          {!unlocked ? (
+            <div className="characters-describer-unlock">
+              <label>
+                Admin API key
+                <br />
+                <input type="password" value={adminKey} onChange={(e) => setAdminKey(e.target.value)} />
+              </label>
+              <br />
+              <button type="button" onClick={load}>
+                Load
+              </button>
+              {loadError && <div className="error-banner">{loadError}</div>}
+            </div>
+          ) : (
+            <div className="characters-describer-fields">
+              <label>
+                Character-describer prompt {characterSettings?.describerPromptIsDefault && <em>(default)</em>}
+                <br />
+                <textarea
+                  value={selectedDescriberPrompt}
+                  onChange={(e) => setSelectedDescriberPrompt(e.target.value)}
+                  rows={10}
+                  placeholder="[SYSTEM: TASK — CHARACTER ARCHIVIST]… (the built-in default)"
+                />
+              </label>
+              <div className="status">
+                The describer LLM call that turns a newly-minted character's blank persona into a
+                real persona blurb (rp-cast-infrastructure-plan.md). Macros expanded per call are{' '}
+                <code>{'{{character_name}}'}</code> and <code>{'{{context}}'}</code>. The reply's{' '}
+                <code>Persona:</code> marker fills <code>characters.persona</code>. Empty means the
+                built-in default.
+              </div>
+              <label>
+                Character-describer context (turn-pairs)
+                <br />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={selectedDescriberHistoryPairs}
+                  onChange={(e) => setSelectedDescriberHistoryPairs(e.target.value)}
+                  placeholder="1"
+                />
+              </label>
+              <div className="status">
+                How many trailing turn-pairs the describer reads as narrative context (default 1).
+                Leave empty for the default.
+              </div>
+              <button
+                type="button"
+                onClick={saveCharacterSettings}
+                disabled={
+                  !characterSettings ||
+                  (selectedDescriberPrompt === characterSettings.describerPrompt &&
+                    selectedDescriberHistoryPairs === characterSettings.describerHistoryPairs)
+                }
+              >
+                Save
+              </button>
+              <div className="status">{settingsStatus}</div>
+            </div>
+          )}
+        </details>
       )}
       <div className="characters-list">
         <div className="characters-list-header">

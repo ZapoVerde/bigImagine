@@ -30,6 +30,7 @@ import type {
   CreateConnectionInput,
   CreateImageConnectionInput,
   CredentialSummary,
+  CharacterSettings,
   Folder,
   ImageConnectionSummary,
   ImageConnectionTestResult,
@@ -130,9 +131,14 @@ export async function getScreenLockSettings(apiKey: string | null): Promise<Scre
 /** Invokes one registered tool by name — POST /v1/tools/:name, same auth and RLS scoping as chat.
  *  apiKey is null under Cloudflare Access SSO (see whoami()) — the Authorization header is simply
  *  omitted in that case. Response shapes aren't discoverable from the server; callers supply the
- *  expected shape via the type parameter, backed by the hand-written interfaces in ./types.ts. */
-export async function callTool<T>(name: string, args: unknown, apiKey: string | null): Promise<T> {
-  const res = await fetch(`/v1/tools/${encodeURIComponent(name)}`, {
+ *  expected shape via the type parameter, backed by the hand-written interfaces in ./types.ts.
+ *  Optional chatId (rp-cast-infrastructure-plan.md Part B) scopes the call to a chat via
+ *  ?chat_id=…, so chat-scoped tools like get_characters/get_scenes surface that chat's
+ *  auto-registered rows; every existing call site is unaffected (optional, appended, not a body
+ *  shape change). */
+export async function callTool<T>(name: string, args: unknown, apiKey: string | null, chatId?: string): Promise<T> {
+  const query = chatId ? `?chat_id=${encodeURIComponent(chatId)}` : '';
+  const res = await fetch(`/v1/tools/${encodeURIComponent(name)}${query}`, {
     method: 'POST',
     headers: { ...authHeaders(apiKey), 'content-type': 'application/json' },
     body: JSON.stringify(args),
@@ -904,6 +910,26 @@ export function adminSetLocationSettings(
   adminKey: string | null,
 ): Promise<LocationSettings> {
   return jsonRequest<LocationSettings>('/v1/admin/location-settings', adminKey, { method: 'POST', body: patch });
+}
+
+/** GET /v1/admin/character-settings — the Characters page's describer settings
+ *  (rp-cast-infrastructure-plan.md A4): the character-describer LLM pass's prompt/history-pairs,
+ *  mirroring the location-settings pair. Admin-gated like every Settings-tab GET. */
+export function adminGetCharacterSettings(adminKey: string | null): Promise<CharacterSettings> {
+  return jsonRequest<CharacterSettings>('/v1/admin/character-settings', adminKey);
+}
+
+/** POST /v1/admin/character-settings — partial patch (any subset of describer_prompt,
+ *  describer_history_pairs); the server rejects a body with zero fields or wrong-typed values.
+ *  Returns the full updated set. No restart: describeCharacter.ts reads the values live. */
+export function adminSetCharacterSettings(
+  patch: {
+    describer_prompt?: string;
+    describer_history_pairs?: string;
+  },
+  adminKey: string | null,
+): Promise<CharacterSettings> {
+  return jsonRequest<CharacterSettings>('/v1/admin/character-settings', adminKey, { method: 'POST', body: patch });
 }
 
 /** GET /v1/admin/locations — the Locations page's read-only known-locations browser (location.md

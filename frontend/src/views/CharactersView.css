@@ -354,3 +354,45 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* The character-describer settings (rp-cast-infrastructure-plan.md A4) — a collapsible details
+   block above the roster, mirroring LocationsView's Room describer fieldset. The roster is
+   user-gated; only this section needs the admin key, so it sits inside its own <details>. */
+.characters-describer-settings {
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.5rem 0.75rem;
+}
+
+.characters-describer-settings summary {
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.characters-describer-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  font-size: var(--font-size-sm);
+}
+
+.characters-describer-fields textarea,
+.characters-describer-fields input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.characters-describer-fields .status {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs, 0.72rem);
+}
+
+.characters-describer-unlock {
+  margin-top: 0.5rem;
+  font-size: var(--font-size-sm);
+}

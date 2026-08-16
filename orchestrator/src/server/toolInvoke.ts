@@ -14,10 +14,13 @@
  * dispatch does — RLS scoping is identical regardless of which front door a call came through.
  *
  * @api-declaration
- * invokeTool(db, tools, embeddings, userId, name, args) — looks up the tool, runs it scoped to
- *   userId with the embeddings provider every tool handler gets on its ToolHandlerContext, and
- *   never throws — failures (unknown tool, a thrown handler) come back as a {status, body} pair
- *   for the caller to translate into an HTTP response
+ * invokeTool(db, tools, embeddings, userId, name, args, chatId?) — looks up the tool, runs it
+ *   scoped to userId with the embeddings provider every tool handler gets on its
+ *   ToolHandlerContext (and the chatId, when the caller has one — the frontend passes
+ *   ?chat_id=… on POST /v1/tools/:name so chat-scoped tools like get_characters/get_scenes
+ *   surface the calling chat's auto-registered rows), and never throws — failures (unknown
+ *   tool, a thrown handler) come back as a {status, body} pair for the caller to translate
+ *   into an HTTP response
  *
  * @contract
  *   assertions:
@@ -45,6 +48,7 @@ export async function invokeTool(
   userId: string,
   name: string,
   args: unknown,
+  chatId?: string,
 ): Promise<ToolInvocationResult> {
   const tool = tools.get(name);
   if (!tool) {
@@ -52,7 +56,9 @@ export async function invokeTool(
   }
 
   try {
-    const result = await db.withUserScope(userId, (session) => tool.handler(args, { userId, db: session, embeddings }));
+    const result = await db.withUserScope(userId, (session) =>
+      tool.handler(args, { userId, db: session, embeddings, chatId }),
+    );
     return { status: 200, body: result ?? {} };
   } catch (err) {
     log.error(`tool invocation failed for "${name}" (user ${userId})`, err);

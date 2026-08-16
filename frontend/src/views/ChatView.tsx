@@ -125,6 +125,12 @@ interface ChatViewProps {
    *  Timing section (docs/plans/turn-timeline-graph-plan.md). Tagged with the chat id so a
    *  switched tab never shows one chat's chart under another chat's cost line. */
   onTurnSnapshot?: (snapshot: TurnSnapshot) => void;
+  /** RP chats only: fired whenever the loaded session's sceneId changes (a chat load, or a turn
+   *  that landed a header — the scraper stamps chat_sessions.scene_id post-turn). App holds the
+   *  active chat's sceneId for the sidebar's Cast section
+   *  (rp-cast-infrastructure-plan.md Part C) — the one piece of genuinely new plumbing in that
+   *  plan, sourced here because ChatView is the only component that fetches the session. */
+  onSceneIdChange?: (sceneId: string | null) => void;
 }
 
 // messageId is set only once a message round-trips through the server and comes back from
@@ -202,6 +208,7 @@ export default function ChatView({
   onTopBarsHiddenChange,
   onPromptRefresh,
   onTurnSnapshot,
+  onSceneIdChange,
   active,
 }: ChatViewProps) {
   // Turn-timing snapshot reporting (docs/plans/turn-timeline-graph-plan.md): capture the timing
@@ -216,6 +223,14 @@ export default function ChatView({
 
   // Active conversation state
   const [activeChat, setActiveChat] = useState<ChatSessionRow | null>(null);
+  // rp-cast-infrastructure-plan.md Part C: keep App's active-sceneId in sync with the loaded
+  // session — a chat load, and any turn that lands a header (the scraper stamps
+  // chat_sessions.scene_id post-turn), changes it. Also re-fires when the callback flips from
+  // undefined (this tab hidden) to wired (this tab active), so returning to an already-loaded
+  // RP chat re-reports its sceneId — App must never keep a different chat's sceneId under it.
+  useEffect(() => {
+    onSceneIdChange?.(activeChat?.sceneId ?? null);
+  }, [activeChat?.sceneId, onSceneIdChange]);
   // endpoint.md §6.4: the active location's rendered background image for this chat (resolved via
   // the scene_id cache pointer, §2.6-filtered). nulls = no eligible location at all — a location
   // whose image hasn't rendered yet does NOT null this out: the previous background stays up until

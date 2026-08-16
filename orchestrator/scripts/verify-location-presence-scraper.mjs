@@ -199,6 +199,17 @@ function createFakePool() {
             const row = eligible[0];
             return { rows: row ? [{ character_id: row.character_id, status: row.status }] : [] };
           }
+          // rp-cast-infrastructure-plan.md A1: the mint-path persona carry-forward — the most
+          // recent same-named row with a real persona (any status, any chat), copied onto the
+          // new transient row so a character who appeared before keeps their persona.
+          if (sql.startsWith('select persona, avatar_path from characters')) {
+            const [userId, name] = params;
+            const withPersona = characters
+              .filter((c) => c.user_id === userId && c.name === name && (c.persona ?? '') !== '')
+              .sort((a, b) => b.created_at.localeCompare(a.created_at));
+            const row = withPersona[0];
+            return { rows: row ? [{ persona: row.persona, avatar_path: row.avatar_path ?? null }] : [] };
+          }
           if (sql.startsWith('update character_chat_links set anchor_swipe_id')) {
             const [swipeId, characterId, chatId] = params;
             const link = characterChatLinks.find((c) => c.character_id === characterId && c.chat_id === chatId);
@@ -206,8 +217,8 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into characters')) {
-            const [userId, name] = params;
-            const row = { character_id: randomUUID(), user_id: userId, name, status: 'transient' };
+            const [userId, name, persona, avatarPath] = params;
+            const row = { character_id: randomUUID(), user_id: userId, name, persona: persona ?? '', avatar_path: avatarPath ?? null, status: 'transient', created_at: now() };
             characters.push(row);
             return { rows: [{ character_id: row.character_id }] };
           }
@@ -332,6 +343,46 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   assert(ensure.calls.length === 1 && ensure.calls[0].messageId === MSG, 'the turn\'s message is the swipe anchor');
 }
 
+// --- scrapeTurnPresence: A1 persona carry-forward ------------------------------------------------
+// rp-cast-infrastructure-plan.md A1: a minted character row carries the most recent same-named
+// prior row's persona/avatar_path forward (any status, any chat — a persona is identity, not
+// timeline state), so a character who appeared before gets their real persona back, and the
+// describer's skip rule (describeCharacter.ts) sees the carried persona as already-described.
+{
+  const pool = poolWithActiveSwipe(createFakePool());
+  const prior = {
+    character_id: randomUUID(),
+    user_id: USER,
+    name: 'Seraphina',
+    persona: 'A sharp-eyed harbormaster with a salt-cured coat.',
+    avatar_path: '/avatars/seraphina.png',
+    created_at: '2026-01-02T00:00:00.000Z',
+    status: 'inactive', // demoted alternate timeline — still carries persona (not chat-scoped)
+  };
+  pool.characters.push(prior);
+  // A different chat's row of the same name, newer but persona-less — must NOT win the carry.
+  pool.characters.push({
+    character_id: randomUUID(),
+    user_id: USER,
+    name: 'Seraphina',
+    persona: '',
+    avatar_path: null,
+    created_at: '2026-01-03T00:00:00.000Z',
+    status: 'transient',
+  });
+
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
+
+  const minted = pool.characters.find(
+    (c) => c.name === 'Seraphina' && pool.characterChatLinks.some((l) => l.character_id === c.character_id && l.chat_id === CHAT),
+  );
+  assert(!!minted, 'Seraphina is freshly auto-registered (the prior rows are not eligible for THIS chat)');
+  assert(minted.persona === 'A sharp-eyed harbormaster with a salt-cured coat.', 'the minted row carries the prior same-named row\'s persona (A1 carry-forward)');
+  assert(minted.avatar_path === '/avatars/seraphina.png', 'the minted row carries the prior row\'s avatar_path');
+}
+
 // --- scrapeTurnPresence: revisit reuses eligible rows ---------------------------------------------
 {
   const pool = poolWithActiveSwipe(createFakePool());
@@ -347,6 +398,9 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     character_id: 'bbbbbbbb-0000-0000-0000-000000000002',
     user_id: USER,
     name: 'Mair',
+    persona: '',
+    avatar_path: null,
+    created_at: '2026-01-01T00:00:00.000Z',
     status: null, // user-authored character
   };
   pool.locations.push(tavern);
@@ -381,7 +435,7 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   const foreignLoc = { location_id: randomUUID(), user_id: USER, name: 'The Drunken Kraken - Main Hall', visual_description: 'a different chat\'s tavern', environment: {}, status: 'transient' };
   pool.locations.push(foreignLoc);
   pool.locationChatLinks.push({ location_id: foreignLoc.location_id, chat_id: OTHER_CHAT, anchor_swipe_id: randomUUID() });
-  const foreignChar = { character_id: randomUUID(), user_id: USER, name: 'Mair', status: 'transient' };
+  const foreignChar = { character_id: randomUUID(), user_id: USER, name: 'Mair', persona: '', avatar_path: null, created_at: '2026-01-01T00:00:00.000Z', status: 'transient' };
   pool.characters.push(foreignChar);
   pool.characterChatLinks.push({ character_id: foreignChar.character_id, chat_id: OTHER_CHAT, anchor_swipe_id: randomUUID() });
 
@@ -498,6 +552,9 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     character_id: randomUUID(),
     user_id: USER,
     name: 'Mair',
+    persona: '',
+    avatar_path: null,
+    created_at: '2026-01-01T00:00:00.000Z',
     status: 'transient',
   };
   pool.characters.push(mair);

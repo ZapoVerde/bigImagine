@@ -151,6 +151,14 @@ export interface CleanupLoopDeps {
    *  kept out of this module's direct imports so cleanupLoop never depends on the HTTP layer.
    *  Fire-and-forget: the callback must never throw into the tick (fail-open, location.md §1.3). */
   onLocationScraped?: (userId: string, chatId: string, locationId: string) => void;
+  /** rp-cast-infrastructure-plan.md A3 — fired alongside onLocationScraped when the deferred
+   *  post-repair scrape resolves a `Present:` roster (the call-site scrape was skipped because
+   *  the raw header was bad; the repaired text now has a header, so the standard
+   *  describe-characters chain runs for the newly-established roster). Wired at the composition
+   *  root (index.ts) to httpServer's fireCharacterDescription — kept out of this module's
+   *  direct imports so cleanupLoop never depends on the HTTP layer. Fire-and-forget: the
+   *  callback must never throw into the tick (fail-open, location.md §1.3). */
+  onCharactersScraped?: (userId: string, chatId: string, characterIds: string[]) => void;
 }
 
 interface UserRow {
@@ -614,7 +622,7 @@ export async function finalizeCleanupResult(
       const mode = (result.message.swipes?.index ?? 0) > 1 ? 'replace' : 'extend';
       void (async () => {
         try {
-          const locationId = await scrapeTurnPresence(
+          const presence = await scrapeTurnPresence(
             { db: deps.db, settings: deps.settings, ensureActiveSwipe: (u, c, m) => deps.chats.ensureActiveSwipe(u, c, m) },
             userId,
             chatId,
@@ -622,7 +630,10 @@ export async function finalizeCleanupResult(
             composedContent,
             mode,
           );
-          if (locationId) deps.onLocationScraped?.(userId, chatId, locationId);
+          if (presence) {
+            deps.onLocationScraped?.(userId, chatId, presence.locationId);
+            deps.onCharactersScraped?.(userId, chatId, presence.characterIds);
+          }
         } catch (err) {
           log.warn(`cleanup: deferred scrape failed for message ${messageId} (fail-open)`, { chatId, err });
         }

@@ -3,6 +3,7 @@ import type { TabType } from '../../hooks/useTabs';
 import type { TurnSnapshot } from '../../lib/turnTimelineReport';
 import ChatBrowser from './ChatBrowser';
 import NotesBrowser from './NotesBrowser';
+import CastSection from './CastSection';
 import PromptInspectorPanel from '../promptInspector/PromptInspectorPanel';
 import TurnDrawerSection from '../timeline/TurnDrawerSection';
 import './Sidebar.css';
@@ -17,6 +18,10 @@ interface SidebarProps {
 
   /** The active RP chat's id — the drawer's Prompt Inspector shows this chat's turns. */
   activeChatId?: string;
+  /** The active RP chat's scene_id cache pointer (rp-cast-infrastructure-plan.md Part C) —
+   *  App holds it (ChatView up-reports it) and CastSection matches get_scenes' rows against it
+   *  to read the active scene's presence. undefined when no RP chat is open. */
+  activeSceneId?: string | null;
   /** Bumped once per completed turn of the active RP chat (App.tsx, via ChatView) so the
    *  inspector re-fetches — same live-read-per-turn behavior it had as an in-chat panel. */
   promptRefreshToken: number;
@@ -57,6 +62,9 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
     case 'rp':
       content = props.activeChatId ? (
         <div className="sidebar-rp-sections">
+          {/* rp-cast-infrastructure-plan.md Part C: the chat's known cast with live presence —
+              the actual feature of this plan, so it defaults expanded (unlike Timing below). */}
+          <CastSection apiKey={props.apiKey} chatId={props.activeChatId} sceneId={props.activeSceneId ?? null} />
           <PromptInspectorPanel apiKey={props.apiKey} chatId={props.activeChatId} refreshToken={props.promptRefreshToken} />
           {/* The snapshot is only shown when it belongs to THIS chat — a switched tab must never
               render one chat's chart under another chat's cost line. */}
