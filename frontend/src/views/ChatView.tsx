@@ -56,6 +56,7 @@ import ImageStagingBar, { type StagedImageFile } from '../components/attachments
 import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import ChatMessageRow from '../components/chat/ChatMessageRow';
+import ChatComposer, { type ChatComposerHandle } from '../components/chat/ChatComposer';
 import { useBottomThirdSwipe } from '../hooks/useBottomThirdSwipe';
 import './ChatView.css';
 
@@ -403,23 +404,20 @@ export default function ChatView({
     };
   }, []);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
-  // Robust-chat-turns plan: the composer's draft survives involuntary remounts (a mobile browser
-  // reloading a backgrounded tab, a relogin) keyed by this tab's stable id — useTabs.ts persists
-  // TabInstance.id in bb_tabs across reloads, so the key is stable exactly when the tab is. Pure
-  // local scratch (bi_principles.md §1), never sent to the server. A deliberate tab close still
-  // drops it (App.tsx's documented "closing a tab does unmount it... any local-only draft is
-  // gone"); only the involuntary remount is being fixed here, so no cleanup-on-close is needed.
+  // Composer draft lives in ChatComposer (composer-render-isolation-plan.md) — typing must not
+  // re-render ChatView, so the draft's state and its localStorage persistence moved there with
+  // it. ChatView keeps only the one reactive signal it actually needs (the Send/Resend button's
+  // label/styling/disabled state), as a boolean updated only when the trimmed-empty state flips.
+  const composerRef = useRef<ChatComposerHandle>(null);
+  // Seed from the same lazy localStorage read ChatComposer performs for its own initial draft, so
+  // a chat reloaded with a persisted non-empty draft shows "Resend"/enabled on the very first
+  // render (onEmptyChange only fires from an effect, after paint — an unseeded false would flash
+  // "Send"/disabled for one frame). One-time read, not a shared source of truth.
   const draftKey = `bb_chat_draft:${tabId}`;
-  const [draft, setDraft] = useState(() => localStorage.getItem(draftKey) ?? '');
-  // Write-through on change with a short debounce (~250ms is plenty for text). send() also
-  // removes the key alongside setDraft('') so a sent draft can't resurrect on a later remount.
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      if (draft) localStorage.setItem(draftKey, draft);
-      else localStorage.removeItem(draftKey);
-    }, 250);
-    return () => window.clearTimeout(t);
-  }, [draft, draftKey]);
+  const [composerHasText, setComposerHasText] = useState(
+    () => (localStorage.getItem(draftKey) ?? '').trim().length > 0,
+  );
+  const onEmptyChange = useCallback((isEmpty: boolean) => setComposerHasText(!isEmpty), []);
   const [sending, setSending] = useState(false);
   // Robust-chat-turns plan: a turn is running server-side for this chat that this tab lost track
   // of (a backgrounded tab / reload mid-turn wiped the local `sending` state). Kept separate from
@@ -1116,7 +1114,7 @@ export default function ChatView({
       !sending &&
       !selectionMode &&
       lastMsg?.role === 'user' &&
-      !draft.trim() &&
+      !composerHasText &&
       stagedFiles.length === 0 &&
       stagedImages.length === 0
     );
@@ -1322,7 +1320,7 @@ export default function ChatView({
   }
 
   async function send() {
-    const text = draft.trim();
+    const text = composerRef.current?.getValue().trim() ?? '';
     const resendLast = resendMode();
     if (sending || resumingTurn) return;
     if (!resendLast && !text && stagedFiles.length === 0 && stagedImages.length === 0) return;
@@ -1347,11 +1345,10 @@ export default function ChatView({
       ? messages
       : [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
-    setDraft('');
-    // Robust-chat-turns plan: the sent draft must not resurrect from localStorage on a later
-    // remount — remove the key alongside clearing the state (the debounced write-through effect
-    // would clear it 250ms later anyway; doing it here makes the intent explicit and immediate).
-    localStorage.removeItem(draftKey);
+    // The sent draft must not resurrect from localStorage on a later remount — clear() resets
+    // the state AND removes the key immediately (the debounced write-through effect would clear
+    // it 250ms later anyway; doing it here makes the intent explicit and immediate).
+    composerRef.current?.clear();
     // Strip the client-only id (StagingBar's key/promotion-tracking field) before it goes over
     // the wire — the server's IncomingAttachment shape doesn't know about it.
     const attachments = stagedFiles.map(({ id: _id, ...rest }) => rest);
@@ -1881,17 +1878,20 @@ export default function ChatView({
     </>
   );
 
-  // Typing lag fix: each row's own onChange (the composer draft) re-renders ChatView on every
-  // keystroke. Without this, that cascaded into a full re-render — and a full ReactMarkdown
-  // reparse — of every message in the history on every keystroke, worst on long RP chats where
-  // it's most of what's on screen. ChatMessageRow (React.memo) skips that reparse for messages
-  // whose own props didn't change, but memoization only holds if those props are referentially
-  // stable across renders. `messages[i]` objects already are (setMessages only replaces the
-  // entries that actually changed); the callbacks below are the other half — swipe/startEdit/
-  // etc. are plain `function` declarations redeclared every render, so passed directly they'd
-  // break the memo on every keystroke too. Routing them through a ref keeps the identity handed
-  // to each row permanently stable while every call still reaches the current closure (avoids
-  // hand-deriving accurate useCallback dependency arrays for functions this wide, e.g. swipe's).
+  // Typing lag fix: the composer's draft used to live in ChatView's state, so every keystroke
+  // re-rendered it — and cascaded into a full re-render, and a full ReactMarkdown reparse, of
+  // every message in the history, worst on long RP chats where that's most of what's on screen.
+  // Two layers now stop that: ChatComposer owns the draft, so typing never re-renders ChatView at
+  // all (composer-render-isolation-plan.md) — and ChatMessageRow (React.memo) is the second line
+  // of defense for ChatView's other re-renders (send progress, selection mode, active-chat
+  // changes), skipping the reparse for messages whose own props didn't change. Memoization only
+  // holds if those props are referentially stable across renders. `messages[i]` objects already
+  // are (setMessages only replaces the entries that actually changed); the callbacks below are
+  // the other half — swipe/startEdit/etc. are plain `function` declarations redeclared every
+  // render, so passed directly they'd break the memo on every re-render too. Routing them
+  // through a ref keeps the identity handed to each row permanently stable while every call still
+  // reaches the current closure (avoids hand-deriving accurate useCallback dependency arrays for
+  // functions this wide, e.g. swipe's).
   const swipeRef = useRef(swipe);
   swipeRef.current = swipe;
   const startEditRef = useRef(startEdit);
@@ -2202,19 +2202,12 @@ export default function ChatView({
             {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this
                 tab lost track of (resumingTurn) — typing into a conversation whose transcript is
                 about to change under you is worse than waiting for the refresh. */}
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey && window.innerWidth >= 768) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              placeholder="Message BigImagine…"
-              rows={2}
-              autoFocus
+            <ChatComposer
+              ref={composerRef}
+              tabId={tabId}
               disabled={resumingTurn}
+              onSend={send}
+              onEmptyChange={onEmptyChange}
             />
             {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
                 the row is identical in both breakpoints. Scrolls the history to its end. */}
@@ -2234,7 +2227,7 @@ export default function ChatView({
                 !swipeRegenerating &&
                 !resumingTurn &&
                 (selectionMode ||
-                  (!resendMode() && !draft.trim() && stagedFiles.length === 0 && stagedImages.length === 0))
+                  (!resendMode() && !composerHasText && stagedFiles.length === 0 && stagedImages.length === 0))
               }
               title={sending || swipeRegenerating ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
               onClick={() => (sending || swipeRegenerating ? void stopTurn() : void send())}
