@@ -5,7 +5,6 @@ import {
   createChat,
   exportCharacterCard,
   importCharacterCard,
-  seedSubjectFromCharacter,
   updateChat,
 } from '../api/client';
 import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
@@ -70,7 +69,6 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [startingRp, setStartingRp] = useState(false);
-  const [studioSeedStatus, setStudioSeedStatus] = useState<string | null>(null);
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -246,25 +244,6 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
       await exportCharacterCard(detail.characterId, format, apiKey);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to export card');
-    }
-  }
-
-  // studio-character-bridge-plan.md Part A: create-or-refresh this character's subject entity
-  // in Portrait Studio from its appearance (falling back to persona when no appearance is set).
-  // An explicit operator click every time — the server overwrites an existing subject entity's
-  // standing_instructions unconditionally, so clicking again after editing the fields is how the
-  // Studio copy is deliberately refreshed.
-  async function sendToPortraitStudio() {
-    if (!detail?.found) return;
-    setStudioSeedStatus('Seeding…');
-    setError(null);
-    try {
-      const result = await seedSubjectFromCharacter(detail.characterId, apiKey);
-      setStudioSeedStatus(result.action === 'created' ? 'Seeded — tune it in Portrait Studio.' : 'Refreshed in Portrait Studio.');
-      window.setTimeout(() => setStudioSeedStatus(null), 4000);
-    } catch (err) {
-      setStudioSeedStatus(null);
-      setError(err instanceof ApiError ? err.message : 'failed to seed Portrait Studio subject');
     }
   }
 
@@ -461,27 +440,9 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
                 rows={3}
                 value={draft.appearance}
                 onChange={(e) => updateDraft({ appearance: e.target.value })}
-                placeholder="Physical traits only — body type, height, build, facial features, natural hair colour, permanent features (scars, birthmarks). Exclude clothing, accessories, current hairstyle, injuries. Portrait Studio prefers this field."
+                placeholder="Physical traits only — body type, height, build, facial features, natural hair colour, permanent features (scars, birthmarks). Exclude clothing, accessories, current hairstyle, injuries."
               />
             </label>
-            {!creatingNew && detail?.found && (
-              <div className="characters-studio-seed">
-                <button
-                  type="button"
-                  className="characters-studio-seed-btn"
-                  disabled={(draft.persona.trim() === '' && draft.appearance.trim() === '') || studioSeedStatus === 'Seeding…'}
-                  title={
-                    draft.persona.trim() === '' && draft.appearance.trim() === ''
-                      ? 'The character has no persona or appearance yet — write one first.'
-                      : 'Create or refresh this character\'s subject entity in Portrait Studio (its appearance becomes the entity\'s instructions, falling back to the persona when no appearance is set)'
-                  }
-                  onClick={() => void sendToPortraitStudio()}
-                >
-                  Send to Portrait Studio
-                </button>
-                {studioSeedStatus && <span className="characters-studio-seed-status">{studioSeedStatus}</span>}
-              </div>
-            )}
             <label className="characters-field">
               Scenario
               <textarea rows={3} value={draft.scenario} onChange={(e) => updateDraft({ scenario: e.target.value })} />

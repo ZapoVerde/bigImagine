@@ -167,6 +167,7 @@ import { DEFAULT_CLEANUP_CONFIG } from '../orchestrator/cleanupHeuristics.js';
 import { DEFAULT_REASONING_CLOSE_TAG, DEFAULT_REASONING_OPEN_TAG } from '../orchestrator/liveReasoning.js';
 import { DEFAULT_LOCATION_DESCRIBER_PROMPT } from '../orchestrator/describeLocation.js';
 import { DEFAULT_CHARACTER_DESCRIBER_PROMPT } from '../orchestrator/describeCharacter.js';
+import { DEFAULT_PORTRAIT_SUBJECT_DESCRIBER_PROMPT } from '../orchestrator/describeStudioSubject.js';
 import { DEFAULT_LOCATION_BLOCK_TEMPLATE } from '../util/renderLocationBlock.js';
 import { loadSlopRules, replaceSlopRules, type SlopRuleInput } from '../orchestrator/cleanupLoop.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -986,6 +987,39 @@ export async function setCharacterSettings(
   if (patch.describer_prompt !== undefined) writes.push(['character_describer_prompt', patch.describer_prompt]);
   if (patch.describer_history_pairs !== undefined) writes.push(['character_describer_history_pairs', patch.describer_history_pairs]);
   for (const [key, value] of writes) await store.set(key, value);
+}
+
+// portrait-studio-standalone-subjects-plan.md Part B — the Settings tab's Portrait Subject
+// describer settings, a sibling of the Character-describer trio above minus the history-pairs
+// knob (this describer has no transcript to bound). Same admin gate + live no-restart shape.
+export interface PortraitSubjectDescriberSettings {
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
+}
+
+export async function getPortraitSubjectDescriberSettings(store: OrchestratorSettingsStore): Promise<PortraitSubjectDescriberSettings> {
+  const describerPrompt = await store.get('portrait_subject_describer_prompt');
+  return {
+    describerPrompt: describerPrompt?.trim() ? describerPrompt : DEFAULT_PORTRAIT_SUBJECT_DESCRIBER_PROMPT,
+    describerPromptIsDefault: !describerPrompt?.trim(),
+  };
+}
+
+export function parseSetPortraitSubjectDescriberSettingsBody(
+  raw: unknown,
+): { describer_prompt?: string } | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { describer_prompt } = raw as Record<string, unknown>;
+  if (describer_prompt === undefined) return undefined;
+  if (typeof describer_prompt !== 'string') return undefined;
+  return { describer_prompt };
+}
+
+export async function setPortraitSubjectDescriberSettings(
+  store: OrchestratorSettingsStore,
+  patch: { describer_prompt?: string },
+): Promise<void> {
+  if (patch.describer_prompt !== undefined) await store.set('portrait_subject_describer_prompt', patch.describer_prompt);
 }
 
 export interface ImageConnectionTestResult {

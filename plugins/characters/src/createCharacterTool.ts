@@ -72,7 +72,7 @@ export function createCreateCharacterTool(): RegisteredTool {
             type: 'string',
             description:
               "Optional. The character's physical appearance only — body type, height, build, facial features, natural hair colour, permanent features such as scars or birthmarks. " +
-              'Exclude clothing, accessories, current hairstyle, and injuries (static, set at creation). Portrait Studio\'s from-character seeding prefers this over persona.',
+              'Exclude clothing, accessories, current hairstyle, and injuries (static, set at creation). Portrait Studio\'s cast-character seeding prefers this over persona.',
           },
           scenario: { type: 'string', description: 'Optional. The character\'s scenario/backstory text.' },
           system_prompt: { type: 'string', description: 'Optional. Extra system prompt content for this character.' },

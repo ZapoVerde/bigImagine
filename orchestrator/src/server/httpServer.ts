@@ -212,6 +212,8 @@ import {
   handleLocationSettingsSet,
   handleCharacterSettingsGet,
   handleCharacterSettingsSet,
+  handlePortraitSubjectDescriberSettingsGet,
+  handlePortraitSubjectDescriberSettingsSet,
   handleLorebookSettingsGet,
   handleLorebookSettingsSet,
   handleTimezoneGet,
@@ -256,8 +258,7 @@ import { buildModelsList } from './openai.js';
 import { handleLocationImageBroken } from './locationImages.js';
 import {
   handlePortraitEntities,
-  handlePortraitEntityFromCharacter,
-  handlePortraitEntitySetAsAvatar,
+  handlePortraitEntityFromCastCharacter,
   handlePortraitFeedback,
   handlePortraitGenerate,
   handlePortraitLayersGet,
@@ -598,6 +599,8 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/admin/location-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/character-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterSettingsGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/character-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/portrait-subject-describer-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitSubjectDescriberSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/portrait-subject-describer-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitSubjectDescriberSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/locations', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationsGet(res, deps); }) },
   { method: 'GET', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneSet(req, res, deps); }) },
@@ -643,16 +646,14 @@ const routes: Route[] = [
   // wiki browse/edit, the generate/feedback actions. The layers write is the one admin-gated
   // route — visual_layer_stack is an orchestrator_settings write, and every settings write on
   // this server is admin-gated; the layers read stays user-gated so the tab renders for anyone.
-  // The two studio-character-bridge-plan.md routes must be registered BEFORE the '*' family
-  // route below (first-match-wins): the exact from-character path would otherwise be swallowed
-  // by the set-as-avatar prefix entry, which in turn would be swallowed by the family entry's
-  // startsWith match. The prefix entry also owns any other unexpected POST under the family
-  // (e.g. /v1/portraits/entities/<uuid>) — its handler 404s those, the same outcome as before.
-  { method: 'POST', path: '/v1/portraits/entities/from-character', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
-      await handlePortraitEntityFromCharacter(req, res, deps, userId);
-    }) },
-  { method: 'POST', prefix: true, path: '/v1/portraits/entities/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
-      await handlePortraitEntitySetAsAvatar(res, deps, userId, new URL(req.url!, 'http://placeholder'));
+  // The portrait-studio-standalone-subjects-plan.md from-cast-character route must be registered
+  // BEFORE the '*' family route below (first-match-wins): the exact path would otherwise be
+  // swallowed by the family entry's startsWith match. The family entry also owns any other
+  // unexpected POST under /v1/portraits/entities (e.g. /v1/portraits/entities/<uuid>) — its
+  // handler 404s those, the same outcome as before. The old /from-character path and the
+  // set-as-avatar route are gone (the plan renames the former and deletes the latter).
+  { method: 'POST', path: '/v1/portraits/entities/from-cast-character', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitEntityFromCastCharacter(req, res, deps, userId);
     }) },
   { method: '*', family: '/v1/portraits/entities', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       await handlePortraitEntities(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));

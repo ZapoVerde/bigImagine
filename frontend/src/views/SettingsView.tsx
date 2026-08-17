@@ -5,6 +5,7 @@ import {
   adminGetNotificationSettings,
   adminGetPersonaSettings,
   adminGetPiaProxyUrl,
+  adminGetPortraitSubjectDescriberSettings,
   adminGetPortraitsEnabled,
   adminGetScreenLockSettings,
   adminGetTimezone,
@@ -14,12 +15,13 @@ import {
   adminSetNotificationSettings,
   adminSetPersonaSettings,
   adminSetPiaProxyUrl,
+  adminSetPortraitSubjectDescriberSettings,
   adminSetPortraitsEnabled,
   adminSetScreenLockSettings,
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
-import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, PortraitsEnabled, ScreenLockSettings } from '../api/types';
+import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, PortraitSubjectDescriberSettings, PortraitsEnabled, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
 // Intl.supportedValuesOf is a modern-browser API (well-supported by anything used with Cloudflare
@@ -129,6 +131,15 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   const [selectedDescriberHistoryPairs, setSelectedDescriberHistoryPairs] = useState('');
   const [characterSettingsStatus, setCharacterSettingsStatus] = useState('');
 
+  // Portrait Subject describer settings (portrait-studio-standalone-subjects-plan.md Part B):
+  // the prompt template for the one synchronous LLM call that turns a bare Studio subject name
+  // (+ optional seed) into its standing_instructions. A sibling of the Character-describer
+  // fieldset above minus the history-pairs knob — this describer has no transcript to bound.
+  // Same admin gate + live no-restart shape.
+  const [portraitSubjectDescriberSettings, setPortraitSubjectDescriberSettings] = useState<PortraitSubjectDescriberSettings | null>(null);
+  const [selectedPortraitSubjectDescriberPrompt, setSelectedPortraitSubjectDescriberPrompt] = useState('');
+  const [portraitSubjectDescriberSettingsStatus, setPortraitSubjectDescriberSettingsStatus] = useState('');
+
   // Portrait Studio's household kill switch (portrait-chain-hardening-plan.md) — one boolean,
   // default-on (the feature predates the switch, an opt-out safety valve, not an opt-in gate).
   const [portraitsEnabled, setPortraitsEnabled] = useState(true);
@@ -144,6 +155,11 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
     setCharacterSettings(settings);
     setSelectedDescriberPrompt(settings.describerPrompt);
     setSelectedDescriberHistoryPairs(settings.describerHistoryPairs);
+  }
+
+  function applyPortraitSubjectDescriberSettings(settings: PortraitSubjectDescriberSettings) {
+    setPortraitSubjectDescriberSettings(settings);
+    setSelectedPortraitSubjectDescriberPrompt(settings.describerPrompt);
   }
 
   function applyNotificationSettings(settings: NotificationSettings) {
@@ -172,7 +188,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
   // manual Load button's handler) lives in useAdminUnlock, not duplicated here.
   async function attemptLoad(key: string | null): Promise<{ ok: true } | { ok: false; error: unknown }> {
     try {
-      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, characterSettingsResult, portraitsEnabledResult] = await Promise.all([
+      const [creds, tz, notificationSettings, piaProxyUrlResult, personaSettings, screenLockSettings, characterSettingsResult, portraitSubjectDescriberSettingsResult, portraitsEnabledResult] = await Promise.all([
         adminListCredentials(key),
         adminGetTimezone(key),
         adminGetNotificationSettings(key),
@@ -180,6 +196,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         adminGetPersonaSettings(key),
         adminGetScreenLockSettings(key),
         adminGetCharacterSettings(key),
+        adminGetPortraitSubjectDescriberSettings(key),
         adminGetPortraitsEnabled(key),
       ]);
       setCredentials(creds);
@@ -192,6 +209,7 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       applyPersonaSettings(personaSettings);
       applyScreenLockSettings(screenLockSettings);
       applyCharacterSettings(characterSettingsResult);
+      applyPortraitSubjectDescriberSettings(portraitSubjectDescriberSettingsResult);
       applyPortraitsEnabled(portraitsEnabledResult);
       return { ok: true };
     } catch (error) {
@@ -297,6 +315,22 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
       setCharacterSettingsStatus('Saved.');
     } catch (err) {
       setCharacterSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
+    }
+  }
+
+  async function savePortraitSubjectDescriberSettings() {
+    if (!portraitSubjectDescriberSettings) return;
+    const patch: { describer_prompt?: string } = {};
+    if (selectedPortraitSubjectDescriberPrompt !== portraitSubjectDescriberSettings.describerPrompt) {
+      patch.describer_prompt = selectedPortraitSubjectDescriberPrompt;
+    }
+    if (Object.keys(patch).length === 0) return;
+    setPortraitSubjectDescriberSettingsStatus('Saving…');
+    try {
+      applyPortraitSubjectDescriberSettings(await adminSetPortraitSubjectDescriberSettings(patch, adminKey));
+      setPortraitSubjectDescriberSettingsStatus('Saved.');
+    } catch (err) {
+      setPortraitSubjectDescriberSettingsStatus(err instanceof ApiError ? err.message : 'Failed to save.');
     }
   }
 
@@ -523,6 +557,41 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
             Save
           </button>
           <div className="status">{characterSettingsStatus}</div>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Portrait Subject-describer</legend>
+        <div className="settings-describer-fields">
+          <label>
+            Prompt {portraitSubjectDescriberSettings?.describerPromptIsDefault && <em>(default)</em>}
+            <br />
+            <textarea
+              value={selectedPortraitSubjectDescriberPrompt}
+              onChange={(e) => setSelectedPortraitSubjectDescriberPrompt(e.target.value)}
+              rows={10}
+              placeholder="[SYSTEM: TASK — PORTRAIT SUBJECT ARCHIVIST]… (the built-in default)"
+            />
+          </label>
+          <div className="status">
+            The one synchronous LLM call that turns a bare Portrait Studio subject name (+
+            optional seed) into its <code>standing_instructions</code>, used only when an operator
+            creates a subject without typing instructions by hand — a subject created with
+            instructions already filled in never calls this. Macros expanded per call are{' '}
+            <code>{'{{name}}'}</code> and <code>{'{{seed}}'}</code>. The reply's{' '}
+            <code>Appearance:</code> marker fills the entity's standing_instructions. Empty means
+            the built-in default.
+          </div>
+          <button
+            onClick={savePortraitSubjectDescriberSettings}
+            disabled={
+              !portraitSubjectDescriberSettings ||
+              selectedPortraitSubjectDescriberPrompt === portraitSubjectDescriberSettings.describerPrompt
+            }
+          >
+            Save
+          </button>
+          <div className="status">{portraitSubjectDescriberSettingsStatus}</div>
         </div>
       </fieldset>
 

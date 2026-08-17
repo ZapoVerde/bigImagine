@@ -1,44 +1,38 @@
-// Proves studio-character-bridge-plan.md Parts A-C's route/service logic against a fake
-// Postgres pool + fake settings + fake LLM gate — no server, no network (fetch is stubbed per
-// test), no real provider (orchestrator/scripts/verify-location-presence-scraper.mjs's
-// convention). The suite exercises:
-//   - from-character (Part A, character-appearance-field-plan.md): create a subject entity
-//     from a character's appearance (preferred over persona when present); blank appearance
-//     falls back to the persona; unknown characterId → 404; both appearance and persona blank →
-//     409 with no entity created or touched; refresh overwrites standing_instructions
-//     unconditionally (no "already seeded, skip");
-//   - set-as-avatar (Part C): non-subject-layer → 400; entity with no character_id → 400; no
-//     last_image_url → 400; success always overwrites the character's avatar regardless of the
-//     current avatar_path; a failing image fetch → 500 without corrupting state (fail-open);
-//   - submitPortraitFeedback (Part B/C): the winning chromosome's per-layer slots land on the
-//     winning entities; an entity that only a losing candidate referenced is left untouched;
-//     the winner image promotes to the linked character's avatar fill-when-empty only — a
-//     null avatar_path gets written and becomes 'local', a non-null one is left exactly as it
-//     was (the plan's "fill-when-empty, not overwrite" crux), and a fetch failure skips the
-//     promotion without failing the feedback;
+// Proves portrait-studio-standalone-subjects-plan.md Parts B-D's route/service logic against a
+// fake Postgres pool + fake settings + fake LLM gates — no server, no network, no real provider
+// (orchestrator/scripts/verify-location-presence-scraper.mjs's convention). The suite exercises:
+//   - create-entity describer (Part B): a subject created with no standingInstructions gets them
+//     described from the optional seed (describeStudioSubject fires, its reply becomes
+//     standing_instructions); a subject created WITH standingInstructions (seed present or not)
+//     never invokes the describer and keeps exactly what was supplied (bi_principles.md §3 —
+//     explicit outranks inferred); a describer LLM failure still creates the entity (201) with
+//     blank instructions (fail-open, §11); a stray characterId in the body is accepted-and-ignored
+//     (never written — entities are standalone); a stray seed on a non-subject layer is silently
+//     unused;
+//   - from-cast-character (Part C): ALWAYS inserts a brand-new, unlinked subject entity seeded
+//     from the character's appearance (preferred over persona when present; blank appearance falls
+//     back to the persona); unknown characterId → 404; both appearance and persona blank → 409
+//     with nothing created; two consecutive calls with the same characterId produce two distinct
+//     entity_ids, both character_id null; a legacy linked entity from the old bridge is never
+//     touched or re-pointed (no refresh-in-place, no per-character dedup);
+//   - set-as-avatar (Part C): the route is removed — the CRUD family 404s it instead of the old
+//     always-overwrite promotion;
+//   - submitPortraitFeedback (Part B/D): the winning chromosome's per-layer slots land on the
+//     winning entities; an entity only a losing candidate referenced is left untouched; NO
+//     characters row is ever touched — zero queries against the characters table, no avatar_path
+//     write, no writeAvatar call (Part D, promotion retired);
 //   - the kill switch (portrait-chain-hardening-plan.md): visual_portraits_enabled = 'false'
 //     makes every gated handler 403 with the pinned error body before touching the DB or
 //     issuing a fetch, while the layer-manifest pair stays reachable either way;
 //   - the switch's own handlers: readPortraitsEnabled unset → true, handlePortraitsEnabledGet/
 //     Set round-trip the boolean, and a missing/non-boolean body is a 400.
-//
-// writeAvatar (characterMedia.ts) writes to disk under BIGBRAIN_CHARACTER_MEDIA_DIR, so that env
-// var is pointed at a throwaway temp dir BEFORE the module graph loads — hence the dynamic
-// imports.
 
-import { mkdtemp, readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-
-const MEDIA_DIR = await mkdtemp(join(tmpdir(), 'bigimagine-avatar-'));
-process.env.BIGBRAIN_CHARACTER_MEDIA_DIR = MEDIA_DIR;
 
 const { DEFAULT_LAYER_MANIFEST } = await import('../dist/portraits/layerStack.js');
 const {
   handlePortraitEntities,
-  handlePortraitEntityFromCharacter,
-  handlePortraitEntitySetAsAvatar,
+  handlePortraitEntityFromCastCharacter,
   handlePortraitFeedback,
   handlePortraitGenerate,
   handlePortraitLayersGet,
@@ -47,7 +41,6 @@ const {
   handlePortraitWiki,
   readPortraitsEnabled,
 } = await import('../dist/server/portraitRoutes.js');
-const { submitPortraitFeedback } = await import('../dist/orchestrator/portraitFeedback.js');
 
 function assert(cond, message) {
   if (!cond) {
@@ -75,6 +68,7 @@ function fakeRes() {
 function jsonReq(body) {
   const payload = JSON.stringify(body);
   return {
+    method: 'POST',
     [Symbol.asyncIterator]: async function* () {
       yield Buffer.from(payload, 'utf8');
     },
@@ -104,7 +98,8 @@ function makeSettings(overrides = {}) {
 
 // --- Fake pool: in-memory characters / visual_entities / visual_candidates / visual_episodes /
 // visual_wiki_entries, covering exactly the queries portraitRoutes.ts + portraitFeedback.ts
-// issue for these three surfaces. ---
+// issue for these surfaces. charQueries counts every query whose SQL mentions the characters
+// table — the Part D "promotion is retired" assertion reads zero after a feedback round. ---
 function makeDb() {
   const state = {
     entities: [],
@@ -114,13 +109,14 @@ function makeDb() {
     episodes: 0,
     episodeCounter: 0,
     wikiCounter: 0,
+    charQueries: 0,
     promoted: [], // { entityId, imageUrl, candidateId, slotsJson? }
     ratingWrites: [],
     noteWrites: [],
-    avatarPathWrites: [], // characters whose avatar_path was actually updated
   };
   const query = (sql, params = []) => {
     const s = sql;
+    if (/characters/.test(s)) state.charQueries += 1;
     if (s.includes('from visual_candidates')) {
       const ids = params[1];
       return ids.map((id) => state.candidates.find((c) => c.candidate_id === id)).filter(Boolean);
@@ -149,10 +145,6 @@ function makeDb() {
       }
       return [];
     }
-    if (s.includes('select character_id from visual_entities')) {
-      const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
-      return [{ character_id: row?.character_id ?? null }];
-    }
     if (s.includes('select template from visual_entities')) {
       const row = state.entities.find((e) => e.user_id === params[0] && e.entity_id === params[1]);
       return [{ template: row?.template ?? null }];
@@ -161,43 +153,22 @@ function makeDb() {
       const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
       return row ? [row] : [];
     }
-    if (s.includes('from characters') && s.includes('avatar_path')) {
-      const row = state.characters.find((c) => c.character_id === params[0] && c.user_id === params[1]);
-      return [{ avatar_path: row?.avatar_path ?? null }];
-    }
-    if (s.startsWith('update characters set avatar_path')) {
-      const row = state.characters.find((c) => c.character_id === params[0] && c.user_id === params[2]);
-      if (row) {
-        row.avatar_path = params[1];
-        state.avatarPathWrites.push({ characterId: params[0], avatarPath: params[1] });
-      }
-      return [];
-    }
     if (s.startsWith('select character_id, name, persona, appearance from characters')) {
       const row = state.characters.find((c) => c.character_id === params[0] && c.user_id === params[1]);
       return row ? [{ character_id: row.character_id, name: row.name, persona: row.persona, appearance: row.appearance }] : [];
     }
-    if (s.startsWith('select entity_id from visual_entities') && s.includes("layer_id = 'subject'")) {
-      // subjectExistsForCharacter
-      return state.entities.filter((e) => e.user_id === params[0] && e.layer_id === 'subject' && e.character_id === params[1]);
-    }
-    if (s.startsWith('update visual_entities set standing_instructions')) {
-      const row = state.entities.find((e) => e.user_id === params[0] && e.layer_id === 'subject' && e.character_id === params[1]);
-      if (row) row.standing_instructions = params[2];
-      return row ? [row] : [];
-    }
     if (s.startsWith('insert into visual_entities')) {
-      const isFromCharacter = params.length === 4;
-      if (isFromCharacter) {
-        const [userId, characterId, name, persona] = params;
+      if (params.length === 3) {
+        // from-cast-character (Part C): [userId, name, seedText] — always unlinked.
+        const [userId, name, seedText] = params;
         const row = {
           entity_id: randomUUID(),
           user_id: userId,
           layer_id: 'subject',
-          character_id: characterId,
+          character_id: null,
           name,
           slots: {},
-          standing_instructions: persona,
+          standing_instructions: seedText,
           template: null,
           last_image_url: null,
           current_best_candidate_id: null,
@@ -207,12 +178,14 @@ function makeDb() {
         state.entities.push(row);
         return [row];
       }
-      const [userId, layerId, characterId, name, slotsJson, standingInstructions, template] = params;
+      // Create-entity: [userId, layerId, name, slotsJson, standingInstructions, template] —
+      // character_id is hardcoded null server-side, never a param.
+      const [userId, layerId, name, slotsJson, standingInstructions, template] = params;
       const row = {
         entity_id: randomUUID(),
         user_id: userId,
         layer_id: layerId,
-        character_id: characterId,
+        character_id: null,
         name,
         slots: JSON.parse(slotsJson),
         standing_instructions: standingInstructions,
@@ -275,21 +248,150 @@ function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImage
   return row;
 }
 
-async function mediaFileExists(characterId) {
-  try {
-    await readFile(join(MEDIA_DIR, `${characterId}.png`));
-    return true;
-  } catch {
-    return false;
-  }
+// --- Fake LLM gates for describeStudioSubject (Part B). --------------------------------------
+// The describer gate records the request and answers with an Appearance-markered reply, so the
+// tests can assert both "the describer fired with the seed" and "its reply became the
+// instructions." The throw gate simulates the fail-open LLM crash. The never gate fails the
+// suite if the describer is (wrongly) invoked.
+function makeDescribeGate(reply) {
+  const gate = {
+    calls: [],
+    name: 'fake-describe-gate',
+    async complete(messages) {
+      gate.calls.push(messages);
+      return { message: { role: 'assistant', content: reply }, toolCalls: [] };
+    },
+  };
+  return gate;
+}
+
+const makeThrowingGate = () => ({
+  name: 'fake-throwing-gate',
+  async complete() {
+    throw new Error('simulated describer crash');
+  },
+});
+
+const makeNeverGate = () => ({
+  name: 'fake-never-gate',
+  async complete() {
+    throw new Error('describer must NOT be invoked for this create');
+  },
+});
+
+// ============================================================================
+// create-entity describer (Part B)
+// ============================================================================
+
+// --- Subject create with a seed and no standingInstructions: the describer fires and its reply
+// becomes standing_instructions. ---
+{
+  const db = makeDb();
+  const gate = makeDescribeGate('Appearance: Tall and stooped, with calloused hands and a beard shot through with grey.');
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'subject', name: 'Talfryn', seed: 'an Italian woman in her 30s' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'create-entity: a subject create → 201');
+  assert(gate.calls.length === 1, 'create-entity: the subject describer fires on the seed path');
+  assert(
+    gate.calls[0][0].content.includes('an Italian woman in her 30s') && gate.calls[0][0].content.includes('Talfryn'),
+    'create-entity: the describer prompt interpolates both {{name}} and {{seed}}',
+  );
+  const created = db.state.entities.find((e) => e.name === 'Talfryn');
+  assert(
+    created.standing_instructions === 'Tall and stooped, with calloused hands and a beard shot through with grey.',
+    'create-entity: the describer reply becomes the entity\'s standing_instructions',
+  );
+  assert(res.responses[0].body.entity_id === created.entity_id, 'create-entity: the response returns the created entity');
+}
+
+// --- A subject created WITH standingInstructions never invokes the describer, seed or no seed
+// (§3 — explicit outranks inferred). ---
+{
+  const db = makeDb();
+  const gate = makeNeverGate();
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'subject', name: 'Mair', standingInstructions: 'A sharp-eyed harbormaster.', seed: 'ignored seed' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'create-entity: a subject create with explicit instructions → 201');
+  const created = db.state.entities.find((e) => e.name === 'Mair');
+  assert(
+    created.standing_instructions === 'A sharp-eyed harbormaster.',
+    'create-entity: standingInstructions are kept exactly as supplied when present',
+  );
+}
+
+// --- A describer LLM failure still creates the entity with blank instructions (fail-open §11). ---
+{
+  const db = makeDb();
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'subject', name: 'Ghost', seed: 'a faceless wanderer' }),
+    res,
+    { db, settings: makeSettings(), llm: makeThrowingGate() },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'create-entity: a describer crash still creates the entity → 201 (fail-open)');
+  const created = db.state.entities.find((e) => e.name === 'Ghost');
+  assert(created.standing_instructions === '', 'create-entity: a describer crash leaves standing_instructions blank');
+}
+
+// --- A stray characterId in the body is accepted-and-ignored: never written (standalone). ---
+{
+  const db = makeDb();
+  const gate = makeNeverGate();
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'subject', name: 'Rin', characterId: 'legacy-linked-char', standingInstructions: 'hand-typed instructions' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'create-entity: a characterId in the body is accepted, not an error');
+  const created = db.state.entities.find((e) => e.name === 'Rin');
+  assert(created.character_id === null, 'create-entity: a body characterId is never written — character_id stays null');
+}
+
+// --- A stray seed on a non-subject layer is silently unused (the describer never fires). ---
+{
+  const db = makeDb();
+  const gate = makeNeverGate();
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'style', name: 'VLZ hybrid', seed: 'this must be ignored' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'create-entity: a seed on a style layer is accepted, not an error');
+  const created = db.state.entities.find((e) => e.name === 'VLZ hybrid');
+  assert(created.standing_instructions === '', 'create-entity: a non-subject layer never gets described instructions');
 }
 
 // ============================================================================
-// from-character (Part A)
+// from-cast-character (Part C)
 // ============================================================================
 
 // --- Creates a subject entity from a character's appearance — appearance preferred over
-// persona when both are present (character-appearance-field-plan.md). ---
+// persona when both are present (character-appearance-field-plan.md). Always unlinked. ---
 {
   const db = makeDb();
   db.state.characters.push({
@@ -301,17 +403,18 @@ async function mediaFileExists(characterId) {
     avatar_path: null,
   });
   const res = fakeRes();
-  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-new' }), res, { db, settings: makeSettings() }, USER);
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-new' }), res, { db, settings: makeSettings() }, USER);
 
-  assert(res.responses.length === 1 && res.responses[0].status === 200, 'from-character: known character returns 200');
-  const created = db.state.entities.find((e) => e.character_id === 'char-new');
-  assert(res.responses[0].body.action === 'created' && !!created, 'from-character: a new subject entity is created (action "created")');
-  assert(created.layer_id === 'subject' && created.name === 'Talfryn', 'from-character: the entity is a subject layer carrying the character\'s name');
+  assert(res.responses[0].status === 200, 'from-cast-character: a known character returns 200');
+  assert(res.responses[0].body.entity?.entity_id, 'from-cast-character: the response carries { entity } — no action field');
+  assert(res.responses[0].body.action === undefined, 'from-cast-character: the action field is dropped');
+  const created = db.state.entities.find((e) => e.name === 'Talfryn');
+  assert(created.layer_id === 'subject' && created.character_id === null, 'from-cast-character: the new entity is a subject layer, always unlinked');
   assert(
     created.standing_instructions === 'Tall and stooped, with calloused hands and a beard shot through with grey.',
-    'from-character: standing_instructions is seeded from the APPEARANCE when present, not the persona',
+    'from-cast-character: standing_instructions is seeded from the APPEARANCE when present, not the persona',
   );
-  assert(res.responses[0].body.entity.entity_id === created.entity_id, 'from-character: the response returns the created entity');
+  assert(res.responses[0].body.entity.entity_id === created.entity_id, 'from-cast-character: the response returns the created entity');
 }
 
 // --- A character with a persona but no appearance still seeds — the fallback to persona. ---
@@ -319,162 +422,90 @@ async function mediaFileExists(characterId) {
   const db = makeDb();
   db.state.characters.push({ character_id: 'char-fallback', user_id: USER, name: 'Mair', persona: 'A sharp-eyed harbormaster.', appearance: '', avatar_path: null });
   const res = fakeRes();
-  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-fallback' }), res, { db, settings: makeSettings() }, USER);
-  const created = db.state.entities.find((e) => e.character_id === 'char-fallback');
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-fallback' }), res, { db, settings: makeSettings() }, USER);
+  const created = db.state.entities.find((e) => e.name === 'Mair');
   assert(
-    created?.standing_instructions === 'A sharp-eyed harbormaster.',
-    'from-character: a blank appearance falls back to the persona for seeding (no silent regression to 409)',
+    created?.standing_instructions === 'A sharp-eyed harbormaster.' && created.character_id === null,
+    'from-cast-character: a blank appearance falls back to the persona for seeding (still unlinked)',
   );
 }
 
-// --- Refresh overwrites standing_instructions unconditionally — no "already seeded, skip". ---
+// --- Two consecutive calls with the same characterId create two distinct, unlinked entities —
+// no dedup, no refresh-in-place (the plan's Edge Cases). A legacy linked entity from the old
+// bridge is left exactly as it was. ---
 {
   const db = makeDb();
   db.state.characters.push({
-    character_id: 'char-refresh',
+    character_id: 'char-twice',
     user_id: USER,
     name: 'Mair',
     persona: 'A sharp-eyed harbormaster.',
     appearance: 'An old salt with a weather-lined face.',
     avatar_path: null,
   });
-  seedSubjectEntity(db, { entityId: 'e-refresh', characterId: 'char-refresh', instructions: 'The old instructions from a prior seed.' });
-  // The appearance changed since the last seed — clicking again is the operator's refresh signal.
-  db.state.characters[0].appearance = 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.';
-  const res = fakeRes();
-  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-refresh' }), res, { db, settings: makeSettings() }, USER);
+  // The old bridge (studio-character-bridge-plan.md Part A) left a linked subject behind. This
+  // plan never touches it — inert legacy data, still returned on reads, never re-pointed.
+  seedSubjectEntity(db, { entityId: 'e-legacy', characterId: 'char-twice', instructions: 'legacy linked instructions' });
 
-  assert(res.responses[0].body.action === 'refreshed', 'from-character: an already-seeded entity is refreshed, not rejected (action "refreshed")');
-  const entity = db.state.entities.find((e) => e.entity_id === 'e-refresh');
-  assert(entity.standing_instructions === 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.', 'from-character: refresh overwrites standing_instructions with the CURRENT appearance — unconditional');
-  assert(db.state.entities.length === 1, 'from-character: refresh updates in place — no duplicate entity');
+  const first = fakeRes();
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), first, { db, settings: makeSettings() }, USER);
+  const second = fakeRes();
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), second, { db, settings: makeSettings() }, USER);
+
+  const ids = db.state.entities.filter((e) => e.name === 'Mair');
+  assert(ids.length === 2 && ids[0].entity_id !== ids[1].entity_id, 'from-cast-character: two clicks → two DISTINCT entity_ids');
+  assert(ids.every((e) => e.character_id === null), 'from-cast-character: both new entities are unlinked (character_id null)');
+  assert(
+    ids.every((e) => e.standing_instructions === 'An old salt with a weather-lined face.'),
+    'from-cast-character: both entities are seeded from the same appearance',
+  );
+  const legacy = db.state.entities.find((e) => e.entity_id === 'e-legacy');
+  assert(
+    legacy.character_id === 'char-twice' && legacy.standing_instructions === 'legacy linked instructions',
+    'from-cast-character: a legacy linked entity is left untouched — no re-pointing, no refresh-in-place',
+  );
 }
 
 // --- Unknown characterId → 404, nothing created. ---
 {
   const db = makeDb();
   const res = fakeRes();
-  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'no-such-character' }), res, { db, settings: makeSettings() }, USER);
-  assert(res.responses[0].status === 404 && res.responses[0].body.error === 'character not found', 'from-character: unknown characterId → 404 "character not found"');
-  assert(db.state.entities.length === 0, 'from-character: a 404 creates no entity');
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'no-such-character' }), res, { db, settings: makeSettings() }, USER);
+  assert(res.responses[0].status === 404 && res.responses[0].body.error === 'character not found', 'from-cast-character: unknown characterId → 404 "character not found"');
+  assert(db.state.entities.length === 0, 'from-cast-character: a 404 creates no entity');
 }
 
-// --- Both appearance and persona blank → 409, no entity created or touched. ---
+// --- Both appearance and persona blank → 409, no entity created. ---
 {
   const db = makeDb();
   db.state.characters.push({ character_id: 'char-blank', user_id: USER, name: 'Ghost', persona: '   ', appearance: '', avatar_path: null });
-  seedSubjectEntity(db, { entityId: 'e-ghost', characterId: 'char-blank', instructions: 'original instructions — must survive untouched' });
   const res = fakeRes();
-  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-blank' }), res, { db, settings: makeSettings() }, USER);
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-blank' }), res, { db, settings: makeSettings() }, USER);
   assert(
     res.responses[0].status === 409 && res.responses[0].body.error === 'character has no appearance or persona',
-    'from-character: both appearance and persona blank → 409 "character has no appearance or persona"',
+    'from-cast-character: both appearance and persona blank → 409 "character has no appearance or persona"',
   );
-  assert(
-    db.state.entities.find((e) => e.entity_id === 'e-ghost').standing_instructions === 'original instructions — must survive untouched',
-    'from-character: a 409 leaves the existing entity untouched',
-  );
-  assert(db.state.entities.length === 1, 'from-character: a 409 creates nothing');
+  assert(db.state.entities.length === 0, 'from-cast-character: a 409 creates nothing');
 }
 
 // ============================================================================
-// set-as-avatar (Part C)
+// set-as-avatar (Part C) — the route is removed
 // ============================================================================
 
-const avatarUrl = 'https://cdn.example.com/winning.png';
-const okFetch = () => ({ ok: true, status: 200, arrayBuffer: async () => new Uint8Array([137, 80, 78, 71, 1, 2, 3]) });
-
-// --- Non-subject-layer entity → 400. ---
+// --- The dedicated route is gone; the CRUD family now 404s the old URL instead of promoting. ---
 {
   const db = makeDb();
-  db.state.entities.push({
-    entity_id: 'e-outfit',
-    user_id: USER,
-    layer_id: 'outfit',
-    character_id: SUBJECT_CHAR,
-    name: 'Coat',
-    slots: {},
-    standing_instructions: '',
-    template: null,
-    last_image_url: avatarUrl,
-    current_best_candidate_id: null,
-    created_at: now(),
-    updated_at: now(),
-  });
+  seedSubjectEntity(db, { entityId: 'e-winner', characterId: SUBJECT_CHAR, lastImageUrl: 'https://img/winner.png' });
   const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = okFetch;
-  try {
-    await handlePortraitEntitySetAsAvatar(res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-outfit/set-as-avatar'));
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
-  assert(res.responses[0].status === 400, 'set-as-avatar: a non-subject-layer entity → 400');
-}
-
-// --- Entity with no character_id → 400. ---
-{
-  const db = makeDb();
-  seedSubjectEntity(db, { entityId: 'e-unlinked', characterId: null, lastImageUrl: avatarUrl });
-  const res = fakeRes();
-  await handlePortraitEntitySetAsAvatar(res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-unlinked/set-as-avatar'));
-  assert(res.responses[0].status === 400 && res.responses[0].body.error.includes('no linked character'), 'set-as-avatar: an entity with no character_id → 400');
-}
-
-// --- Entity with no last_image_url → 400. ---
-{
-  const db = makeDb();
-  seedSubjectEntity(db, { entityId: 'e-noimage', characterId: SUBJECT_CHAR, lastImageUrl: null });
-  const res = fakeRes();
-  await handlePortraitEntitySetAsAvatar(res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-noimage/set-as-avatar'));
-  assert(res.responses[0].status === 400 && res.responses[0].body.error.includes('no winning image'), 'set-as-avatar: an entity with no winning image → 400');
-}
-
-// --- Success always overwrites — regardless of the character's current avatar_path. ---
-{
-  const db = makeDb();
-  seedSubjectEntity(db, { entityId: 'e-winner', characterId: SUBJECT_CHAR, lastImageUrl: avatarUrl });
-  db.state.characters.push({ character_id: SUBJECT_CHAR, user_id: USER, name: 'Rin', persona: 'x', avatar_path: '/avatars/imported.png' });
-  const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = okFetch;
-  try {
-    await handlePortraitEntitySetAsAvatar(res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-winner/set-as-avatar'));
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
-  assert(res.responses[0].status === 200 && res.responses[0].body.avatarSet === true, 'set-as-avatar: success → 200 { avatarSet: true }');
+  await handlePortraitEntities({}, res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-winner/set-as-avatar'));
   assert(
-    db.state.characters.find((c) => c.character_id === SUBJECT_CHAR).avatar_path === 'local',
-    'set-as-avatar: the character avatar is overwritten (avatar_path becomes "local") even when it was already set',
+    res.responses[0].status === 404 && res.responses[0].body.error === 'not found',
+    'set-as-avatar: the removed route 404s through the CRUD family (no more avatar promotion)',
   );
-  assert(await mediaFileExists(SUBJECT_CHAR), 'set-as-avatar: the winning image bytes are written as the stored avatar');
-}
-
-// --- Image fetch failure → 500, no state corruption (fail-open). ---
-{
-  const db = makeDb();
-  const failChar = '33333333-3333-3333-3333-333333333333';
-  seedSubjectEntity(db, { entityId: 'e-fail', characterId: failChar, lastImageUrl: avatarUrl });
-  db.state.characters.push({ character_id: failChar, user_id: USER, name: 'Rin', persona: 'x', avatar_path: '/avatars/keep.png' });
-  const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: false, status: 502 });
-  try {
-    await handlePortraitEntitySetAsAvatar(res, { db, settings: makeSettings() }, USER, new URL('http://x/v1/portraits/entities/e-fail/set-as-avatar'));
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
-  assert(res.responses[0].status === 500, 'set-as-avatar: a failing image fetch → 500 (fail-open, never a partial write)');
-  assert(
-    db.state.characters.find((c) => c.character_id === failChar).avatar_path === '/avatars/keep.png',
-    'set-as-avatar: a failed fetch leaves the existing avatar untouched',
-  );
-  assert(!(await mediaFileExists(failChar)), 'set-as-avatar: a failed fetch writes no avatar file');
 }
 
 // ============================================================================
-// submitPortraitFeedback (Part B/C)
+// submitPortraitFeedback (Part B/D)
 // ============================================================================
 
 const WINNER = 'c-winner';
@@ -537,18 +568,12 @@ const feedbackInput = {
   winnerId: WINNER,
 };
 
-// --- Winner promotion + fill-when-empty avatar. ---
+// --- Winner promotion happens; the characters table is NEVER touched (Part D). ---
 {
   const db = makeDb();
   seedFeedbackRound(db, { avatarPath: null });
   const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = okFetch;
-  try {
-    await handlePortraitFeedback(jsonReq(feedbackInput), res, { db, settings: makeSettings(), llm: concludeLlm, imageConnections: undefined }, USER);
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
+  await handlePortraitFeedback(jsonReq(feedbackInput), res, { db, settings: makeSettings(), llm: concludeLlm, imageConnections: undefined }, USER);
   assert(res.responses[0].status === 200, 'feedback: a well-formed round → 200');
   assert(res.responses[0].body.episodeId === 'ep-1', 'feedback: an episode row is recorded and returned');
 
@@ -559,47 +584,8 @@ const feedbackInput = {
   const other = db.state.entities.find((e) => e.entity_id === 'e-other-out');
   assert(other.last_image_url === 'https://img/old.png' && other.slots.outfit_style === 'old wool', 'feedback: an entity only a losing candidate referenced is left untouched');
 
-  const char = db.state.characters.find((c) => c.character_id === SUBJECT_CHAR);
-  assert(char.avatar_path === 'local', 'feedback: a null avatar_path is filled — avatar_path becomes "local"');
-  assert(await mediaFileExists(SUBJECT_CHAR), 'feedback: the winner image is written as the character avatar (fill-when-empty)');
+  assert(db.state.charQueries === 0, 'feedback: NO characters-table query fires — avatar promotion is retired (Part D)');
   assert(res.responses[0].body.reflection?.action === 'created', 'feedback: the reflection investigation concludes and reports the wiki write');
-}
-
-// --- Fill-when-empty, NOT overwrite: a non-null avatar_path is left exactly as it was. ---
-{
-  const db = makeDb();
-  const keptChar = '44444444-4444-4444-4444-444444444444';
-  seedFeedbackRound(db, { avatarPath: '/avatars/imported.png', characterId: keptChar });
-  const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = okFetch;
-  try {
-    await handlePortraitFeedback(jsonReq(feedbackInput), res, { db, settings: makeSettings(), llm: concludeLlm, imageConnections: undefined }, USER);
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
-  const char = db.state.characters.find((c) => c.character_id === keptChar);
-  assert(char.avatar_path === '/avatars/imported.png', 'feedback: an existing avatar_path is left untouched — fill-when-empty, never overwrite');
-  assert(!(await mediaFileExists(keptChar)), 'feedback: no avatar file is written when one is already set');
-  assert(db.state.avatarPathWrites.length === 0, 'feedback: no avatar update query fires when the avatar is already set');
-}
-
-// --- Avatar fetch failure skips the promotion but the feedback still succeeds (fail-open). ---
-{
-  const db = makeDb();
-  seedFeedbackRound(db, { avatarPath: null });
-  const res = fakeRes();
-  const prevFetch = globalThis.fetch;
-  globalThis.fetch = async () => ({ ok: false, status: 502 });
-  try {
-    await handlePortraitFeedback(jsonReq(feedbackInput), res, { db, settings: makeSettings(), llm: concludeLlm, imageConnections: undefined }, USER);
-  } finally {
-    globalThis.fetch = prevFetch;
-  }
-  assert(res.responses[0].status === 200, 'feedback: a failed avatar fetch does not fail the feedback (fail-open)');
-  const char = db.state.characters.find((c) => c.character_id === SUBJECT_CHAR);
-  assert(char.avatar_path === null, 'feedback: a failed avatar fetch leaves avatar_path null');
-  assert(res.responses[0].body.episodeId === 'ep-1', 'feedback: the episode record survives the skipped promotion');
 }
 
 // ============================================================================
@@ -653,14 +639,9 @@ const feedbackInput = {
       await handlePortraitEntities({}, r, deps, USER, new URL('http://x/v1/portraits/entities'));
       return r;
     }],
-    ['from-character', async () => {
+    ['from-cast-character', async () => {
       const r = fakeRes();
-      await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'anything' }), r, deps, USER);
-      return r;
-    }],
-    ['set-as-avatar', async () => {
-      const r = fakeRes();
-      await handlePortraitEntitySetAsAvatar(r, deps, USER, new URL('http://x/v1/portraits/entities/anything/set-as-avatar'));
+      await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'anything' }), r, deps, USER);
       return r;
     }],
     ['wiki GET', async () => {

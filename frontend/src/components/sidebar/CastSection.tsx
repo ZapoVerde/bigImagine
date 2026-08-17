@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { ApiError, callTool, seedSubjectFromCharacter } from '../../api/client';
+import { ApiError, callTool, sendCastCharacterToStudio } from '../../api/client';
 import type { CharacterSummary } from '../../api/types';
 import CharacterAvatarThumb from '../CharacterAvatarThumb';
 import './CastSection.css';
@@ -103,17 +103,17 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   const presentIds = new Set(activeScene?.characterIds ?? []);
   const visibleRoster = loadChatId === chatId ? roster : null;
 
-  // studio-character-bridge-plan.md Part A: the cast row's "Send to Studio" — the Roster's own
-  // no-chatId get_characters listing never includes RP-born characters (see the plan's Out of
-  // Scope), so this row-level action sources characterId straight off the chat-scoped cast list.
-  // Explicit operator click, same unconditional-refresh semantics as the CharactersView button.
+  // portrait-studio-standalone-subjects-plan.md Part C: the cast row's "Send to Studio" — the
+  // Roster's own no-chatId get_characters listing never includes RP-born characters (see the
+  // plan's Out of Scope), so this row-level action sources characterId straight off the
+  // chat-scoped cast list. Every click creates a brand-new, unlinked subject entity seeded from
+  // the character's appearance (falling back to the persona) — no refresh-in-place anymore.
   async function sendToStudio(characterId: string) {
     setStudioBusyId(characterId);
     setStudioMessage(null);
     try {
-      const result = await seedSubjectFromCharacter(characterId, apiKey);
-      const text = result.action === 'created' ? 'Seeded in Studio.' : 'Refreshed in Studio.';
-      setStudioMessage({ id: characterId, text, ok: true });
+      await sendCastCharacterToStudio(characterId, apiKey);
+      setStudioMessage({ id: characterId, text: 'Sent to Studio.', ok: true });
       window.setTimeout(() => setStudioMessage((m) => (m?.id === characterId ? null : m)), 4000);
     } catch (err) {
       setStudioMessage({ id: characterId, text: err instanceof ApiError ? err.message : 'Studio seed failed.', ok: false });
@@ -158,7 +158,7 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
                       type="button"
                       className="cast-row-studio-btn"
                       disabled={studioBusyId === c.characterId}
-                      title="Create or refresh this character's subject entity in Portrait Studio (its appearance becomes the entity's instructions, falling back to the persona)"
+                      title="Create a new, unlinked Portrait Studio subject from this character's appearance (falling back to the persona)"
                       onClick={() => void sendToStudio(c.characterId)}
                     >
                       {studioBusyId === c.characterId ? '…' : 'Send to Studio'}

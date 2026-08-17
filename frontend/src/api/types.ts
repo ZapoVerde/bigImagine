@@ -1387,39 +1387,45 @@ export interface PortraitEntityRow {
   updated_at: string;
 }
 
-/** POST /v1/portraits/entities body — characterId is required for the subject layer (one
- *  subject per character, validated server-side). */
+/** POST /v1/portraits/entities body (portrait-studio-standalone-subjects-plan.md) — every
+ *  entity is standalone (never linked to a character); `seed` is a subject-only free-text prompt
+ *  ("an Italian woman in her 30s") the describer uses when no standingInstructions are given. */
 export interface CreatePortraitEntityInput {
   layerId: string;
-  characterId?: string | null;
   name: string;
   slots?: Record<string, string>;
   standingInstructions?: string;
   template?: string | null;
+  seed?: string;
 }
 
 /** PATCH /v1/portraits/entities/:id body — every field optional; null clears
- *  standingInstructions/template/characterId (not name/slots — an entity always has a name). */
+ *  standingInstructions/template (not name/slots — an entity always has a name). */
 export interface UpdatePortraitEntityInput {
   name?: string;
-  characterId?: string | null;
   slots?: Record<string, string>;
   standingInstructions?: string;
   template?: string | null;
 }
 
-/** POST /v1/portraits/entities/from-character response (studio-character-bridge-plan.md
- *  Part A) — the seeded or refreshed subject entity and which of the two happened. */
-export interface SeedSubjectFromCharacterResult {
+/** POST /v1/portraits/entities/from-cast-character response
+ *  (portrait-studio-standalone-subjects-plan.md Part C) — the new, unlinked subject entity
+ *  seeded from a cast character's appearance/persona. Every call creates a fresh entity; there
+ *  is no create-vs-refresh distinction anymore. */
+export interface SendCastCharacterToStudioResult {
   entity: PortraitEntityRow;
-  action: 'created' | 'refreshed';
 }
 
-/** POST /v1/portraits/entities/:id/set-as-avatar response (Part C) — the promoted character
- *  and the always-true confirmation. */
-export interface SetPortraitEntityAsAvatarResult {
-  characterId: string;
-  avatarSet: true;
+/** GET/POST /v1/admin/portrait-subject-describer-settings — the Settings tab's Portrait
+ *  Subject describer settings (portrait-studio-standalone-subjects-plan.md Part B): the prompt
+ *  template for the one synchronous LLM call that turns a bare subject name (+ optional seed)
+ *  into its standing_instructions. describerPrompt is always the effective prompt — the
+ *  built-in default when the stored value is empty (bi_principles.md §17) — with
+ *  describerPromptIsDefault flagging which one it is. No history-pairs sibling: this describer
+ *  has no transcript to bound. */
+export interface PortraitSubjectDescriberSettings {
+  describerPrompt: string;
+  describerPromptIsDefault: boolean;
 }
 
 /** GET /v1/portraits-enabled and GET/POST /v1/admin/portraits-enabled responses

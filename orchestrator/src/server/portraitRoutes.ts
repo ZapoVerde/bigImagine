@@ -33,10 +33,9 @@
  *   parseFeedbackBody / parseWikiPatchBody / parseFromCharacterBody — pure body parsers
  *   (undefined = invalid)
  * handlePortraitEntities(req, res, deps, userId, url) — CRUD on /v1/portraits/entities
- * handlePortraitEntityFromCharacter(req, res, deps, userId) — POST /v1/portraits/entities/from-character
- *   (studio-character-bridge-plan.md Part A — seed-or-refresh a subject entity from a character's persona)
- * handlePortraitEntitySetAsAvatar(req, res, deps, userId, url) — POST /v1/portraits/entities/:id/set-as-avatar
- *   (Part C — explicit, always-overwrites avatar promotion)
+ * handlePortraitEntityFromCastCharacter(req, res, deps, userId) — POST
+ *   /v1/portraits/entities/from-cast-character (portrait-studio-standalone-subjects-plan.md Part C —
+ *   always-inserts a new, unlinked subject entity seeded from a cast character's appearance/persona)
  * handlePortraitWiki(req, res, deps, userId, url) — list/edit/delete on /v1/portraits/wiki
  * handlePortraitLayersGet / handlePortraitLayersSet — GET/POST /v1/portraits/layers
  * handlePortraitGenerate / handlePortraitFeedback — POST /v1/portraits/generate,
@@ -52,7 +51,7 @@
  *                      the LLM + image provider via the orchestrators)
  *     state_ownership: []
  *     external_io:     [Postgres (visual_entities/visual_wiki_entries/visual_candidates via
- *                       db.withUserScope; characters for subject-entity validation), the LLM and
+ *                       db.withUserScope; characters for the from-cast-character seed), the LLM and
  *                       the active portrait image provider via the orchestrators]
  *     never:           throws. Every failure path logs and answers with a status + error body.
  */
@@ -60,9 +59,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { log } from '../io/logger.js';
 import type { PostgresClient } from '../io/postgres.js';
-import { writeAvatar } from '../io/characterMedia.js';
 import { loadLayerManifest, type LayerDefinition, type LayerManifest } from '../portraits/layerStack.js';
 import type { WikiSubscription } from '../portraits/wiki.js';
+import { describeStudioSubject } from '../orchestrator/describeStudioSubject.js';
 import { runPortraitGenerationRound } from '../orchestrator/portraitGeneration.js';
 import { submitPortraitFeedback } from '../orchestrator/portraitFeedback.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
@@ -114,54 +113,54 @@ function isStringRecord(v: unknown): v is Record<string, string> {
 
 export interface CreateEntityBody {
   layerId: string;
-  characterId: string | null;
   name: string;
   slots: Record<string, string>;
   standingInstructions: string;
   template: string | null;
+  seed: string | null;
 }
 
-/** POST /v1/portraits/entities — { layerId, characterId?, name, slots?, standingInstructions?,
- *  template? }. characterId is validated against the caller's characters table in the handler
- *  (subject entities require it — one subject per character, plan §Entities). */
+/** POST /v1/portraits/entities — { layerId, name, slots?, standingInstructions?, template?,
+ *  seed? }. `seed` is subject-only: a short free-text prompt ("an Italian woman in her 30s") the
+ *  describer uses when no standingInstructions are supplied — the "type a name, get a described
+ *  subject" path (portrait-studio-standalone-subjects-plan.md Part B). It is silently unused for
+ *  every other layer and whenever standingInstructions is present (bi_principles.md §3 — explicit
+ *  outranks inferred). No characterId anywhere: entities are standalone and never linked. */
 export function parseCreateEntityBody(raw: unknown): CreateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   if (typeof raw.layerId !== 'string' || !raw.layerId) return undefined;
   if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
-  if (raw.characterId !== undefined && raw.characterId !== null && typeof raw.characterId !== 'string') return undefined;
   if (raw.slots !== undefined && !isStringRecord(raw.slots)) return undefined;
   if (raw.standingInstructions !== undefined && typeof raw.standingInstructions !== 'string') return undefined;
   if (raw.template !== undefined && raw.template !== null && typeof raw.template !== 'string') return undefined;
+  if (raw.seed !== undefined && raw.seed !== null && typeof raw.seed !== 'string') return undefined;
   return {
     layerId: raw.layerId,
-    characterId: typeof raw.characterId === 'string' ? raw.characterId : null,
     name: raw.name.trim(),
     slots: raw.slots ?? {},
     standingInstructions: raw.standingInstructions ?? '',
     template: typeof raw.template === 'string' ? raw.template : null,
+    seed: typeof raw.seed === 'string' ? raw.seed.trim() : null,
   };
 }
 
 export interface UpdateEntityBody {
   name?: string;
-  characterId?: string | null;
   slots?: Record<string, string>;
   standingInstructions?: string;
   template?: string | null;
 }
 
 /** PATCH /v1/portraits/entities/:id — every field optional; null clears
- *  standingInstructions/template/characterId (not name/slots — an entity always has a name). */
+ *  standingInstructions/template (not name/slots — an entity always has a name). A stray
+ *  characterId in the body is ignored by this parser (unknown fields are already inert here),
+ *  never written. */
 export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   const out: UpdateEntityBody = {};
   if (raw.name !== undefined) {
     if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
     out.name = raw.name.trim();
-  }
-  if (raw.characterId !== undefined) {
-    if (raw.characterId !== null && typeof raw.characterId !== 'string') return undefined;
-    out.characterId = typeof raw.characterId === 'string' ? raw.characterId : null;
   }
   if (raw.slots !== undefined) {
     if (!isStringRecord(raw.slots)) return undefined;
@@ -178,10 +177,12 @@ export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefine
   return out;
 }
 
-/** POST /v1/portraits/entities/from-character — { characterId: string }. The seed-or-refresh
- *  action (studio-character-bridge-plan.md Part A): resolves the caller's own character, then
- *  either creates a subject entity from its name + persona or refreshes an existing one's
- *  standing_instructions in place (unconditional on every call — the button is an explicit act). */
+/** POST /v1/portraits/entities/from-cast-character — { characterId: string }. The one-time,
+ *  never-linking pull-in (portrait-studio-standalone-subjects-plan.md Part C): resolves the
+ *  caller's own character, then ALWAYS inserts a brand-new, unlinked subject entity seeded from
+ *  its appearance (falling back to the persona when appearance is blank). No refresh-in-place, no
+ *  per-character dedup — clicking "Send to Studio" twice creates two independent training
+ *  subjects, exactly like clicking "+ new" twice would. */
 export interface FromCharacterBody {
   characterId: string;
 }
@@ -337,20 +338,6 @@ async function getEntity(db: PostgresClient, userId: string, entityId: string): 
   return rows[0];
 }
 
-/** One subject entity per character (plan §Entities) — the app-level guard (0105 has no unique
- *  index for it). Called on create and on a subject-entity patch that changes character_id. */
-async function subjectExistsForCharacter(db: PostgresClient, userId: string, characterId: string, excludeEntityId?: string): Promise<boolean> {
-  const rows = await db.withUserScope(userId, (session) =>
-    session.query<{ entity_id: string }>(
-      `select entity_id from visual_entities
-       where user_id = $1 and layer_id = 'subject' and character_id = $2
-         and ($3::uuid is null or entity_id <> $3::uuid)`,
-      [userId, characterId, excludeEntityId ?? null],
-    ),
-  );
-  return rows.length > 0;
-}
-
 // ---- Handlers -------------------------------------------------------------------
 
 /** portrait-chain-hardening-plan.md's kill switch read: visual_portraits_enabled as a boolean,
@@ -437,7 +424,7 @@ export async function handlePortraitEntities(
       const parsed = parseCreateEntityBody(raw);
       if (!parsed) {
         sendJson(res, 400, {
-          error: 'expected { layerId: non-empty string, name: non-empty string, characterId?, slots?, standingInstructions?, template? }',
+          error: 'expected { layerId: non-empty string, name: non-empty string, slots?, standingInstructions?, template?, seed? }',
         });
         return;
       }
@@ -446,39 +433,28 @@ export async function handlePortraitEntities(
         sendJson(res, 400, { error: `unknown layer "${parsed.layerId}" — see GET /v1/portraits/layers` });
         return;
       }
-      if (parsed.layerId === 'subject' && !parsed.characterId) {
-        sendJson(res, 400, { error: 'a subject entity requires characterId — subjects are created from an existing character (one per character)' });
-        return;
-      }
-      if (parsed.characterId) {
-        const char = await deps.db.withUserScope(userId, (session) =>
-          session.query<{ character_id: string }>('select character_id from characters where character_id = $1 and user_id = $2', [
-            parsed.characterId,
-            userId,
-          ]),
-        );
-        if (!char[0]) {
-          sendJson(res, 404, { error: 'character not found' });
-          return;
-        }
-        if (parsed.layerId === 'subject' && (await subjectExistsForCharacter(deps.db, userId, parsed.characterId))) {
-          sendJson(res, 409, { error: 'a subject entity already exists for this character' });
-          return;
-        }
+      // The subject describer fires only on the "type a name, get it described" default path:
+      // layerId subject AND no explicit standingInstructions (bi_principles.md §3 — an operator
+      // who types full instructions by hand gets exactly what they typed). Fail-open (§11): the
+      // describer never throws (describeStudioSubject resolves to '' on any failure), so creation
+      // never blocks or errors on a missing description.
+      let instructions = parsed.standingInstructions;
+      if (parsed.layerId === 'subject' && !instructions.trim()) {
+        const described = await describeStudioSubject(deps.settings, deps.llm, userId, { name: parsed.name, seed: parsed.seed ?? undefined });
+        if (described.trim() !== '') instructions = described;
       }
       const created = await deps.db.withUserScope(userId, (session) =>
         session.query<PortraitEntityRow>(
           `insert into visual_entities (user_id, layer_id, character_id, name, slots, standing_instructions, template)
-           values ($1, $2, $3, $4, $5::jsonb, $6, $7)
+           values ($1, $2, null, $3, $4::jsonb, $5, $6)
            returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
                      last_image_url, current_best_candidate_id, created_at, updated_at`,
           [
             userId,
             parsed.layerId,
-            parsed.characterId,
             parsed.name,
             JSON.stringify(parsed.slots),
-            parsed.standingInstructions,
+            instructions,
             parsed.template,
           ],
         ),
@@ -519,25 +495,6 @@ export async function handlePortraitEntities(
         sendJson(res, 404, { error: 'not found' });
         return;
       }
-      // A subject entity's character can't be re-pointed onto a character that already has a
-      // subject (the one-per-character rule), and any new characterId must exist.
-      const newCharacterId = parsed.characterId !== undefined ? parsed.characterId : existing.character_id;
-      if (newCharacterId && newCharacterId !== existing.character_id) {
-        const char = await deps.db.withUserScope(userId, (session) =>
-          session.query<{ character_id: string }>('select character_id from characters where character_id = $1 and user_id = $2', [
-            newCharacterId,
-            userId,
-          ]),
-        );
-        if (!char[0]) {
-          sendJson(res, 404, { error: 'character not found' });
-          return;
-        }
-        if (existing.layer_id === 'subject' && (await subjectExistsForCharacter(deps.db, userId, newCharacterId, id))) {
-          sendJson(res, 409, { error: 'a subject entity already exists for this character' });
-          return;
-        }
-      }
       const sets: string[] = [];
       const params: unknown[] = [id, userId];
       let n = 2;
@@ -547,7 +504,6 @@ export async function handlePortraitEntities(
         params.push(v);
       };
       push('name', parsed.name);
-      push('character_id', parsed.characterId);
       push('slots', parsed.slots !== undefined ? JSON.stringify(parsed.slots) : undefined, '::jsonb');
       push('standing_instructions', parsed.standingInstructions);
       push('template', parsed.template);
@@ -593,20 +549,18 @@ export async function handlePortraitEntities(
   sendJson(res, 404, { error: 'not found' });
 }
 
-/** POST /v1/portraits/entities/from-character (studio-character-bridge-plan.md Part A,
- *  character-appearance-field-plan.md) — seed or refresh a subject entity from a character's
- *  appearance, falling back to the persona when appearance is blank (an imported card or a
- *  manually-created character with a full persona but no separately-authored appearance still
- *  seeds Studio with something useful today, exactly as it did before the appearance column
- *  existed — persona is read here as a fallback, never a replacement). The operator-facing
- *  button on both surfaces (CharactersView editor pane, CastSection cast row) calls this on
- *  purpose each time: an existing subject entity's standing_instructions is overwritten
- *  unconditionally with the character's current appearance-or-persona — there is no "already
- *  seeded, skip" rule, clicking again is how the operator deliberately refreshes Studio's
- *  instructions after the text changed (§3: explicit signal outranks inferred). Declines
- *  outright (409, no entity touched) only when both appearance and persona are blank rather
- *  than seeding empty instructions. */
-export async function handlePortraitEntityFromCharacter(
+/** POST /v1/portraits/entities/from-cast-character (portrait-studio-standalone-subjects-plan.md
+ *  Part C) — the one-time, never-linking pull-in: resolve the caller's own character (any status —
+ *  the route doesn't care whether it's a Card or a live character; in practice only CastSection
+ *  calls it now, and it only ever offers live in-chat characters via its castOnly listing), read
+ *  appearance || persona as the seed text exactly as the old from-character route did (409 when
+ *  both are blank — never seed empty instructions), and ALWAYS insert a brand-new, unlinked
+ *  subject entity: character_id is never set on the row. There is no more "does a subject already
+ *  exist for this character" check and no more refresh-in-place — clicking "Send to Studio" on the
+ *  same cast row twice creates two independent training subjects, exactly like clicking "+ new"
+ *  twice would. The seed text becomes the entity's standing_instructions verbatim (an explicit,
+ *  operator-clicked source, bi_principles.md §3). */
+export async function handlePortraitEntityFromCastCharacter(
   req: IncomingMessage,
   res: ServerResponse,
   deps: HttpServerDeps,
@@ -641,95 +595,18 @@ export async function handlePortraitEntityFromCharacter(
     sendJson(res, 409, { error: 'character has no appearance or persona' });
     return;
   }
-  // One subject entity per character (the same app-level guard the create path enforces).
-  if (await subjectExistsForCharacter(deps.db, userId, character.character_id)) {
-    const rows = await deps.db.withUserScope(userId, (session) =>
-      session.query<PortraitEntityRow>(
-        `update visual_entities set standing_instructions = $3, updated_at = now()
-         where entity_id in (
-           select entity_id from visual_entities
-           where user_id = $1 and layer_id = 'subject' and character_id = $2
-         )
-         returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
-                   last_image_url, current_best_candidate_id, created_at, updated_at`,
-        [userId, character.character_id, seedText],
-      ),
-    );
-    const entity = rows[0]!;
-    log.info('portraitRoutes: subject entity refreshed from character appearance/persona', { characterId: character.character_id, entityId: entity.entity_id });
-    sendJson(res, 200, { entity, action: 'refreshed' });
-    return;
-  }
   const created = await deps.db.withUserScope(userId, (session) =>
     session.query<PortraitEntityRow>(
       `insert into visual_entities (user_id, layer_id, character_id, name, slots, standing_instructions, template)
-       values ($1, 'subject', $2, $3, '{}'::jsonb, $4, null)
+       values ($1, 'subject', null, $2, '{}'::jsonb, $3, null)
        returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
                  last_image_url, current_best_candidate_id, created_at, updated_at`,
-      [userId, character.character_id, character.name, seedText],
+      [userId, character.name, seedText],
     ),
   );
   const entity = created[0]!;
-  log.info('portraitRoutes: subject entity seeded from character appearance/persona', { characterId: character.character_id, entityId: entity.entity_id });
-  sendJson(res, 200, { entity, action: 'created' });
-}
-
-/** POST /v1/portraits/entities/:id/set-as-avatar (studio-character-bridge-plan.md Part C) — the
- *  deliberate, always-overwrite avatar promotion: an explicit operator click on a subject
- *  entity's card, the counterweight to the automatic fill-when-empty-only rule inside
- *  submitPortraitFeedback. Takes the entity's current winning image (last_image_url — always a
- *  URL our own resolved image_connections profile produced, never a user-typed value, so a plain
- *  fetch is the right trust tier) and writes it as the linked character's stored avatar
- *  (writeAvatar + the 'local' avatar_path sentinel insertCharacterFromCard.ts already uses). */
-export async function handlePortraitEntitySetAsAvatar(
-  res: ServerResponse,
-  deps: HttpServerDeps,
-  userId: string,
-  url: URL,
-): Promise<void> {
-  if (!(await requirePortraitsEnabled(deps, res))) return;
-  const segments = url.pathname.slice('/v1/portraits/entities'.length).split('/').filter(Boolean);
-  if (segments.length !== 2 || segments[1] !== 'set-as-avatar') {
-    sendJson(res, 404, { error: 'not found' });
-    return;
-  }
-  const entity = await getEntity(deps.db, userId, decodeURIComponent(segments[0]!));
-  if (!entity) {
-    sendJson(res, 404, { error: 'not found' });
-    return;
-  }
-  if (entity.layer_id !== 'subject') {
-    sendJson(res, 400, { error: 'only a subject-layer entity can promote its image to a character avatar' });
-    return;
-  }
-  if (!entity.character_id) {
-    sendJson(res, 400, { error: 'entity has no linked character — nothing to set as avatar' });
-    return;
-  }
-  if (!entity.last_image_url) {
-    sendJson(res, 400, { error: 'entity has no winning image yet — run a generation round and pick a winner first' });
-    return;
-  }
-  let bytes: Buffer;
-  try {
-    const imageRes = await fetch(entity.last_image_url);
-    if (!imageRes.ok) throw new Error(`image fetch returned ${imageRes.status}`);
-    bytes = Buffer.from(await imageRes.arrayBuffer());
-  } catch (err) {
-    log.error('portraitRoutes: set-as-avatar failed to fetch the winning image', { entityId: entity.entity_id, err });
-    sendJson(res, 500, { error: 'failed to fetch the entity\'s winning image' });
-    return;
-  }
-  await writeAvatar(entity.character_id, bytes);
-  await deps.db.withUserScope(userId, (session) =>
-    session.query('update characters set avatar_path = $2 where character_id = $1 and user_id = $3', [
-      entity.character_id,
-      'local',
-      userId,
-    ]),
-  );
-  log.info('portraitRoutes: entity image promoted as character avatar (explicit)', { entityId: entity.entity_id, characterId: entity.character_id });
-  sendJson(res, 200, { characterId: entity.character_id, avatarSet: true });
+  log.info('portraitRoutes: subject entity pulled in from cast character (unlinked)', { characterId: character.character_id, entityId: entity.entity_id });
+  sendJson(res, 200, { entity });
 }
 
 /** Wiki family on /v1/portraits/wiki — list / edit / delete (creation is the Reflection pass's

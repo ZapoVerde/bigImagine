@@ -194,8 +194,7 @@
   font-weight: 600;
 }
 
-.portrait-entity-layer,
-.portrait-entity-char {
+.portrait-entity-layer {
   color: var(--color-text-secondary);
   font-size: var(--font-size-md);
 }
@@ -205,39 +204,6 @@
   height: 2.2rem;
   object-fit: cover;
   border-radius: var(--radius-sm, 6px);
-}
-
-/* studio-character-bridge-plan.md Part C — the explicit "Set as avatar" action on a subject
-   layer entity's card (always overwrites, unlike the automatic fill-when-empty promotion inside
-   submitPortraitFeedback). Compact ghost button + transient per-entity status. */
-.portrait-entity-avatar-btn {
-  font: inherit;
-  font-size: var(--font-size-xs, 0.72rem);
-  padding: 0.2rem 0.5rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border-strong);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.portrait-entity-avatar-btn:hover:not(:disabled) {
-  background: var(--color-hover-surface);
-  color: var(--color-text-primary);
-}
-
-.portrait-entity-avatar-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.portrait-entity-avatar-status {
-  font-size: var(--font-size-xs, 0.72rem);
-  color: var(--color-text-muted);
-}
-
-.portrait-entity-avatar-status.err {
-  color: var(--color-danger);
 }
 
 .portrait-si-editor {

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ApiError,
-  callTool,
   createPortraitEntity,
   deletePortraitEntity,
   deletePortraitWikiEntry,
@@ -9,14 +8,12 @@ import {
   getPortraitLayerManifest,
   listPortraitEntities,
   listPortraitWikiEntries,
-  setPortraitEntityAsAvatar,
   setPortraitLayerManifest,
   submitPortraitFeedback,
   updatePortraitEntity,
   updatePortraitWikiEntry,
 } from '../api/client';
 import type {
-  CharacterSummary,
   PortraitCandidate,
   PortraitEntityRow,
   PortraitLayerDefinition,
@@ -35,18 +32,21 @@ import './PortraitStudioView.css';
 // standing_instructions editing uses the same textarea+Save pattern; Manage Layers (admin-gated —
 // visual_layer_stack is a settings write, per the plan's auth note) edits the manifest with the
 // subject layer locked and in-use layers unremovable. All portrait reads/writes are user-scoped
-// (apiKey); only the layers write takes the admin key.
+// (apiKey); only the layers write takes the admin key. Per portrait-studio-standalone-subjects-
+// plan.md, every entity is standalone — never linked to a character — and a bare subject name
+// created without standing instructions gets them described from the new optional seed by the
+// server's portrait_subject_describer_prompt (Settings tab).
 interface PortraitStudioViewProps {
   apiKey: string | null;
 }
 
 interface CreateDraft {
   name: string;
-  characterId: string;
+  seed: string;
   template: string;
 }
 
-const EMPTY_CREATE: CreateDraft = { name: '', characterId: '', template: '' };
+const EMPTY_CREATE: CreateDraft = { name: '', seed: '', template: '' };
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
@@ -55,7 +55,6 @@ function errMessage(err: unknown, fallback: string): string {
 export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) {
   const [manifest, setManifest] = useState<PortraitLayerManifest | null>(null);
   const [entities, setEntities] = useState<PortraitEntityRow[] | null>(null);
-  const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [wiki, setWiki] = useState<PortraitWikiEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -80,10 +79,6 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [siSaving, setSiSaving] = useState(false);
   const [siSaved, setSiSaved] = useState(false);
   const [siError, setSiError] = useState<string | null>(null);
-  // studio-character-bridge-plan.md Part C — the explicit "Set as avatar" action on a
-  // subject-layer entity's card: which entity's promotion is in flight + the transient result.
-  const [avatarBusyId, setAvatarBusyId] = useState<string | null>(null);
-  const [avatarMessage, setAvatarMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   // Wiki panel editor.
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -133,16 +128,14 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   useEffect(() => {
     (async () => {
       try {
-        const [m, es, ws, cs] = await Promise.all([
+        const [m, es, ws] = await Promise.all([
           getPortraitLayerManifest(apiKey),
           listPortraitEntities(apiKey),
           listPortraitWikiEntries(apiKey),
-          callTool<CharacterSummary[]>('get_characters', {}, apiKey),
         ]);
         setManifest(m);
         setEntities(es);
         setWiki(ws);
-        setCharacters(cs);
         const sel: Record<string, string> = {};
         for (const layer of m.layers) {
           if (!layer.promptable) continue;
@@ -182,7 +175,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         {
           layerId: layer.id,
           name: createDraft.name.trim(),
-          ...(layer.id === 'subject' && createDraft.characterId ? { characterId: createDraft.characterId } : {}),
+          ...(layer.id === 'subject' && createDraft.seed.trim() ? { seed: createDraft.seed.trim() } : {}),
           ...(layer.id === 'style' && createDraft.template.trim() ? { template: createDraft.template.trim() } : {}),
         },
         apiKey,
@@ -290,24 +283,6 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
       setSiError(errMessage(err, 'failed to save standing instructions'));
     } finally {
       setSiSaving(false);
-    }
-  }
-
-  // studio-character-bridge-plan.md Part C — the deliberate, always-overwrite avatar promotion:
-  // the entity's current winning image becomes the linked character's stored avatar. Distinct
-  // from the automatic fill-when-empty-only promotion inside submitPortraitFeedback; this is an
-  // explicit operator click, shown only on subject-layer entities with a character_id.
-  async function promoteToAvatar(entity: PortraitEntityRow) {
-    setAvatarBusyId(entity.entity_id);
-    setAvatarMessage(null);
-    try {
-      await setPortraitEntityAsAvatar(entity.entity_id, apiKey);
-      setAvatarMessage({ id: entity.entity_id, text: 'Avatar set.', ok: true });
-      window.setTimeout(() => setAvatarMessage((m) => (m?.id === entity.entity_id ? null : m)), 4000);
-    } catch (err) {
-      setAvatarMessage({ id: entity.entity_id, text: errMessage(err, 'failed to set avatar'), ok: false });
-    } finally {
-      setAvatarBusyId(null);
     }
   }
 
@@ -447,14 +422,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
                 <div className="portrait-create">
                   <input value={createDraft.name} onChange={(e) => setCreateDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`New ${layer.label} name`} />
                   {layer.id === 'subject' && (
-                    <select value={createDraft.characterId} onChange={(e) => setCreateDraft((d) => ({ ...d, characterId: e.target.value }))}>
-                      <option value="">— character —</option>
-                      {(characters ?? []).map((c) => (
-                        <option key={c.characterId} value={c.characterId}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
+                    <input value={createDraft.seed} onChange={(e) => setCreateDraft((d) => ({ ...d, seed: e.target.value }))} placeholder="Seed (optional) — e.g. an Italian woman in her 30s" />
                   )}
                   {layer.id === 'style' && (
                     <textarea rows={2} value={createDraft.template} onChange={(e) => setCreateDraft((d) => ({ ...d, template: e.target.value }))} placeholder="Composed-prompt template (optional, e.g. {{subject_overflow}} — {{style_overflow}})" />
@@ -557,24 +525,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
               <header className="portrait-entity-header">
                 <span className="portrait-entity-name">{entity.name}</span>
                 <span className="portrait-entity-layer">{manifest.layers.find((l) => l.id === entity.layer_id)?.label ?? entity.layer_id}</span>
-                {entity.character_id && <span className="portrait-entity-char">character: {characters?.find((c) => c.characterId === entity.character_id)?.name ?? entity.character_id}</span>}
                 {entity.last_image_url && <img className="portrait-entity-thumb" src={entity.last_image_url} alt={`${entity.name} best`} />}
-                {entity.layer_id === 'subject' && entity.character_id && (
-                  <>
-                    <button
-                      type="button"
-                      className="portrait-entity-avatar-btn"
-                      disabled={avatarBusyId === entity.entity_id}
-                      title="Set this entity's winning image as the linked character's avatar (always overwrites)"
-                      onClick={() => void promoteToAvatar(entity)}
-                    >
-                      {avatarBusyId === entity.entity_id ? '…' : 'Set as avatar'}
-                    </button>
-                    {avatarMessage?.id === entity.entity_id && (
-                      <span className={`portrait-entity-avatar-status${avatarMessage.ok ? '' : ' err'}`}>{avatarMessage.text}</span>
-                    )}
-                  </>
-                )}
                 <button type="button" onClick={() => openSi(entity)}>
                   {siEntityId === entity.entity_id ? 'hide' : 'instructions'}
                 </button>

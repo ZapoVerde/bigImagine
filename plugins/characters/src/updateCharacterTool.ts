@@ -71,7 +71,7 @@ export function createUpdateCharacterTool(): RegisteredTool {
           appearance: {
             type: 'string',
             description:
-              "The character's physical appearance only (body type, height, build, facial features, natural hair colour, permanent features such as scars or birthmarks; exclude clothing, accessories, current hairstyle, injuries). Portrait Studio's from-character seeding prefers this over persona.",
+              "The character's physical appearance only (body type, height, build, facial features, natural hair colour, permanent features such as scars or birthmarks; exclude clothing, accessories, current hairstyle, injuries). Portrait Studio's cast-character seeding prefers this over persona.",
           },
           scenario: { type: 'string' },
           system_prompt: { type: 'string' },

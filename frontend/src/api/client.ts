@@ -52,9 +52,9 @@ import type {
   PortraitLayerManifest,
   PortraitWikiEntry,
   CreatePortraitEntityInput,
-  SeedSubjectFromCharacterResult,
-  SetPortraitEntityAsAvatarResult,
+  SendCastCharacterToStudioResult,
   PortraitsEnabled,
+  PortraitSubjectDescriberSettings,
   UpdatePortraitEntityInput,
   UpdatePortraitWikiInput,
   ProfileModelsResult,
@@ -992,6 +992,26 @@ export function adminSetCharacterSettings(
   return jsonRequest<CharacterSettings>('/v1/admin/character-settings', adminKey, { method: 'POST', body: patch });
 }
 
+/** GET /v1/admin/portrait-subject-describer-settings — the Settings tab's Portrait Subject
+ *  describer settings (portrait-studio-standalone-subjects-plan.md Part B): the prompt template
+ *  for the one synchronous LLM call that turns a bare Studio subject name (+ optional seed) into
+ *  its standing_instructions. Admin-gated like every Settings-tab GET. */
+export function adminGetPortraitSubjectDescriberSettings(adminKey: string | null): Promise<PortraitSubjectDescriberSettings> {
+  return jsonRequest<PortraitSubjectDescriberSettings>('/v1/admin/portrait-subject-describer-settings', adminKey);
+}
+
+/** POST /v1/admin/portrait-subject-describer-settings — partial patch ({ describer_prompt? });
+ *  the server rejects a body with zero fields or a wrong-typed value. Returns the full updated
+ *  set. No restart: describeStudioSubject.ts reads the value live. */
+export function adminSetPortraitSubjectDescriberSettings(
+  patch: {
+    describer_prompt?: string;
+  },
+  adminKey: string | null,
+): Promise<PortraitSubjectDescriberSettings> {
+  return jsonRequest<PortraitSubjectDescriberSettings>('/v1/admin/portrait-subject-describer-settings', adminKey, { method: 'POST', body: patch });
+}
+
 /** GET /v1/admin/locations — the Locations page's read-only known-locations browser (location.md
  *  §6.2.4), cross-user roster: every location with its parent place (parent_location_id) and
  *  lifecycle status. No POST counterpart — the tracker owns row creation. */
@@ -1642,8 +1662,9 @@ export async function listPortraitEntities(apiKey: string | null): Promise<Portr
   return body.entities;
 }
 
-/** POST /v1/portraits/entities — create a visual_entities row. A subject entity requires
- *  characterId (one subject per character — 409 when one already exists). */
+/** POST /v1/portraits/entities — create a standalone visual_entities row
+ *  (portrait-studio-standalone-subjects-plan.md). Entities are never linked to characters; a
+ *  subject created without standingInstructions gets them described from `seed` by the server. */
 export function createPortraitEntity(input: CreatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
   return jsonRequest<PortraitEntityRow>('/v1/portraits/entities', apiKey, { method: 'POST', body: input });
 }
@@ -1654,33 +1675,23 @@ export function getPortraitEntity(entityId: string, apiKey: string | null): Prom
 }
 
 /** PATCH /v1/portraits/entities/:id — partial update; null clears
- *  standingInstructions/template/characterId (not name/slots). */
+ *  standingInstructions/template (not name/slots). */
 export function updatePortraitEntity(entityId: string, input: UpdatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
   return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'PATCH', body: input });
 }
 
-/** POST /v1/portraits/entities/from-character — seed or refresh a subject entity from a
- *  character's appearance, falling back to the persona when appearance is blank
- *  (studio-character-bridge-plan.md Part A, character-appearance-field-plan.md). Unconditional
- *  overwrite of the existing entity's standing_instructions on every call; 409 only when both
- *  appearance and persona are empty. */
-export function seedSubjectFromCharacter(
+/** POST /v1/portraits/entities/from-cast-character — the Cast row's one-time, never-linking
+ *  pull-in (portrait-studio-standalone-subjects-plan.md Part C): always inserts a brand-new,
+ *  unlinked subject entity seeded from the character's appearance, falling back to the persona
+ *  when appearance is blank. Every call creates a fresh entity — no refresh-in-place. 409 when
+ *  both appearance and persona are empty. */
+export function sendCastCharacterToStudio(
   characterId: string,
   apiKey: string | null,
-): Promise<SeedSubjectFromCharacterResult> {
-  return jsonRequest<SeedSubjectFromCharacterResult>('/v1/portraits/entities/from-character', apiKey, {
+): Promise<SendCastCharacterToStudioResult> {
+  return jsonRequest<SendCastCharacterToStudioResult>('/v1/portraits/entities/from-cast-character', apiKey, {
     method: 'POST',
     body: { characterId },
-  });
-}
-
-/** POST /v1/portraits/entities/:id/set-as-avatar — explicit, always-overwrite avatar promotion
- *  (studio-character-bridge-plan.md Part C): the entity's current winning image becomes the
- *  linked character's stored avatar. 400 unless the entity is a subject-layer entity with a
- *  character_id and a winning image. */
-export function setPortraitEntityAsAvatar(entityId: string, apiKey: string | null): Promise<SetPortraitEntityAsAvatarResult> {
-  return jsonRequest<SetPortraitEntityAsAvatarResult>(`/v1/portraits/entities/${encodeURIComponent(entityId)}/set-as-avatar`, apiKey, {
-    method: 'POST',
   });
 }
 

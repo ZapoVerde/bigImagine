@@ -207,41 +207,6 @@
   resize: vertical;
 }
 
-/* studio-character-bridge-plan.md Part A — the "Send to Portrait Studio" action under the
-   persona field: seeds/refreshes the character's subject entity in Portrait Studio from the
-   persona. Disabled (with the tooltip explaining why) while the persona is empty. */
-.characters-studio-seed {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-}
-
-.characters-studio-seed-btn {
-  font: inherit;
-  font-size: var(--font-size-sm);
-  padding: 0.3rem 0.7rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border-strong);
-  background: transparent;
-  color: var(--color-text-primary);
-  cursor: pointer;
-}
-
-.characters-studio-seed-btn:hover:not(:disabled) {
-  background: var(--color-hover-surface);
-}
-
-.characters-studio-seed-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.characters-studio-seed-status {
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-}
-
 .characters-greetings {
   display: flex;
   flex-direction: column;

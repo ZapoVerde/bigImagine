@@ -53,6 +53,7 @@ import {
   getLocationsAdmin,
   getLocationSettings,
   getLorebookSettings,
+  getPortraitSubjectDescriberSettings,
   parseSetCanonSettingsBody,
   parseSetCharacterSettingsBody,
   parseSetChatMemorySettingsBody,
@@ -61,6 +62,7 @@ import {
   parseSetImageSettingsBody,
   parseSetLocationSettingsBody,
   parseSetLorebookSettingsBody,
+  parseSetPortraitSubjectDescriberSettingsBody,
   parseSetTimezoneBody,
   setCanonSettings,
   setCharacterSettings,
@@ -71,6 +73,7 @@ import {
   setImageSettings,
   setLocationSettings,
   setLorebookSettings,
+  setPortraitSubjectDescriberSettings,
 } from './adminServer.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
@@ -147,6 +150,32 @@ export async function handleCharacterSettingsSet(req: IncomingMessage, res: Serv
   }
   await setCharacterSettings(deps.settings, parsed);
   sendJson(res, 200, await getCharacterSettings(deps.settings));
+}
+
+// portrait-studio-standalone-subjects-plan.md Part B — the Settings tab's Portrait Subject
+// describer settings: the prompt template for the one synchronous LLM call that turns a bare
+// Studio subject name (+ optional seed) into its standing_instructions. Sibling of the
+// character-settings pair, minus the history-pairs knob (no transcript to bound). Same admin
+// gate + live no-restart shape as every other settings pair.
+export async function handlePortraitSubjectDescriberSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getPortraitSubjectDescriberSettings(deps.settings));
+}
+
+export async function handlePortraitSubjectDescriberSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetPortraitSubjectDescriberSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { describer_prompt?: string }' });
+    return;
+  }
+  await setPortraitSubjectDescriberSettings(deps.settings, parsed);
+  sendJson(res, 200, await getPortraitSubjectDescriberSettings(deps.settings));
 }
 
 // location.md §6.2.4 — the Locations page's read-only known-locations browser (parent/sub

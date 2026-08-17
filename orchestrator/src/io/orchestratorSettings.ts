@@ -260,6 +260,16 @@
  * frontend's once-per-load fetch, no restart; not covered: scene-presence ordering
  * (presence_order), which is a general scene feature independent of Portrait Studio.
  *
+ * portrait_subject_describer_prompt (migration 0111,
+ * docs/plans/portrait-studio-standalone-subjects-plan.md Part B) is the Portrait Studio subject
+ * describer's prompt template — the one synchronous LLM call that turns a bare subject name (+
+ * optional seed) into the entity's standing_instructions when an operator creates a Studio-native
+ * subject without hand-typing full instructions. Same "default + bespoke" override shape as every
+ * prompt key (bi_principles.md §17): empty = the built-in default in
+ * orchestrator/describeStudioSubject.ts, a non-empty value is used verbatim, {{name}}/{{seed}}
+ * interpolated. Read live on each subject create, no restart, editable from the Settings tab's
+ * fieldset.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -365,6 +375,7 @@ export const SETTING_NAMES = [
   'visual_reflection_system_prompt_override',
   'visual_wiki_investigation_max_turns',
   'visual_portraits_enabled',
+  'portrait_subject_describer_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 
