@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/chatMemorySync.ts
- * @stamp 2026-07-28
+ * @stamp 2026-08-17
  * @architectural-role Orchestrator — the rolling chat-summarization/RAG sync poll loop
  * @description
  * docs/chat-memory.md's sync pipeline. Lives in core, not plugins/chat-memory (which contributes
@@ -769,6 +769,34 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
                values ($1, 'person', $2, $3, $4, $5, $6, $7)`,
               [userId, entityKeyFor('person', entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
             );
+            // character-appearance-field-plan.md: the curator-side half of the frozen-once-set
+            // rule — a non-empty `appearance` from this entry writes back onto the matching
+            // `characters` row, but only when that row's own appearance is still empty (a
+            // character describeCharacter.ts already filled, or the operator authored, is left
+            // alone — bi_principles.md §3). The lookup is a plain exact case-insensitive name
+            // match: a miss (the curator's strict two-word naming diverging from the scraped
+            // row's name) just skips the write-back for this tick, never blocks or fails the
+            // sync. The write is a no-op idempotent check every tick either way.
+            const appearance = entry.appearance?.trim();
+            if (appearance) {
+              const [charRow] = await session.query<{ character_id: string; appearance: string }>(
+                `select character_id, appearance from characters
+                 where user_id = $1 and lower(name) = lower($2)`,
+                [userId, entry.name],
+              );
+              if (charRow && charRow.appearance.trim() === '') {
+                await session.query(
+                  `update characters set appearance = $3, updated_at = now()
+                   where character_id = $1 and user_id = $2`,
+                  [charRow.character_id, userId, appearance],
+                );
+                log.info('chat-memory sync: people curator appearance written onto characters', {
+                  chatId,
+                  characterId: charRow.character_id,
+                  entryName: entry.name,
+                });
+              }
+            }
           }
         });
 

@@ -55,13 +55,14 @@ function createFakePool() {
 
           // --- create_character ---
           if (sql.startsWith('insert into characters') && !sql.includes('spec_version')) {
-            const [userId, name, persona, scenario, systemPrompt, exampleDialogue, greetings] = params;
+            const [userId, name, persona, appearance, scenario, systemPrompt, exampleDialogue, greetings] = params;
             assert(scopedUserId === userId, 'create_character is scoped to the requesting user');
             const row = {
               character_id: `char-${++counter}`,
               user_id: userId,
               name,
               persona,
+              appearance,
               scenario,
               system_prompt: systemPrompt,
               example_dialogue: exampleDialogue,
@@ -157,6 +158,7 @@ function createFakePool() {
                   character_id: row.character_id,
                   name: row.name,
                   persona: row.persona,
+                  appearance: row.appearance,
                   scenario: row.scenario,
                   system_prompt: row.system_prompt,
                   example_dialogue: row.example_dialogue,
@@ -179,7 +181,7 @@ function createFakePool() {
             if (!row) return { rows: [] };
             // The tool appends patched fields to `sets` (and therefore params) in a fixed order
             // whenever present — mirror that order here to know which value is which.
-            const fieldOrder = ['name', 'persona', 'scenario', 'system_prompt', 'example_dialogue', 'greetings'];
+            const fieldOrder = ['name', 'persona', 'appearance', 'scenario', 'system_prompt', 'example_dialogue', 'greetings'];
             const patchedFields = fieldOrder.filter((f) => sql.includes(`${f} = $`));
             patchedFields.forEach((field, i) => {
               row[field] = field === 'greetings' ? JSON.parse(rest[i]) : rest[i];
@@ -379,11 +381,12 @@ const applyTool = registry.get('apply_character_to_chat');
 // --- create_character ---
 const elara = await db.withUserScope(userId, (session) =>
   createTool.handler(
-    { name: 'Elara', persona: 'A stern but fair knight-commander.', greetings: ['You again.'] },
+    { name: 'Elara', persona: 'A stern but fair knight-commander.', appearance: 'Tall, with steel-grey eyes and a scarred jaw.', greetings: ['You again.'] },
     { userId, db: session },
   ),
 );
 assert(elara.characterId.length > 0 && elara.name === 'Elara', 'create_character returns the new character id and name');
+assert(pool.characters.find((c) => c.character_id === elara.characterId)?.appearance === 'Tall, with steel-grey eyes and a scarred jaw.', 'create_character stores the optional appearance field');
 
 const bare = await db.withUserScope(userId, (session) =>
   createTool.handler({ name: 'Bare' }, { userId, db: session }),
@@ -420,6 +423,7 @@ const elaraDetail = await db.withUserScope(userId, (session) =>
   getOneTool.handler({ characterId: elara.characterId }, { userId, db: session }),
 );
 assert(elaraDetail.found && elaraDetail.name === 'Elara' && elaraDetail.persona.includes('stern'), 'get_character returns the full detail row');
+assert(elaraDetail.appearance === 'Tall, with steel-grey eyes and a scarred jaw.', 'get_character returns the appearance field');
 assert(elaraDetail.hasSourceJson === false, 'a manually-created character has no source_json');
 
 const notFoundDetail = await db.withUserScope(userId, (session) =>
@@ -510,13 +514,17 @@ assert(notFoundDetail.found === false, "get_character can't see another user's c
 
 // --- update_character ---
 const updated = await db.withUserScope(userId, (session) =>
-  updateTool.handler({ characterId: elara.characterId, scenario: 'A besieged keep at dawn.' }, { userId, db: session }),
+  updateTool.handler(
+    { characterId: elara.characterId, scenario: 'A besieged keep at dawn.', appearance: 'Tall, with grey eyes and a fresh scar.' },
+    { userId, db: session },
+  ),
 );
 assert(updated.found, 'update_character finds and patches an owned character');
 const afterUpdate = await db.withUserScope(userId, (session) =>
   getOneTool.handler({ characterId: elara.characterId }, { userId, db: session }),
 );
 assert(afterUpdate.scenario === 'A besieged keep at dawn.', 'update_character actually persisted the patched field');
+assert(afterUpdate.appearance === 'Tall, with grey eyes and a fresh scar.', 'update_character patches the appearance field');
 assert(afterUpdate.name === 'Elara', "update_character leaves fields that weren't patched alone");
 
 const updateOtherUsers = await db.withUserScope(userId, (session) =>

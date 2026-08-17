@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/curatePeople.ts
- * @stamp 2026-08-07
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — forced-schema LLM call
  * @description
  * The 'rp'-kind sync lane's periodic person curator: maintains living, seven-section records for
@@ -15,12 +15,19 @@
  *  - The "Keys:" keyword-list instruction is dropped — docs/spec.md's vector recall replaces
  *    keyword-lorebook matching outright, so there is nothing that would ever read a generated key.
  *  - The raw-markdown "### OUTPUT FORMAT" section is replaced by a forced tool call
- *    (curate_people). Appearance/Personality/Core Misread stay free-text prose inside `content`
- *    exactly as CNZ's own card shows them — this port does not split them into separate structured
+ *    (curate_people). Appearance is its own structured `appearance` parameter on the call —
+ *    split out of `content` because Portrait Studio's from-character seeding reads exactly the
+ *    physical part (docs/plans/character-appearance-field-plan.md), and its section rule comes
+ *    from the shared APPEARANCE_SECTION_RULE constant (personCuratorAppearance.ts) so this
+ *    curator and the mint-time describer (describeCharacter.ts) can never drift apart.
+ *    Personality/Core Misread stay free-text prose inside `content` exactly as CNZ's own card
+ *    shows them — this port does not split the remaining sections into separate structured
  *    fields (same "flat text block now, structure later if ever needed" precedent
- *    bridgeChatMemory.ts's own SCENE/EVENTS blocks set). CNZ's own `**dup** — duplicate of [Primary
- *    Name]` free-text convention becomes a first-class 'duplicate' action with a duplicate_of
- *    field, same structural swap curateWorldMemory.ts makes.
+ *    bridgeChatMemory.ts's own SCENE/EVENTS blocks set; nothing downstream needs Personality or
+ *    Goals in isolation the way Portrait Studio needs Appearance). CNZ's own
+ *    `**dup** — duplicate of [Primary Name]` free-text convention becomes a first-class
+ *    'duplicate' action with a duplicate_of field, same structural swap curateWorldMemory.ts
+ *    makes.
  *
  * {{user}} is resolved via util/interpolateMacros.ts (the household's persona_name), same live-macro
  * shape bridgeChatMemory.ts already uses — kept literal in the ported prompt text below.
@@ -39,6 +46,7 @@
 
 import type { LlmProvider, ToolDefinition } from '../llm/types.js';
 import { interpolateMacros } from '../../util/interpolateMacros.js';
+import { APPEARANCE_SECTION_RULE } from '../../orchestrator/personCuratorAppearance.js';
 
 export const DEFAULT_PEOPLE_CURATOR_PROMPT = `**[SYSTEM: TASK — PEOPLE CURATOR]**
 You will receive a transcript of recent story events and the current person entries for this story. The primary character is {{user}}.
@@ -50,10 +58,7 @@ If a card is missing any section — Appearance, Personality, Core Misread, Conn
 
 SECTION RULES:
 
-## Appearance — set once at creation.
-Physically inherent traits only: body type, height, build, bone structure, facial features, natural hair colour and texture, permanent features such as scars or birthmarks. Exclude clothing, accessories, current hairstyle, and injuries.
-  If a trait is not established in the transcript, invent something consistent with the character's tone and setting — commit to it, do not leave gaps.
-  Reproduce exactly in every UPDATE — do not alter, rephrase, or reorder.
+${APPEARANCE_SECTION_RULE}
 
 ## Personality — set once at creation.
 Choose 3–5 axes genuinely revealing of this specific character. Format:
@@ -164,8 +169,15 @@ const curatePeopleTool: ToolDefinition = {
             content: {
               type: 'string',
               description:
-                'Full replacement or new content: the seven sections (Appearance, Personality, Core Misread, Connections, ' +
-                'Relationship with {{user}}, Goals) as markdown, per the section rules above. Required for update/new; omit for duplicate.',
+                'Full replacement or new content: the five sections (Personality, Core Misread, Connections, ' +
+                'Relationship with {{user}}, Goals) as markdown, per the section rules above. Appearance is a separate ' +
+                'field — see appearance below. Required for update/new; omit for duplicate.',
+            },
+            appearance: {
+              type: 'string',
+              description:
+                'The physical-appearance treatment for this entry, per the ## Appearance section rule above. ' +
+                'Required alongside content for update/new; omit for duplicate.',
             },
             duplicate_of: {
               type: 'string',
@@ -186,6 +198,7 @@ export interface PeopleCuratorEntryDraft {
   action: 'update' | 'new' | 'duplicate';
   name: string;
   content?: string;
+  appearance?: string;
   duplicateOf?: string;
 }
 
@@ -194,6 +207,7 @@ interface PeopleCuratorToolResponse {
     action: 'update' | 'new' | 'duplicate';
     name: string;
     content?: string;
+    appearance?: string;
     duplicate_of?: string;
   }[];
 }
@@ -246,6 +260,7 @@ export async function curatePeople(
     action: e.action,
     name: e.name,
     content: e.content,
+    appearance: e.appearance,
     duplicateOf: e.duplicate_of,
   }));
 }

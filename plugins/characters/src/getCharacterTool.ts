@@ -31,6 +31,7 @@ interface CharacterDetailRow {
   character_id: string;
   name: string;
   persona: string;
+  appearance: string;
   scenario: string;
   system_prompt: string;
   example_dialogue: string;
@@ -66,7 +67,7 @@ export function createGetCharacterTool(): RegisteredTool {
         throw new Error('get_character requires a characterId: string');
       }
       const rows = await ctx.db.query<CharacterDetailRow>(
-        `select character_id, name, persona, scenario, system_prompt, example_dialogue, greetings,
+        `select character_id, name, persona, appearance, scenario, system_prompt, example_dialogue, greetings,
                 spec_version, avatar_path is not null as has_avatar, source_json is not null as has_source_json,
                 created_at, updated_at
          from characters where character_id = $1 and user_id = $2 and (
@@ -85,6 +86,7 @@ export function createGetCharacterTool(): RegisteredTool {
         characterId: row.character_id,
         name: row.name,
         persona: row.persona,
+        appearance: row.appearance,
         scenario: row.scenario,
         systemPrompt: row.system_prompt,
         exampleDialogue: row.example_dialogue,

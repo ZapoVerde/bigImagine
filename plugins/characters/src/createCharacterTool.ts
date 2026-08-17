@@ -1,6 +1,6 @@
 /**
  * @file plugins/characters/src/createCharacterTool.ts
- * @stamp 2026-08-04
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — creates a character
  * @description
  * The data-only slice of the Character Roster (canonize-plan.md §8 — this is not the Roster:
@@ -32,6 +32,7 @@ interface CharacterRow {
 interface CreateCharacterArgs {
   name: string;
   persona?: string;
+  appearance?: string;
   scenario?: string;
   system_prompt?: string;
   example_dialogue?: string;
@@ -44,6 +45,7 @@ function isCreateCharacterArgs(value: unknown): value is CreateCharacterArgs {
     return false;
   }
   if (v.persona !== undefined && typeof v.persona !== 'string') return false;
+  if (v.appearance !== undefined && typeof v.appearance !== 'string') return false;
   if (v.scenario !== undefined && typeof v.scenario !== 'string') return false;
   if (v.system_prompt !== undefined && typeof v.system_prompt !== 'string') return false;
   if (v.example_dialogue !== undefined && typeof v.example_dialogue !== 'string') return false;
@@ -66,6 +68,12 @@ export function createCreateCharacterTool(): RegisteredTool {
         properties: {
           name: { type: 'string', description: "The character's name." },
           persona: { type: 'string', description: 'Optional. The character\'s appearance and personality (static, set at creation).' },
+          appearance: {
+            type: 'string',
+            description:
+              "Optional. The character's physical appearance only — body type, height, build, facial features, natural hair colour, permanent features such as scars or birthmarks. " +
+              'Exclude clothing, accessories, current hairstyle, and injuries (static, set at creation). Portrait Studio\'s from-character seeding prefers this over persona.',
+          },
           scenario: { type: 'string', description: 'Optional. The character\'s scenario/backstory text.' },
           system_prompt: { type: 'string', description: 'Optional. Extra system prompt content for this character.' },
           example_dialogue: { type: 'string', description: 'Optional. Example dialogue shown to the model.' },
@@ -84,13 +92,14 @@ export function createCreateCharacterTool(): RegisteredTool {
         throw new Error('create_character requires a non-empty name: string; optional fields must be strings (greetings a string array)');
       }
       const [row] = await ctx.db.query<CharacterRow>(
-        `insert into characters (user_id, name, persona, scenario, system_prompt, example_dialogue, greetings)
-         values ($1, $2, $3, $4, $5, $6, $7::jsonb)
+        `insert into characters (user_id, name, persona, appearance, scenario, system_prompt, example_dialogue, greetings)
+         values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
          returning character_id, name`,
         [
           ctx.userId,
           args.name.trim(),
           args.persona ?? '',
+          args.appearance ?? '',
           args.scenario ?? '',
           args.system_prompt ?? '',
           args.example_dialogue ?? '',

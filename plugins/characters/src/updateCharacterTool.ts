@@ -1,6 +1,6 @@
 /**
  * @file plugins/characters/src/updateCharacterTool.ts
- * @stamp 2026-08-05
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — patches a character's editable fields
  * @description
  * The write half of the Roster editor pane (get_character is the read half). Only the same static
@@ -30,6 +30,7 @@ interface UpdateCharacterArgs {
   characterId: string;
   name?: string;
   persona?: string;
+  appearance?: string;
   scenario?: string;
   system_prompt?: string;
   example_dialogue?: string;
@@ -43,6 +44,7 @@ function isUpdateCharacterArgs(value: unknown): value is UpdateCharacterArgs {
   }
   if (v.name !== undefined && (typeof v.name !== 'string' || v.name.trim().length === 0)) return false;
   if (v.persona !== undefined && typeof v.persona !== 'string') return false;
+  if (v.appearance !== undefined && typeof v.appearance !== 'string') return false;
   if (v.scenario !== undefined && typeof v.scenario !== 'string') return false;
   if (v.system_prompt !== undefined && typeof v.system_prompt !== 'string') return false;
   if (v.example_dialogue !== undefined && typeof v.example_dialogue !== 'string') return false;
@@ -59,13 +61,18 @@ export function createUpdateCharacterTool(): RegisteredTool {
   return {
     definition: {
       name: 'update_character',
-      description: "Patch one of a character's editable fields (name, persona, scenario, system_prompt, example_dialogue, greetings).",
+      description: "Patch one of a character's editable fields (name, persona, appearance, scenario, system_prompt, example_dialogue, greetings).",
       parameters: {
         type: 'object',
         properties: {
           characterId: { type: 'string', description: 'The character id to update.' },
           name: { type: 'string' },
           persona: { type: 'string' },
+          appearance: {
+            type: 'string',
+            description:
+              "The character's physical appearance only (body type, height, build, facial features, natural hair colour, permanent features such as scars or birthmarks; exclude clothing, accessories, current hairstyle, injuries). Portrait Studio's from-character seeding prefers this over persona.",
+          },
           scenario: { type: 'string' },
           system_prompt: { type: 'string' },
           example_dialogue: { type: 'string' },
@@ -88,6 +95,10 @@ export function createUpdateCharacterTool(): RegisteredTool {
       if (args.persona !== undefined) {
         params.push(args.persona);
         sets.push(`persona = $${params.length}`);
+      }
+      if (args.appearance !== undefined) {
+        params.push(args.appearance);
+        sets.push(`appearance = $${params.length}`);
       }
       if (args.scenario !== undefined) {
         params.push(args.scenario);

@@ -30,19 +30,21 @@ interface CharactersViewProps {
 interface Draft {
   name: string;
   persona: string;
+  appearance: string;
   scenario: string;
   systemPrompt: string;
   exampleDialogue: string;
   greetings: string[];
 }
 
-const BLANK_DRAFT: Draft = { name: '', persona: '', scenario: '', systemPrompt: '', exampleDialogue: '', greetings: [] };
+const BLANK_DRAFT: Draft = { name: '', persona: '', appearance: '', scenario: '', systemPrompt: '', exampleDialogue: '', greetings: [] };
 
 function draftFromDetail(detail: CharacterDetail): Draft {
   if (!detail.found) return BLANK_DRAFT;
   return {
     name: detail.name,
     persona: detail.persona,
+    appearance: detail.appearance,
     scenario: detail.scenario,
     systemPrompt: detail.systemPrompt,
     exampleDialogue: detail.exampleDialogue,
@@ -158,6 +160,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     (detail?.found === true &&
       (draft.name.trim() !== detail.name ||
         draft.persona !== detail.persona ||
+        draft.appearance !== detail.appearance ||
         draft.scenario !== detail.scenario ||
         draft.systemPrompt !== detail.systemPrompt ||
         draft.exampleDialogue !== detail.exampleDialogue ||
@@ -178,6 +181,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
           {
             name: draft.name.trim(),
             persona: draft.persona,
+            appearance: draft.appearance,
             scenario: draft.scenario,
             system_prompt: draft.systemPrompt,
             example_dialogue: draft.exampleDialogue,
@@ -195,6 +199,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
             characterId: detail.characterId,
             name: draft.name.trim(),
             persona: draft.persona,
+            appearance: draft.appearance,
             scenario: draft.scenario,
             system_prompt: draft.systemPrompt,
             example_dialogue: draft.exampleDialogue,
@@ -245,9 +250,10 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
   }
 
   // studio-character-bridge-plan.md Part A: create-or-refresh this character's subject entity
-  // in Portrait Studio from its persona. An explicit operator click every time — the server
-  // overwrites an existing subject entity's standing_instructions unconditionally, so clicking
-  // again after editing the persona is how the Studio copy is deliberately refreshed.
+  // in Portrait Studio from its appearance (falling back to persona when no appearance is set).
+  // An explicit operator click every time — the server overwrites an existing subject entity's
+  // standing_instructions unconditionally, so clicking again after editing the fields is how the
+  // Studio copy is deliberately refreshed.
   async function sendToPortraitStudio() {
     if (!detail?.found) return;
     setStudioSeedStatus('Seeding…');
@@ -449,16 +455,25 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
               Persona
               <textarea rows={4} value={draft.persona} onChange={(e) => updateDraft({ persona: e.target.value })} />
             </label>
+            <label className="characters-field">
+              Appearance
+              <textarea
+                rows={3}
+                value={draft.appearance}
+                onChange={(e) => updateDraft({ appearance: e.target.value })}
+                placeholder="Physical traits only — body type, height, build, facial features, natural hair colour, permanent features (scars, birthmarks). Exclude clothing, accessories, current hairstyle, injuries. Portrait Studio prefers this field."
+              />
+            </label>
             {!creatingNew && detail?.found && (
               <div className="characters-studio-seed">
                 <button
                   type="button"
                   className="characters-studio-seed-btn"
-                  disabled={draft.persona.trim() === '' || studioSeedStatus === 'Seeding…'}
+                  disabled={(draft.persona.trim() === '' && draft.appearance.trim() === '') || studioSeedStatus === 'Seeding…'}
                   title={
-                    draft.persona.trim() === ''
-                      ? 'The character has no persona yet — write one first.'
-                      : 'Create or refresh this character\'s subject entity in Portrait Studio (its persona becomes the entity\'s instructions)'
+                    draft.persona.trim() === '' && draft.appearance.trim() === ''
+                      ? 'The character has no persona or appearance yet — write one first.'
+                      : 'Create or refresh this character\'s subject entity in Portrait Studio (its appearance becomes the entity\'s instructions, falling back to the persona when no appearance is set)'
                   }
                   onClick={() => void sendToPortraitStudio()}
                 >

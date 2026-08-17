@@ -33,7 +33,8 @@ function createFakePool() {
   const swipes = []; // { swipe_id, message_id, created_at } (chat_message_swipes, migration 0059)
   const locations = []; // { location_id, user_id, status } (locations, migration 0067; status is settled by
   // the sync tick below — 0096 moved the chat/swipe anchor off the row and onto the link table)
-  const characters = []; // { character_id, user_id, status } (characters, migration 0067)
+  const characters = []; // { character_id, user_id, name, appearance, status } (characters, migration 0067;
+  // name+appearance for the upsert_people write-back, character-appearance-field-plan.md)
   const locationChatLinks = []; // { location_id, chat_id, anchor_swipe_id } (migration 0096)
   const characterChatLinks = []; // { character_id, chat_id, anchor_swipe_id } (migration 0096)
   let clock = 1000;
@@ -362,8 +363,7 @@ function createFakePool() {
             return { rows: [] };
           }
 
-          if (sql.includes('insert into canon_facts')) {
-            // Column order (0079): (user_id, category, arc_tag|entity_key, summary, detail,
+          if (sql.includes('insert into canon_facts')) {            // Column order (0079): (user_id, category, arc_tag|entity_key, summary, detail,
             // vector_embed, chat_id, sync_id) — arc_tag for the bridge's plot lane, entity_key
             // for the two curators, exactly one of them present per insert. Param layout differs
             // by lane: plot/people put the category in the SQL as a literal (7 params), the
@@ -394,6 +394,22 @@ function createFakePool() {
               sync_id: syncId ?? null,
               proposed_at: now(),
             });
+            return { rows: [] };
+          }
+
+          // character-appearance-field-plan.md: the upsert_people step's exact case-insensitive
+          // name lookup (scoped to user_id) and the frozen-once-set appearance write-back.
+          if (sql.startsWith('select character_id, appearance from characters')) {
+            const [userId, name] = params;
+            const row = characters.find(
+              (c) => c.user_id === userId && typeof c.name === 'string' && c.name.toLowerCase() === String(name).toLowerCase(),
+            );
+            return { rows: row ? [{ character_id: row.character_id, appearance: row.appearance }] : [] };
+          }
+          if (sql.startsWith('update characters set appearance')) {
+            const [characterId, userId, appearance] = params;
+            const row = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+            if (row) row.appearance = appearance;
             return { rows: [] };
           }
 
@@ -471,7 +487,16 @@ function createFakeLlm() {
             {
               id: randomUUID(),
               name: 'curate_people',
-              arguments: { entries: [{ action: 'new', name: 'Elena Ashford', content: '**Appearance:** tall.\n**Goals:** hold the gate.' }] },
+              arguments: {
+                entries: [
+                  {
+                    action: 'new',
+                    name: 'Elena Ashford',
+                    content: '**Personality:** resolute.\n**Goals:** hold the gate.',
+                    appearance: 'Tall, with a lantern jaw and steel-grey eyes.',
+                  },
+                ],
+              },
             },
           ],
         };
@@ -869,6 +894,12 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   pool.chatSessions.set(RP_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
   seedMessages(RP_CHAT_ID, 'RP', 12); // same 12-message due profile as the household tick above
 
+  // character-appearance-field-plan.md: the people curator's entry carries a separate
+  // `appearance`; a matching characters row (exact case-insensitive name, appearance blank)
+  // receives it in the same tick. The curator's strict two-word name "Elena Ashford" matches
+  // the scraped characters row verbatim.
+  pool.characters.push({ character_id: randomUUID(), user_id: USER, name: 'Elena Ashford', appearance: '', status: 'transient' });
+
   const chunksBefore = pool.chatChunks.length;
   await runChatMemorySyncTick(deps);
 
@@ -906,10 +937,107 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     rpFacts.some((f) => f.category === 'person' && f.entity_key === 'person:elena-ashford'),
     "the people curator's proposal lands with its entity_key intact",
   );
+  const elenaChar = pool.characters.find((c) => c.name === 'Elena Ashford');
+  assert(
+    elenaChar?.appearance === 'Tall, with a lantern jaw and steel-grey eyes.',
+    "the rp tick's people-curator appearance writes back onto the matching appearance-blank characters row",
+  );
   assert(
     pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 5,
     'an rp sync reports 5 entries updated (scene + events + plot + lorebook + people)',
   );
+}
+
+// --- character-appearance-field-plan.md: the upsert_people appearance write-back's edge cases.
+// A curator entry whose exact case-insensitive name matches no characters row still inserts its
+// canon_facts row (the write-back never blocks or fails the tick); a matching row whose
+// appearance is already non-empty is never overwritten (bi_principles.md §3 per field). ---
+{
+  const APPEAR_CHAT_ID = randomUUID();
+  pool.chatSessions.set(APPEAR_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  seedMessages(APPEAR_CHAT_ID, 'APPEAR', 12);
+
+  // One matching appearance-blank row, one matching already-filled row, and no row at all for
+  // the third entry's name.
+  pool.characters.push(
+    { character_id: randomUUID(), user_id: USER, name: 'Mira Vale', appearance: '', status: 'transient' },
+    { character_id: randomUUID(), user_id: USER, name: 'Garrick Stone', appearance: 'A heavyset old soldier.', status: 'transient' },
+  );
+
+  const realComplete = llm.complete.bind(llm);
+  llm.complete = async (messages, tools, options = {}) => {
+    if (options.forceTool === 'curate_people') {
+      return {
+        message: { role: 'assistant', content: '' },
+        toolCalls: [
+          {
+            id: randomUUID(),
+            name: 'curate_people',
+            arguments: {
+              entries: [
+                { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, with ash-blonde hair.' },
+                { action: 'new', name: 'Unknown Stranger', content: '**Personality:** elusive.', appearance: 'A hooded figure.' },
+                { action: 'new', name: 'Garrick Stone', content: '**Personality:** gruff.', appearance: 'Fresh description that must NOT land.' },
+              ],
+            },
+          },
+        ],
+      };
+    }
+    return realComplete(messages, tools, options);
+  };
+
+  const peopleFactsBefore = pool.canonFacts.filter((f) => f.chat_id === APPEAR_CHAT_ID && f.category === 'person').length;
+  await runChatMemorySyncTick(deps);
+  llm.complete = realComplete;
+
+  const mira = pool.characters.find((c) => c.name === 'Mira Vale');
+  assert(mira?.appearance === 'Slender, with ash-blonde hair.', 'an exact name match writes appearance onto the blank characters row');
+  const garrick = pool.characters.find((c) => c.name === 'Garrick Stone');
+  assert(
+    garrick?.appearance === 'A heavyset old soldier.',
+    'a matching characters row whose appearance is already non-empty is never overwritten',
+  );
+  const peopleFactsAfter = pool.canonFacts.filter((f) => f.chat_id === APPEAR_CHAT_ID && f.category === 'person');
+  assert(
+    peopleFactsAfter.length === peopleFactsBefore + 3,
+    'every curator entry still inserts its canon_facts row — a missing name match never skips the insert',
+  );
+  assert(
+    peopleFactsAfter.some((f) => f.detail === 'Unknown Stranger'),
+    "an entry with no matching characters row still lands as a canon_facts row (fuzzy name reconciliation is out of scope)",
+  );
+}
+
+// --- curatePeople() return shape: the tool call's appearance parameter round-trips through the
+// return value distinctly from content; a 'duplicate' action entry carries neither. ---
+{
+  const { curatePeople } = await import('../dist/io/chatMemory/curatePeople.js');
+  const entriesReply = {
+    message: { role: 'assistant', content: '' },
+    toolCalls: [
+      {
+        id: randomUUID(),
+        name: 'curate_people',
+        arguments: {
+          entries: [
+            { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, ash-blonde.' },
+            { action: 'duplicate', name: 'Mira V.', duplicate_of: 'Mira Vale' },
+          ],
+        },
+      },
+    ],
+  };
+  const stubLlm = {
+    async complete() {
+      return entriesReply;
+    },
+  };
+  const drafts = await curatePeople(stubLlm, 'TRANSCRIPT', '', 'Elara');
+  const newEntry = drafts.find((d) => d.name === 'Mira Vale');
+  assert(newEntry?.content === '**Personality:** wary.' && newEntry?.appearance === 'Slender, ash-blonde.', "curatePeople round-trips appearance distinctly from content");
+  const dupEntry = drafts.find((d) => d.action === 'duplicate');
+  assert(dupEntry?.appearance === undefined && dupEntry?.content === undefined, "a 'duplicate' action entry has no appearance value (same as content today)");
 }
 
 // --- eager-chunk-sync-plan: the tick reuses-and-closes an eagerly-opened sync point. An open

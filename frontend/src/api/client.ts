@@ -1660,8 +1660,10 @@ export function updatePortraitEntity(entityId: string, input: UpdatePortraitEnti
 }
 
 /** POST /v1/portraits/entities/from-character — seed or refresh a subject entity from a
- *  character's persona (studio-character-bridge-plan.md Part A). Unconditional overwrite of the
- *  existing entity's standing_instructions on every call; 409 when the persona is empty. */
+ *  character's appearance, falling back to the persona when appearance is blank
+ *  (studio-character-bridge-plan.md Part A, character-appearance-field-plan.md). Unconditional
+ *  overwrite of the existing entity's standing_instructions on every call; 409 only when both
+ *  appearance and persona are empty. */
 export function seedSubjectFromCharacter(
   characterId: string,
   apiKey: string | null,

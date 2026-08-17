@@ -1163,6 +1163,7 @@ export type CharacterDetail =
       characterId: string;
       name: string;
       persona: string;
+      appearance: string;
       scenario: string;
       systemPrompt: string;
       exampleDialogue: string;

@@ -2,10 +2,11 @@
 // Postgres pool + fake settings + fake LLM gate — no server, no network (fetch is stubbed per
 // test), no real provider (orchestrator/scripts/verify-location-presence-scraper.mjs's
 // convention). The suite exercises:
-//   - from-character (Part A): create a subject entity from a character with a persona;
-//     refresh overwrites standing_instructions unconditionally (no "already seeded, skip");
-//     unknown characterId → 404; blank/whitespace persona → 409 with no entity created or
-//     touched;
+//   - from-character (Part A, character-appearance-field-plan.md): create a subject entity
+//     from a character's appearance (preferred over persona when present); blank appearance
+//     falls back to the persona; unknown characterId → 404; both appearance and persona blank →
+//     409 with no entity created or touched; refresh overwrites standing_instructions
+//     unconditionally (no "already seeded, skip");
 //   - set-as-avatar (Part C): non-subject-layer → 400; entity with no character_id → 400; no
 //     last_image_url → 400; success always overwrites the character's avatar regardless of the
 //     current avatar_path; a failing image fetch → 500 without corrupting state (fail-open);
@@ -172,9 +173,9 @@ function makeDb() {
       }
       return [];
     }
-    if (s.startsWith('select character_id, name, persona from characters')) {
+    if (s.startsWith('select character_id, name, persona, appearance from characters')) {
       const row = state.characters.find((c) => c.character_id === params[0] && c.user_id === params[1]);
-      return row ? [{ character_id: row.character_id, name: row.name, persona: row.persona }] : [];
+      return row ? [{ character_id: row.character_id, name: row.name, persona: row.persona, appearance: row.appearance }] : [];
     }
     if (s.startsWith('select entity_id from visual_entities') && s.includes("layer_id = 'subject'")) {
       // subjectExistsForCharacter
@@ -287,10 +288,18 @@ async function mediaFileExists(characterId) {
 // from-character (Part A)
 // ============================================================================
 
-// --- Creates a subject entity from a character with a persona. ---
+// --- Creates a subject entity from a character's appearance — appearance preferred over
+// persona when both are present (character-appearance-field-plan.md). ---
 {
   const db = makeDb();
-  db.state.characters.push({ character_id: 'char-new', user_id: USER, name: 'Talfryn', persona: 'A dour shipwright with a lantern jaw.', avatar_path: null });
+  db.state.characters.push({
+    character_id: 'char-new',
+    user_id: USER,
+    name: 'Talfryn',
+    persona: 'A dour shipwright with a lantern jaw.',
+    appearance: 'Tall and stooped, with calloused hands and a beard shot through with grey.',
+    avatar_path: null,
+  });
   const res = fakeRes();
   await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-new' }), res, { db, settings: makeSettings() }, USER);
 
@@ -298,23 +307,46 @@ async function mediaFileExists(characterId) {
   const created = db.state.entities.find((e) => e.character_id === 'char-new');
   assert(res.responses[0].body.action === 'created' && !!created, 'from-character: a new subject entity is created (action "created")');
   assert(created.layer_id === 'subject' && created.name === 'Talfryn', 'from-character: the entity is a subject layer carrying the character\'s name');
-  assert(created.standing_instructions === 'A dour shipwright with a lantern jaw.', 'from-character: standing_instructions is seeded from the persona');
+  assert(
+    created.standing_instructions === 'Tall and stooped, with calloused hands and a beard shot through with grey.',
+    'from-character: standing_instructions is seeded from the APPEARANCE when present, not the persona',
+  );
   assert(res.responses[0].body.entity.entity_id === created.entity_id, 'from-character: the response returns the created entity');
+}
+
+// --- A character with a persona but no appearance still seeds — the fallback to persona. ---
+{
+  const db = makeDb();
+  db.state.characters.push({ character_id: 'char-fallback', user_id: USER, name: 'Mair', persona: 'A sharp-eyed harbormaster.', appearance: '', avatar_path: null });
+  const res = fakeRes();
+  await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-fallback' }), res, { db, settings: makeSettings() }, USER);
+  const created = db.state.entities.find((e) => e.character_id === 'char-fallback');
+  assert(
+    created?.standing_instructions === 'A sharp-eyed harbormaster.',
+    'from-character: a blank appearance falls back to the persona for seeding (no silent regression to 409)',
+  );
 }
 
 // --- Refresh overwrites standing_instructions unconditionally — no "already seeded, skip". ---
 {
   const db = makeDb();
-  db.state.characters.push({ character_id: 'char-refresh', user_id: USER, name: 'Mair', persona: 'A sharp-eyed harbormaster.', avatar_path: null });
-  seedSubjectEntity(db, { entityId: 'e-refresh', characterId: 'char-refresh', instructions: 'The old persona from a prior seed.' });
-  // The persona changed since the last seed — clicking again is the operator's refresh signal.
-  db.state.characters[0].persona = 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.';
+  db.state.characters.push({
+    character_id: 'char-refresh',
+    user_id: USER,
+    name: 'Mair',
+    persona: 'A sharp-eyed harbormaster.',
+    appearance: 'An old salt with a weather-lined face.',
+    avatar_path: null,
+  });
+  seedSubjectEntity(db, { entityId: 'e-refresh', characterId: 'char-refresh', instructions: 'The old instructions from a prior seed.' });
+  // The appearance changed since the last seed — clicking again is the operator's refresh signal.
+  db.state.characters[0].appearance = 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.';
   const res = fakeRes();
   await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-refresh' }), res, { db, settings: makeSettings() }, USER);
 
   assert(res.responses[0].body.action === 'refreshed', 'from-character: an already-seeded entity is refreshed, not rejected (action "refreshed")');
   const entity = db.state.entities.find((e) => e.entity_id === 'e-refresh');
-  assert(entity.standing_instructions === 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.', 'from-character: refresh overwrites standing_instructions with the CURRENT persona — unconditional');
+  assert(entity.standing_instructions === 'A harbormaster whose coat is salt-cured and whose gaze is a ledger.', 'from-character: refresh overwrites standing_instructions with the CURRENT appearance — unconditional');
   assert(db.state.entities.length === 1, 'from-character: refresh updates in place — no duplicate entity');
 }
 
@@ -327,14 +359,17 @@ async function mediaFileExists(characterId) {
   assert(db.state.entities.length === 0, 'from-character: a 404 creates no entity');
 }
 
-// --- Blank/whitespace persona → 409, no entity created or touched. ---
+// --- Both appearance and persona blank → 409, no entity created or touched. ---
 {
   const db = makeDb();
-  db.state.characters.push({ character_id: 'char-blank', user_id: USER, name: 'Ghost', persona: '   ', avatar_path: null });
+  db.state.characters.push({ character_id: 'char-blank', user_id: USER, name: 'Ghost', persona: '   ', appearance: '', avatar_path: null });
   seedSubjectEntity(db, { entityId: 'e-ghost', characterId: 'char-blank', instructions: 'original instructions — must survive untouched' });
   const res = fakeRes();
   await handlePortraitEntityFromCharacter(jsonReq({ characterId: 'char-blank' }), res, { db, settings: makeSettings() }, USER);
-  assert(res.responses[0].status === 409 && res.responses[0].body.error === 'persona is empty', 'from-character: a blank persona → 409 "persona is empty"');
+  assert(
+    res.responses[0].status === 409 && res.responses[0].body.error === 'character has no appearance or persona',
+    'from-character: both appearance and persona blank → 409 "character has no appearance or persona"',
+  );
   assert(
     db.state.entities.find((e) => e.entity_id === 'e-ghost').standing_instructions === 'original instructions — must survive untouched',
     'from-character: a 409 leaves the existing entity untouched',

@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/portraitRoutes.ts
- * @stamp 2026-08-16
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — the Portrait Studio's HTTP surface + the portraits
  *   subsystem's DB read/write seam (bi_principles.md §8), the file wiki.ts's preamble names as
  *   the wrapper that shapes visual_wiki_entries rows before the pure formatters see them
@@ -593,14 +593,19 @@ export async function handlePortraitEntities(
   sendJson(res, 404, { error: 'not found' });
 }
 
-/** POST /v1/portraits/entities/from-character (studio-character-bridge-plan.md Part A) — seed
- *  or refresh a subject entity from a character's persona. The operator-facing button on both
- *  surfaces (CharactersView editor pane, CastSection cast row) calls this on purpose each time:
- *  an existing subject entity's standing_instructions is overwritten unconditionally with the
- *  character's current persona — there is no "already seeded, skip" rule, clicking again is how
- *  the operator deliberately refreshes Studio's instructions after the persona changed (§3:
- *  explicit signal outranks inferred). Declines outright (409, no entity touched) on a blank
- *  persona rather than seeding empty instructions. */
+/** POST /v1/portraits/entities/from-character (studio-character-bridge-plan.md Part A,
+ *  character-appearance-field-plan.md) — seed or refresh a subject entity from a character's
+ *  appearance, falling back to the persona when appearance is blank (an imported card or a
+ *  manually-created character with a full persona but no separately-authored appearance still
+ *  seeds Studio with something useful today, exactly as it did before the appearance column
+ *  existed — persona is read here as a fallback, never a replacement). The operator-facing
+ *  button on both surfaces (CharactersView editor pane, CastSection cast row) calls this on
+ *  purpose each time: an existing subject entity's standing_instructions is overwritten
+ *  unconditionally with the character's current appearance-or-persona — there is no "already
+ *  seeded, skip" rule, clicking again is how the operator deliberately refreshes Studio's
+ *  instructions after the text changed (§3: explicit signal outranks inferred). Declines
+ *  outright (409, no entity touched) only when both appearance and persona are blank rather
+ *  than seeding empty instructions. */
 export async function handlePortraitEntityFromCharacter(
   req: IncomingMessage,
   res: ServerResponse,
@@ -621,8 +626,8 @@ export async function handlePortraitEntityFromCharacter(
     return;
   }
   const chars = await deps.db.withUserScope(userId, (session) =>
-    session.query<{ character_id: string; name: string; persona: string }>(
-      'select character_id, name, persona from characters where character_id = $1 and user_id = $2',
+    session.query<{ character_id: string; name: string; persona: string; appearance: string }>(
+      'select character_id, name, persona, appearance from characters where character_id = $1 and user_id = $2',
       [parsed.characterId, userId],
     ),
   );
@@ -631,9 +636,9 @@ export async function handlePortraitEntityFromCharacter(
     sendJson(res, 404, { error: 'character not found' });
     return;
   }
-  const persona = character.persona.trim();
-  if (persona === '') {
-    sendJson(res, 409, { error: 'persona is empty' });
+  const seedText = character.appearance.trim() || character.persona.trim();
+  if (seedText === '') {
+    sendJson(res, 409, { error: 'character has no appearance or persona' });
     return;
   }
   // One subject entity per character (the same app-level guard the create path enforces).
@@ -647,11 +652,11 @@ export async function handlePortraitEntityFromCharacter(
          )
          returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
                    last_image_url, current_best_candidate_id, created_at, updated_at`,
-        [userId, character.character_id, persona],
+        [userId, character.character_id, seedText],
       ),
     );
     const entity = rows[0]!;
-    log.info('portraitRoutes: subject entity refreshed from character persona', { characterId: character.character_id, entityId: entity.entity_id });
+    log.info('portraitRoutes: subject entity refreshed from character appearance/persona', { characterId: character.character_id, entityId: entity.entity_id });
     sendJson(res, 200, { entity, action: 'refreshed' });
     return;
   }
@@ -661,11 +666,11 @@ export async function handlePortraitEntityFromCharacter(
        values ($1, 'subject', $2, $3, '{}'::jsonb, $4, null)
        returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
                  last_image_url, current_best_candidate_id, created_at, updated_at`,
-      [userId, character.character_id, character.name, persona],
+      [userId, character.character_id, character.name, seedText],
     ),
   );
   const entity = created[0]!;
-  log.info('portraitRoutes: subject entity seeded from character persona', { characterId: character.character_id, entityId: entity.entity_id });
+  log.info('portraitRoutes: subject entity seeded from character appearance/persona', { characterId: character.character_id, entityId: entity.entity_id });
   sendJson(res, 200, { entity, action: 'created' });
 }
 

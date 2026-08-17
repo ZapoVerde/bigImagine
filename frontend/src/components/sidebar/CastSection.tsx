@@ -158,7 +158,7 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
                       type="button"
                       className="cast-row-studio-btn"
                       disabled={studioBusyId === c.characterId}
-                      title="Create or refresh this character's subject entity in Portrait Studio (its persona becomes the entity's instructions)"
+                      title="Create or refresh this character's subject entity in Portrait Studio (its appearance becomes the entity's instructions, falling back to the persona)"
                       onClick={() => void sendToStudio(c.characterId)}
                     >
                       {studioBusyId === c.characterId ? '…' : 'Send to Studio'}
