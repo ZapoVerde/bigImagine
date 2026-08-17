@@ -6,15 +6,16 @@
  * @description
  * The "type a name, get a described subject" path inside Portrait Studio: one synchronous LLM
  * call that turns a bare subject name (+ an optional short `seed` prompt) into a full physical-
- * appearance blurb, used as the new entity's standing_instructions when an operator creates a
- * Studio-native subject without hand-typing full instructions.
+ * appearance blurb. The blurb is never persisted on the entity itself (2026-08-17: visual_entities
+ * dropped standing_instructions, migration 0114) — the caller (portraitRoutes.ts's create-entity
+ * path) hands it straight to describeStudioSlots.ts as ephemeral bootstrap context, one LLM call
+ * feeding the next, ordinary scratch data with no independent life afterward.
  *
  * Structurally the small sibling of describeCharacter.ts (orchestrator/describeCharacter.ts),
  * minus the transcript-context machinery — there is no chat to read here, nothing to fill-when-
  * empty, no skip rule, no fire-and-forget split — minus the two-marker persona/appearance
- * output: this pass produces exactly one blurb, and the whole reply (the Appearance marker's
- * value when the model follows the output format, the full reply otherwise) becomes the entity's
- * standing_instructions verbatim.
+ * output: this pass produces exactly one blurb (the Appearance marker's value when the model
+ * follows the output format, the full reply otherwise).
  *
  * The prompt is the same "default + bespoke" shape as every prompt key (bi_principles.md §17):
  * empty `portrait_subject_describer_prompt` → the built-in default here; a non-empty override is
@@ -26,8 +27,8 @@
  *
  * Fail-open (bi_principles.md §11): the call itself never throws — a settings read failure, an
  * LLM error, an empty reply, or a reply with no usable content all log a warning and resolve to
- * `''`, and the caller inserts the entity anyway with blank standing_instructions (the operator
- * can type them by hand afterward). Creation never blocks on the describer failing.
+ * `''`, and the caller proceeds to bootstrap slots with no context either way (the operator can
+ * hand-fill slots afterward). Creation never blocks on the describer failing.
  *
  * @api-declaration
  * DEFAULT_PORTRAIT_SUBJECT_DESCRIBER_PROMPT — the built-in prompt template (empty

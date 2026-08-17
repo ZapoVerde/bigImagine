@@ -112,6 +112,39 @@
   align-self: stretch;
 }
 
+.portrait-card-failed {
+  border-color: var(--color-danger);
+}
+
+.portrait-card-placeholder {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: var(--radius-sm, 6px);
+  border: 1px dashed var(--color-danger);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 0.3rem;
+  padding: 0.6rem;
+  color: var(--color-danger);
+}
+
+.portrait-card-failed-label {
+  font-weight: 600;
+}
+
+.portrait-card-failed-reason {
+  font-size: var(--font-size-sm, 0.85rem);
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.portrait-card-retry {
+  align-self: stretch;
+}
+
 @media (max-width: 768px) {
   .portrait-grid {
     grid-template-columns: 1fr;

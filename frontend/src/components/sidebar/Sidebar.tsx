@@ -4,6 +4,8 @@ import type { TurnSnapshot } from '../../lib/turnTimelineReport';
 import ChatBrowser from './ChatBrowser';
 import NotesBrowser from './NotesBrowser';
 import CastSection from './CastSection';
+import PortraitConnectionPanel from './PortraitConnectionPanel';
+import PortraitPromptsPanel from './PortraitPromptsPanel';
 import PromptInspectorPanel from '../promptInspector/PromptInspectorPanel';
 import TurnDrawerSection from '../timeline/TurnDrawerSection';
 import './Sidebar.css';
@@ -44,13 +46,15 @@ const TITLES: Partial<Record<TabType, string>> = {
   // prompt inspector now, so it carries no title of its own — the inspector has its own header).
   characters: 'History',
   notes: 'Notes',
+  portraits: 'Connection',
 };
 
 // App-wide left rail. Content is contextual to the active tab's type: a folder/history browser
 // for chat, the RP chat history for the character page (resume an ongoing RP from where you pick
 // characters), the Prompt Inspector for RP chats (permanent — the drawer IS the inspector), a
-// name picker for notes — and empty for view types that are already a single browsable structure
-// (settings, the blank picker).
+// name picker for notes, Portrait Studio's own connection subscription panel for portraits — and
+// empty for view types that are already a single browsable structure (settings, the blank
+// picker).
 export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: SidebarProps) {
   const title = props.activeType && TITLES[props.activeType];
 
@@ -90,6 +94,14 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
           onDeselect={props.onDeselectNote}
           refreshKey={props.notesRefreshKey}
         />
+      );
+      break;
+    case 'portraits':
+      content = (
+        <div className="sidebar-portraits-sections">
+          <PortraitConnectionPanel />
+          <PortraitPromptsPanel />
+        </div>
       );
       break;
   }

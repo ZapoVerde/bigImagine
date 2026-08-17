@@ -53,6 +53,7 @@ import {
   getLocationsAdmin,
   getLocationSettings,
   getLorebookSettings,
+  getPortraitBackgroundPromptsSettings,
   getPortraitSubjectDescriberSettings,
   parseSetCanonSettingsBody,
   parseSetCharacterSettingsBody,
@@ -62,6 +63,7 @@ import {
   parseSetImageSettingsBody,
   parseSetLocationSettingsBody,
   parseSetLorebookSettingsBody,
+  parseSetPortraitBackgroundPromptsSettingsBody,
   parseSetPortraitSubjectDescriberSettingsBody,
   parseSetTimezoneBody,
   setCanonSettings,
@@ -73,6 +75,7 @@ import {
   setImageSettings,
   setLocationSettings,
   setLorebookSettings,
+  setPortraitBackgroundPromptsSettings,
   setPortraitSubjectDescriberSettings,
 } from './adminServer.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
@@ -154,9 +157,10 @@ export async function handleCharacterSettingsSet(req: IncomingMessage, res: Serv
 
 // portrait-studio-standalone-subjects-plan.md Part B — the Settings tab's Portrait Subject
 // describer settings: the prompt template for the one synchronous LLM call that turns a bare
-// Studio subject name (+ optional seed) into its standing_instructions. Sibling of the
-// character-settings pair, minus the history-pairs knob (no transcript to bound). Same admin
-// gate + live no-restart shape as every other settings pair.
+// Studio subject name (+ optional seed) into an appearance blurb (fed to the slot bootstrapper as
+// ephemeral context, never persisted — migration 0114). Sibling of the character-settings pair,
+// minus the history-pairs knob (no transcript to bound). Same admin gate + live no-restart shape
+// as every other settings pair.
 export async function handlePortraitSubjectDescriberSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, await getPortraitSubjectDescriberSettings(deps.settings));
 }
@@ -176,6 +180,30 @@ export async function handlePortraitSubjectDescriberSettingsSet(req: IncomingMes
   }
   await setPortraitSubjectDescriberSettings(deps.settings, parsed);
   sendJson(res, 200, await getPortraitSubjectDescriberSettings(deps.settings));
+}
+
+// Portrait Studio's other three background prompts (slot bootstrap, mutation, reflection) — one
+// consolidated GET/SET pair, edited from the Studio's own sidebar panel rather than this tab.
+// Same admin gate + live no-restart shape as every other settings pair.
+export async function handlePortraitBackgroundPromptsSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getPortraitBackgroundPromptsSettings(deps.settings));
+}
+
+export async function handlePortraitBackgroundPromptsSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetPortraitBackgroundPromptsSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { slot_bootstrap_prompt?: string, mutation_prompt?: string, reflection_prompt?: string }' });
+    return;
+  }
+  await setPortraitBackgroundPromptsSettings(deps.settings, parsed);
+  sendJson(res, 200, await getPortraitBackgroundPromptsSettings(deps.settings));
 }
 
 // location.md §6.2.4 — the Locations page's read-only known-locations browser (parent/sub

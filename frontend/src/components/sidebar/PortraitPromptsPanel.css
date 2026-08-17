@@ -1,0 +1,47 @@
+.portrait-prompts-panel {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.portrait-prompt-field {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.5rem 0.6rem;
+}
+
+.portrait-prompt-field summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.portrait-prompt-field summary em {
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+.portrait-prompt-description {
+  margin: 0.4rem 0;
+  font-size: var(--font-size-sm, 0.85rem);
+  color: var(--color-text-secondary);
+}
+
+.portrait-prompt-field textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: var(--font-size-sm, 0.85rem);
+  resize: vertical;
+}
+
+.portrait-prompt-actions {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.4rem;
+}
+
+.portrait-prompt-status {
+  margin-top: 0.3rem;
+  font-size: var(--font-size-sm, 0.85rem);
+  color: var(--color-text-secondary);
+}

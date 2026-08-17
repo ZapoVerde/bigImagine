@@ -42,6 +42,9 @@
  *   /v1/portraits/feedback
  * handlePortraitsEnabledGet / handlePortraitsEnabledSet — GET /v1/portraits-enabled and
  *   GET/POST /v1/admin/portraits-enabled (portrait-chain-hardening-plan.md's kill switch)
+ * handlePortraitLlmConnectionGet / handlePortraitLlmConnectionSet — GET/POST
+ *   /v1/admin/portrait-llm-connection (portrait-studio-connection-picker-plan.md — Portrait
+ *   Studio's own connection subscription, read by resolvePortraitLlm below)
  * requirePortraitsEnabled(deps, res) — the shared 403 gate every gated handler opens with
  *   (returns false and answers 403 when visual_portraits_enabled reads 'false')
  *
@@ -62,10 +65,32 @@ import type { PostgresClient } from '../io/postgres.js';
 import { loadLayerManifest, type LayerDefinition, type LayerManifest } from '../portraits/layerStack.js';
 import type { WikiSubscription } from '../portraits/wiki.js';
 import { describeStudioSubject } from '../orchestrator/describeStudioSubject.js';
-import { runPortraitGenerationRound } from '../orchestrator/portraitGeneration.js';
+import { describeStudioSlots } from '../orchestrator/describeStudioSlots.js';
+import { runPortraitGenerationRound, retryPortraitCandidateRender } from '../orchestrator/portraitGeneration.js';
 import { submitPortraitFeedback } from '../orchestrator/portraitFeedback.js';
+import { createLlmProviderForProfile } from '../io/llm/index.js';
+import { createGatedLlmProvider } from '../io/llm/llmGate.js';
+import type { LlmProvider } from '../io/llm/types.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
+
+// Portrait Studio's own connection subscription (portrait-studio-connection-picker-plan.md): the
+// household's active connection (deps.llm) is still the fallback, but the Studio's sidebar panel
+// can subscribe every LLM call in this module — the subject describer, the generation round, and
+// feedback/reflection alike — to one specific connection, independent of whatever the household
+// default is or later becomes. Same resolution shape as chat_memory_profile
+// (orchestrator/chatMemorySync.ts) and a chat's own params.profile (server/turnExecution.ts):
+// empty/unknown name falls back to deps.llm, never throws.
+async function resolvePortraitLlm(deps: HttpServerDeps): Promise<LlmProvider> {
+  const connectionName = await deps.settings.get('portrait_llm_connection');
+  if (!connectionName) return deps.llm;
+  const profile = await deps.llmConnections.resolveByName(connectionName);
+  if (!profile) {
+    log.error(`portraits: portrait_llm_connection names unknown connection "${connectionName}" — falling back to the active connection`);
+    return deps.llm;
+  }
+  return createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
+}
 
 /** One visual_entities row as the Studio sees it — full, no redaction (nothing secret here). */
 export interface PortraitEntityRow {
@@ -74,7 +99,6 @@ export interface PortraitEntityRow {
   character_id: string | null;
   name: string;
   slots: Record<string, string>;
-  standing_instructions: string;
   template: string | null;
   last_image_url: string | null;
   current_best_candidate_id: string | null;
@@ -115,30 +139,30 @@ export interface CreateEntityBody {
   layerId: string;
   name: string;
   slots: Record<string, string>;
-  standingInstructions: string;
   template: string | null;
   seed: string | null;
 }
 
-/** POST /v1/portraits/entities — { layerId, name, slots?, standingInstructions?, template?,
- *  seed? }. `seed` is subject-only: a short free-text prompt ("an Italian woman in her 30s") the
- *  describer uses when no standingInstructions are supplied — the "type a name, get a described
- *  subject" path (portrait-studio-standalone-subjects-plan.md Part B). It is silently unused for
- *  every other layer and whenever standingInstructions is present (bi_principles.md §3 — explicit
- *  outranks inferred). No characterId anywhere: entities are standalone and never linked. */
+/** POST /v1/portraits/entities — { layerId, name, slots?, template?, seed? }. `seed` is the
+ *  optional free-text bootstrap context ("an Italian woman in her 30s") used only when `slots` is
+ *  omitted/empty — the "type a name, get it filled in" default path
+ *  (portrait-studio-standalone-subjects-plan.md Part B). On the subject layer it is first expanded
+ *  into a full appearance blurb by describeStudioSubject; on every other layer it is passed to
+ *  describeStudioSlots verbatim. It is silently unused whenever `slots` is supplied explicitly
+ *  (bi_principles.md §3 — explicit outranks inferred). Neither `seed` nor the intermediate blurb
+ *  is ever persisted (2026-08-17, migration 0114 dropped standing_instructions). No characterId
+ *  anywhere: entities are standalone and never linked. */
 export function parseCreateEntityBody(raw: unknown): CreateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   if (typeof raw.layerId !== 'string' || !raw.layerId) return undefined;
   if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
   if (raw.slots !== undefined && !isStringRecord(raw.slots)) return undefined;
-  if (raw.standingInstructions !== undefined && typeof raw.standingInstructions !== 'string') return undefined;
   if (raw.template !== undefined && raw.template !== null && typeof raw.template !== 'string') return undefined;
   if (raw.seed !== undefined && raw.seed !== null && typeof raw.seed !== 'string') return undefined;
   return {
     layerId: raw.layerId,
     name: raw.name.trim(),
     slots: raw.slots ?? {},
-    standingInstructions: raw.standingInstructions ?? '',
     template: typeof raw.template === 'string' ? raw.template : null,
     seed: typeof raw.seed === 'string' ? raw.seed.trim() : null,
   };
@@ -147,14 +171,12 @@ export function parseCreateEntityBody(raw: unknown): CreateEntityBody | undefine
 export interface UpdateEntityBody {
   name?: string;
   slots?: Record<string, string>;
-  standingInstructions?: string;
   template?: string | null;
 }
 
-/** PATCH /v1/portraits/entities/:id — every field optional; null clears
- *  standingInstructions/template (not name/slots — an entity always has a name). A stray
- *  characterId in the body is ignored by this parser (unknown fields are already inert here),
- *  never written. */
+/** PATCH /v1/portraits/entities/:id — every field optional; null clears template (not name/slots
+ *  — an entity always has a name). A stray characterId in the body is ignored by this parser
+ *  (unknown fields are already inert here), never written. */
 export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   const out: UpdateEntityBody = {};
@@ -165,10 +187,6 @@ export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefine
   if (raw.slots !== undefined) {
     if (!isStringRecord(raw.slots)) return undefined;
     out.slots = raw.slots;
-  }
-  if (raw.standingInstructions !== undefined) {
-    if (typeof raw.standingInstructions !== 'string') return undefined;
-    out.standingInstructions = raw.standingInstructions;
   }
   if (raw.template !== undefined) {
     if (raw.template !== null && typeof raw.template !== 'string') return undefined;
@@ -329,7 +347,7 @@ async function resolveManifest(deps: HttpServerDeps): Promise<ManifestValidation
 async function getEntity(db: PostgresClient, userId: string, entityId: string): Promise<PortraitEntityRow | undefined> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<PortraitEntityRow>(
-      `select entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+      `select entity_id, layer_id, character_id, name, slots, template,
               last_image_url, current_best_candidate_id, created_at, updated_at
        from visual_entities where entity_id = $1 and user_id = $2`,
       [entityId, userId],
@@ -388,6 +406,39 @@ export async function handlePortraitsEnabledSet(req: IncomingMessage, res: Serve
   sendJson(res, 200, { enabled: parsed.enabled });
 }
 
+/** GET/POST /v1/admin/portrait-llm-connection — Portrait Studio's own connection subscription
+ *  (this file's resolvePortraitLlm reads it). Admin-gated like every orchestrator_settings write
+ *  on this server; the Studio's sidebar panel already needs the admin key to list connections
+ *  (adminListConnections), so gating this pair the same way adds no extra friction. Empty string
+ *  = unset = falls back to the household's active connection. */
+export async function handlePortraitLlmConnectionGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, { connectionName: (await deps.settings.get('portrait_llm_connection')) ?? '' });
+}
+
+function parseSetPortraitLlmConnectionBody(raw: unknown): { connectionName: string } | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const { connectionName } = raw as Record<string, unknown>;
+  if (typeof connectionName !== 'string') return undefined;
+  return { connectionName };
+}
+
+export async function handlePortraitLlmConnectionSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetPortraitLlmConnectionBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { connectionName: string }' });
+    return;
+  }
+  await deps.settings.set('portrait_llm_connection', parsed.connectionName);
+  sendJson(res, 200, { connectionName: parsed.connectionName });
+}
+
 /** CRUD family on /v1/portraits/entities (user-scoped). */
 export async function handlePortraitEntities(
   req: IncomingMessage,
@@ -404,7 +455,7 @@ export async function handlePortraitEntities(
     if (req.method === 'GET') {
       const rows = await deps.db.withUserScope(userId, (session) =>
         session.query<PortraitEntityRow>(
-          `select entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+          `select entity_id, layer_id, character_id, name, slots, template,
                   last_image_url, current_best_candidate_id, created_at, updated_at
            from visual_entities where user_id = $1 order by layer_id, name`,
           [userId],
@@ -424,7 +475,7 @@ export async function handlePortraitEntities(
       const parsed = parseCreateEntityBody(raw);
       if (!parsed) {
         sendJson(res, 400, {
-          error: 'expected { layerId: non-empty string, name: non-empty string, slots?, standingInstructions?, template?, seed? }',
+          error: 'expected { layerId: non-empty string, name: non-empty string, slots?, template?, seed? }',
         });
         return;
       }
@@ -433,28 +484,47 @@ export async function handlePortraitEntities(
         sendJson(res, 400, { error: `unknown layer "${parsed.layerId}" — see GET /v1/portraits/layers` });
         return;
       }
-      // The subject describer fires only on the "type a name, get it described" default path:
-      // layerId subject AND no explicit standingInstructions (bi_principles.md §3 — an operator
-      // who types full instructions by hand gets exactly what they typed). Fail-open (§11): the
-      // describer never throws (describeStudioSubject resolves to '' on any failure), so creation
-      // never blocks or errors on a missing description.
-      let instructions = parsed.standingInstructions;
-      if (parsed.layerId === 'subject' && !instructions.trim()) {
-        const described = await describeStudioSubject(deps.settings, deps.llm, userId, { name: parsed.name, seed: parsed.seed ?? undefined });
-        if (described.trim() !== '') instructions = described;
+      const llm = await resolvePortraitLlm(deps);
+      // The slot bootstrapper fires only on the "type a name, get it filled in" default path: an
+      // entity created with slots: {} stays empty forever otherwise, since the mutation loop only
+      // ever reuses slot names that already exist for a layer (describeStudioSlots.ts file header).
+      // An operator who hand-fills slots gets exactly those (bi_principles.md §3), and neither
+      // `seed` nor the bootstrap context ever gets written to the entity itself — both are
+      // ephemeral, this call's own scratch data (2026-08-17, migration 0114 dropped
+      // standing_instructions).
+      let slots = parsed.slots;
+      if (Object.keys(slots).length === 0) {
+        const layer = manifest.layers.find((l) => l.id === parsed.layerId)!;
+        // On the subject layer, expand the (possibly empty) seed into a full appearance blurb
+        // first — describeStudioSubject invents from the name alone when the seed is blank
+        // (fail-open: resolves to '' on any failure). Every other layer passes the seed straight
+        // through as context, since no expansion pass fits a bikini/expression/format the way it
+        // fits a physical subject.
+        let context = parsed.seed ?? '';
+        if (parsed.layerId === 'subject') {
+          const described = await describeStudioSubject(deps.settings, llm, userId, { name: parsed.name, seed: parsed.seed ?? undefined });
+          if (described.trim() !== '') context = described;
+        }
+        const bootstrapped = await describeStudioSlots(deps.settings, llm, userId, {
+          layerId: layer.id,
+          layerLabel: layer.label,
+          layerBoundary: layer.boundary,
+          name: parsed.name,
+          context,
+        });
+        if (Object.keys(bootstrapped).length > 0) slots = bootstrapped;
       }
       const created = await deps.db.withUserScope(userId, (session) =>
         session.query<PortraitEntityRow>(
-          `insert into visual_entities (user_id, layer_id, character_id, name, slots, standing_instructions, template)
-           values ($1, $2, null, $3, $4::jsonb, $5, $6)
-           returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+          `insert into visual_entities (user_id, layer_id, character_id, name, slots, template)
+           values ($1, $2, null, $3, $4::jsonb, $5)
+           returning entity_id, layer_id, character_id, name, slots, template,
                      last_image_url, current_best_candidate_id, created_at, updated_at`,
           [
             userId,
             parsed.layerId,
             parsed.name,
-            JSON.stringify(parsed.slots),
-            instructions,
+            JSON.stringify(slots),
             parsed.template,
           ],
         ),
@@ -505,7 +575,6 @@ export async function handlePortraitEntities(
       };
       push('name', parsed.name);
       push('slots', parsed.slots !== undefined ? JSON.stringify(parsed.slots) : undefined, '::jsonb');
-      push('standing_instructions', parsed.standingInstructions);
       push('template', parsed.template);
       if (sets.length === 0) {
         sendJson(res, 200, existing);
@@ -516,7 +585,7 @@ export async function handlePortraitEntities(
         session.query<PortraitEntityRow>(
           `update visual_entities set ${sets.join(', ')}
            where entity_id = $1 and user_id = $2
-           returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+           returning entity_id, layer_id, character_id, name, slots, template,
                      last_image_url, current_best_candidate_id, created_at, updated_at`,
           params,
         ),
@@ -554,12 +623,17 @@ export async function handlePortraitEntities(
  *  the route doesn't care whether it's a Card or a live character; in practice only CastSection
  *  calls it now, and it only ever offers live in-chat characters via its castOnly listing), read
  *  appearance || persona as the seed text exactly as the old from-character route did (409 when
- *  both are blank — never seed empty instructions), and ALWAYS insert a brand-new, unlinked
- *  subject entity: character_id is never set on the row. There is no more "does a subject already
- *  exist for this character" check and no more refresh-in-place — clicking "Send to Studio" on the
- *  same cast row twice creates two independent training subjects, exactly like clicking "+ new"
- *  twice would. The seed text becomes the entity's standing_instructions verbatim (an explicit,
- *  operator-clicked source, bi_principles.md §3). */
+ *  both are blank), and ALWAYS insert a brand-new, unlinked subject entity: character_id is never
+ *  set on the row. There is no more "does a subject already exist for this character" check and no
+ *  more refresh-in-place — clicking "Send to Studio" on the same cast row twice creates two
+ *  independent training subjects, exactly like clicking "+ new" twice would. The seed text feeds
+ *  describeStudioSubject then describeStudioSlots (2026-08-17, the same bootstrap sequence the
+ *  plain create-entity path uses) so the entity starts with real slots instead of the empty
+ *  `{}` this route used to insert — an entity with no slots never gets any from the mutation loop
+ *  either (describeStudioSlots.ts file header), so skipping the bootstrap here would have quietly
+ *  broken this path once standing_instructions (its old, never-actually-prompt-facing fallback)
+ *  was dropped (migration 0114). Fail-open throughout (§11): a describer/bootstrapper failure
+ *  still creates the entity, just with fewer or no starting slots. */
 export async function handlePortraitEntityFromCastCharacter(
   req: IncomingMessage,
   res: ServerResponse,
@@ -595,13 +669,24 @@ export async function handlePortraitEntityFromCastCharacter(
     sendJson(res, 409, { error: 'character has no appearance or persona' });
     return;
   }
+  const { manifest } = await resolveManifest(deps);
+  const subjectLayer = manifest.layers.find((l) => l.id === 'subject')!;
+  const llm = await resolvePortraitLlm(deps);
+  const described = await describeStudioSubject(deps.settings, llm, userId, { name: character.name, seed: seedText });
+  const bootstrapped = await describeStudioSlots(deps.settings, llm, userId, {
+    layerId: subjectLayer.id,
+    layerLabel: subjectLayer.label,
+    layerBoundary: subjectLayer.boundary,
+    name: character.name,
+    context: described.trim() || seedText,
+  });
   const created = await deps.db.withUserScope(userId, (session) =>
     session.query<PortraitEntityRow>(
-      `insert into visual_entities (user_id, layer_id, character_id, name, slots, standing_instructions, template)
-       values ($1, 'subject', null, $2, '{}'::jsonb, $3, null)
-       returning entity_id, layer_id, character_id, name, slots, standing_instructions, template,
+      `insert into visual_entities (user_id, layer_id, character_id, name, slots, template)
+       values ($1, 'subject', null, $2, $3::jsonb, null)
+       returning entity_id, layer_id, character_id, name, slots, template,
                  last_image_url, current_best_candidate_id, created_at, updated_at`,
-      [userId, character.name, seedText],
+      [userId, character.name, JSON.stringify(bootstrapped)],
     ),
   );
   const entity = created[0]!;
@@ -771,12 +856,31 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: 'expected { entityIds: { [layerId]: entityId }, goal: non-empty string, pendingFeedback? }' });
     return;
   }
-  const result = await runPortraitGenerationRound({ db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections }, deps.llm, userId, parsed);
+  const result = await runPortraitGenerationRound({ db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections }, await resolvePortraitLlm(deps), userId, parsed);
   if (!result.ok) {
     sendJson(res, 400, { error: result.error ?? 'generation failed' });
     return;
   }
   sendJson(res, 200, { candidates: result.candidates });
+}
+
+/** POST /v1/portraits/candidates/:id/retry — re-render one candidate (typically one whose
+ *  original render failed) without spending a new mutation call; see
+ *  retryPortraitCandidateRender's doc comment for the template/prompt resolution. */
+export async function handlePortraitCandidateRetry(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string, url: URL): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
+  const rest = url.pathname.slice('/v1/portraits/candidates'.length);
+  const segments = rest.split('/').filter(Boolean);
+  if (req.method !== 'POST' || segments.length !== 2 || segments[1] !== 'retry') {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  const result = await retryPortraitCandidateRender({ db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections }, userId, segments[0]);
+  if (!result.ok) {
+    sendJson(res, 400, { error: result.error ?? 'retry failed' });
+    return;
+  }
+  sendJson(res, 200, { imageUrl: result.imageUrl, composedPrompt: result.composedPrompt, ...(result.failed !== undefined ? { failed: result.failed } : {}) });
 }
 
 /** POST /v1/portraits/feedback — record the human evaluation and run the Reflection
@@ -798,7 +902,7 @@ export async function handlePortraitFeedback(req: IncomingMessage, res: ServerRe
     });
     return;
   }
-  const result = await submitPortraitFeedback({ db: deps.db, settings: deps.settings }, deps.llm, userId, parsed);
+  const result = await submitPortraitFeedback({ db: deps.db, settings: deps.settings }, await resolvePortraitLlm(deps), userId, parsed);
   if (!result.ok) {
     sendJson(res, 400, { error: result.error ?? 'feedback failed' });
     return;

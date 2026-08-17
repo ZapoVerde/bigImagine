@@ -1,20 +1,21 @@
 // Proves portrait-studio-standalone-subjects-plan.md Parts B-D's route/service logic against a
 // fake Postgres pool + fake settings + fake LLM gates — no server, no network, no real provider
 // (orchestrator/scripts/verify-location-presence-scraper.mjs's convention). The suite exercises:
-//   - create-entity describer (Part B): a subject created with no standingInstructions gets them
-//     described from the optional seed (describeStudioSubject fires, its reply becomes
-//     standing_instructions); a subject created WITH standingInstructions (seed present or not)
-//     never invokes the describer and keeps exactly what was supplied (bi_principles.md §3 —
-//     explicit outranks inferred); a describer LLM failure still creates the entity (201) with
-//     blank instructions (fail-open, §11); a stray characterId in the body is accepted-and-ignored
-//     (never written — entities are standalone); a stray seed on a non-subject layer is silently
-//     unused;
-//   - from-cast-character (Part C): ALWAYS inserts a brand-new, unlinked subject entity seeded
-//     from the character's appearance (preferred over persona when present; blank appearance falls
-//     back to the persona); unknown characterId → 404; both appearance and persona blank → 409
-//     with nothing created; two consecutive calls with the same characterId produce two distinct
-//     entity_ids, both character_id null; a legacy linked entity from the old bridge is never
-//     touched or re-pointed (no refresh-in-place, no per-character dedup);
+//   - create-entity bootstrap (Part B, reworked 2026-08-17 when migration 0114 dropped
+//     standing_instructions): a subject created with no explicit slots gets a two-call bootstrap —
+//     describeStudioSubject expands the seed into an appearance blurb, describeStudioSlots turns
+//     that into structured slots — and neither the seed nor the blurb is ever persisted; a subject
+//     created WITH explicit slots never invokes either describer (bi_principles.md §3 — explicit
+//     outranks inferred); a describer/bootstrapper LLM failure still creates the entity (201) with
+//     empty slots (fail-open, §11); a stray characterId in the body is accepted-and-ignored (never
+//     written — entities are standalone); a non-subject layer's seed skips describeStudioSubject
+//     and feeds describeStudioSlots directly;
+//   - from-cast-character (Part C): ALWAYS inserts a brand-new, unlinked subject entity, its slots
+//     bootstrapped from the character's appearance (preferred over persona when present; blank
+//     appearance falls back to the persona); unknown characterId → 404; both appearance and
+//     persona blank → 409 with nothing created; two consecutive calls with the same characterId
+//     produce two distinct entity_ids, both character_id null; a legacy linked entity from the old
+//     bridge is never touched or re-pointed (no refresh-in-place, no per-character dedup);
 //   - set-as-avatar (Part C): the route is removed — the CRUD family 404s it instead of the old
 //     always-overwrite promotion;
 //   - submitPortraitFeedback (Part B/D): the winning chromosome's per-layer slots land on the
@@ -127,21 +128,23 @@ function makeDb() {
       return [{ episode_id: state.episodes }];
     }
     if (s.startsWith('update visual_entities set last_image_url')) {
-      // Winner promotion — two shapes: with slots (6 params) and without (5, a layer absent
-      // from the winning chromosome leaves that entity's slots untouched).
-      const withSlots = params.length === 6;
-      const entityId = params[withSlots ? 5 : 4];
+      // Winner promotion — two shapes: with slots (5 params: image_url, candidate_id, slotsJson,
+      // userId, entityId) and without (4, a layer absent from the winning chromosome leaves that
+      // entity's slots untouched).
+      const withSlots = params.length === 5;
+      const entityId = params[withSlots ? 4 : 3];
+      const userIdParam = params[withSlots ? 3 : 2];
       state.promoted.push({
         entityId,
-        imageUrl: params[1],
-        candidateId: params[2],
-        ...(withSlots ? { slotsJson: params[3] } : {}),
+        imageUrl: params[0],
+        candidateId: params[1],
+        ...(withSlots ? { slotsJson: params[2] } : {}),
       });
-      const row = state.entities.find((e) => e.entity_id === entityId && e.user_id === params[0]);
+      const row = state.entities.find((e) => e.entity_id === entityId && e.user_id === userIdParam);
       if (row) {
-        row.last_image_url = params[1];
-        row.current_best_candidate_id = params[2];
-        if (withSlots) row.slots = JSON.parse(params[3]);
+        row.last_image_url = params[0];
+        row.current_best_candidate_id = params[1];
+        if (withSlots) row.slots = JSON.parse(params[2]);
       }
       return [];
     }
@@ -159,16 +162,17 @@ function makeDb() {
     }
     if (s.startsWith('insert into visual_entities')) {
       if (params.length === 3) {
-        // from-cast-character (Part C): [userId, name, seedText] — always unlinked.
-        const [userId, name, seedText] = params;
+        // from-cast-character (Part C): [userId, name, slotsJson] — always unlinked, subject layer,
+        // slots already bootstrapped by the route (2026-08-17 — no more standing_instructions to
+        // fall back on, so this path bootstraps up front instead of inserting `{}`).
+        const [userId, name, slotsJson] = params;
         const row = {
           entity_id: randomUUID(),
           user_id: userId,
           layer_id: 'subject',
           character_id: null,
           name,
-          slots: {},
-          standing_instructions: seedText,
+          slots: JSON.parse(slotsJson),
           template: null,
           last_image_url: null,
           current_best_candidate_id: null,
@@ -178,9 +182,9 @@ function makeDb() {
         state.entities.push(row);
         return [row];
       }
-      // Create-entity: [userId, layerId, name, slotsJson, standingInstructions, template] —
-      // character_id is hardcoded null server-side, never a param.
-      const [userId, layerId, name, slotsJson, standingInstructions, template] = params;
+      // Create-entity: [userId, layerId, name, slotsJson, template] — character_id is hardcoded
+      // null server-side, never a param.
+      const [userId, layerId, name, slotsJson, template] = params;
       const row = {
         entity_id: randomUUID(),
         user_id: userId,
@@ -188,7 +192,6 @@ function makeDb() {
         character_id: null,
         name,
         slots: JSON.parse(slotsJson),
-        standing_instructions: standingInstructions,
         template,
         last_image_url: null,
         current_best_candidate_id: null,
@@ -229,7 +232,7 @@ function makeDb() {
   };
 }
 
-function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImageUrl = null, slots = {}, instructions = '' }) {
+function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImageUrl = null, slots = {} }) {
   const row = {
     entity_id: entityId,
     user_id: USER,
@@ -237,7 +240,6 @@ function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImage
     character_id: characterId,
     name: 'Subject',
     slots,
-    standing_instructions: instructions,
     template: null,
     last_image_url: lastImageUrl,
     current_best_candidate_id: null,
@@ -248,46 +250,54 @@ function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImage
   return row;
 }
 
-// --- Fake LLM gates for describeStudioSubject (Part B). --------------------------------------
-// The describer gate records the request and answers with an Appearance-markered reply, so the
-// tests can assert both "the describer fired with the seed" and "its reply became the
-// instructions." The throw gate simulates the fail-open LLM crash. The never gate fails the
-// suite if the describer is (wrongly) invoked.
-function makeDescribeGate(reply) {
+// --- Fake LLM gates for the create-entity bootstrap sequence (Part B, reworked 2026-08-17):
+// describeStudioSubject then describeStudioSlots, both routed through the SAME llm dependency —
+// the routing gate tells them apart by their prompts' distinct [SYSTEM: TASK — ...] markers, so
+// tests can assert on call count/order/content for the real two-call pipeline rather than a single
+// canned reply. The throwing gate simulates a crash on every call — both describers catch their
+// own errors internally (fail-open, §11), so a throw here never propagates to the caller; it just
+// exercises the empty-result path. gate.calls.length is the positive, non-throw-dependent way to
+// assert "this call never happened."
+function makeRoutingGate({ describerReply = '', bootstrapReply = '' } = {}) {
   const gate = {
     calls: [],
-    name: 'fake-describe-gate',
+    name: 'fake-routing-gate',
     async complete(messages) {
       gate.calls.push(messages);
+      const content = messages[0]?.content ?? '';
+      const reply = content.includes('SUBJECT VISUAL ARCHIVIST') ? describerReply : bootstrapReply;
       return { message: { role: 'assistant', content: reply }, toolCalls: [] };
     },
   };
   return gate;
 }
 
-const makeThrowingGate = () => ({
-  name: 'fake-throwing-gate',
-  async complete() {
-    throw new Error('simulated describer crash');
-  },
-});
-
-const makeNeverGate = () => ({
-  name: 'fake-never-gate',
-  async complete() {
-    throw new Error('describer must NOT be invoked for this create');
-  },
-});
+function makeThrowingGate() {
+  const gate = {
+    calls: [],
+    name: 'fake-throwing-gate',
+    async complete(messages) {
+      gate.calls.push(messages);
+      throw new Error('simulated describer crash');
+    },
+  };
+  return gate;
+}
 
 // ============================================================================
-// create-entity describer (Part B)
+// create-entity bootstrap (Part B, reworked 2026-08-17 — migration 0114 dropped
+// standing_instructions)
 // ============================================================================
 
-// --- Subject create with a seed and no standingInstructions: the describer fires and its reply
-// becomes standing_instructions. ---
+// --- Subject create with a seed and no explicit slots: describeStudioSubject fires first
+// (expands the seed into a blurb), then describeStudioSlots fires with that blurb as context —
+// neither the seed nor the blurb is persisted, only the resulting structured slots are. ---
 {
   const db = makeDb();
-  const gate = makeDescribeGate('Appearance: Tall and stooped, with calloused hands and a beard shot through with grey.');
+  const gate = makeRoutingGate({
+    describerReply: 'Appearance: Tall and stooped, with calloused hands and a beard shot through with grey.',
+    bootstrapReply: 'body: Tall and stooped\nhands: calloused\nbeard: shot through with grey',
+  });
   const res = fakeRes();
   await handlePortraitEntities(
     jsonReq({ layerId: 'subject', name: 'Talfryn', seed: 'an Italian woman in her 30s' }),
@@ -298,65 +308,74 @@ const makeNeverGate = () => ({
   );
 
   assert(res.responses[0].status === 201, 'create-entity: a subject create → 201');
-  assert(gate.calls.length === 1, 'create-entity: the subject describer fires on the seed path');
+  assert(gate.calls.length === 2, 'create-entity: the subject bootstrap fires two calls — describer then slot bootstrapper');
   assert(
     gate.calls[0][0].content.includes('an Italian woman in her 30s') && gate.calls[0][0].content.includes('Talfryn'),
     'create-entity: the describer prompt interpolates both {{name}} and {{seed}}',
   );
+  assert(
+    gate.calls[1][0].content.includes('Tall and stooped, with calloused hands and a beard shot through with grey.'),
+    'create-entity: the slot bootstrapper\'s context is the describer\'s blurb, not the raw seed',
+  );
   const created = db.state.entities.find((e) => e.name === 'Talfryn');
   assert(
-    created.standing_instructions === 'Tall and stooped, with calloused hands and a beard shot through with grey.',
-    'create-entity: the describer reply becomes the entity\'s standing_instructions',
+    created.slots.body === 'Tall and stooped' && created.slots.hands === 'calloused' && created.slots.beard === 'shot through with grey',
+    'create-entity: the bootstrapper\'s structured slots land on the entity',
   );
+  assert(created.standing_instructions === undefined, 'create-entity: no standing_instructions field exists on the row at all');
   assert(res.responses[0].body.entity_id === created.entity_id, 'create-entity: the response returns the created entity');
 }
 
-// --- A subject created WITH standingInstructions never invokes the describer, seed or no seed
-// (§3 — explicit outranks inferred). ---
+// --- A subject created WITH explicit slots never invokes either describer (§3 — explicit
+// outranks inferred), seed or no seed. ---
 {
   const db = makeDb();
-  const gate = makeNeverGate();
+  const gate = makeRoutingGate();
   const res = fakeRes();
   await handlePortraitEntities(
-    jsonReq({ layerId: 'subject', name: 'Mair', standingInstructions: 'A sharp-eyed harbormaster.', seed: 'ignored seed' }),
+    jsonReq({ layerId: 'subject', name: 'Mair', slots: { look: 'A sharp-eyed harbormaster.' }, seed: 'ignored seed' }),
     res,
     { db, settings: makeSettings(), llm: gate },
     USER,
     new URL('http://x/v1/portraits/entities'),
   );
 
-  assert(res.responses[0].status === 201, 'create-entity: a subject create with explicit instructions → 201');
+  assert(res.responses[0].status === 201, 'create-entity: a subject create with explicit slots → 201');
+  assert(gate.calls.length === 0, 'create-entity: explicit slots skip both the describer and the slot bootstrapper entirely');
   const created = db.state.entities.find((e) => e.name === 'Mair');
   assert(
-    created.standing_instructions === 'A sharp-eyed harbormaster.',
-    'create-entity: standingInstructions are kept exactly as supplied when present',
+    created.slots.look === 'A sharp-eyed harbormaster.' && Object.keys(created.slots).length === 1,
+    'create-entity: explicit slots are kept exactly as supplied when present',
   );
 }
 
-// --- A describer LLM failure still creates the entity with blank instructions (fail-open §11). ---
+// --- A describer/bootstrapper LLM failure still creates the entity with empty slots
+// (fail-open §11) — both calls fire (and both fail-open internally), but neither crashes. ---
 {
   const db = makeDb();
+  const gate = makeThrowingGate();
   const res = fakeRes();
   await handlePortraitEntities(
     jsonReq({ layerId: 'subject', name: 'Ghost', seed: 'a faceless wanderer' }),
     res,
-    { db, settings: makeSettings(), llm: makeThrowingGate() },
+    { db, settings: makeSettings(), llm: gate },
     USER,
     new URL('http://x/v1/portraits/entities'),
   );
 
   assert(res.responses[0].status === 201, 'create-entity: a describer crash still creates the entity → 201 (fail-open)');
+  assert(gate.calls.length === 2, 'create-entity: both calls fire despite failing — the crash never short-circuits the bootstrap sequence');
   const created = db.state.entities.find((e) => e.name === 'Ghost');
-  assert(created.standing_instructions === '', 'create-entity: a describer crash leaves standing_instructions blank');
+  assert(Object.keys(created.slots).length === 0, 'create-entity: a describer/bootstrapper crash leaves slots empty');
 }
 
 // --- A stray characterId in the body is accepted-and-ignored: never written (standalone). ---
 {
   const db = makeDb();
-  const gate = makeNeverGate();
+  const gate = makeRoutingGate();
   const res = fakeRes();
   await handlePortraitEntities(
-    jsonReq({ layerId: 'subject', name: 'Rin', characterId: 'legacy-linked-char', standingInstructions: 'hand-typed instructions' }),
+    jsonReq({ layerId: 'subject', name: 'Rin', characterId: 'legacy-linked-char', slots: { look: 'hand-typed slots' } }),
     res,
     { db, settings: makeSettings(), llm: gate },
     USER,
@@ -368,13 +387,14 @@ const makeNeverGate = () => ({
   assert(created.character_id === null, 'create-entity: a body characterId is never written — character_id stays null');
 }
 
-// --- A stray seed on a non-subject layer is silently unused (the describer never fires). ---
+// --- A seed on a non-subject layer skips describeStudioSubject entirely and feeds
+// describeStudioSlots directly (no expansion pass fits a style/outfit/expression layer). ---
 {
   const db = makeDb();
-  const gate = makeNeverGate();
+  const gate = makeRoutingGate({ bootstrapReply: 'style_style: VLZ hybrid, moody rim light' });
   const res = fakeRes();
   await handlePortraitEntities(
-    jsonReq({ layerId: 'style', name: 'VLZ hybrid', seed: 'this must be ignored' }),
+    jsonReq({ layerId: 'style', name: 'VLZ hybrid', seed: 'a moody rim-lit hybrid look' }),
     res,
     { db, settings: makeSettings(), llm: gate },
     USER,
@@ -382,8 +402,13 @@ const makeNeverGate = () => ({
   );
 
   assert(res.responses[0].status === 201, 'create-entity: a seed on a style layer is accepted, not an error');
+  assert(gate.calls.length === 1, 'create-entity: a non-subject layer only fires the slot bootstrapper, never describeStudioSubject');
+  assert(
+    gate.calls[0][0].content.includes('a moody rim-lit hybrid look'),
+    'create-entity: the style layer\'s seed reaches the slot bootstrapper directly, unexpanded',
+  );
   const created = db.state.entities.find((e) => e.name === 'VLZ hybrid');
-  assert(created.standing_instructions === '', 'create-entity: a non-subject layer never gets described instructions');
+  assert(created.slots.style_style === 'VLZ hybrid, moody rim light', 'create-entity: the style layer gets bootstrapped slots from its seed');
 }
 
 // ============================================================================
@@ -391,7 +416,9 @@ const makeNeverGate = () => ({
 // ============================================================================
 
 // --- Creates a subject entity from a character's appearance — appearance preferred over
-// persona when both are present (character-appearance-field-plan.md). Always unlinked. ---
+// persona when both are present (character-appearance-field-plan.md). Always unlinked, slots
+// bootstrapped through the same describer → slot-bootstrapper sequence create-entity uses
+// (2026-08-17 — no more standing_instructions fallback, so this route must bootstrap up front). ---
 {
   const db = makeDb();
   db.state.characters.push({
@@ -402,18 +429,21 @@ const makeNeverGate = () => ({
     appearance: 'Tall and stooped, with calloused hands and a beard shot through with grey.',
     avatar_path: null,
   });
+  const gate = makeRoutingGate({ describerReply: 'Appearance: a tall, stooped figure.', bootstrapReply: 'body: tall and stooped' });
   const res = fakeRes();
-  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-new' }), res, { db, settings: makeSettings() }, USER);
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-new' }), res, { db, settings: makeSettings(), llm: gate }, USER);
 
   assert(res.responses[0].status === 200, 'from-cast-character: a known character returns 200');
   assert(res.responses[0].body.entity?.entity_id, 'from-cast-character: the response carries { entity } — no action field');
   assert(res.responses[0].body.action === undefined, 'from-cast-character: the action field is dropped');
+  assert(gate.calls.length === 2, 'from-cast-character: the same describer → slot-bootstrapper sequence as create-entity fires');
+  assert(
+    gate.calls[0][0].content.includes('Tall and stooped, with calloused hands and a beard shot through with grey.'),
+    'from-cast-character: the describer is seeded from the APPEARANCE when present, not the persona',
+  );
   const created = db.state.entities.find((e) => e.name === 'Talfryn');
   assert(created.layer_id === 'subject' && created.character_id === null, 'from-cast-character: the new entity is a subject layer, always unlinked');
-  assert(
-    created.standing_instructions === 'Tall and stooped, with calloused hands and a beard shot through with grey.',
-    'from-cast-character: standing_instructions is seeded from the APPEARANCE when present, not the persona',
-  );
+  assert(created.slots.body === 'tall and stooped', 'from-cast-character: the bootstrapper\'s structured slots land on the entity');
   assert(res.responses[0].body.entity.entity_id === created.entity_id, 'from-cast-character: the response returns the created entity');
 }
 
@@ -421,13 +451,15 @@ const makeNeverGate = () => ({
 {
   const db = makeDb();
   db.state.characters.push({ character_id: 'char-fallback', user_id: USER, name: 'Mair', persona: 'A sharp-eyed harbormaster.', appearance: '', avatar_path: null });
+  const gate = makeRoutingGate({ describerReply: 'Appearance: a weathered harbormaster.', bootstrapReply: 'look: weathered harbormaster' });
   const res = fakeRes();
-  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-fallback' }), res, { db, settings: makeSettings() }, USER);
-  const created = db.state.entities.find((e) => e.name === 'Mair');
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-fallback' }), res, { db, settings: makeSettings(), llm: gate }, USER);
   assert(
-    created?.standing_instructions === 'A sharp-eyed harbormaster.' && created.character_id === null,
-    'from-cast-character: a blank appearance falls back to the persona for seeding (still unlinked)',
+    gate.calls[0][0].content.includes('A sharp-eyed harbormaster.'),
+    'from-cast-character: a blank appearance falls back to the persona for the describer seed',
   );
+  const created = db.state.entities.find((e) => e.name === 'Mair');
+  assert(created?.slots.look === 'weathered harbormaster' && created.character_id === null, 'from-cast-character: the fallback-seeded entity still gets bootstrapped slots (still unlinked)');
 }
 
 // --- Two consecutive calls with the same characterId create two distinct, unlinked entities —
@@ -445,23 +477,24 @@ const makeNeverGate = () => ({
   });
   // The old bridge (studio-character-bridge-plan.md Part A) left a linked subject behind. This
   // plan never touches it — inert legacy data, still returned on reads, never re-pointed.
-  seedSubjectEntity(db, { entityId: 'e-legacy', characterId: 'char-twice', instructions: 'legacy linked instructions' });
+  seedSubjectEntity(db, { entityId: 'e-legacy', characterId: 'char-twice', slots: { look: 'legacy linked slots' } });
 
+  const gate = makeRoutingGate({ describerReply: 'Appearance: an old salt.', bootstrapReply: 'look: old salt' });
   const first = fakeRes();
-  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), first, { db, settings: makeSettings() }, USER);
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), first, { db, settings: makeSettings(), llm: gate }, USER);
   const second = fakeRes();
-  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), second, { db, settings: makeSettings() }, USER);
+  await handlePortraitEntityFromCastCharacter(jsonReq({ characterId: 'char-twice' }), second, { db, settings: makeSettings(), llm: gate }, USER);
 
   const ids = db.state.entities.filter((e) => e.name === 'Mair');
   assert(ids.length === 2 && ids[0].entity_id !== ids[1].entity_id, 'from-cast-character: two clicks → two DISTINCT entity_ids');
   assert(ids.every((e) => e.character_id === null), 'from-cast-character: both new entities are unlinked (character_id null)');
   assert(
-    ids.every((e) => e.standing_instructions === 'An old salt with a weather-lined face.'),
-    'from-cast-character: both entities are seeded from the same appearance',
+    ids.every((e) => e.slots.look === 'old salt'),
+    'from-cast-character: both entities are bootstrapped from the same appearance',
   );
   const legacy = db.state.entities.find((e) => e.entity_id === 'e-legacy');
   assert(
-    legacy.character_id === 'char-twice' && legacy.standing_instructions === 'legacy linked instructions',
+    legacy.character_id === 'char-twice' && legacy.slots.look === 'legacy linked slots',
     'from-cast-character: a legacy linked entity is left untouched — no re-pointing, no refresh-in-place',
   );
 }
@@ -513,12 +546,12 @@ const LOSER = 'c-loser';
 
 function seedFeedbackRound(db, { avatarPath = null, characterId = SUBJECT_CHAR } = {}) {
   db.state.entities.push(
-    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', character_id: characterId, name: 'Rin', slots: {}, standing_instructions: '', template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Coat', slots: {}, standing_instructions: '', template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-style', user_id: USER, layer_id: 'style', character_id: null, name: 'Style', slots: {}, standing_instructions: '', template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', character_id: null, name: 'Expr', slots: {}, standing_instructions: '', template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', character_id: characterId, name: 'Rin', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Coat', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-style', user_id: USER, layer_id: 'style', character_id: null, name: 'Style', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', character_id: null, name: 'Expr', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
     // An entity only the losing candidate referenced — must come through untouched.
-    { entity_id: 'e-other-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Old coat', slots: { outfit_style: 'old wool' }, standing_instructions: '', template: null, last_image_url: 'https://img/old.png', current_best_candidate_id: 'c-old', created_at: now(), updated_at: now() },
+    { entity_id: 'e-other-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Old coat', slots: { outfit_style: 'old wool' }, template: null, last_image_url: 'https://img/old.png', current_best_candidate_id: 'c-old', created_at: now(), updated_at: now() },
   );
   db.state.characters.push({ character_id: characterId, user_id: USER, name: 'Rin', persona: 'x', avatar_path: avatarPath });
   db.state.candidates.push(

@@ -113,6 +113,15 @@
   overflow: hidden;
 }
 
+/* Portrait Studio's drawer: the connection picker (fixed height) stacked above the prompts panel
+   (four collapsible fields, tall once expanded) — unlike the RP drawer's sections, neither one
+   manages its own internal scroll, so the wrapper itself scrolls as a whole. */
+.sidebar-portraits-sections {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .sidebar-browser {
   flex: 1;
   display: flex;

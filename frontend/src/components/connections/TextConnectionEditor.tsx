@@ -142,7 +142,7 @@ function openRouterPricingFor(
   modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
   providerOptions: { name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[],
 ): { inputPerMillion: string; outputPerMillion: string } | null {
-  const pinned = providerOptions.find((p) => p.tag === draft.providerPrimary)?.pricing;
+  const pinned = providerOptions.find((p) => p.name === draft.providerPrimary)?.pricing;
   const pricing = pinned ?? modelOptions.find((m) => m.id === draft.model)?.pricing;
   if (!pricing) return null;
   return {
@@ -749,7 +749,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   >
                     <option value="">(no pin — OpenRouter's default routing)</option>
                     {providerOptions.map((p) => (
-                      <option key={p.tag} value={p.tag}>
+                      <option key={p.tag} value={p.name}>
                         {p.name}
                         {p.pricing
                           ? ` — ${formatPricePerMillion(p.pricing.prompt)} in / ${formatPricePerMillion(p.pricing.completion)} out per 1M tok`
@@ -767,9 +767,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                   >
                     <option value="">(none)</option>
                     {providerOptions
-                      .filter((p) => p.tag !== draft.providerPrimary)
+                      .filter((p) => p.name !== draft.providerPrimary)
                       .map((p) => (
-                        <option key={p.tag} value={p.tag}>
+                        <option key={p.tag} value={p.name}>
                           {p.name}
                         </option>
                       ))}

@@ -9,6 +9,10 @@
  * carried forward — both corruptions are fixed here, per layer, unconditionally (plan
  * §Generation round step 5). A key in the child that the parent's layer does not have is
  * dropped (hallucinated); a parent key missing from the child is backfilled from the parent.
+ * Exception: a layer whose parent has no keys at all yet (a fresh or not-yet-bootstrapped entity)
+ * has no key-set contract to enforce — the child's proposed keys pass through as-is, so that
+ * layer's very first mutation is what establishes its slot vocabulary, rather than being
+ * permanently deadlocked at empty.
  * The operation is per layer over the manifest's whole layer list — a child's slots object is
  * reconciled independently for every layer, so a manifest with 2, 4 or 6 layers takes the same
  * code path (plan §Tests). Values pass through untouched: fidelity is about *which* keys exist,
@@ -48,10 +52,22 @@ function toSlotValue(value: unknown): string {
 }
 
 /** Pure: reconcile one layer's child slots against the parent's. The parent's key set is the
- *  contract; the child may neither invent keys nor drop existing ones. */
+ *  contract; the child may neither invent keys nor drop existing ones — except when the parent
+ *  has no keys at all (a not-yet-bootstrapped or pre-bootstrap-feature entity), in which case
+ *  there is no contract yet to enforce and the child's own proposed keys pass through untouched.
+ *  Without this exception an empty parent is a permanent deadlock: every subsequent round would
+ *  keep discarding everything the mutation LLM invents for that layer, forever, since the loop
+ *  below only ever emits keys the parent already has. */
 function reconcileLayer(parent: Record<string, unknown>, child: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   const childIsObject = typeof child === 'object' && child !== null && !Array.isArray(child);
+  if (Object.keys(parent).length === 0) {
+    if (!childIsObject) return out;
+    for (const [key, value] of Object.entries(child as Record<string, unknown>)) {
+      out[key] = toSlotValue(value);
+    }
+    return out;
+  }
   for (const [key, value] of Object.entries(parent)) {
     const candidate = childIsObject && typeof (child as Record<string, unknown>)[key] !== 'undefined'
       ? (child as Record<string, unknown>)[key]

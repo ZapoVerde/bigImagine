@@ -1372,14 +1372,16 @@ export interface PortraitLayerManifest {
   template: string;
 }
 
-/** One visual_entities row as the Studio sees it — full, nothing redacted. */
+/** One visual_entities row as the Studio sees it — full, nothing redacted. `slots` is the ground
+ *  truth compiled into the image prompt (composer.ts's compileTemplate reads only this); there is
+ *  no separate free-text field alongside it any more (2026-08-17, migration 0114 dropped
+ *  standing_instructions — it never fed the prompt and duplicated the wiki's guidance role). */
 export interface PortraitEntityRow {
   entity_id: string;
   layer_id: string;
   character_id: string | null;
   name: string;
   slots: Record<string, string>;
-  standing_instructions: string;
   template: string | null;
   last_image_url: string | null;
   current_best_candidate_id: string | null;
@@ -1388,23 +1390,21 @@ export interface PortraitEntityRow {
 }
 
 /** POST /v1/portraits/entities body (portrait-studio-standalone-subjects-plan.md) — every
- *  entity is standalone (never linked to a character); `seed` is a subject-only free-text prompt
- *  ("an Italian woman in her 30s") the describer uses when no standingInstructions are given. */
+ *  entity is standalone (never linked to a character); `seed` is a free-text bootstrap hint
+ *  ("an Italian woman in her 30s") used only when `slots` is omitted/empty — never persisted. */
 export interface CreatePortraitEntityInput {
   layerId: string;
   name: string;
   slots?: Record<string, string>;
-  standingInstructions?: string;
   template?: string | null;
   seed?: string;
 }
 
-/** PATCH /v1/portraits/entities/:id body — every field optional; null clears
- *  standingInstructions/template (not name/slots — an entity always has a name). */
+/** PATCH /v1/portraits/entities/:id body — every field optional; null clears template (not
+ *  name/slots — an entity always has a name). */
 export interface UpdatePortraitEntityInput {
   name?: string;
   slots?: Record<string, string>;
-  standingInstructions?: string;
   template?: string | null;
 }
 
@@ -1419,13 +1419,36 @@ export interface SendCastCharacterToStudioResult {
 /** GET/POST /v1/admin/portrait-subject-describer-settings — the Settings tab's Portrait
  *  Subject describer settings (portrait-studio-standalone-subjects-plan.md Part B): the prompt
  *  template for the one synchronous LLM call that turns a bare subject name (+ optional seed)
- *  into its standing_instructions. describerPrompt is always the effective prompt — the
+ *  into an appearance blurb (fed to the slot bootstrapper, never persisted). describerPrompt is
+ *  always the effective prompt — the
  *  built-in default when the stored value is empty (bi_principles.md §17) — with
  *  describerPromptIsDefault flagging which one it is. No history-pairs sibling: this describer
  *  has no transcript to bound. */
 export interface PortraitSubjectDescriberSettings {
   describerPrompt: string;
   describerPromptIsDefault: boolean;
+}
+
+/** GET/POST /v1/admin/portrait-background-prompts — Portrait Studio's other three background LLM
+ *  prompts, edited from the Studio's own sidebar panel (unlike the subject-describer one above,
+ *  which stays in Settings): slot bootstrap (fires once per entity, at creation), the
+ *  mutation/chromosome call (once per generation round), and the reflection/wiki-writing call
+ *  (once per feedback submission). Each *Prompt field is always the effective prompt — built-in
+ *  default when unset — with the matching *PromptIsDefault flag. */
+export interface PortraitBackgroundPromptsSettings {
+  slotBootstrapPrompt: string;
+  slotBootstrapPromptIsDefault: boolean;
+  mutationPrompt: string;
+  mutationPromptIsDefault: boolean;
+  reflectionPrompt: string;
+  reflectionPromptIsDefault: boolean;
+}
+
+/** GET/POST /v1/admin/portrait-llm-connection (portrait-studio-connection-picker-plan.md) —
+ *  Portrait Studio's own connection subscription: an llm_connections row's name, or '' when unset
+ *  (every LLM call inside Portrait Studio then falls back to the household's active connection). */
+export interface PortraitLlmConnectionSetting {
+  connectionName: string;
 }
 
 /** GET /v1/portraits-enabled and GET/POST /v1/admin/portraits-enabled responses

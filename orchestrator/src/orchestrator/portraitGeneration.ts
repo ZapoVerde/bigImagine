@@ -1,11 +1,11 @@
 /**
  * @file orchestrator/src/orchestrator/portraitGeneration.ts
- * @stamp 2026-08-16
+ * @stamp 2026-08-17
  * @architectural-role Orchestrator — one Portrait Studio generation round
  *   (docs/plans/completed/portrait-studio-plan.md §Generation round)
  * @description
  * The generation round of Portrait Studio: manifest + entity resolution, Path-1 wiki injection,
- * the forced-schema mutation LLM call, slot-key reconciliation, and the parallel per-candidate
+ * the marker-text mutation LLM call, slot-key reconciliation, and the parallel per-candidate
  * image-gen dispatch — then one visual_candidates row per candidate, returned to the Studio
  * grid. Mirrors generateLocationImage.ts's shape/header conventions (plan §New files): fail-open
  * structured result, never throws, every failure mode logged at the seam (bi_principles.md §11),
@@ -18,10 +18,16 @@
  *      structured error. An *unspecified* layer falls back to that layer's most-recently-used
  *      entity, or a fresh placeholder entity (empty slots, name = the layer's label) when the
  *      user has none yet — playground's seed-on-first-use behavior (plan §Generation round step 1).
- *   3. Load Path-1 wiki entries (wiki.ts formatSubscribedEntries): every visual_wiki_entries row
- *      subscribed to an active entity id or an active whole-layer type, full body, uncapped.
- *   4. Build the mutation prompt (evoprompt.ts buildMutationPrompt) and force a propose_candidates
- *      tool call returning visual_mutation_candidate_count (default 3) candidate chromosomes.
+ *   3. Load the whole wiki (loadAllWikiEntries) and split it two ways (wiki.ts's three-path
+ *      model, 2026-08-17): (a)/(b) formatSubscribedEntries — every entry subscribed to an active
+ *      entity id or an active whole-layer type, full body, uncapped; (c)
+ *      formatUnsubscribedTagIndex — every other entry, title+tags+id only, pullable on demand
+ *      (step 4) when relevant despite carrying no structural subscription to this round.
+ *   4. Build the mutation prompt (evoprompt.ts buildMutationPrompt) and run it: PULL_WIKI_ENTRY_TOOL
+ *      is offered (never forced) whenever (c) is non-empty, for up to MAX_WIKI_PULLS round-trips;
+ *      the final call always drops the tool, forcing a plain-text reply. Parse that reply
+ *      (evoprompt.ts parseCandidateResponse) into visual_mutation_candidate_count (default 3)
+ *      candidate chromosomes.
  *   5. enforceSlotKeys reconciles every parsed chromosome against the parent — the entities'
  *      own slots (the mutation LLM's "current candidate" is exactly that union, so parent
  *      fidelity means the round can neither hallucinate a slot key no entity owns nor drop one
@@ -59,6 +65,9 @@
  *   — fail-open; { ok, candidates?: PortraitCandidateResult[], error? }
  * PortraitCandidateResult — candidateId, chromosome, composedPrompt, imageUrl (null = provider
  *   failure), failed? (the provider error, when present)
+ * retryPortraitCandidateRender(deps, userId, candidateId) -> Promise<PortraitCandidateRetryResult>
+ *   — re-renders one already-written candidate's stored chromosome (no mutation call, same
+ *   candidate_id) when its original render failed; fail-open, same imageUrl/failed shape
  *
  * @contract
  *   assertions:
@@ -73,16 +82,16 @@
 
 import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
-import type { LlmProvider } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { compileTemplate, type SlotMap } from '../portraits/composer.js';
-import { buildMutationPrompt, parseCandidateResponse } from '../portraits/evoprompt.js';
+import { buildMutationPrompt, parseCandidateResponse, parsePullWikiEntryId, PULL_WIKI_ENTRY_TOOL } from '../portraits/evoprompt.js';
 import { loadLayerManifest, getPromptableLayers, formatLayerDefinitions, type LayerDefinition } from '../portraits/layerStack.js';
 import { enforceSlotKeys, type CandidateChromosome } from '../portraits/reconcile.js';
-import { formatSubscribedEntries, type WikiEntryRow, type WikiSubscription } from '../portraits/wiki.js';
+import { formatSubscribedEntries, formatUnsubscribedTagIndex, type WikiEntryRow, type WikiSubscription } from '../portraits/wiki.js';
 
 export interface PortraitGenerationDeps {
   db: PostgresClient;
@@ -124,7 +133,6 @@ interface EntityRow {
   entity_id: string;
   layer_id: string;
   slots: Record<string, string>;
-  standing_instructions: string;
   template: string | null;
 }
 
@@ -145,7 +153,7 @@ async function ensureEntityForLayer(
     // substituting a placeholder the round would then train on as if it were the named one.
     const rows = await db.withUserScope(userId, (session) =>
       session.query<EntityRow>(
-        `select entity_id, layer_id, slots, standing_instructions, template
+        `select entity_id, layer_id, slots, template
          from visual_entities where entity_id = $1 and user_id = $2`,
         [namedId, userId],
       ),
@@ -159,7 +167,7 @@ async function ensureEntityForLayer(
   }
   const rows = await db.withUserScope(userId, (session) =>
     session.query<EntityRow>(
-      `select entity_id, layer_id, slots, standing_instructions, template
+      `select entity_id, layer_id, slots, template
        from visual_entities where user_id = $1 and layer_id = $2 order by updated_at desc limit 1`,
       [userId, layer.id],
     ),
@@ -168,7 +176,7 @@ async function ensureEntityForLayer(
   const created = await db.withUserScope(userId, (session) =>
     session.query<EntityRow>(
       `insert into visual_entities (user_id, layer_id, name) values ($1, $2, $3)
-       returning entity_id, layer_id, slots, standing_instructions, template`,
+       returning entity_id, layer_id, slots, template`,
       [userId, layer.id, layer.label],
     ),
   );
@@ -189,33 +197,17 @@ function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDe
   return { slots };
 }
 
-/** Path-1 SQL is deliberately a superset (the GIN containment reads) — the precise
- *  entity-vs-whole-layer-type filtering happens in the pure formatSubscribedEntries, which sees
- *  exactly the round's active entity ids and layer types. Empty query shapes (no entity ids, no
- *  active layer types) mean there is nothing Path-1 could match — skip the query entirely. */
-async function loadPath1WikiEntries(
-  db: PostgresClient,
-  userId: string,
-  activeEntityIds: string[],
-  activeLayerTypes: string[],
-): Promise<WikiEntryRow[]> {
-  const clauses: string[] = [];
-  const params: unknown[] = [userId];
-  if (activeEntityIds.length > 0) {
-    params.push(JSON.stringify(activeEntityIds.map((id) => ({ layerEntityId: id }))));
-    clauses.push(`subscriptions @> $${params.length}::jsonb`);
-  }
-  if (activeLayerTypes.length > 0) {
-    params.push(JSON.stringify(activeLayerTypes.map((lt) => ({ layerType: lt }))));
-    clauses.push(`subscriptions @> $${params.length}::jsonb`);
-  }
-  if (clauses.length === 0) return [];
+/** The round's whole wiki universe — every visual_wiki_entries row the user owns, same
+ *  unconditional full-table shape portraitFeedback.ts's reflection index query already uses.
+ *  Fetched once and handed to both formatSubscribedEntries (Path 1 a/b, full body) and
+ *  formatUnsubscribedTagIndex (Path 1c, title+tags+id) — each does its own pure filtering over
+ *  the same set, and Path 1c's pull loop looks entries up from this in-memory array by id rather
+ *  than a second query. */
+async function loadAllWikiEntries(db: PostgresClient, userId: string): Promise<WikiEntryRow[]> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<{ entry_id: string; title: string; body: string; tags: string[]; subscriptions: unknown }>(
-      `select entry_id, title, body, tags, subscriptions
-       from visual_wiki_entries where user_id = $1 and (${clauses.join(' or ')})
-       order by created_at`,
-      params,
+      `select entry_id, title, body, tags, subscriptions from visual_wiki_entries where user_id = $1 order by created_at`,
+      [userId],
     ),
   );
   return rows.map((r) => ({
@@ -286,12 +278,17 @@ export async function runPortraitGenerationRound(
     const resolvedEntityIds: Record<string, string> = {};
     for (const [layerId, entity] of entities) resolvedEntityIds[layerId] = entity.entity_id;
 
-    // 3. Path-1 wiki: rows subscribed to an active entity id or an active whole-layer type,
-    //    full body, uncapped (wiki.ts formatSubscribedEntries does the precise filtering).
+    // 3. Path-1 wiki: (a)/(b) rows subscribed to an active entity id or an active whole-layer
+    //    type, full body, uncapped (wiki.ts formatSubscribedEntries). (c) every other entry,
+    //    title+tags+id only (wiki.ts formatUnsubscribedTagIndex) — a lesson can be relevant to
+    //    this round's goal without ever having been subscribed to this entity or layer, so the
+    //    mutation call gets to pull one on demand (PULL_WIKI_ENTRY_TOOL below) instead of staying
+    //    blind to everything outside its structural (a)/(b) subscriptions.
     const activeEntityIds = [...entities.values()].map((e) => e.entity_id);
     const activeLayerTypes = layers.map((l) => l.id);
-    const wikiEntries = await loadPath1WikiEntries(deps.db, userId, activeEntityIds, activeLayerTypes);
-    const wikiText = formatSubscribedEntries(wikiEntries, activeEntityIds, activeLayerTypes);
+    const allWikiEntries = await loadAllWikiEntries(deps.db, userId);
+    const wikiText = formatSubscribedEntries(allWikiEntries, activeEntityIds, activeLayerTypes);
+    const unsubscribedWikiTagIndex = formatUnsubscribedTagIndex(allWikiEntries, activeEntityIds, activeLayerTypes);
 
     // 6 (deliberately early — see header): the portrait connection gates the round before a
     //    single mutation token is spent.
@@ -302,8 +299,6 @@ export async function runPortraitGenerationRound(
     }
 
     const parent = buildParentChromosome(entities, layers);
-    const standingInstructions: Record<string, string> = {};
-    for (const [layerId, entity] of entities) standingInstructions[layerId] = entity.standing_instructions;
 
     const [candidateCountRaw, mutationOverride] = await Promise.all([
       deps.settings.get('visual_mutation_candidate_count'),
@@ -312,17 +307,21 @@ export async function runPortraitGenerationRound(
     const candidateCount = candidateCountRaw ? Number(candidateCountRaw) : NaN;
     const count = Number.isInteger(candidateCount) && candidateCount > 0 ? candidateCount : 3;
 
-    // 4. The forced-schema mutation call, through the existing gate with the plan's task-id
-    //    attribution. With forceTool the adapter hands the model exactly one tool, so a reply
-    //    missing propose_candidates is a genuine provider anomaly — parseCandidateResponse
-    //    throws and the round fails with a structured error rather than silently continuing
-    //    without candidates.
-    const { messages, tools } = buildMutationPrompt(
+    // 4. The mutation call, through the existing gate with the plan's task-id attribution.
+    //    Plain marker-text reply, not a forced tool call (2026-08-17: forced tool_choice both
+    //    made OpenRouter filter out otherwise-healthy pinned providers entirely, and made the
+    //    providers that did accept it return malformed JSON for a schema this nested — see
+    //    evoprompt.ts's file header) — a reply with no parseable "### Candidate N" block is
+    //    still a genuine provider anomaly, and parseCandidateResponse throws for that case.
+    //    When wiki path (c) has entries to offer, PULL_WIKI_ENTRY_TOOL is available (auto, never
+    //    forced) for up to MAX_WIKI_PULLS round-trips before the final call drops it, forcing a
+    //    plain-text answer — bounds the round's worst-case cost to one extra LLM call per pull.
+    const { messages } = buildMutationPrompt(
       {
         goal: input.goal,
         parentSlots: parent.slots,
-        standingInstructions,
         wikiEntries: wikiText,
+        unsubscribedWikiTagIndex,
         layerDefinitions: formatLayerDefinitions(manifest),
         pendingFeedback: input.pendingFeedback,
       },
@@ -332,9 +331,27 @@ export async function runPortraitGenerationRound(
     const attempt = await nextAttempt(deps.db, userId, subjectEntityId);
     let chromosomes: CandidateChromosome[];
     try {
-      const turn = await runWithCallContext({ taskId: `visual-${subjectEntityId}-${attempt}`, kind: 'system', userId }, () =>
-        withCallLabel('portrait:mutation', () => llm.complete(messages, tools, { forceTool: 'propose_candidates' })),
-      );
+      const MAX_WIKI_PULLS = 2;
+      const conversation: LlmMessage[] = [...messages];
+      let pulls = 0;
+      let turn: LlmTurn;
+      for (;;) {
+        const offerPullTool = unsubscribedWikiTagIndex.trim() !== '' && pulls < MAX_WIKI_PULLS;
+        turn = await runWithCallContext({ taskId: `visual-${subjectEntityId}-${attempt}`, kind: 'system', userId }, () =>
+          withCallLabel('portrait:mutation', () => llm.complete(conversation, offerPullTool ? [PULL_WIKI_ENTRY_TOOL] : [])),
+        );
+        conversation.push({ role: 'assistant', content: turn.message.content, toolCalls: turn.toolCalls });
+        const pullCall = turn.toolCalls.find((c) => c.name === 'pull_wiki_entry');
+        if (!pullCall) break;
+        pulls++;
+        const entryId = parsePullWikiEntryId(pullCall);
+        const entry = entryId ? allWikiEntries.find((e) => e.entry_id === entryId) : undefined;
+        conversation.push({
+          role: 'tool',
+          toolCallId: pullCall.id,
+          content: entry ? `## ${entry.title}\n${entry.body}` : `No wiki entry with id ${entryId ?? '(missing id)'} — proceed without it.`,
+        });
+      }
       chromosomes = parseCandidateResponse(turn);
     } catch (err) {
       log.error('portraitGeneration: mutation call failed, aborting round', { subjectEntityId, attempt, err });
@@ -413,6 +430,94 @@ export async function runPortraitGenerationRound(
     // bi_principles.md §11: log the seam. A failed round is a missing grid, never a broken
     // orchestrator — the operator retries from the Studio.
     log.error('portraitGeneration: round failed', { userId, goal: input.goal, err });
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface PortraitCandidateRetryResult {
+  ok: boolean;
+  imageUrl?: string | null;
+  composedPrompt?: string;
+  /** The provider error message on a repeat failure — same meaning as
+   *  PortraitCandidateResult.failed, distinct from `error` (a retry-itself failure: candidate
+   *  not found, no active connection). */
+  failed?: string;
+  error?: string;
+}
+
+interface CandidateRetryRow {
+  entity_ids: Record<string, string>;
+  chromosome: CandidateChromosome;
+}
+
+/** Re-renders a single candidate's already-stored chromosome through the active portrait
+ *  connection, without spending a new mutation call — the Studio grid's per-candidate "Retry"
+ *  action (plan §Edge Cases: a transient provider failure on 1-of-N candidates shouldn't cost a
+ *  fresh round). The candidate_id is preserved on success (image_url updated in place), so a
+ *  retried candidate becomes eligible for winner-pick under the same round it was born into.
+ *  composedPrompt is recompiled against the *current* manifest/style template (the same
+ *  resolution portraitFeedback.ts's reflection formatter uses) rather than reusing whatever was
+ *  live at the original round, so a template fix made between attempts benefits a retry
+ *  immediately. */
+export async function retryPortraitCandidateRender(
+  deps: PortraitGenerationDeps,
+  userId: string,
+  candidateId: string,
+): Promise<PortraitCandidateRetryResult> {
+  try {
+    const rows = await deps.db.withUserScope(userId, (session) =>
+      session.query<CandidateRetryRow>(
+        `select entity_ids, chromosome from visual_candidates where candidate_id = $1 and user_id = $2`,
+        [candidateId, userId],
+      ),
+    );
+    const row = rows[0];
+    if (!row) return { ok: false, error: 'candidate_not_found' };
+
+    const profile = await deps.imageConnections.resolveActive('portrait');
+    if (!profile) return { ok: false, error: 'no_active_connection' };
+
+    const manifest = await loadLayerManifest({ settings: deps.settings });
+    const styleEntityId = row.entity_ids?.style;
+    let template = manifest.template;
+    if (styleEntityId) {
+      const styleRows = await deps.db.withUserScope(userId, (session) =>
+        session.query<{ template: string | null }>(
+          `select template from visual_entities where entity_id = $1 and user_id = $2`,
+          [styleEntityId, userId],
+        ),
+      );
+      if (styleRows[0]?.template) template = styleRows[0].template;
+    }
+    const composedPrompt = compileTemplate(template, row.chromosome.slots ?? {}, manifest.layers);
+
+    try {
+      const imageUrl = await createImageGenProvider(profile).generate({
+        prompt: composedPrompt,
+        negativePrompt: [profile.masterNegativePrompt ?? '', row.chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
+        model: profile.model,
+        apiKey: profile.apiKey,
+        baseUrl: profile.baseUrl,
+        width: profile.width,
+        height: profile.height,
+        seed: null,
+        steps: profile.samplingSteps,
+        cfgScale: profile.cfgScale,
+        samplerName: profile.samplerName,
+        workflowParameters: profile.workflowParameters,
+      });
+      await deps.db.withUserScope(userId, (session) =>
+        session.query(`update visual_candidates set image_url = $1 where candidate_id = $2 and user_id = $3`, [imageUrl, candidateId, userId]),
+      );
+      log.info('portraitGeneration: candidate retry succeeded', { candidateId });
+      return { ok: true, imageUrl: imageUrl as string, composedPrompt };
+    } catch (err) {
+      const failed = err instanceof Error ? err.message : String(err);
+      log.warn('portraitGeneration: candidate retry failed', { candidateId, error: failed });
+      return { ok: true, imageUrl: null, composedPrompt, failed };
+    }
+  } catch (err) {
+    log.error('portraitGeneration: candidate retry errored', { userId, candidateId, err });
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

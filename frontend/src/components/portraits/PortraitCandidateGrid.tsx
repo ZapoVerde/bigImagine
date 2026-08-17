@@ -6,8 +6,9 @@ import './PortraitCandidateGrid.css';
 // card per rendered candidate with a winner-pick action and a per-candidate 1-5 star + note field
 // (collapsible note, matching SettingsView's fieldset/textarea convention). The grid owns the
 // ratings/notes draft state and hands them up with the pick; the parent owns the feedback call.
-// Cards whose render failed are filtered out by the parent before this ever renders (plan
-// §Edge Cases — the row is still written, the card is not).
+// A candidate whose render failed gets a placeholder card (the error + a Retry button) instead of
+// an image — rating/note/pick are meaningless with nothing to look at, so those are withheld until
+// a retry succeeds (plan §Edge Cases: the row is still written, the failure is never silent).
 interface PortraitCandidateGridProps {
   candidates: PortraitCandidate[];
   /** The round's goal — shown with the grid so the evaluation context survives. */
@@ -16,11 +17,15 @@ interface PortraitCandidateGridProps {
   submitted: boolean;
   /** The human picked a winner: candidateId + the collected per-candidate ratings/notes. */
   onPickWinner: (candidateId: string, ratings: Record<string, number>, notes: Record<string, string>) => void;
+  /** Re-render one failed candidate's stored chromosome — no new mutation call. */
+  onRetry: (candidateId: string) => void;
+  /** The candidateId currently mid-retry, if any — that card alone shows "Retrying…". */
+  retryingId: string | null;
 }
 
 const STARS = [1, 2, 3, 4, 5];
 
-export default function PortraitCandidateGrid({ candidates, goal, submitted, onPickWinner }: PortraitCandidateGridProps) {
+export default function PortraitCandidateGrid({ candidates, goal, submitted, onPickWinner, onRetry, retryingId }: PortraitCandidateGridProps) {
   const [ratings, setRatings] = useState<Record<string, number>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
 
@@ -35,9 +40,27 @@ export default function PortraitCandidateGrid({ candidates, goal, submitted, onP
       <div className="portrait-grid">
         {candidates.map((candidate) => {
           const rating = ratings[candidate.candidateId] ?? 0;
+          if (!candidate.imageUrl) {
+            const retrying = retryingId === candidate.candidateId;
+            return (
+              <article key={candidate.candidateId} className="portrait-card portrait-card-failed">
+                <div className="portrait-card-placeholder">
+                  <span className="portrait-card-failed-label">Render failed</span>
+                  {candidate.failed && <span className="portrait-card-failed-reason">{candidate.failed}</span>}
+                </div>
+                <details className="portrait-card-prompt">
+                  <summary>Prompt</summary>
+                  <pre>{candidate.composedPrompt}</pre>
+                </details>
+                <button type="button" className="portrait-card-retry" onClick={() => onRetry(candidate.candidateId)} disabled={retrying}>
+                  {retrying ? 'Retrying…' : 'Retry'}
+                </button>
+              </article>
+            );
+          }
           return (
             <article key={candidate.candidateId} className="portrait-card">
-              {candidate.imageUrl && <img className="portrait-card-img" src={candidate.imageUrl} alt="Portrait candidate" />}
+              <img className="portrait-card-img" src={candidate.imageUrl} alt="Portrait candidate" />
               <details className="portrait-card-prompt">
                 <summary>Prompt</summary>
                 <pre>{candidate.composedPrompt}</pre>

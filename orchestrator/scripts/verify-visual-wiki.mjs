@@ -3,6 +3,8 @@
 // §Tests):
 //   - Path 1 (formatSubscribedEntries): subscribed entries only, full title+body, uncapped,
 //     whole-layer-type subscriptions reaching every entity of that type;
+//   - Path 1c (formatUnsubscribedTagIndex): the tag-catch-all — every entry Path 1 (a)/(b) did
+//     NOT already reach, title+tags+id, so mutation can pull one on demand;
 //   - Path 2 (buildWikiIndex): title+tags only, grouped by layer type, across the whole manifest;
 //   - subscriptionsFor: the create-conclusion subscription constructor;
 //   - the investigation loop's cap-forcing behavior driven through submitPortraitFeedback with a
@@ -12,7 +14,7 @@
 // no real provider.
 
 import { DEFAULT_LAYER_MANIFEST } from '../dist/portraits/layerStack.js';
-import { buildWikiIndex, formatSubscribedEntries, subscriptionsFor } from '../dist/portraits/wiki.js';
+import { buildWikiIndex, formatSubscribedEntries, formatUnsubscribedTagIndex, subscriptionsFor } from '../dist/portraits/wiki.js';
 import { submitPortraitFeedback } from '../dist/orchestrator/portraitFeedback.js';
 
 function assert(cond, message) {
@@ -135,6 +137,28 @@ const alphaEntries = [
 const alphaIndex = buildWikiIndex(alphaEntries, layers);
 assert(alphaIndex.indexOf('Apple lesson') < alphaIndex.indexOf('Zebra lesson'), 'wiki: Path 2 sorts titles alphabetically within a group');
 
+// --- Path 1c (formatUnsubscribedTagIndex): the complement of Path 1 (a)/(b), title+tags+id. ---
+// Reuses the Path 1 fixtures: w1 (outfit whole-layer), w2 (subject entity-specific), w3 (style
+// whole-layer), w4 (no subscriptions at all).
+const unsub = formatUnsubscribedTagIndex(entries, [SUBJECT_ENTITY], ['outfit', 'style']);
+assert(!unsub.includes('Keep coats short') && !unsub.includes('Rin prefers teal') && !unsub.includes('Amber eyes carry'), 'wiki: Path 1c excludes everything Path 1 (a)/(b) already reached');
+assert(unsub.includes('w4: Draft entry'), 'wiki: Path 1c includes an entry with no matching subscription at all, with its id');
+
+// A round that doesn't touch 'subject' at all sees w2 (entity-specific, entity not active) fall
+// into the catch-all too — the subscription model is structural, not semantic.
+const unsubNoSubject = formatUnsubscribedTagIndex(entries, [], ['outfit', 'style']);
+assert(unsubNoSubject.includes('w2: Rin prefers teal [subject, color]'), 'wiki: Path 1c catches an entity-specific entry whose entity isn\'t active this round');
+
+// Once every entry's subscription is satisfied, only the truly-unsubscribed entry remains.
+const unsubAllActive = formatUnsubscribedTagIndex(entries, [SUBJECT_ENTITY, STYLE_ENTITY], ['outfit', 'subject', 'style']);
+assert(unsubAllActive.includes('w4') && !unsubAllActive.includes('w1') && !unsubAllActive.includes('w2') && !unsubAllActive.includes('w3'), 'wiki: Path 1c shrinks to just the truly-unsubscribed entry once everything else is active');
+
+assert(formatUnsubscribedTagIndex([], [], layers.map((l) => l.id)) === '', 'wiki: Path 1c returns "" for an empty wiki');
+
+// Title order, alphabetical (same convention as Path 2).
+const unsubAlpha = formatUnsubscribedTagIndex(alphaEntries, [], []);
+assert(unsubAlpha.indexOf('Apple lesson') < unsubAlpha.indexOf('Zebra lesson'), 'wiki: Path 1c sorts titles alphabetically');
+
 // --- subscriptionsFor: the create-conclusion subscription constructor. ---
 const sub1 = subscriptionsFor('style', STYLE_ENTITY);
 assert(sub1.length === 1 && sub1[0].layerType === 'style' && sub1[0].layerEntityId === STYLE_ENTITY, 'wiki: subscriptionsFor with entity → entity-specific subscription');
@@ -213,8 +237,8 @@ function makeDb() {
       return [{ episode_id: episodeId }];
     }
     if (s.startsWith('update visual_entities')) {
-      const entityId = s.includes('slots = $4') ? params[5] : params[4];
-      state.promoted.push({ entityId, imageUrl: params[1], candidateId: params[2] });
+      const entityId = s.includes('slots = $3') ? params[4] : params[3];
+      state.promoted.push({ entityId, imageUrl: params[0], candidateId: params[1] });
       return [];
     }
     if (s.includes('update visual_candidates set rating')) {

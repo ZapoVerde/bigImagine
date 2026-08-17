@@ -39,7 +39,7 @@ const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 // browsers, the RP prompt inspector, and the notes name picker. Every other tab type gets an
 // empty drawer, so the mobile rail opener (grip grab) is hidden there rather than
 // summoning nothing.
-const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'characters', 'notes']);
+const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'characters', 'notes', 'portraits']);
 
 type AuthState =
   | { mode: 'checking' }

@@ -47,12 +47,14 @@ import type {
   PortraitCandidate,
   PortraitEntityRow,
   PortraitFeedbackInput,
+  PortraitBackgroundPromptsSettings,
   PortraitFeedbackResult,
   PortraitGenerateInput,
   PortraitLayerManifest,
   PortraitWikiEntry,
   CreatePortraitEntityInput,
   SendCastCharacterToStudioResult,
+  PortraitLlmConnectionSetting,
   PortraitsEnabled,
   PortraitSubjectDescriberSettings,
   UpdatePortraitEntityInput,
@@ -995,7 +997,8 @@ export function adminSetCharacterSettings(
 /** GET /v1/admin/portrait-subject-describer-settings — the Settings tab's Portrait Subject
  *  describer settings (portrait-studio-standalone-subjects-plan.md Part B): the prompt template
  *  for the one synchronous LLM call that turns a bare Studio subject name (+ optional seed) into
- *  its standing_instructions. Admin-gated like every Settings-tab GET. */
+ *  an appearance blurb (fed to the slot bootstrapper, never persisted). Admin-gated like every
+ *  Settings-tab GET. */
 export function adminGetPortraitSubjectDescriberSettings(adminKey: string | null): Promise<PortraitSubjectDescriberSettings> {
   return jsonRequest<PortraitSubjectDescriberSettings>('/v1/admin/portrait-subject-describer-settings', adminKey);
 }
@@ -1010,6 +1013,37 @@ export function adminSetPortraitSubjectDescriberSettings(
   adminKey: string | null,
 ): Promise<PortraitSubjectDescriberSettings> {
   return jsonRequest<PortraitSubjectDescriberSettings>('/v1/admin/portrait-subject-describer-settings', adminKey, { method: 'POST', body: patch });
+}
+
+/** GET /v1/admin/portrait-background-prompts — Portrait Studio's other three background LLM
+ *  prompts (slot bootstrap, mutation, reflection), surfaced in the Studio's own sidebar panel. */
+export function adminGetPortraitBackgroundPrompts(adminKey: string | null): Promise<PortraitBackgroundPromptsSettings> {
+  return jsonRequest<PortraitBackgroundPromptsSettings>('/v1/admin/portrait-background-prompts', adminKey);
+}
+
+/** POST /v1/admin/portrait-background-prompts — partial patch ({ slot_bootstrap_prompt?,
+ *  mutation_prompt?, reflection_prompt? }); an empty string clears the override back to the
+ *  built-in default. Returns the full updated set. No restart: every value is read live. */
+export function adminSetPortraitBackgroundPrompts(
+  patch: { slot_bootstrap_prompt?: string; mutation_prompt?: string; reflection_prompt?: string },
+  adminKey: string | null,
+): Promise<PortraitBackgroundPromptsSettings> {
+  return jsonRequest<PortraitBackgroundPromptsSettings>('/v1/admin/portrait-background-prompts', adminKey, { method: 'POST', body: patch });
+}
+
+/** GET/POST /v1/admin/portrait-llm-connection (portrait-studio-connection-picker-plan.md) —
+ *  Portrait Studio's own sidebar connection picker: which saved connection every LLM call inside
+ *  Portrait Studio (subject describer, generation round, feedback/reflection) uses, independent
+ *  of the household's active connection. '' = unset = falls back to the household default. */
+export function adminGetPortraitLlmConnection(adminKey: string | null): Promise<PortraitLlmConnectionSetting> {
+  return jsonRequest<PortraitLlmConnectionSetting>('/v1/admin/portrait-llm-connection', adminKey);
+}
+
+export function adminSetPortraitLlmConnection(connectionName: string, adminKey: string | null): Promise<PortraitLlmConnectionSetting> {
+  return jsonRequest<PortraitLlmConnectionSetting>('/v1/admin/portrait-llm-connection', adminKey, {
+    method: 'POST',
+    body: { connectionName },
+  });
 }
 
 /** GET /v1/admin/locations — the Locations page's read-only known-locations browser (location.md
@@ -1663,8 +1697,8 @@ export async function listPortraitEntities(apiKey: string | null): Promise<Portr
 }
 
 /** POST /v1/portraits/entities — create a standalone visual_entities row
- *  (portrait-studio-standalone-subjects-plan.md). Entities are never linked to characters; a
- *  subject created without standingInstructions gets them described from `seed` by the server. */
+ *  (portrait-studio-standalone-subjects-plan.md). Entities are never linked to characters; an
+ *  entity created without `slots` gets them bootstrapped from `seed` by the server. */
 export function createPortraitEntity(input: CreatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
   return jsonRequest<PortraitEntityRow>('/v1/portraits/entities', apiKey, { method: 'POST', body: input });
 }
@@ -1674,8 +1708,7 @@ export function getPortraitEntity(entityId: string, apiKey: string | null): Prom
   return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey);
 }
 
-/** PATCH /v1/portraits/entities/:id — partial update; null clears
- *  standingInstructions/template (not name/slots). */
+/** PATCH /v1/portraits/entities/:id — partial update; null clears template (not name/slots). */
 export function updatePortraitEntity(entityId: string, input: UpdatePortraitEntityInput, apiKey: string | null): Promise<PortraitEntityRow> {
   return jsonRequest<PortraitEntityRow>(`/v1/portraits/entities/${encodeURIComponent(entityId)}`, apiKey, { method: 'PATCH', body: input });
 }
@@ -1767,4 +1800,18 @@ export async function generatePortraitCandidates(input: PortraitGenerateInput, a
  *  Investigation; the response carries the episode id and the wiki write it produced. */
 export function submitPortraitFeedback(input: PortraitFeedbackInput, apiKey: string | null): Promise<PortraitFeedbackResult> {
   return jsonRequest<PortraitFeedbackResult>('/v1/portraits/feedback', apiKey, { method: 'POST', body: input });
+}
+
+/** POST /v1/portraits/candidates/:id/retry — re-render one candidate whose original image
+ *  failed, without spending a new mutation call. imageUrl stays null (with `failed` set) on a
+ *  repeat provider failure — that's still a 200, not a thrown ApiError. */
+export function retryPortraitCandidate(
+  candidateId: string,
+  apiKey: string | null,
+): Promise<{ imageUrl: string | null; composedPrompt: string; failed?: string }> {
+  return jsonRequest<{ imageUrl: string | null; composedPrompt: string; failed?: string }>(
+    `/v1/portraits/candidates/${candidateId}/retry`,
+    apiKey,
+    { method: 'POST', body: {} },
+  );
 }

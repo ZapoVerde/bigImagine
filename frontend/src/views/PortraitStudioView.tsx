@@ -8,6 +8,7 @@ import {
   getPortraitLayerManifest,
   listPortraitEntities,
   listPortraitWikiEntries,
+  retryPortraitCandidate,
   setPortraitLayerManifest,
   submitPortraitFeedback,
   updatePortraitEntity,
@@ -28,25 +29,28 @@ import './PortraitStudioView.css';
 // for character portraits: per-layer entity pickers + create-new drive a Generate action; the
 // round's candidates land in PortraitCandidateGrid for winner-pick + 1-5 rating + note; feedback
 // runs the Reflection Investigation and surfaces an "Applied" banner (created vs amended,
-// distinguished); a Wiki panel lists/edits/deletes the reflection's lessons; per-entity
-// standing_instructions editing uses the same textarea+Save pattern; Manage Layers (admin-gated —
-// visual_layer_stack is a settings write, per the plan's auth note) edits the manifest with the
-// subject layer locked and in-use layers unremovable. All portrait reads/writes are user-scoped
-// (apiKey); only the layers write takes the admin key. Per portrait-studio-standalone-subjects-
-// plan.md, every entity is standalone — never linked to a character — and a bare subject name
-// created without standing instructions gets them described from the new optional seed by the
-// server's portrait_subject_describer_prompt (Settings tab).
+// distinguished); a Wiki panel lists/edits/deletes the reflection's lessons — the one guidance
+// channel now (2026-08-17: dropped the separate, never-actually-prompt-facing standing_instructions
+// editor, migration 0114); per-entity slots (the ground truth compiled into the image prompt) are
+// shown read-only in an expandable section instead; Manage Layers (admin-gated — visual_layer_stack
+// is a settings write, per the plan's auth note) edits the manifest with the subject layer locked
+// and in-use layers unremovable. All portrait reads/writes are user-scoped (apiKey); only the
+// layers write takes the admin key. Per portrait-studio-standalone-subjects-plan.md, every entity
+// is standalone — never linked to a character — and a bare subject name created without hand-filled
+// slots gets them bootstrapped from the optional seed by the server's slot bootstrapper (and, on
+// the subject layer, portrait_subject_describer_prompt first — Settings tab).
 interface PortraitStudioViewProps {
   apiKey: string | null;
 }
 
 interface CreateDraft {
   name: string;
-  seed: string;
+  description: string;
   template: string;
 }
 
-const EMPTY_CREATE: CreateDraft = { name: '', seed: '', template: '' };
+const EMPTY_CREATE: CreateDraft = { name: '', description: '', template: '' };
+const GOAL_STORAGE_KEY = 'bb_portrait_goal';
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
@@ -62,8 +66,11 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [selections, setSelections] = useState<Record<string, string>>({});
   const [creatingLayer, setCreatingLayer] = useState<string | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE);
+  const [creatingSaving, setCreatingSaving] = useState(false);
 
-  const [goal, setGoal] = useState('');
+  // The round goal survives a reload (localStorage write-through, same debounced pattern as
+  // ChatComposer's draft) — a single global key, since Portrait Studio has no per-tab scoping.
+  const [goal, setGoal] = useState(() => localStorage.getItem(GOAL_STORAGE_KEY) ?? '');
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<PortraitCandidate[] | null>(null);
@@ -72,13 +79,19 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ action: 'created' | 'amended'; entryId: string } | null>(null);
+  // Per-candidate retry (a failed render gets a placeholder + Retry in the grid rather than being
+  // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
+  const [retryingId, setRetryingId] = useState<string | null>(null);
 
-  // Per-entity standing_instructions editor.
-  const [siEntityId, setSiEntityId] = useState<string | null>(null);
-  const [siDraft, setSiDraft] = useState('');
-  const [siSaving, setSiSaving] = useState(false);
-  const [siSaved, setSiSaved] = useState(false);
-  const [siError, setSiError] = useState<string | null>(null);
+  // Per-entity slots — read-only expandable section (the ground truth compiled into the image
+  // prompt; composer.ts's compileTemplate reads only this, never a free-text field).
+  const [expandedSlotsEntityId, setExpandedSlotsEntityId] = useState<string | null>(null);
+
+  // Per-entity rename editor — same toggle-open-inline-input-Save shape as the instructions editor.
+  const [renamingEntityId, setRenamingEntityId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
 
   // Wiki panel editor.
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -155,10 +168,18 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     }
   }, [manifest, layersDraft]);
 
+  // Write-through the goal to localStorage on change, same 250ms-debounced pattern as
+  // ChatComposer's draft — survives a reload without persisting anything server-side.
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      if (goal) localStorage.setItem(GOAL_STORAGE_KEY, goal);
+      else localStorage.removeItem(GOAL_STORAGE_KEY);
+    }, 250);
+    return () => window.clearTimeout(t);
+  }, [goal]);
+
   const promptableLayers = useMemo(() => manifest?.layers.filter((l) => l.promptable) ?? [], [manifest]);
   const inUseLayerIds = useMemo(() => new Set((entities ?? []).map((e) => e.layer_id)), [entities]);
-
-  const focusEntity = entities?.find((e) => e.entity_id === siEntityId) ?? null;
 
   function startCreate(layerId: string) {
     setCreatingLayer((cur) => (cur === layerId ? null : layerId));
@@ -166,16 +187,22 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   }
 
   async function saveNewEntity(layer: PortraitLayerDefinition) {
+    if (creatingSaving) return; // already in flight — a second click (or double Enter) must not double-POST
     if (!createDraft.name.trim()) {
       setGenerateError(`name the new ${layer.label} entity`);
       return;
     }
+    setCreatingSaving(true);
     try {
+      const description = createDraft.description.trim();
       const created = await createPortraitEntity(
         {
           layerId: layer.id,
           name: createDraft.name.trim(),
-          ...(layer.id === 'subject' && createDraft.seed.trim() ? { seed: createDraft.seed.trim() } : {}),
+          // `seed` is ephemeral bootstrap context, never persisted: on the subject layer the
+          // server expands it into a full appearance blurb first (describeStudioSubject); every
+          // other layer passes it straight to the slot bootstrapper (describeStudioSlots).
+          ...(description ? { seed: description } : {}),
           ...(layer.id === 'style' && createDraft.template.trim() ? { template: createDraft.template.trim() } : {}),
         },
         apiKey,
@@ -187,6 +214,8 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
       setGenerateError(null);
     } catch (err) {
       setGenerateError(errMessage(err, 'failed to create entity'));
+    } finally {
+      setCreatingSaving(false);
     }
   }
 
@@ -200,7 +229,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         delete next[entity.layer_id];
         return next;
       });
-      if (siEntityId === entity.entity_id) setSiEntityId(null);
+      if (expandedSlotsEntityId === entity.entity_id) setExpandedSlotsEntityId(null);
       await refreshEntities();
     } catch (err) {
       setGenerateError(errMessage(err, 'failed to delete entity'));
@@ -225,12 +254,30 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     setFeedbackError(null);
     try {
       const cs = await generatePortraitCandidates({ entityIds: selections, goal: goal.trim() }, apiKey);
-      setCandidates(cs.filter((c) => c.imageUrl)); // failed renders are omitted from the grid (row still written)
+      setCandidates(cs); // a failed render still gets a card — a placeholder with Retry, not silently dropped
       setRoundGoal(goal.trim());
     } catch (err) {
       setGenerateError(errMessage(err, 'generation failed'));
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function retryCandidate(candidateId: string) {
+    setRetryingId(candidateId);
+    try {
+      const res = await retryPortraitCandidate(candidateId, apiKey);
+      setCandidates((cs) =>
+        (cs ?? []).map((c) =>
+          c.candidateId === candidateId
+            ? { ...c, imageUrl: res.imageUrl, composedPrompt: res.composedPrompt, failed: res.failed }
+            : c,
+        ),
+      );
+    } catch (err) {
+      setGenerateError(errMessage(err, 'retry failed'));
+    } finally {
+      setRetryingId(null);
     }
   }
 
@@ -264,25 +311,27 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     }
   }
 
-  function openSi(entity: PortraitEntityRow) {
-    setSiEntityId(entity.entity_id);
-    setSiDraft(entity.standing_instructions ?? '');
-    setSiSaved(false);
-    setSiError(null);
+  function openRename(entity: PortraitEntityRow) {
+    setRenamingEntityId(entity.entity_id);
+    setRenameDraft(entity.name);
+    setRenameError(null);
   }
 
-  async function saveStandingInstructions() {
-    if (!focusEntity) return;
-    setSiSaving(true);
-    setSiError(null);
+  async function saveRename(entity: PortraitEntityRow) {
+    if (!renameDraft.trim()) {
+      setRenameError('name cannot be empty');
+      return;
+    }
+    setRenameSaving(true);
+    setRenameError(null);
     try {
-      await updatePortraitEntity(focusEntity.entity_id, { standingInstructions: siDraft }, apiKey);
-      setSiSaved(true);
+      await updatePortraitEntity(entity.entity_id, { name: renameDraft.trim() }, apiKey);
+      setRenamingEntityId(null);
       await refreshEntities();
     } catch (err) {
-      setSiError(errMessage(err, 'failed to save standing instructions'));
+      setRenameError(errMessage(err, 'failed to rename entity'));
     } finally {
-      setSiSaving(false);
+      setRenameSaving(false);
     }
   }
 
@@ -421,14 +470,21 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
               {creatingLayer === layer.id && (
                 <div className="portrait-create">
                   <input value={createDraft.name} onChange={(e) => setCreateDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`New ${layer.label} name`} />
-                  {layer.id === 'subject' && (
-                    <input value={createDraft.seed} onChange={(e) => setCreateDraft((d) => ({ ...d, seed: e.target.value }))} placeholder="Seed (optional) — e.g. an Italian woman in her 30s" />
-                  )}
+                  <textarea
+                    rows={2}
+                    value={createDraft.description}
+                    onChange={(e) => setCreateDraft((d) => ({ ...d, description: e.target.value }))}
+                    placeholder={
+                      layer.id === 'subject'
+                        ? 'Seed (optional) — e.g. an Italian woman in her 30s'
+                        : `Seed (optional) — feeds the ${layer.label.toLowerCase()} slot bootstrapper`
+                    }
+                  />
                   {layer.id === 'style' && (
-                    <textarea rows={2} value={createDraft.template} onChange={(e) => setCreateDraft((d) => ({ ...d, template: e.target.value }))} placeholder="Composed-prompt template (optional, e.g. {{subject_overflow}} — {{style_overflow}})" />
+                    <textarea rows={2} value={createDraft.template} onChange={(e) => setCreateDraft((d) => ({ ...d, template: e.target.value }))} placeholder="Advanced: raw prompt-template override (optional, e.g. {{subject_overflow}} — {{style_overflow}}) — not the description above" />
                   )}
-                  <button type="button" onClick={() => saveNewEntity(layer)}>
-                    Create
+                  <button type="button" onClick={() => saveNewEntity(layer)} disabled={creatingSaving}>
+                    {creatingSaving ? 'Creating…' : 'Create'}
                   </button>
                 </div>
               )}
@@ -451,7 +507,14 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
 
       {/* The round's candidates. */}
       {candidates && candidates.length > 0 && (
-        <PortraitCandidateGrid candidates={candidates} goal={roundGoal} submitted={submitted} onPickWinner={pickWinner} />
+        <PortraitCandidateGrid
+          candidates={candidates}
+          goal={roundGoal}
+          submitted={submitted}
+          onPickWinner={pickWinner}
+          onRetry={retryCandidate}
+          retryingId={retryingId}
+        />
       )}
       {submitting && <div className="portrait-submitting">Recording evaluation and running Reflection…</div>}
       {feedbackError && <div className="error-banner">{feedbackError}</div>}
@@ -516,30 +579,66 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         ))}
       </section>
 
-      {/* Entities — per-entity standing_instructions editing (textarea + Save). */}
+      {/* Entities — per-entity slots, read-only expandable (the ground truth compiled into the
+          image prompt; composer.ts's compileTemplate reads only this). */}
       <section className="portrait-entities">
         <h3>Entities</h3>
         <div className="portrait-entity-list">
           {entities.map((entity) => (
             <article key={entity.entity_id} className="portrait-entity-row">
               <header className="portrait-entity-header">
-                <span className="portrait-entity-name">{entity.name}</span>
+                {renamingEntityId === entity.entity_id ? (
+                  <input
+                    className="portrait-entity-rename-input"
+                    value={renameDraft}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void saveRename(entity);
+                      if (e.key === 'Escape') setRenamingEntityId(null);
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <span className="portrait-entity-name">{entity.name}</span>
+                )}
                 <span className="portrait-entity-layer">{manifest.layers.find((l) => l.id === entity.layer_id)?.label ?? entity.layer_id}</span>
                 {entity.last_image_url && <img className="portrait-entity-thumb" src={entity.last_image_url} alt={`${entity.name} best`} />}
-                <button type="button" onClick={() => openSi(entity)}>
-                  {siEntityId === entity.entity_id ? 'hide' : 'instructions'}
+                {renamingEntityId === entity.entity_id ? (
+                  <>
+                    <button type="button" onClick={() => saveRename(entity)} disabled={renameSaving}>
+                      {renameSaving ? 'Saving…' : 'save'}
+                    </button>
+                    <button type="button" onClick={() => setRenamingEntityId(null)} disabled={renameSaving}>
+                      cancel
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" onClick={() => openRename(entity)}>
+                    rename
+                  </button>
+                )}
+                <button type="button" onClick={() => setExpandedSlotsEntityId((cur) => (cur === entity.entity_id ? null : entity.entity_id))}>
+                  {expandedSlotsEntityId === entity.entity_id ? 'hide' : 'slots'}
+                </button>
+                <button type="button" className="portrait-wiki-delete" onClick={() => deleteEntity(entity)}>
+                  delete
                 </button>
               </header>
-              {siEntityId === entity.entity_id && (
-                <div className="portrait-si-editor">
-                  {siError && <div className="error-banner">{siError}</div>}
-                  <textarea rows={3} value={siDraft} onChange={(e) => setSiDraft(e.target.value)} placeholder="Standing instructions — the settled soft concentrate-here hint for this entity" />
-                  <div className="portrait-wiki-actions">
-                    <button type="button" onClick={saveStandingInstructions} disabled={siSaving}>
-                      {siSaving ? 'Saving…' : 'Save'}
-                    </button>
-                    {siSaved && <span className="portrait-saved-note">Saved.</span>}
-                  </div>
+              {renamingEntityId === entity.entity_id && renameError && <div className="error-banner">{renameError}</div>}
+              {expandedSlotsEntityId === entity.entity_id && (
+                <div className="portrait-slots-view">
+                  {Object.keys(entity.slots).length === 0 ? (
+                    <div className="portrait-empty">No slots yet — generate a round or edit the layer's boundary to bootstrap some.</div>
+                  ) : (
+                    <dl className="portrait-slots-list">
+                      {Object.entries(entity.slots).map(([key, value]) => (
+                        <div key={key} className="portrait-slot-row">
+                          <dt>{key}</dt>
+                          <dd>{value}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  )}
                 </div>
               )}
             </article>

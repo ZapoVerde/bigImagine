@@ -263,12 +263,30 @@
  * portrait_subject_describer_prompt (migration 0111,
  * docs/plans/portrait-studio-standalone-subjects-plan.md Part B) is the Portrait Studio subject
  * describer's prompt template — the one synchronous LLM call that turns a bare subject name (+
- * optional seed) into the entity's standing_instructions when an operator creates a Studio-native
- * subject without hand-typing full instructions. Same "default + bespoke" override shape as every
+ * optional seed) into an appearance blurb, fed straight to the slot bootstrapper as context
+ * (never persisted on the entity — migration 0114 dropped standing_instructions). Same
+ * "default + bespoke" override shape as every
  * prompt key (bi_principles.md §17): empty = the built-in default in
  * orchestrator/describeStudioSubject.ts, a non-empty value is used verbatim, {{name}}/{{seed}}
  * interpolated. Read live on each subject create, no restart, editable from the Settings tab's
  * fieldset.
+ *
+ * portrait_llm_connection (migration 0112, docs/plans/portrait-studio-connection-picker-plan.md)
+ * is Portrait Studio's own connection subscription: an llm_connections row's name, or empty. Every
+ * text-LLM call inside Portrait Studio (server/portraitRoutes.ts's resolvePortraitLlm — the
+ * subject describer, the generation round, feedback/reflection) resolves through it, falling back
+ * to the household's active connection when empty or unresolvable — same shape as
+ * chat_memory_profile and a chat's own params.profile, not another is_active-style push. Read
+ * live on each call, no restart; set from Portrait Studio's own sidebar panel, not the Connections
+ * tab.
+ *
+ * portrait_slot_bootstrap_prompt (migration 0113, orchestrator/describeStudioSlots.ts) is the
+ * Portrait Studio slot bootstrapper's prompt template — the LLM call that turns a bare entity
+ * (name + whatever standing instructions it already has) into a starting set of structured slot
+ * values for its own layer, fired on entity creation whenever no slots were explicitly supplied
+ * (every layer, not just subject). Same "default + bespoke" override shape as every prompt key
+ * (bi_principles.md §17): empty = the built-in default in describeStudioSlots.ts. Read live on
+ * each entity create, no restart.
  *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
@@ -376,6 +394,8 @@ export const SETTING_NAMES = [
   'visual_wiki_investigation_max_turns',
   'visual_portraits_enabled',
   'portrait_subject_describer_prompt',
+  'portrait_llm_connection',
+  'portrait_slot_bootstrap_prompt',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

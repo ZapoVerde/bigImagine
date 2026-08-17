@@ -20,6 +20,15 @@
  *   would be the actual inconsistency; plan §Reflection Investigation step 1). Deterministic:
  *   manifest layer order, then title order within a group.
  *
+ * - `formatUnsubscribedTagIndex` is Path 1c — the mutation call's catch-all for entries Path 1
+ *   (a/b) didn't already hand over full-body: title + tags + id, flat, for every entry NOT
+ *   subscribed to any active entity id or active whole-layer type. A lesson can be genuinely
+ *   relevant to a round's goal without ever having been subscribed to this entity or this layer
+ *   (the subscription model is structural, not semantic), so the mutation call gets to see what
+ *   exists and pull one on demand (evoprompt.ts's PULL_WIKI_ENTRY_TOOL) rather than staying blind
+ *   to everything outside its structural subscriptions. Ids are shown here (unlike Path 2's
+ *   buildWikiIndex) because this index exists specifically to be pulled from by id.
+ *
  * `subscriptionsFor` is the pure constructor for the subscriptions jsonb a `create` conclusion
  *   writes: entity-specific when the model named an entity, whole-layer-type when it didn't.
  *
@@ -32,6 +41,8 @@
  * formatSubscribedEntries(entries, activeEntityIds, activeLayerTypes) -> string — pure, '' when
  *   nothing matches
  * buildWikiIndex(entries, layers) -> string — pure, title+tags grouped by layer type
+ * formatUnsubscribedTagIndex(entries, activeEntityIds, activeLayerTypes) -> string — pure,
+ *   title+tags+id for entries Path 1 (a/b) didn't already surface, '' when nothing qualifies
  * subscriptionsFor(layerId, entityId) -> WikiSubscription[] — pure
  *
  * @contract
@@ -100,6 +111,21 @@ export function buildWikiIndex(entries: WikiEntryRow[], layers: LayerDefinition[
     }
   }
   return lines.join('\n');
+}
+
+/** Pure: Path 1c — every entry Path 1's a/b subscription match (isSubscribed) does NOT already
+ *  reach, title + tags + id, flat, title order. '' when every entry is already subscribed or the
+ *  wiki is empty. Ids are shown (unlike buildWikiIndex) because this index is meant to be pulled
+ *  from by id via PULL_WIKI_ENTRY_TOOL, not just read. */
+export function formatUnsubscribedTagIndex(entries: WikiEntryRow[], activeEntityIds: string[], activeLayerTypes: string[]): string {
+  return entries
+    .filter((entry) => !isSubscribed(entry, activeEntityIds, activeLayerTypes))
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .map((entry) => {
+      const tagSuffix = entry.tags.length > 0 ? ` [${entry.tags.join(', ')}]` : '';
+      return `- ${entry.entry_id}: ${entry.title}${tagSuffix}`;
+    })
+    .join('\n');
 }
 
 /** Pure: the subscriptions jsonb for a created entry — entity-specific when the reflection

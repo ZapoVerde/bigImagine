@@ -497,13 +497,13 @@ export async function submitPortraitFeedback(
       await deps.db.withUserScope(userId, (session) =>
         session.query(
           layerSlots !== undefined
-            ? `update visual_entities set last_image_url = $2, current_best_candidate_id = $3, slots = $4::jsonb, updated_at = now()
-               where user_id = $5 and entity_id = $6`
-            : `update visual_entities set last_image_url = $2, current_best_candidate_id = $3, updated_at = now()
-               where user_id = $4 and entity_id = $5`,
+            ? `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, slots = $3::jsonb, updated_at = now()
+               where user_id = $4 and entity_id = $5`
+            : `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, updated_at = now()
+               where user_id = $3 and entity_id = $4`,
           layerSlots !== undefined
-            ? [userId, winner.image_url, winner.candidate_id, JSON.stringify(layerSlots), userId, entityId]
-            : [userId, winner.image_url, winner.candidate_id, userId, entityId],
+            ? [winner.image_url, winner.candidate_id, JSON.stringify(layerSlots), userId, entityId]
+            : [winner.image_url, winner.candidate_id, userId, entityId],
         ),
       );
     }

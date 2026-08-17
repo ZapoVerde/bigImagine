@@ -212,6 +212,8 @@ import {
   handleLocationSettingsSet,
   handleCharacterSettingsGet,
   handleCharacterSettingsSet,
+  handlePortraitBackgroundPromptsSettingsGet,
+  handlePortraitBackgroundPromptsSettingsSet,
   handlePortraitSubjectDescriberSettingsGet,
   handlePortraitSubjectDescriberSettingsSet,
   handleLorebookSettingsGet,
@@ -257,12 +259,15 @@ import { handleLlmStatsGet, handleTurnDisplayStatsGet } from './handleAdminStats
 import { buildModelsList } from './openai.js';
 import { handleLocationImageBroken } from './locationImages.js';
 import {
+  handlePortraitCandidateRetry,
   handlePortraitEntities,
   handlePortraitEntityFromCastCharacter,
   handlePortraitFeedback,
   handlePortraitGenerate,
   handlePortraitLayersGet,
   handlePortraitLayersSet,
+  handlePortraitLlmConnectionGet,
+  handlePortraitLlmConnectionSet,
   handlePortraitsEnabledGet,
   handlePortraitsEnabledSet,
   handlePortraitWiki,
@@ -601,6 +606,8 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/admin/character-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/portrait-subject-describer-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitSubjectDescriberSettingsGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/portrait-subject-describer-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitSubjectDescriberSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/portrait-background-prompts', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitBackgroundPromptsSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/portrait-background-prompts', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitBackgroundPromptsSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/locations', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationsGet(res, deps); }) },
   { method: 'GET', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/timezone', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleTimezoneSet(req, res, deps); }) },
@@ -665,6 +672,9 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
   { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
   { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
+  { method: 'POST', family: '/v1/portraits/candidates', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitCandidateRetry(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
   // portrait-chain-hardening-plan.md's kill switch — the read is registered at both a
   // household-gated public path (the frontend fetches it as a regular authenticated user right
   // after auth resolves, before anyone would have entered the separate admin key) and an
@@ -674,6 +684,8 @@ const routes: Route[] = [
   { method: 'GET', path: '/v1/portraits-enabled', run: async (req, res, deps) => withUser(req, res, deps, async () => { await handlePortraitsEnabledGet(res, deps); }) },
   { method: 'GET', path: '/v1/admin/portraits-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitsEnabledGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/portraits-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitsEnabledSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/portrait-llm-connection', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLlmConnectionGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/portrait-llm-connection', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLlmConnectionSet(req, res, deps); }) },
 ];
 
 async function handleRequest(

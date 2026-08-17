@@ -102,3 +102,25 @@ assert(!('hair' in r9.slots), 'reconcile: layer with no parent content is skippe
 // --- Child-only layer not in the manifest is dropped even though it has content. ---
 const r10 = enforceSlotKeys(parent, { slots: { subject: { subject_identity: 'Rin V3' }, ghost: { g: '1' } } }, layers3);
 assert(!('ghost' in r10.slots), 'reconcile: child-only layer dropped despite having content');
+
+// --- An entity with genuinely no slots yet (an empty object, not an absent key — what
+// portraitGeneration.ts's buildParentChromosome actually produces for a fresh or
+// pre-bootstrap-feature entity) has no key-set contract to enforce: the mutation LLM's proposed
+// keys for that layer pass through, rather than being discarded forever. ---
+const emptyParent = { slots: { subject: {}, style: { style_style: 'VLZ hybrid' }, hair: { hair_style: 'bob' } } };
+const r11 = enforceSlotKeys(
+  emptyParent,
+  { slots: { subject: { subject_identity: 'first ever value', build: 'tall' }, style: { style_style: 'watercolor' }, hair: { hair_style: 'pixie' } } },
+  layers3,
+);
+assert(
+  r11.slots.subject.subject_identity === 'first ever value' && r11.slots.subject.build === 'tall',
+  'reconcile: an empty-parent layer accepts every key the child proposes',
+);
+assert(r11.slots.style.style_style === 'watercolor', 'reconcile: a non-empty-parent layer still enforces its own key set as before');
+
+// --- Empty-parent layer with a degenerate (non-object) child for that layer: no keys survive,
+// but it never throws and other layers are unaffected. ---
+const r12 = enforceSlotKeys(emptyParent, { slots: { subject: 'not-an-object', style: { style_style: 'watercolor' }, hair: { hair_style: 'pixie' } } }, layers3);
+assert(Object.keys(r12.slots.subject).length === 0, 'reconcile: empty-parent layer with a non-object child yields no keys, not a throw');
+assert(r12.slots.style.style_style === 'watercolor', 'reconcile: sibling layers unaffected by a degenerate empty-parent child');

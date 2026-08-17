@@ -1,0 +1,10 @@
+.portrait-connection-panel {
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.portrait-connection-panel select {
+  width: 100%;
+}
