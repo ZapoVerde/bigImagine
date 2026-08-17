@@ -832,6 +832,19 @@ export async function adminGetReliabilitySweep(id: string, adminKey: string | nu
   return jsonRequest<ReliabilitySweepSnapshot>(`/v1/admin/connections/${encodeURIComponent(id)}/reliability`, adminKey);
 }
 
+/** POST /v1/admin/connections/pricing-sync — the manual DeepSeek pricing sync (docs/plans/
+ *  deepseek-pricing-sync.md), the same pass the daily loop runs: fetch the official pricing page
+ *  and write off-peak + peak rates onto every native DeepSeek connection (host api.deepseek.com +
+ *  model on the page). Returns { checked, updated }; 502 (thrown as ApiError) when the fetch/parse
+ *  failed — the Connections tab's "Sync now" button. */
+export async function adminSyncDeepSeekPricing(
+  adminKey: string | null,
+): Promise<{ checked: number; updated: number }> {
+  return jsonRequest<{ checked: number; updated: number }>('/v1/admin/connections/pricing-sync', adminKey, {
+    method: 'POST',
+  });
+}
+
 /** The Connections tab's image section full list (io/imageConnections.ts, endpoint.md §3) — every
  *  admin-managed image generation connection, redacted (no apiKey field; hasApiKey instead, since
  *  keyless providers legitimately have none). */

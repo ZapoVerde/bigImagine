@@ -159,6 +159,12 @@ function createFakeProfile() {
     priceInputPerMillion: 1,
     priceOutputPerMillion: 2,
     priceCacheHitPerMillion: 0.5,
+    // Identical peak tier so the cost assertions are hour-independent — pickPriceTier resolves the
+    // effective tier by the call's UTC hour, and a base-only profile would price the call as "no
+    // price" (cost null) whenever the suite runs during DeepSeek's peak window.
+    pricePeakInputPerMillion: 1,
+    pricePeakOutputPerMillion: 2,
+    pricePeakCacheHitPerMillion: 0.5,
   };
 }
 

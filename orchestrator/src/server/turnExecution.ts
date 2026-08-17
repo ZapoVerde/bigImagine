@@ -33,6 +33,7 @@
 
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
+import { pickPriceTier, type CallCostPrice } from '../io/llm/callCost.js';
 import { log } from '../io/logger.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
@@ -64,31 +65,42 @@ import type { HttpServerDeps } from './httpServer.js';
 // The acting connection's per-token rates (USD per 1M tokens) for a turn — what the Prompt
 // Inspector's receipt multiplies the vendor's usage by. Undefined end to end when the connection
 // has no price configured; a tier is undefined when that tier has no rate (the receipt then omits
-// the $ figure entirely rather than pricing it at another tier's rate).
+// the $ figure entirely rather than pricing it at another tier's rate). Already tier-resolved by
+// toTurnPrice (pickPriceTier at the call's UTC hour) — this shape is always the effective tier,
+// never both tiers.
 export interface TurnPrice {
   inputPerMillion?: number;
   outputPerMillion?: number;
   cacheHitPerMillion?: number;
 }
 
-// LlmProfile carries the same three price fields as the llm_connections row (io/llm/profiles.ts,
-// relayed by io/llmConnections.ts's toProfile) — this is a pure shape conversion, not a second
-// DB round-trip. All three undefined collapses to undefined: a connection with no price set must
-// read as "no price" end to end, never as a fabricated $0.00.
-function toTurnPrice(profile: {
-  priceInputPerMillion?: number;
-  priceOutputPerMillion?: number;
-  priceCacheHitPerMillion?: number;
-} | undefined): TurnPrice | undefined {
+// LlmProfile carries both price tiers (base + peak) as the llm_connections row does
+// (io/llm/profiles.ts, relayed by io/llmConnections.ts's toProfile) — this is a pure shape
+// conversion, not a second DB round-trip. pickPriceTier resolves which tier is in effect at the
+// call's UTC wall-clock hour (docs/plans/deepseek-pricing-sync.md), freezing the effective
+// single-tier price at turn resolution (here) rather than at call-resolution (llmGate.ts's
+// computeCallCostUsd). A turn that straddles a peak/off-peak boundary can in principle see the
+// Inspector's receipt disagree with llmGate's billed cost for that one call — accepted: this
+// price is a trend signal (is spend trekking up, which connection is expensive), not a precise
+// per-call invoice, so a rare few-minutes-wide boundary mismatch isn't worth threading the
+// call-time tier back through the whole turn path. All three effective fields undefined collapses
+// to undefined: a connection with no price set — or a peak-hour call against a base-only
+// connection, omit-rather-than-guess — must read as "no price" end to end, never as a fabricated
+// $0.00.
+function toTurnPrice(profile: CallCostPrice | undefined): TurnPrice | undefined {
   if (!profile) return undefined;
-  const { priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = profile;
-  if (priceInputPerMillion === undefined && priceOutputPerMillion === undefined && priceCacheHitPerMillion === undefined) {
+  const effective = pickPriceTier(profile);
+  if (
+    effective.priceInputPerMillion === undefined &&
+    effective.priceOutputPerMillion === undefined &&
+    effective.priceCacheHitPerMillion === undefined
+  ) {
     return undefined;
   }
   return {
-    inputPerMillion: priceInputPerMillion,
-    outputPerMillion: priceOutputPerMillion,
-    cacheHitPerMillion: priceCacheHitPerMillion,
+    inputPerMillion: effective.priceInputPerMillion,
+    outputPerMillion: effective.priceOutputPerMillion,
+    cacheHitPerMillion: effective.priceCacheHitPerMillion,
   };
 }
 

@@ -53,6 +53,7 @@ import { createGatedLlmProvider } from './io/llm/llmGate.js';
 import { startAgentRoutineDispatchLoop } from './orchestrator/agentRoutineDispatch.js';
 import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
 import { startCleanupLoop } from './orchestrator/cleanupLoop.js';
+import { startDeepSeekPricingSyncLoop } from './orchestrator/deepseekPricingSyncLoop.js';
 import { parseLlmProfiles } from './io/llm/profiles.js';
 import { createLlmConnectionStore } from './io/llmConnections.js';
 import { createImageConnectionStore } from './io/imageConnections.js';
@@ -201,6 +202,13 @@ async function main(): Promise<void> {
   // chat_memory_profile names one, the same per-call construction httpServer.ts's own per-chat
   // connection override uses.
   startChatMemorySyncLoop({ db, llm, embeddings, settings, llmConnections });
+
+  // Daily DeepSeek pricing sync (docs/plans/deepseek-pricing-sync.md) — keeps the Connections
+  // tab's off-peak + peak rates for native DeepSeek connections current from the official pricing
+  // page, no manual typing. Same composition-root tier as the sync loop above; needs only the
+  // connection store (list + update), and fires one immediate tick at boot so a fresh deploy
+  // picks up current rates within seconds.
+  startDeepSeekPricingSyncLoop({ llmConnections });
 
   // Async heuristic cleanup (migration 0072, plan v2) — the TRG-style rewrite subloop that
   // replaced the inline post-runTurn cleanup LLM preset. Same composition-root tier as the sync

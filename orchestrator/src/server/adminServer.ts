@@ -263,7 +263,8 @@ export function parseReliabilitySweepBody(raw: unknown): ReliabilitySweepBody | 
 export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
-    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = raw as Record<string, unknown>;
+    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion,
+    pricePeakInputPerMillion, pricePeakOutputPerMillion, pricePeakCacheHitPerMillion } = raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
   if (kind !== 'anthropic' && kind !== 'openai-compatible') return undefined;
   if (typeof model !== 'string' || !model) return undefined;
@@ -282,6 +283,9 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
   if (priceInputPerMillion !== undefined && !isPrice(priceInputPerMillion)) return undefined;
   if (priceOutputPerMillion !== undefined && !isPrice(priceOutputPerMillion)) return undefined;
   if (priceCacheHitPerMillion !== undefined && !isPrice(priceCacheHitPerMillion)) return undefined;
+  if (pricePeakInputPerMillion !== undefined && !isPrice(pricePeakInputPerMillion)) return undefined;
+  if (pricePeakOutputPerMillion !== undefined && !isPrice(pricePeakOutputPerMillion)) return undefined;
+  if (pricePeakCacheHitPerMillion !== undefined && !isPrice(pricePeakCacheHitPerMillion)) return undefined;
   return {
     name: name.trim(),
     kind,
@@ -296,6 +300,9 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
     priceInputPerMillion: isPrice(priceInputPerMillion) ? priceInputPerMillion : undefined,
     priceOutputPerMillion: isPrice(priceOutputPerMillion) ? priceOutputPerMillion : undefined,
     priceCacheHitPerMillion: isPrice(priceCacheHitPerMillion) ? priceCacheHitPerMillion : undefined,
+    pricePeakInputPerMillion: isPrice(pricePeakInputPerMillion) ? pricePeakInputPerMillion : undefined,
+    pricePeakOutputPerMillion: isPrice(pricePeakOutputPerMillion) ? pricePeakOutputPerMillion : undefined,
+    pricePeakCacheHitPerMillion: isPrice(pricePeakCacheHitPerMillion) ? pricePeakCacheHitPerMillion : undefined,
   };
 }
 
@@ -306,7 +313,8 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
 export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const { name, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
-    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion } = raw as Record<string, unknown>;
+    priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion,
+    pricePeakInputPerMillion, pricePeakOutputPerMillion, pricePeakCacheHitPerMillion } = raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
@@ -322,6 +330,9 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
   if (priceInputPerMillion !== undefined && priceInputPerMillion !== null && !isPrice(priceInputPerMillion)) return undefined;
   if (priceOutputPerMillion !== undefined && priceOutputPerMillion !== null && !isPrice(priceOutputPerMillion)) return undefined;
   if (priceCacheHitPerMillion !== undefined && priceCacheHitPerMillion !== null && !isPrice(priceCacheHitPerMillion)) return undefined;
+  if (pricePeakInputPerMillion !== undefined && pricePeakInputPerMillion !== null && !isPrice(pricePeakInputPerMillion)) return undefined;
+  if (pricePeakOutputPerMillion !== undefined && pricePeakOutputPerMillion !== null && !isPrice(pricePeakOutputPerMillion)) return undefined;
+  if (pricePeakCacheHitPerMillion !== undefined && pricePeakCacheHitPerMillion !== null && !isPrice(pricePeakCacheHitPerMillion)) return undefined;
 
   const patch: LlmConnectionPatch = {};
   if (name !== undefined) patch.name = (name as string).trim();
@@ -336,6 +347,9 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
   if (priceInputPerMillion !== undefined) patch.priceInputPerMillion = priceInputPerMillion as number | null;
   if (priceOutputPerMillion !== undefined) patch.priceOutputPerMillion = priceOutputPerMillion as number | null;
   if (priceCacheHitPerMillion !== undefined) patch.priceCacheHitPerMillion = priceCacheHitPerMillion as number | null;
+  if (pricePeakInputPerMillion !== undefined) patch.pricePeakInputPerMillion = pricePeakInputPerMillion as number | null;
+  if (pricePeakOutputPerMillion !== undefined) patch.pricePeakOutputPerMillion = pricePeakOutputPerMillion as number | null;
+  if (pricePeakCacheHitPerMillion !== undefined) patch.pricePeakCacheHitPerMillion = pricePeakCacheHitPerMillion as number | null;
   return patch;
 }
 

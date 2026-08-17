@@ -285,6 +285,10 @@ export interface HttpServerDeps {
    *  io/llmConnections.ts) — backs the Connections tab's CRUD (GET/POST/PATCH/DELETE
    *  /v1/admin/connections) and its per-connection model/provider catalog preview routes. */
   llmConnections: LlmConnectionStore;
+  /** Injectable DeepSeek pricing-page fetcher for POST /v1/admin/connections/pricing-sync
+   *  (io/deepseekPricingSync.ts) — omitted in production (the real fetch hits DeepSeek's own
+   *  domain), present in verify-server.mjs so the route can be exercised without a network call. */
+  fetchHtml?: (url: string) => Promise<string>;
   /** The admin-managed image-generation connection registry (db/migrations/0068_image_connections.sql,
    *  io/imageConnections.ts) — backs the Connections tab's image section CRUD and the
    *  generateLocationImage pass's active-connection resolution (endpoint.md §3/§5). */

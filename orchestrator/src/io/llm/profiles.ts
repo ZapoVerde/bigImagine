@@ -17,7 +17,8 @@
  *
  * @api-declaration
  * LlmProfile — kind/model/apiKey/baseUrl/supportsVision/provider + per-connection pricing
- *   (priceInputPerMillion/priceOutputPerMillion/priceCacheHitPerMillion), io/llmConnections.ts's
+ *   (priceInputPerMillion/priceOutputPerMillion/priceCacheHitPerMillion base tier plus the
+ *   pricePeak*Million peak tier), io/llmConnections.ts's
  *   resolveByName/resolveActive build this shape from a decrypted connection row
  * parseLlmProfiles(raw: string) — throws with a specific, actionable message on any malformed
  *   profile rather than silently dropping or guessing at it; index.ts's first-boot seed only
@@ -60,6 +61,14 @@ export interface LlmProfile {
   priceInputPerMillion?: number;
   priceOutputPerMillion?: number;
   priceCacheHitPerMillion?: number;
+  /** Peak tier (migration 0109's price_peak_* columns) — USD per 1M tokens for DeepSeek's peak
+   *  UTC hours (docs/plans/deepseek-pricing-sync.md), relayed from the llm_connections row by
+   *  io/llmConnections.ts's toProfile like the base tier. Undefined means "not configured" — the
+   *  receipt then picks the effective tier by the call's UTC hour (io/llm/callCost.ts's
+   *  pickPriceTier) and omits the $ when the needed tier is missing. */
+  pricePeakInputPerMillion?: number;
+  pricePeakOutputPerMillion?: number;
+  pricePeakCacheHitPerMillion?: number;
 }
 
 function validateProfile(name: string, value: unknown): LlmProfile {

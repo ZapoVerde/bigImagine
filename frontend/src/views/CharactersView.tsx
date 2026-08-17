@@ -22,6 +22,9 @@ interface CharactersViewProps {
   /** A character was deleted and its chats purged server-side — these are the deleted chat ids,
    *  so the app can close any open tabs for them and drop them from the history browsers. */
   onChatsDeleted?: (chatIds: string[]) => void;
+  /** Bumped (App.tsx) whenever a card is imported from chub elsewhere, so this roster re-fetches
+   *  and shows it without a manual reload. Same pattern as ChatBrowser's refreshKey. */
+  refreshKey: number;
 }
 
 interface Draft {
@@ -55,7 +58,7 @@ function draftFromDetail(detail: CharacterDetail): Draft {
 // explicitly wherever the selection changes, rather than driven off a useEffect keyed on
 // selectedId, since saving an *already-selected* character needs a fresh fetch too and a same-value
 // setSelectedId wouldn't retrigger an effect.
-export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: CharactersViewProps) {
+export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refreshKey }: CharactersViewProps) {
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterDetail | null>(null);
@@ -105,7 +108,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted }: Cha
   useEffect(() => {
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey]);
+  }, [apiKey, refreshKey]);
 
   function selectCharacter(id: string) {
     setSelectedId(id);

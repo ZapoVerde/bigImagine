@@ -10,6 +10,9 @@ import './BrowseChubView.css';
 
 interface BrowseChubViewProps {
   apiKey: string | null;
+  /** Called when an import succeeds — App.tsx bumps CharactersView's refreshKey so the card
+   *  roster shows the newly imported card without a reload. */
+  onCardImported: () => void;
 }
 
 // Must match searchChubCharactersTool.ts's own PAGE_SIZE — the tool doesn't echo it back in its
@@ -92,7 +95,7 @@ function withinRecencyBucket(createdAt: string, bucket: RecencyBucket): boolean 
 // goes through pia-proxy server-side (searchChubCharactersTool.ts/importCharacterCardFromUrlTool.ts),
 // same as pasting a chub.ai URL directly into chat. A grid, not CharactersView's master-detail
 // list/editor split, since there's nothing to edit here — only to preview and import.
-export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
+export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubViewProps) {
   const [query, setQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [page, setPage] = useState(1);
@@ -216,6 +219,7 @@ export default function BrowseChubView({ apiKey }: BrowseChubViewProps) {
         ...prev,
         [fullPath]: { status: 'imported', lorebookEntriesImported: imported.lorebookEntriesImported },
       }));
+      onCardImported();
     } catch (err) {
       setImportStates((prev) => ({
         ...prev,

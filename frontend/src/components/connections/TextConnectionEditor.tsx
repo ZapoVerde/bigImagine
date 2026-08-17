@@ -9,6 +9,7 @@ import {
   adminListConnectionProviders,
   adminStartReliabilitySweep,
   adminStopReliabilitySweep,
+  adminSyncDeepSeekPricing,
   adminTestConnection,
   adminUpdateConnection,
 } from '../../api/client';
@@ -35,6 +36,9 @@ interface Draft {
   priceInput: string;
   priceOutput: string;
   priceCacheHit: string;
+  pricePeakInput: string;
+  pricePeakOutput: string;
+  pricePeakCacheHit: string;
 }
 
 function emptyDraft(): Draft {
@@ -53,6 +57,9 @@ function emptyDraft(): Draft {
     priceInput: '',
     priceOutput: '',
     priceCacheHit: '',
+    pricePeakInput: '',
+    pricePeakOutput: '',
+    pricePeakCacheHit: '',
   };
 }
 
@@ -72,6 +79,9 @@ function draftFromConnection(c: LlmConnectionSummary): Draft {
     priceInput: c.priceInputPerMillion?.toString() ?? '',
     priceOutput: c.priceOutputPerMillion?.toString() ?? '',
     priceCacheHit: c.priceCacheHitPerMillion?.toString() ?? '',
+    pricePeakInput: c.pricePeakInputPerMillion?.toString() ?? '',
+    pricePeakOutput: c.pricePeakOutputPerMillion?.toString() ?? '',
+    pricePeakCacheHit: c.pricePeakCacheHitPerMillion?.toString() ?? '',
   };
 }
 
@@ -89,7 +99,10 @@ function draftEqualsConnection(draft: Draft, c: LlmConnectionSummary): boolean {
     draft.quantizations === (c.quantizations ?? []).join(', ') &&
     draft.priceInput === (c.priceInputPerMillion?.toString() ?? '') &&
     draft.priceOutput === (c.priceOutputPerMillion?.toString() ?? '') &&
-    draft.priceCacheHit === (c.priceCacheHitPerMillion?.toString() ?? '')
+    draft.priceCacheHit === (c.priceCacheHitPerMillion?.toString() ?? '') &&
+    draft.pricePeakInput === (c.pricePeakInputPerMillion?.toString() ?? '') &&
+    draft.pricePeakOutput === (c.pricePeakOutputPerMillion?.toString() ?? '') &&
+    draft.pricePeakCacheHit === (c.pricePeakCacheHitPerMillion?.toString() ?? '')
   );
 }
 
@@ -200,6 +213,12 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   // The sweep's quantization filter — '' means unfiltered. The dropdown options are the distinct
   // quantizations the model's endpoints report (union of providerOptions[].quantizations).
   const [reliabilityQuantization, setReliabilityQuantization] = useState('');
+  // Manual DeepSeek pricing sync (docs/plans/deepseek-pricing-sync.md) — a one-shot pass that
+  // overwrites off-peak + peak rates on every matched native DeepSeek connection from the official
+  // page; syncing writes the stored connection (never the unsaved draft), so it only runs when the
+  // panel shows a saved, unedited connection.
+  const [syncingPricing, setSyncingPricing] = useState(false);
+  const [pricingSyncNote, setPricingSyncNote] = useState<string | null>(null);
   const pollRef = useRef<number | null>(null);
 
   function stopSweepPolling() {
@@ -350,7 +369,10 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     const priceInput = parsePrice(draft.priceInput);
     const priceOutput = parsePrice(draft.priceOutput);
     const priceCacheHit = parsePrice(draft.priceCacheHit);
-    if (!priceInput.ok || !priceOutput.ok || !priceCacheHit.ok) {
+    const pricePeakInput = parsePrice(draft.pricePeakInput);
+    const pricePeakOutput = parsePrice(draft.pricePeakOutput);
+    const pricePeakCacheHit = parsePrice(draft.pricePeakCacheHit);
+    if (!priceInput.ok || !priceOutput.ok || !priceCacheHit.ok || !pricePeakInput.ok || !pricePeakOutput.ok || !pricePeakCacheHit.ok) {
       setError('Prices must be non-negative numbers (USD per 1M tokens), or left empty.');
       return;
     }
@@ -373,6 +395,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             priceInputPerMillion: priceInput.value,
             priceOutputPerMillion: priceOutput.value,
             priceCacheHitPerMillion: priceCacheHit.value,
+            pricePeakInputPerMillion: pricePeakInput.value,
+            pricePeakOutputPerMillion: pricePeakOutput.value,
+            pricePeakCacheHitPerMillion: pricePeakCacheHit.value,
           },
           adminKey,
         );
@@ -393,6 +418,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             priceInputPerMillion: priceInput.value ?? null,
             priceOutputPerMillion: priceOutput.value ?? null,
             priceCacheHitPerMillion: priceCacheHit.value ?? null,
+            pricePeakInputPerMillion: pricePeakInput.value ?? null,
+            pricePeakOutputPerMillion: pricePeakOutput.value ?? null,
+            pricePeakCacheHitPerMillion: pricePeakCacheHit.value ?? null,
           },
           adminKey,
         );
@@ -424,6 +452,24 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
       setTestResult({ ok: false, latencyMs: 0, error: err instanceof ApiError ? err.message : 'failed to reach the orchestrator' });
     } finally {
       setTesting(false);
+    }
+  }
+
+  // Manual DeepSeek pricing sync. Disabled while the draft is dirty, since the sync overwrites the
+  // *saved* connection's rates (and would clobber unsaved edits on refresh); refreshing the list
+  // re-syncs the panel, so the note tells the admin to save (or discard) first.
+  async function runPricingSync() {
+    if (!selected) return;
+    setPricingSyncNote(null);
+    setSyncingPricing(true);
+    try {
+      const result = await adminSyncDeepSeekPricing(adminKey);
+      setPricingSyncNote(`Synced ${result.updated} of ${result.checked} connections.`);
+      onRefresh(selected.id);
+    } catch (err) {
+      setPricingSyncNote(err instanceof ApiError ? err.message : 'failed to reach the orchestrator');
+    } finally {
+      setSyncingPricing(false);
     }
   }
 
@@ -859,7 +905,10 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
               fabricated $0.00. When only some tiers are set, the cost figure is omitted rather
               than pricing a tier at the wrong rate. OpenRouter connections autofill Input/Output
               from the picked model's (or pinned provider's) published rate — cache-hit is never
-              guessed, since OpenRouter reports no such tier.
+              guessed, since OpenRouter reports no such tier. The peak tier (higher DeepSeek rate,
+              UTC 01:00-04:00 and 06:00-10:00) applies by the call's UTC hour; the server picks it
+              automatically, so receipt costs already reflect it. Leave peak fields empty and peak
+              calls show tokens only.
             </div>
             <div className="connections-pricing-row">
               <label>
@@ -890,6 +939,52 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                 />
               </label>
             </div>
+            <div className="connections-pricing-row">
+              <label>
+                Peak input
+                <input
+                  value={draft.pricePeakInput}
+                  onChange={(e) => setDraft((d) => ({ ...d, pricePeakInput: e.target.value }))}
+                  placeholder="e.g. 0.28"
+                  inputMode="decimal"
+                />
+              </label>
+              <label>
+                Peak output
+                <input
+                  value={draft.pricePeakOutput}
+                  onChange={(e) => setDraft((d) => ({ ...d, pricePeakOutput: e.target.value }))}
+                  placeholder="e.g. 0.56"
+                  inputMode="decimal"
+                />
+              </label>
+              <label>
+                Peak cache hit
+                <input
+                  value={draft.pricePeakCacheHit}
+                  onChange={(e) => setDraft((d) => ({ ...d, pricePeakCacheHit: e.target.value }))}
+                  placeholder="e.g. 0.028"
+                  inputMode="decimal"
+                />
+              </label>
+            </div>
+            {!isNew && (
+              <div className="status">
+                {selected?.priceSyncedAt
+                  ? `Last synced from the DeepSeek pricing page ${new Date(selected.priceSyncedAt).toLocaleString()}.`
+                  : 'Never synced from the DeepSeek pricing page — the daily pass updates native DeepSeek connections automatically, or run it now.'}
+                <button
+                  type="button"
+                  className="connections-test-btn"
+                  onClick={runPricingSync}
+                  disabled={isNew || dirty || syncingPricing}
+                  title={dirty ? 'Save your changes first — Sync overwrites the saved connection' : 'Fetch DeepSeek’s official pricing and write off-peak + peak rates onto every matching connection'}
+                >
+                  {syncingPricing ? 'Syncing…' : 'Sync now'}
+                </button>
+                {pricingSyncNote && <span className="saved-note">{pricingSyncNote}</span>}
+              </div>
+            )}
           </fieldset>
 
           <div className="connections-actions">

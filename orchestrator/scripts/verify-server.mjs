@@ -21,6 +21,43 @@ import { randomBytes, randomUUID } from 'node:crypto';
 
 const testCipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32).toString('base64') });
 
+// The DeepSeek pricing page's table shape (verified live 2026-08-17) for the pricing-sync route
+// test — injected as the server's fetchHtml so the route runs without a network call (io/
+// deepseekPricing.ts's parser). One native model with both tiers; a second model that never
+// matches any seeded connection.
+const PRICING_FIXTURE = `
+<table>
+  <tbody>
+    <tr>
+      <td colspan="2">MODEL</td>
+      <td>deepseek-v4-flash</td>
+      <td>deepseek-v4-pro</td>
+    </tr>
+    <tr>
+      <td rowspan="2">1M INPUT TOKENS (CACHE MISS)</td>
+      <td>OFF-PEAK</td>
+      <td>$0.14</td>
+      <td>$2.00</td>
+    </tr>
+    <tr><td>PEAK</td><td>$0.28</td><td>$4.00</td></tr>
+    <tr>
+      <td rowspan="2">1M OUTPUT TOKENS</td>
+      <td>OFF-PEAK</td>
+      <td>$0.28</td>
+      <td>$8.00</td>
+    </tr>
+    <tr><td>PEAK</td><td>$0.56</td><td>$16.00</td></tr>
+    <tr>
+      <td rowspan="2">1M INPUT TOKENS (CACHE HIT)</td>
+      <td>OFF-PEAK</td>
+      <td>$0.014</td>
+      <td>$0.20</td>
+    </tr>
+    <tr><td>PEAK</td><td>$0.028</td><td>$0.40</td></tr>
+  </tbody>
+</table>
+`;
+
 // A hand-rolled fake satisfying LlmConnectionStore's shape directly (io/llmConnections.ts) — this
 // suite is testing the HTTP wiring (adminServer.ts, httpServer.ts's routes/auth), not
 // llmConnections.ts's own DB/encryption logic. listModelsForConnection/listProvidersForConnection
@@ -30,13 +67,26 @@ function createFakeLlmConnectionStore(seedRows = []) {
   const rows = new Map(seedRows.map((r) => [r.id, { ...r }]));
   let nextId = 1;
   function toPublic(row) {
-    const { apiKey, priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion, ...rest } = row;
+    const {
+      apiKey,
+      priceInputPerMillion,
+      priceOutputPerMillion,
+      priceCacheHitPerMillion,
+      pricePeakInputPerMillion,
+      pricePeakOutputPerMillion,
+      pricePeakCacheHitPerMillion,
+      ...rest
+    } = row;
     const pub = { ...rest };
     // Price fields follow the real store's NULL -> undefined convention: absent/cleared means
     // "not configured" and stays off the wire (the receipt then shows tokens only).
     if (priceInputPerMillion !== undefined && priceInputPerMillion !== null) pub.priceInputPerMillion = priceInputPerMillion;
     if (priceOutputPerMillion !== undefined && priceOutputPerMillion !== null) pub.priceOutputPerMillion = priceOutputPerMillion;
     if (priceCacheHitPerMillion !== undefined && priceCacheHitPerMillion !== null) pub.priceCacheHitPerMillion = priceCacheHitPerMillion;
+    if (pricePeakInputPerMillion !== undefined && pricePeakInputPerMillion !== null) pub.pricePeakInputPerMillion = pricePeakInputPerMillion;
+    if (pricePeakOutputPerMillion !== undefined && pricePeakOutputPerMillion !== null) pub.pricePeakOutputPerMillion = pricePeakOutputPerMillion;
+    if (pricePeakCacheHitPerMillion !== undefined && pricePeakCacheHitPerMillion !== null) pub.pricePeakCacheHitPerMillion = pricePeakCacheHitPerMillion;
+    if (row.priceSyncedAt !== undefined && row.priceSyncedAt !== null) pub.priceSyncedAt = row.priceSyncedAt;
     return pub;
   }
   function toProfile(row) {
@@ -49,6 +99,9 @@ function createFakeLlmConnectionStore(seedRows = []) {
       priceInputPerMillion: row.priceInputPerMillion ?? undefined,
       priceOutputPerMillion: row.priceOutputPerMillion ?? undefined,
       priceCacheHitPerMillion: row.priceCacheHitPerMillion ?? undefined,
+      pricePeakInputPerMillion: row.pricePeakInputPerMillion ?? undefined,
+      pricePeakOutputPerMillion: row.pricePeakOutputPerMillion ?? undefined,
+      pricePeakCacheHitPerMillion: row.pricePeakCacheHitPerMillion ?? undefined,
     };
   }
   return {
@@ -72,6 +125,9 @@ function createFakeLlmConnectionStore(seedRows = []) {
         priceInputPerMillion: init.priceInputPerMillion ?? undefined,
         priceOutputPerMillion: init.priceOutputPerMillion ?? undefined,
         priceCacheHitPerMillion: init.priceCacheHitPerMillion ?? undefined,
+        pricePeakInputPerMillion: init.pricePeakInputPerMillion ?? undefined,
+        pricePeakOutputPerMillion: init.pricePeakOutputPerMillion ?? undefined,
+        pricePeakCacheHitPerMillion: init.pricePeakCacheHitPerMillion ?? undefined,
         isActive: false,
         updatedAt: new Date().toISOString(),
       };
@@ -941,6 +997,7 @@ const server = startHttpServer({
       updatedAt: '2026-01-01T00:00:00.000Z',
     },
   ]),
+  fetchHtml: async () => PRICING_FIXTURE,
   modelName: 'bigbrain',
   port: 0,
   triggerRestart: () => restartCalls.push(Date.now()),
@@ -1226,6 +1283,9 @@ const createPricedRes = await fetch(`${base}/v1/admin/connections`, {
     priceInputPerMillion: 0.14,
     priceOutputPerMillion: 0.28,
     priceCacheHitPerMillion: 0.014,
+    pricePeakInputPerMillion: 0.28,
+    pricePeakOutputPerMillion: 0.56,
+    pricePeakCacheHitPerMillion: 0.028,
   }),
 });
 const createPricedBody = await createPricedRes.json();
@@ -1233,8 +1293,12 @@ assert(
   createPricedRes.status === 201 &&
     createPricedBody.priceInputPerMillion === 0.14 &&
     createPricedBody.priceOutputPerMillion === 0.28 &&
-    createPricedBody.priceCacheHitPerMillion === 0.014,
-  'POST /v1/admin/connections accepts and returns the three price fields',
+    createPricedBody.priceCacheHitPerMillion === 0.014 &&
+    createPricedBody.pricePeakInputPerMillion === 0.28 &&
+    createPricedBody.pricePeakOutputPerMillion === 0.56 &&
+    createPricedBody.pricePeakCacheHitPerMillion === 0.028 &&
+    createPricedBody.priceSyncedAt === undefined,
+  'POST /v1/admin/connections accepts and returns the three peak price fields (migration 0109) and never a priceSyncedAt',
 );
 
 const createBadPriceRes = await fetch(`${base}/v1/admin/connections`, {
@@ -1279,9 +1343,83 @@ assert(
   pricedListed &&
     pricedListed.priceInputPerMillion === 0.14 &&
     pricedListed.priceOutputPerMillion === 0.28 &&
-    pricedListed.priceCacheHitPerMillion === undefined,
-  'GET /v1/admin/connections lists the surviving price fields and omits the cleared one',
+    pricedListed.priceCacheHitPerMillion === undefined &&
+    pricedListed.pricePeakInputPerMillion === 0.28 &&
+    pricedListed.pricePeakOutputPerMillion === 0.56 &&
+    pricedListed.pricePeakCacheHitPerMillion === 0.028 &&
+    pricedListed.priceSyncedAt === undefined,
+  'GET /v1/admin/connections lists the surviving price fields, omits the cleared one, and never fabricates priceSyncedAt',
 );
+
+// Peak prices are admin-editable like the base tier, and priceSyncedAt is sync-only — an admin
+// PATCH that tries to stamp it is ignored (never spoofable), while clearing a peak price works.
+const patchPeakClearRes = await fetch(`${base}/v1/admin/connections/${createPricedBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ pricePeakCacheHitPerMillion: null, priceSyncedAt: '2026-01-01T00:00:00.000Z' }),
+});
+const patchPeakClearBody = await patchPeakClearRes.json();
+assert(
+  patchPeakClearRes.status === 200 &&
+    patchPeakClearBody.pricePeakInputPerMillion === 0.28 &&
+    patchPeakClearBody.pricePeakCacheHitPerMillion === undefined &&
+    patchPeakClearBody.priceSyncedAt === undefined,
+  'PATCH /v1/admin/connections/:id clears one peak price to null and ignores a spoofed priceSyncedAt',
+);
+
+// POST /v1/admin/connections/pricing-sync (docs/plans/deepseek-pricing-sync.md): a native DeepSeek
+// connection (host api.deepseek.com, model on the page) gets all six rates written and
+// price_synced_at stamped; everything else — wrong host, model not on the page, other providers —
+// is counted as checked but left untouched.
+llmConnections.rows.set('conn-deepseek-native', {
+  id: 'conn-deepseek-native',
+  name: 'deepseek-native',
+  kind: 'openai-compatible',
+  model: 'deepseek-v4-flash',
+  apiKey: 'sk-test-deepseek',
+  baseUrl: 'https://api.deepseek.com',
+  supportsVision: false,
+  providerOrder: null,
+  allowFallbacks: true,
+  quantizations: null,
+  isActive: false,
+  updatedAt: '2026-01-01T00:00:00.000Z',
+});
+const syncRes = await fetch(`${base}/v1/admin/connections/pricing-sync`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const syncBody = await syncRes.json();
+assert(
+  syncRes.status === 200 && syncBody.checked === 5 && syncBody.updated === 1,
+  `POST /v1/admin/connections/pricing-sync returns { checked, updated } (got ${JSON.stringify(syncBody)})`,
+);
+const syncedRow = llmConnections.rows.get('conn-deepseek-native');
+assert(
+  syncedRow.priceInputPerMillion === 0.14 &&
+    syncedRow.priceOutputPerMillion === 0.28 &&
+    syncedRow.priceCacheHitPerMillion === 0.014 &&
+    syncedRow.pricePeakInputPerMillion === 0.28 &&
+    syncedRow.pricePeakOutputPerMillion === 0.56 &&
+    syncedRow.pricePeakCacheHitPerMillion === 0.028 &&
+    typeof syncedRow.priceSyncedAt === 'string' &&
+    !Number.isNaN(Date.parse(syncedRow.priceSyncedAt)),
+  'the sync route writes all six rates plus price_synced_at onto the matched native connection',
+);
+const syncedListed = (
+  await (await fetch(`${base}/v1/admin/connections`, { headers: { authorization: 'Bearer the-admin-key' } })).json()
+).connections.find((c) => c.id === 'conn-deepseek-native');
+assert(
+  syncedListed && syncedListed.pricePeakOutputPerMillion === 0.56 && !!syncedListed.priceSyncedAt,
+  'GET /v1/admin/connections surfaces the synced peak prices and price_synced_at',
+);
+
+const syncNoAuthRes = await fetch(`${base}/v1/admin/connections/pricing-sync`, { method: 'POST' });
+assert(syncNoAuthRes.status === 401, 'POST /v1/admin/connections/pricing-sync requires the admin key');
+const syncGetRes = await fetch(`${base}/v1/admin/connections/pricing-sync`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+assert(syncGetRes.status === 404, 'a GET on /v1/admin/connections/pricing-sync falls through to the :id handler and 404s');
 
 const patchUnknownRes = await fetch(`${base}/v1/admin/connections/not-a-real-id`, {
   method: 'PATCH',
@@ -2955,6 +3093,11 @@ server.close();
       priceInputPerMillion: 0.14,
       priceOutputPerMillion: 0.28,
       priceCacheHitPerMillion: 0.014,
+      // Same rates in both tiers so the receipt assertion is hour-independent (toTurnPrice resolves
+      // the effective tier by the call's UTC hour — peak hours would otherwise omit the price).
+      pricePeakInputPerMillion: 0.14,
+      pricePeakOutputPerMillion: 0.28,
+      pricePeakCacheHitPerMillion: 0.014,
     },
   ]);
   const pool = createFakePool();

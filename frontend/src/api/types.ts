@@ -134,6 +134,15 @@ export interface LlmConnectionSummary {
   priceInputPerMillion?: number;
   priceOutputPerMillion?: number;
   priceCacheHitPerMillion?: number;
+  /** Peak-tier USD per 1M tokens (migration 0109's price_peak_* columns) — DeepSeek bills a
+   *  higher rate during peak UTC hours (01:00-04:00 and 06:00-10:00 UTC). The server picks the
+   *  effective tier by the call's UTC hour; undefined = not configured. */
+  pricePeakInputPerMillion?: number;
+  pricePeakOutputPerMillion?: number;
+  pricePeakCacheHitPerMillion?: number;
+  /** When the pricing sync last wrote this connection's rates — undefined = never synced. Read-only
+   *  in the editor (written only by the server's sync pass, never by an admin PATCH). */
+  priceSyncedAt?: string;
   isActive: boolean;
   updatedAt: string;
 }
@@ -157,6 +166,10 @@ export interface CreateConnectionInput {
   priceInputPerMillion?: number;
   priceOutputPerMillion?: number;
   priceCacheHitPerMillion?: number;
+  /** Peak-tier USD per 1M tokens — omit to leave unconfigured. */
+  pricePeakInputPerMillion?: number;
+  pricePeakOutputPerMillion?: number;
+  pricePeakCacheHitPerMillion?: number;
 }
 
 // orchestrator/src/server/adminServer.ts parseUpdateConnectionBody's expected shape
@@ -179,6 +192,10 @@ export interface UpdateConnectionInput {
   priceInputPerMillion?: number | null;
   priceOutputPerMillion?: number | null;
   priceCacheHitPerMillion?: number | null;
+  /** Peak-tier USD per 1M tokens — omit/null, same three-state convention as the base tier. */
+  pricePeakInputPerMillion?: number | null;
+  pricePeakOutputPerMillion?: number | null;
+  pricePeakCacheHitPerMillion?: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts ProfileModelsResult

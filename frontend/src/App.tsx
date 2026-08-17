@@ -105,6 +105,11 @@ export default function App() {
   // history browsers (which list those chats) re-fetch and drop them.
   const [chatsRefreshKey, setChatsRefreshKey] = useState(0);
 
+  // Bumped when a card is imported from chub (BrowseChubView), so the CharactersView roster —
+  // which otherwise only fetches once on mount — re-fetches and shows it without a reload.
+  // Same pattern as chatsRefreshKey/notesRefreshKey.
+  const [charactersRefreshKey, setCharactersRefreshKey] = useState(0);
+
   // Mobile chat only: the top bars (TabStrip + TimerStrip + the chat header) collapse up when the
   // user scrolls down the chat history and come back on scroll-up or a pull-down at the top —
   // ChatView drives this via onTopBarsHiddenChange; the class below is what actually collapses
@@ -322,8 +327,12 @@ export default function App() {
             {tab.type === 'rag' && <RagView />}
             {tab.type === 'lorebooks' && <LorebooksView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
-            {tab.type === 'characters' && <CharactersView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} />}
-            {tab.type === 'browse-chub' && <BrowseChubView apiKey={apiKey} />}
+            {tab.type === 'characters' && (
+              <CharactersView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} refreshKey={charactersRefreshKey} />
+            )}
+            {tab.type === 'browse-chub' && (
+              <BrowseChubView apiKey={apiKey} onCardImported={() => setCharactersRefreshKey((k) => k + 1)} />
+            )}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}
             {tab.type === 'portraits' &&

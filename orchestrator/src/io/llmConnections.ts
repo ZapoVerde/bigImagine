@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llmConnections.ts
- * @stamp 2026-08-06
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — DB-backed, admin-managed LLM connection registry
  * @description
  * Replaces BIGBRAIN_LLM_PROFILES (io/llm/profiles.ts) as the runtime source of truth for LLM
@@ -65,6 +65,15 @@ export interface LlmConnectionRow {
   priceInputPerMillion?: number;
   priceOutputPerMillion?: number;
   priceCacheHitPerMillion?: number;
+  /** Peak tier (migration 0109's price_peak_* columns) — USD per 1M tokens for the hours
+   *  DeepSeek bills at the higher rate (docs/plans/deepseek-pricing-sync.md). Same nullable
+   *  contract as the base tier: undefined means "not configured". */
+  pricePeakInputPerMillion?: number;
+  pricePeakOutputPerMillion?: number;
+  pricePeakCacheHitPerMillion?: number;
+  /** When the pricing sync (orchestrator/src/io/deepseekPricingSync.ts) last wrote this row's
+   *  rates — read-only to admins; the editor's "last synced" line and the Stats page read it. */
+  priceSyncedAt?: string;
   isActive: boolean;
   updatedAt: string;
 }
@@ -92,6 +101,11 @@ export interface LlmConnectionInit {
   priceInputPerMillion?: number;
   priceOutputPerMillion?: number;
   priceCacheHitPerMillion?: number;
+  /** Peak tier — USD per 1M tokens, same nullable contract as the base tier above
+   *  (docs/plans/deepseek-pricing-sync.md). */
+  pricePeakInputPerMillion?: number;
+  pricePeakOutputPerMillion?: number;
+  pricePeakCacheHitPerMillion?: number;
 }
 
 export interface LlmConnectionPatch {
@@ -111,6 +125,14 @@ export interface LlmConnectionPatch {
   priceInputPerMillion?: number | null;
   priceOutputPerMillion?: number | null;
   priceCacheHitPerMillion?: number | null;
+  /** Peak tier — number-or-null, same three-state convention as the base tier above. */
+  pricePeakInputPerMillion?: number | null;
+  pricePeakOutputPerMillion?: number | null;
+  pricePeakCacheHitPerMillion?: number | null;
+  /** Written only by the pricing sync (orchestrator/src/io/deepseekPricingSync.ts), never by the
+   *  admin editor — parseUpdateConnectionBody in server/adminServer.ts deliberately never sets it,
+   *  so a PATCH can't spoof "last synced". */
+  priceSyncedAt?: string;
 }
 
 export interface LlmConnectionStore {
@@ -138,13 +160,18 @@ interface ConnectionDbRow {
   price_input_per_million: string | null;
   price_output_per_million: string | null;
   price_cache_hit_per_million: string | null;
+  price_peak_input_per_million: string | null;
+  price_peak_output_per_million: string | null;
+  price_peak_cache_hit_per_million: string | null;
+  price_synced_at: string | null;
   is_active: boolean;
   updated_at: string;
 }
 
 const ROW_COLUMNS = `id, name, kind, model, base_url, supports_vision, api_key_ciphertext,
   provider_order, allow_fallbacks, quantizations, price_input_per_million,
-  price_output_per_million, price_cache_hit_per_million, is_active, updated_at`;
+  price_output_per_million, price_cache_hit_per_million, price_peak_input_per_million,
+  price_peak_output_per_million, price_peak_cache_hit_per_million, price_synced_at, is_active, updated_at`;
 
 // numeric columns come back from pg as strings; a null column means "not configured", which maps
 // to undefined end to end (the plan's "tokens only, never $0.00" contract).
@@ -166,6 +193,10 @@ function toRow(row: ConnectionDbRow): LlmConnectionRow {
     priceInputPerMillion: toPrice(row.price_input_per_million),
     priceOutputPerMillion: toPrice(row.price_output_per_million),
     priceCacheHitPerMillion: toPrice(row.price_cache_hit_per_million),
+    pricePeakInputPerMillion: toPrice(row.price_peak_input_per_million),
+    pricePeakOutputPerMillion: toPrice(row.price_peak_output_per_million),
+    pricePeakCacheHitPerMillion: toPrice(row.price_peak_cache_hit_per_million),
+    priceSyncedAt: row.price_synced_at ?? undefined,
     isActive: row.is_active,
     updatedAt: row.updated_at,
   };
@@ -191,6 +222,9 @@ function toProfile(row: ConnectionDbRow, cipher: FieldCipher): LlmProfile {
     priceInputPerMillion: toPrice(row.price_input_per_million),
     priceOutputPerMillion: toPrice(row.price_output_per_million),
     priceCacheHitPerMillion: toPrice(row.price_cache_hit_per_million),
+    pricePeakInputPerMillion: toPrice(row.price_peak_input_per_million),
+    pricePeakOutputPerMillion: toPrice(row.price_peak_output_per_million),
+    pricePeakCacheHitPerMillion: toPrice(row.price_peak_cache_hit_per_million),
   };
 }
 
@@ -223,8 +257,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
         session.query<ConnectionDbRow>(
           `insert into llm_connections
              (name, kind, model, api_key_ciphertext, base_url, supports_vision, provider_order, allow_fallbacks, quantizations,
-              price_input_per_million, price_output_per_million, price_cache_hit_per_million)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              price_input_per_million, price_output_per_million, price_cache_hit_per_million,
+              price_peak_input_per_million, price_peak_output_per_million, price_peak_cache_hit_per_million)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            returning ${ROW_COLUMNS}`,
           [
             init.name,
@@ -239,6 +274,9 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
             init.priceInputPerMillion ?? null,
             init.priceOutputPerMillion ?? null,
             init.priceCacheHitPerMillion ?? null,
+            init.pricePeakInputPerMillion ?? null,
+            init.pricePeakOutputPerMillion ?? null,
+            init.pricePeakCacheHitPerMillion ?? null,
           ],
         ),
       );
@@ -267,6 +305,10 @@ export function createLlmConnectionStore(db: PostgresClient, cipher: FieldCipher
       if (patch.priceInputPerMillion !== undefined) set('price_input_per_million', patch.priceInputPerMillion);
       if (patch.priceOutputPerMillion !== undefined) set('price_output_per_million', patch.priceOutputPerMillion);
       if (patch.priceCacheHitPerMillion !== undefined) set('price_cache_hit_per_million', patch.priceCacheHitPerMillion);
+      if (patch.pricePeakInputPerMillion !== undefined) set('price_peak_input_per_million', patch.pricePeakInputPerMillion);
+      if (patch.pricePeakOutputPerMillion !== undefined) set('price_peak_output_per_million', patch.pricePeakOutputPerMillion);
+      if (patch.pricePeakCacheHitPerMillion !== undefined) set('price_peak_cache_hit_per_million', patch.pricePeakCacheHitPerMillion);
+      if (patch.priceSyncedAt !== undefined) set('price_synced_at', patch.priceSyncedAt);
       if (sets.length === 0) {
         const rows = await db.withSystemScope((session) =>
           session.query<ConnectionDbRow>(`select ${ROW_COLUMNS} from llm_connections where id = $1`, [id]),

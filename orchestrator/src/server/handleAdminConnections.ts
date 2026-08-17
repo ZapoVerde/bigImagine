@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/handleAdminConnections.ts
- * @stamp 2026-08-12
+ * @stamp 2026-08-17
  * @architectural-role IO Wrapper — the admin credentials + connections CRUD surface from httpServer.ts
  * @description
  * Three related admin surfaces, all gated by the dispatcher's isAdminAuthorized before this
@@ -23,7 +23,7 @@
  * @api-declaration
  * handleAdminCredentialsList(res, deps)                 — GET /v1/admin/credentials
  * handleAdminCredentialsSet(req, res, deps)             — POST /v1/admin/credentials
- * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/:id[/activate|/models|/providers|/test|/reliability[/stop]]]
+ * handleAdminConnectionRoutes(req, res, deps, url)      — /v1/admin/connections[/pricing-sync | /:id[/activate|/models|/providers|/test|/reliability[/stop]]]
  * handleAdminImageConnectionRoutes(req, res, deps, url) — /v1/admin/image-connections[/:id[/activate|/test]]
  *
  * @contract
@@ -36,6 +36,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { log } from '../io/logger.js';
+import { syncDeepSeekPricing } from '../io/deepseekPricingSync.js';
 import {
   getProviderReliabilitySweep,
   startProviderReliabilitySweep,
@@ -98,6 +99,20 @@ export async function handleAdminCredentialsSet(
 export async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
   const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test' | '/<id>/reliability[/stop]'
   const segments = rest.split('/').filter(Boolean);
+
+  // Collection-level action, checked before the id is parsed (a one-shot manual DeepSeek pricing
+  // sync — docs/plans/deepseek-pricing-sync.md — the same function the daily loop runs, shared so
+  // the manual button and the scheduled pass can never drift apart).
+  if (segments.length === 1 && segments[0] === 'pricing-sync' && req.method === 'POST') {
+    try {
+      const result = await syncDeepSeekPricing({ llmConnections: deps.llmConnections, fetchHtml: deps.fetchHtml });
+      sendJson(res, 200, result);
+    } catch (err) {
+      log.error('deepseek pricing sync failed', err);
+      sendJson(res, 502, { error: 'failed to fetch or parse the DeepSeek pricing page' });
+    }
+    return;
+  }
 
   if (segments.length === 0) {
     if (req.method === 'GET') {
