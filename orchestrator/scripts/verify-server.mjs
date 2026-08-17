@@ -750,7 +750,9 @@ function createFakePool() {
           // way, but the fake pool's catch-all would still spam ERROR lines per turn. Accept the
           // insert like llm_calls; nothing here asserts on its contents (verify-loop.mjs's job).
           if (sql.includes('insert into turn_metrics')) {
-            return { rows: [] };
+            // recordTurnMetrics reads returning turn_metric_id (cleanup-pass-blocks-turn-slot-plan.md);
+            // the fake must return a row id so that read succeeds, mirroring Postgres.
+            return { rows: [{ turn_metric_id: 'tm-verify-server' }] };
           }
           // docs/chat-memory.md: handleChatCompletions' buildChatMemorySystemPrompt reads both of
           // these on every persisted-session turn now — empty is a legitimate, common answer (no

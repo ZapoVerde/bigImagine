@@ -66,7 +66,9 @@ function createFakePool() {
               errorReason: params[7],
               rounds: JSON.parse(params[8]),
             });
-            return { rows: [] };
+            // recordTurnMetrics reads returning turn_metric_id (cleanup-pass-blocks-turn-slot-plan.md);
+            // the fake must return a row id so that read succeeds, mirroring Postgres.
+            return { rows: [{ turn_metric_id: `tm-${turnMetricsInserts.length}` }] };
           }
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
