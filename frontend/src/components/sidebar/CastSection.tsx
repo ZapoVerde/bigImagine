@@ -68,8 +68,8 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   // until the new chat's fetch lands, never showing the previous chat's cast under it.
   const [loadChatId, setLoadChatId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // studio-character-bridge-plan.md Part A on the cast row: which character's seed is in flight
-  // (the button shows a busy state), and the most recent per-row result/error message.
+  // portrait-studio-standalone-subjects-plan.md Part C on the cast row: which character's send is
+  // in flight (the button shows a busy state), and the most recent per-row result/error message.
   const [studioBusyId, setStudioBusyId] = useState<string | null>(null);
   const [studioMessage, setStudioMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 

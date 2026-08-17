@@ -12,10 +12,15 @@ becomes a genuinely standalone training sandbox: no `character_id` requirement, 
 no avatar promotion. Getting a trained result back onto a live character's avatar is deliberately
 deferred to a separate, later feature that will live entirely on the chat side.
 
-This supersedes Parts A and C of `studio-character-bridge-plan.md` (kept in place as historical
-record — Parts B/D/E are unaffected and stay exactly as shipped) and reverses the "a Subject entity
-is created from an existing `characters` row" design decision `portrait-studio-plan.md` originally
-made.
+This supersedes Parts A and C of the old `studio-character-bridge-plan.md` (deleted — it described a
+persona-seeded, refresh-in-place, chat-linked Subject entity and a winner-image-promotes-to-avatar
+write-back, neither of which exist anymore; Studio never reads from or writes back to a chat or a
+`characters` row today) and reverses the "a Subject entity is created from an existing `characters`
+row" design decision `portrait-studio-plan.md` originally made. That old plan's Parts B (per-entity
+winner `slots` write-back, still exactly as shipped — see `portraitFeedback.ts`) and D (the `format`
+layer, `layerStack.ts`) needed no change here and live on as ordinary shipped code with no plan
+document behind them; Part E (presence order + the `ActivePortrait` box) is unaffected by this plan
+and is documented in its own files' doc comments.
 
 ## Background
 

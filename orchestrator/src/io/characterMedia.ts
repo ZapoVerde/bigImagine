@@ -13,11 +13,14 @@
  * This is the single source of truth for the on-disk avatar layout. plugins/characters'
  * avatarStorage.ts re-exports these three functions so the plugin's existing consumers
  * (insertCharacterFromCard, getCharacterAvatarTool, exportCharacterCardTool,
- * deleteCharacterTool) keep their `from './avatarStorage.js'` imports, while the orchestrator's
- * own avatar writes (Portrait Studio's winner promotion and set-as-avatar route,
- * docs/plans/studio-character-bridge-plan.md Part C) reach the same code path — the
- * orchestrator never statically depends on a plugin package (pluginLoader.ts's dependency
- * rule), so the shared module lives here.
+ * deleteCharacterTool) keep their `from './avatarStorage.js'` imports. The module lives in the
+ * orchestrator rather than the plugin because Portrait Studio used to write avatars from the
+ * orchestrator side too (a winner-promotion write-back, since retired — Studio is now a
+ * standalone training sandbox with no link back to `characters`,
+ * portrait-studio-standalone-subjects-plan.md) and the orchestrator never statically depends on a
+ * plugin package (pluginLoader.ts's dependency rule); today the plugin's card-import path is the
+ * only writer, but the shared location stays ready for a future orchestrator-side writer (e.g. a
+ * chat-triggered regenerate-portrait action) without another move.
  *
  * @api-declaration
  * writeAvatar(characterId, bytes) — writes/overwrites the stored PNG for this character

@@ -8,8 +8,8 @@
  * global JSON value under `orchestrator_settings.visual_layer_stack` (Principle 13 — runtime
  * config, not env/const; editable without a redeploy). Shape:
  * `{ layers: [{ id, label, promptable, boundary }], template }` — the five default layers
- * (`subject`, `outfit`, `style`, `expression`, `format` — the fifth added by
- * studio-character-bridge-plan.md Part D, all `promptable: true`, each `boundary` a short
+ * (`subject`, `outfit`, `style`, `expression`, `format` — the fifth added for composition/shot-type
+ * framing, all `promptable: true`, each `boundary` a short
  * prose description of what belongs there and what explicitly doesn't) plus a default `template`
  * referencing each layer's overflow token. An operator can add/remove/relabel layers afterward
  * from Portrait Studio's "Manage Layers" panel — this is what makes the system genuinely

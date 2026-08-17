@@ -7,8 +7,8 @@
  * @description
  * The feedback half of Portrait Studio: submitPortraitFeedback writes the visual_episodes row,
  * promotes the winner per-entity, per-layer (each entity's own slots from the winning
- * chromosome — studio-character-bridge-plan.md Part B — plus last_image_url /
- * current_best_candidate_id), persists per-candidate ratings/notes, then runs the Reflection
+ * chromosome, plus last_image_url / current_best_candidate_id), persists per-candidate
+ * ratings/notes, then runs the Reflection
  * Investigation — the plan's genuinely new loop: build a Path-2 title+tags wiki index (wiki.ts
  * buildWikiIndex), let the model pull full entries and conclude with a two-tool schema, capped
  * at visual_wiki_investigation_max_turns (default 6) with a forced final submit_conclusion so a
@@ -480,7 +480,7 @@ export async function submitPortraitFeedback(
     );
     const episodeId = episode[0].episode_id;
 
-    // Winner promotion — per-entity, per-layer (studio-character-bridge-plan.md Part B): each
+    // Winner promotion — per-entity, per-layer: each
     // [layerId, entityId] pair in the winning candidate's entity_ids (the round's authoritative
     // record) gets its own layer's values from the winning chromosome written onto its `slots`
     // column — never another layer's values, never the whole chromosome, and a layer absent

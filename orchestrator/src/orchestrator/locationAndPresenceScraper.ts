@@ -514,7 +514,7 @@ async function replaceScenePresence(session: DbSession, userId: string, sceneId:
   // presence_order (0107) preserves the Present: roster's left-to-right order through storage:
   // characterIds arrives here already ordered by resolvePresentCharacters' for-of over the
   // Present: names, so each character's index in it is the order getScenesTool.ts must read
-  // back out (studio-character-bridge-plan.md Part E).
+  // back out.
   for (let i = 0; i < characterIds.length; i++) {
     await session.query(
       `insert into scene_presence (scene_id, character_id, user_id, presence_order) values ($1, $2, $3, $4)

@@ -4,22 +4,26 @@
  * @architectural-role Stateful Owner (bi_principles.md §8) — owns this box's own scene lookup +
  *   avatar fetch; renders a pure read-only display
  * @description
- * studio-character-bridge-plan.md Part E — the small box above the RP chat showing whoever the
- * current scene's `Present:` line named first: the character whose avatar exists (set by the
- * winner promotion / set-as-avatar paths of Part C) and is currently the scene's most narratively
- * central present character.
+ * The small box above the RP chat showing whoever the current scene's `Present:` line named
+ * first: the character whose avatar exists and is currently the scene's most narratively central
+ * present character. Portrait Studio no longer writes a character's avatar at all
+ * (portrait-studio-standalone-subjects-plan.md retired the old winner-promotion/set-as-avatar
+ * write-back — Studio is a standalone training sandbox with no link back to `characters`), so
+ * today an avatar here only ever comes from card import (`insertCharacterFromCard.ts`) or a
+ * manual set; a future chat-side "regenerate this character's portrait" action is deferred (see
+ * that plan's Out of Scope) and would be this box's next real data source.
  *
  * Read-only display, deliberately the simplest possible selection rule — first-listed, nothing
- * weighted or scored, a structure to prove the plumbing and refine later (plan Part E). It calls
- * the same chat-scoped get_scenes tool CastSection does, reads the matching scene's — now
- * reliably ordered, via presence_order (migration 0107) — characterIds, and takes the first
- * entry; that character's avatar resolves through the same fetchCharacterAvatarUrl path
- * CharacterAvatarThumb uses, with the same object-URL lifecycle.
+ * weighted or scored, a structure to prove the plumbing and refine later. It calls the same
+ * chat-scoped get_scenes tool CastSection does, reads the matching scene's — now reliably
+ * ordered, via presence_order (migration 0107) — characterIds, and takes the first entry; that
+ * character's avatar resolves through the same fetchCharacterAvatarUrl path CharacterAvatarThumb
+ * uses, with the same object-URL lifecycle.
  *
  * Renders nothing — never an error, a placeholder, or a broken-image state — when sceneId is
  * null (no header has landed yet), the scene's characterIds is empty (nobody currently present),
- * or the first-listed character has no avatar yet (Part C hasn't fired for them, or their
- * subject entity has no winning round).
+ * or the first-listed character has no avatar yet (the common case for an RP-born character,
+ * since nothing currently sets one for them).
  *
  * @api-declaration
  * ActivePortrait({ apiKey, chatId, sceneId }) — sceneId: string | null; same props shape
