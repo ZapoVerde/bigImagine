@@ -39,9 +39,10 @@ import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { runStreamingRpTurn, type RunStreamingRpTurnResult } from '../orchestrator/streamingTurn.js';
 import { isAbortError, registerTurnAbort, unregisterTurnAbort } from '../orchestrator/turnAbort.js';
-import { claimCleanupInFlight, finalizeCleanupResult, releaseCleanupInFlight, type CleanupLoopDeps } from '../orchestrator/cleanupLoop.js';
+import { claimCleanupInFlight, releaseCleanupInFlight, type CleanupLoopDeps } from '../orchestrator/cleanupLoop.js';
 import { clearCleanupLiveStatus } from '../orchestrator/cleanupLiveStatus.js';
-import { finishStream, type CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
+import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
+import { runLiveCleanupHandoff } from '../orchestrator/liveCleanupHandoff.js';
 import { fireLocationImageGeneration } from './locationImages.js';
 import { fireCharacterDescription } from './characterDescription.js';
 import { createToolRegistry, filterToolRegistry } from '../orchestrator/toolRegistry.js';
@@ -247,6 +248,15 @@ export async function regenerateSwipe(
   };
   let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
   let cleanupAbortController: AbortController | undefined;
+  // The turn_metrics row id written for this turn's base row (docs/plans/
+  // cleanup-pass-blocks-turn-slot-plan.md) — threaded onto the backgrounded cleanup handoff so it
+  // can append the cleanup duration to this same row. Absent when the turn recorded no metrics.
+  let turnMetricId: string | undefined;
+  // Set true immediately before the `void runLiveCleanupHandoff(...)` call (docs/plans/
+  // cleanup-pass-blocks-turn-slot-plan.md Edge Cases) so the finally below does not also release
+  // the live-cleanup guard the background task now owns; a turn that never reaches the handoff
+  // leaves it false and the finally releases as today.
+  let cleanupHandedOff = false;
   let liveCleanupGuardHeld = false;
   // The regenerated turn's accumulated reasoning span (reasoning-blocks-plan.md): persisted via
   // recordSwipe below and carried into the cleanup handoff's composed swipe; absent when the
@@ -293,6 +303,7 @@ export async function regenerateSwipe(
       reply = turnResult.content;
       cleanupHandoff = turnResult.cleanup;
       turnReasoning = turnResult.reasoning;
+      turnMetricId = turnResult.turnMetricId;
       traceEntry.usage = turnResult.usage;
       traceEntry.price = turnPrice;
     } catch (err) {
@@ -355,34 +366,37 @@ export async function regenerateSwipe(
       return { ok: false, error: 'message no longer exists' };
     }
     swipeResult = updated;
-    // Live cleanup persistence handoff (in-stream-cleanup-plan.md): recordSwipe just persisted the
-    // regenerated raw text as the new active swipe — finishStream applies the end-of-stream repairs
-    // (tail body, footer, deferred 'llm' pass) to the composed buffer, and finalizeCleanupResult
-    // writes the composed text as the NEXT swipe (original stays a swipe, the send/swipe parity the
-    // plan's Logic section carries through). Same finalizeCleanupResult the poll tick uses, so the
-    // message is indistinguishable in cleanup_jobs from one the tick caught.
+    // Live cleanup persistence handoff (in-stream-cleanup-plan.md, decoupled by
+    // cleanup-pass-blocks-turn-slot-plan.md): recordSwipe just persisted the regenerated raw text
+    // as the new active swipe, and finishStream's end-of-stream repairs (tail body, footer,
+    // deferred 'llm' pass) + finalizeCleanupResult's composed-swipe writeback now run in a detached
+    // background task — regenerateSwipe returns as soon as the swipe + presence scrape + canvas
+    // update finish, releasing the turn slot right after instead of after a slow repair pass. Any
+    // patch the background pass produces lands via CleanupStatusPill's onSettled →
+    // refreshActiveMessages refetch, exactly like a poll-tick-caught repair. cleanupHandedOff is
+    // set BEFORE the call so the finally below does not double-release the guard the background
+    // task now owns.
     if (cleanupHandoff) {
-      try {
-        const fsResult = await finishStream(cleanupHandoff.ctx, cleanupDeps, reply, {
-          userId,
-          chatId,
-          signal: cleanupAbortController!.signal,
-          onCleanupEvent,
-        });
-        await finalizeCleanupResult(cleanupDeps, userId, chatId, messageId, reply, fsResult.composed, fsResult.outcomes, turnReasoning?.text);
-      } catch (err) {
-        if (isAbortError(err)) {
-          // A Stop landed during the end-of-stream repairs: the regenerated swipe above is already
-          // persisted (the regeneration succeeded — report it as such); no composed swipe and no
-          // job rows, so the poll tick catches the message, same as the tick's own abort path.
-          log.info(`swipe live cleanup handoff aborted for chat ${chatId}`);
-        } else {
-          throw err; // finishStream is fail-open internally — a non-abort throw here is a bug
-        }
-      }
+      cleanupHandedOff = true;
+      void runLiveCleanupHandoff(
+        cleanupDeps,
+        cleanupHandoff.ctx,
+        userId,
+        chatId,
+        messageId,
+        reply,
+        cleanupAbortController!,
+        releaseLiveCleanupGuard,
+        { reasoning: turnReasoning?.text, turnMetricId },
+      );
     }
   } finally {
-    releaseLiveCleanupGuard();
+    // Only the in-flight stream/persistence segment releases the guard here. Once the cleanup
+    // handoff has been handed off (cleanupHandedOff), the background task owns the guard and
+    // releases it exactly once in its own finally — releasing again here would free the poll tick's
+    // dedup key before the background pass has started touching the message. Idempotent either way
+    // for a turn that never reached the handoff, matching today's behavior.
+    if (!cleanupHandedOff) releaseLiveCleanupGuard();
   }
   // Stage 2 (docs/plans/vistalyze_integration/segway.md §4, location.md §4.2): post-cleanup heuristic
   // extraction against the regenerated text — recordSwipe above just made its swipe active,

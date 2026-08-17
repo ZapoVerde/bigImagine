@@ -156,6 +156,12 @@ export interface RunStreamingRpTurnResult {
    *  live — the poll tick handles the message, unchanged from today) or when the caller never
    *  opted in. */
   cleanup?: { composed: string; liveOutcomes: LiveRegionOutcome[]; ctx: LiveCleanupContext };
+  /** The turn_metrics row id written for this turn's base row (docs/plans/
+   *  cleanup-pass-blocks-turn-slot-plan.md). Present when the success-path recordTurnMetrics
+   *  insert succeeded; a caller that runs a live-cleanup handoff after the turn uses it to append
+   *  the cleanup duration to this same row. Absent for a no-cleanup turn or a metrics-record
+   *  failure. */
+  turnMetricId?: string;
 }
 
 export async function runStreamingRpTurn(opts: RunStreamingRpTurnOptions): Promise<RunStreamingRpTurnResult> {
@@ -171,15 +177,24 @@ export async function runStreamingRpTurn(opts: RunStreamingRpTurnOptions): Promi
     const result = await runWithRequestId(requestId, () =>
       runWithCallContext(callContext, () => runStreamingRpTurnInner(opts, metrics, abortController.signal)),
     );
-    await recordTurnMetrics(opts.db, {
+    // The base turn_metrics row is written immediately, the instant the raw turn finishes
+    // (docs/plans/cleanup-pass-blocks-turn-slot-plan.md). Its id is threaded onto the result so a
+    // caller that runs a live-cleanup handoff after this turn can append the cleanup duration to
+    // this same row via appendCleanupDuration. A metrics-record failure (logged, not thrown) leaves
+    // turnMetricId absent; the handoff then simply skips the append.
+    return await recordTurnMetrics(opts.db, {
       userId: opts.userId,
       taskId: opts.taskId,
       kind: callContext.kind,
       totalDurationMs: Date.now() - turnStart,
       outcome: 'ok',
       accumulator: metrics,
-    }).catch((err) => log.error('failed to record turn_metrics', err));
-    return result;
+    })
+      .then((turnMetricId) => ({ ...result, turnMetricId }))
+      .catch((err) => {
+        log.error('failed to record turn_metrics', err);
+        return result;
+      });
   } catch (err) {
     await recordTurnMetrics(opts.db, {
       userId: opts.userId,

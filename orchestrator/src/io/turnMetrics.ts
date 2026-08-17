@@ -15,8 +15,14 @@
  *
  * @api-declaration
  * createMetricsAccumulator() — a fresh { rounds: [] } bag for one turn.
- * recordTurnMetrics(db, fields) — inserts one turn_metrics row via db.withUserScope. Throws only
- *   if the insert itself fails; callers decide whether/how to log that.
+ * recordTurnMetrics(db, fields) — inserts one turn_metrics row via db.withUserScope and resolves
+ *   with that row's turn_metric_id (the value a caller threads onto the turn for the later
+ *   appendCleanupDuration follow-up). Throws only if the insert itself fails; callers decide
+ *   whether/how to log that.
+ * appendCleanupDuration(db, userId, turnMetricId, cleanupDurationMs) — appends the live cleanup
+ *   pass's end-of-stream duration onto the turn's already-written row (a follow-up UPDATE, not a
+ *   delayed INSERT). Never rethrows: by the time it runs the response is long gone, so a
+ *   metrics-append failure is logged-and-dropped, never surfaced anywhere.
  *
  * @contract
  *   assertions:
@@ -25,6 +31,7 @@
  *     external_io:     [Postgres via db.withUserScope]
  */
 
+import { log } from './logger.js';
 import type { PostgresClient } from './postgres.js';
 
 export interface ToolCallMetric {
@@ -76,13 +83,14 @@ export async function recordTurnMetrics(
     errorReason?: string;
     accumulator: TurnMetricsAccumulator;
   },
-): Promise<void> {
+): Promise<string> {
   const { rounds } = fields.accumulator;
-  await db.withUserScope(fields.userId, (session) =>
+  const rows = await db.withUserScope<Array<{ turn_metric_id: string }>>(fields.userId, (session) =>
     session.query(
       `insert into turn_metrics
          (user_id, task_id, kind, round_count, tool_call_count, total_duration_ms, outcome, error_reason, rounds)
-       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       returning turn_metric_id`,
       [
         fields.userId,
         fields.taskId,
@@ -96,4 +104,29 @@ export async function recordTurnMetrics(
       ],
     ),
   );
+  return (rows[0] as { turn_metric_id: string }).turn_metric_id;
 }
+
+/** Append the live cleanup pass's end-of-stream duration onto an already-written turn_metrics row
+ *  (docs/plans/cleanup-pass-blocks-turn-slot-plan.md). The base row is inserted the instant the
+ *  raw turn finishes; this follow-up records how long the backgrounded cleanup handoff then took
+ *  (finishStream + finalizeCleanupResult), matched by turnMetricId. Never rethrows — by the time
+ *  this runs the response is long gone, so a metrics-append failure must be invisible anywhere. */
+export async function appendCleanupDuration(
+  db: PostgresClient,
+  userId: string,
+  turnMetricId: string,
+  cleanupDurationMs: number,
+): Promise<void> {
+  try {
+    await db.withUserScope(userId, (session) =>
+      session.query(`update turn_metrics set cleanup_duration_ms = $1 where turn_metric_id = $2`, [
+        cleanupDurationMs,
+        turnMetricId,
+      ]),
+    );
+  } catch (err) {
+    log.error('failed to append cleanup_duration_ms to turn_metrics', err);
+  }
+}
+
