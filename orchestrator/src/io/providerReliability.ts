@@ -65,6 +65,10 @@ export interface ProviderReliabilityRow {
   ok: number;
   total: number;
   attempts: ProviderReliabilityAttempt[];
+  /** OpenRouter's published per-token price for this provider+model endpoint, carried over from
+   *  the catalog so the Connections tab can render in/out cost next to the reliability tally —
+   *  the "which one am I after" signal. Undefined when the catalog reported none. */
+  pricing?: { prompt: string; completion: string };
 }
 
 export interface ReliabilitySweepState {
@@ -86,8 +90,9 @@ export interface ReliabilitySweepParams {
   attemptsPerProvider?: number;
   delayMs?: number;
   requestTimeoutMs?: number;
-  /** Filter every probe to the given quantization formats (e.g. ["int8"]) — an empty or absent
-   *  array leaves the sweep unfiltered. */
+  /** Filter the sweep to providers that serve one of these quantization formats (e.g. ["int8"]).
+   *  Other providers are excluded from the sweep entirely — never probed into a guaranteed 404.
+   *  An empty or absent array leaves the sweep unfiltered (the whole catalog runs). */
   quantizations?: string[];
 }
 
@@ -257,6 +262,8 @@ export async function startProviderReliabilitySweep(
     return { ok: false, reason: 'no_provider_catalog' };
   }
 
+  const quantizations =
+    params.quantizations && params.quantizations.length > 0 ? params.quantizations : undefined;
   const state: ReliabilitySweepState = {
     connectionId,
     model: profile.model,
@@ -264,9 +271,22 @@ export async function startProviderReliabilitySweep(
     startedAt: Date.now(),
     attemptsPerProvider: params.attemptsPerProvider ?? 3,
     delayMs: params.delayMs ?? 2000,
-    quantizations:
-      params.quantizations && params.quantizations.length > 0 ? params.quantizations : undefined,
-    providers: catalog.map((p) => ({ name: p.name, tag: p.tag, ok: 0, total: 0, attempts: [] })),
+    quantizations,
+    // A quantization filter narrows the sweep to providers that actually serve it — probing the
+    // others would just collect OpenRouter's 404 ("no endpoint matches this quantization") and
+    // muddy the tally. Unfiltered runs the whole catalog.
+    providers: (
+      quantizations
+        ? catalog.filter((p) => p.quantization && quantizations.includes(p.quantization))
+        : catalog
+    ).map((p) => ({
+      name: p.name,
+      tag: p.tag,
+      ok: 0,
+      total: 0,
+      attempts: [],
+      ...(p.pricing ? { pricing: p.pricing } : {}),
+    })),
   };
   sweeps.set(connectionId, state);
   activeControllers.set(connectionId, new Set());

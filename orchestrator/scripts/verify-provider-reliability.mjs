@@ -7,8 +7,10 @@
 //     reasoning: { exclude: true } }) — exactly what pinning sends
 //   * a hung provider is scored a per-request timeout and can't wedge the rest of the sweep
 //   * stopProviderReliabilitySweep aborts in-flight probes ('cancelled' notes) and never starts more
-//   * a quantizations filter is forwarded as provider.quantizations on every probe
-//   * not_found / no_provider_catalog / already_running error reasons
+// *   a quantizations filter narrows the sweep to providers that serve it (others excluded, never
+//     probed into a guaranteed 404) and is forwarded as provider.quantizations on each probe
+// *   each row carries the catalog's published pricing alongside the tally
+// *   not_found / no_provider_catalog / already_running error reasons
 
 import { createLlmProviderForProfile } from '../dist/io/llm/index.js';
 import {
@@ -92,14 +94,21 @@ function sleep(ms) {
 // --- Stub global fetch: routes /endpoints to a live catalog, /chat/completions to an SSE probe ---
 const events = []; // 'start:<name>' / 'end:<name>' in chronological order, for in-flight assertions
 const probeCalls = [];
-const router = { providers: ['A', 'B', 'C'], hangProvider: null };
+const router = { providers: ['A', 'B', 'C'], hangProvider: null, quantizationOf: {}, pricingOf: {} };
 
 globalThis.fetch = async (url, init) => {
   const u = String(url);
   if (u.includes('/endpoints')) {
     return new Response(
       JSON.stringify({
-        data: { endpoints: router.providers.map((name) => ({ provider_name: name, tag: name.toLowerCase() })) },
+        data: {
+          endpoints: router.providers.map((name) => ({
+            provider_name: name,
+            tag: name.toLowerCase(),
+            quantization: router.quantizationOf?.[name] ?? 'fp8',
+            pricing: router.pricingOf?.[name] ?? { prompt: '0.00000008', completion: '0.00000018' },
+          })),
+        },
       }),
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
@@ -255,23 +264,39 @@ async function waitFor(cond, timeoutMs = 2000) {
   probeCalls.length = 0;
   router.providers = ['A', 'B'];
   router.hangProvider = null;
+  router.quantizationOf = { A: 'fp8', B: 'fp4' };
 
   const result = await startProviderReliabilitySweep(fakeStore, 'conn-quant', {
     attemptsPerProvider: 1,
     delayMs: 1,
-    quantizations: ['int8'],
+    quantizations: ['fp8'],
   });
   assert(result.ok === true, 'a sweep with a quantization filter starts');
+  assert(
+    result.ok && result.state.providers.map((p) => p.name).join(',') === 'A',
+    'a quantized sweep keeps only providers that serve the selected quantization',
+  );
   const done = await waitForDone('conn-quant');
   assert(done !== undefined, 'a quantized sweep reaches done');
   assert(
-    probeCalls.every((c) => JSON.stringify(c.body.provider) === JSON.stringify({ order: [c.body.provider.order[0]], allow_fallbacks: false, quantizations: ['int8'] })),
-    'every probe forwards the sweep quantization filter as provider.quantizations',
+    done && done.providers.length === 1 && done.providers[0].name === 'A',
+    'non-matching providers are excluded from the results, never probed into a guaranteed 404',
   );
   assert(
-    done.quantizations?.[0] === 'int8',
+    probeCalls.length === 1 &&
+      JSON.stringify(probeCalls[0].body.provider) ===
+        JSON.stringify({ order: ['A'], allow_fallbacks: false, quantizations: ['fp8'] }),
+    'the single matching provider is probed with the quantization filter forwarded as provider.quantizations',
+  );
+  assert(
+    done.quantizations?.[0] === 'fp8',
     'the finished sweep records the quantization filter it ran under',
   );
+  assert(
+    done.providers[0].pricing?.prompt === '0.00000008' && done.providers[0].pricing?.completion === '0.00000018',
+    'each row carries the catalog pricing alongside the tally',
+  );
+  delete router.quantizationOf;
 }
 
 // --- stop: admin cancellation aborts in-flight probes and never starts more ---

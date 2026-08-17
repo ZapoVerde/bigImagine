@@ -226,6 +226,9 @@ export interface ProviderReliabilityRow {
   ok: number;
   total: number;
   attempts: ProviderReliabilityAttempt[];
+  /** OpenRouter's published per-token price for this provider+model endpoint (undefined when the
+   *  catalog reported none) — rendered next to the tally so an admin can weigh cost vs reliability. */
+  pricing?: { prompt: string; completion: string };
 }
 
 export interface ReliabilitySweepState {

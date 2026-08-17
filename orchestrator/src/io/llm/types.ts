@@ -160,6 +160,8 @@ export interface LlmProvider {
    *  every other adapter, same "undefined means no catalog, not broken" convention as listModels.
    *  Behind GET /v1/admin/connections/:id/providers so the Connections tab can show which providers
    *  are available before an admin pins routing to one of them plus a fallback, instead of
-   *  accepting OpenRouter's own default routing across the full set. */
-  listProviders?(modelId: string): Promise<{ name: string; tag: string; pricing?: { prompt: string; completion: string } }[]>;
+   *  accepting OpenRouter's own default routing across the full set. `quantization` is the format
+   *  the provider serves (e.g. "fp8"; absent when the vendor reports "unknown") — the sweep's
+   *  quantizations filter excludes providers whose value doesn't match, rather than probing them. */
+  listProviders?(modelId: string): Promise<{ name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[]>;
 }

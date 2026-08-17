@@ -386,6 +386,12 @@
   word-break: break-word;
 }
 
+.reliability-price {
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
 .connections-actions {
   display: flex;
   align-items: center;

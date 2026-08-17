@@ -799,6 +799,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                         <th>Provider</th>
                         <th>Result</th>
                         <th>Attempts</th>
+                        <th>Price in / out (per 1M)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -810,6 +811,11 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                           </td>
                           <td className="reliability-notes">
                             {p.attempts.length === 0 ? 'pending' : p.attempts.map((a) => a.note).join(', ')}
+                          </td>
+                          <td className="reliability-price">
+                            {p.pricing
+                              ? `${formatPricePerMillion(p.pricing.prompt)} in / ${formatPricePerMillion(p.pricing.completion)} out`
+                              : '—'}
                           </td>
                         </tr>
                       ))}
