@@ -192,7 +192,9 @@ export interface ModelProvidersResult {
   providers: {
     name: string;
     tag: string;
-    quantizations?: string[];
+    /** The quantization format this endpoint serves (e.g. "fp8"; OpenRouter's singular per-endpoint
+     *  `quantization` field). The quantization dropdown unions these across providers. */
+    quantization?: string;
     pricing?: { prompt: string; completion: string };
   }[];
 }

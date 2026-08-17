@@ -271,17 +271,19 @@ export async function listOpenAiCompatibleModels(
  *  own default routing would pick across the full set. `name` is the provider's own display name
  *  (e.g. "OpenAI", "Fireworks") — the value OpenRouter's request-level `provider.order` expects;
  *  `tag` is its more specific routing slug (occasionally a region-qualified variant of the same
- *  provider, e.g. "azure/swedencentral"), kept alongside since `name` alone can collide; and
- *  `quantizations` is the set of quantization formats the endpoint serves (e.g. ["bf16","int8"])
- *  when the vendor reports any — the source of the Connections tab's quantization dropdown, and
- *  forwarded as `provider.quantizations` when a sweep or pinned request filters by it. No auth
- *  required by OpenRouter for this route either, same as listOpenAiCompatibleModels, but the key
- *  is sent anyway for the same reason. */
+ *  provider, e.g. "azure/swedencentral" or "decart/fp4"), kept alongside since `name` alone can
+ *  collide; and `quantization` is the format the endpoint serves (e.g. "fp8"; "unknown" when the
+ *  vendor doesn't report one) — OpenRouter reports this per endpoint as the singular `quantization`
+ *  field (confirmed live 2026-08-16: fp4/fp8/unknown for this model). It's the Connections tab's
+ *  quantization dropdown source, and a chosen value is forwarded as `provider.quantizations`
+ *  (plural array — the request field's shape) when a sweep or pinned request filters by it. No
+ *  auth required by OpenRouter for this route either, same as listOpenAiCompatibleModels, but the
+ *  key is sent anyway for the same reason. */
 export async function listOpenAiCompatibleModelProviders(
   config: Pick<OpenAiCompatibleConfig, 'baseUrl' | 'apiKey'>,
   modelId: string,
 ): Promise<
-  { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[]
+  { name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[]
 > {
   const response = await fetchWithRetry(`${config.baseUrl}/models/${modelId}/endpoints`, {
     headers: { authorization: `Bearer ${config.apiKey}` },
@@ -295,7 +297,7 @@ export async function listOpenAiCompatibleModelProviders(
       endpoints?: {
         provider_name?: unknown;
         tag?: unknown;
-        quantizations?: unknown;
+        quantization?: unknown;
         pricing?: { prompt?: unknown; completion?: unknown };
       }[];
     };
@@ -309,11 +311,8 @@ export async function listOpenAiCompatibleModelProviders(
           ? { prompt: e.pricing.prompt, completion: e.pricing.completion }
           : undefined;
       const tag = typeof e.tag === 'string' ? e.tag : e.provider_name;
-      const quantizations = Array.isArray(e.quantizations)
-        ? e.quantizations.filter((q): q is string => typeof q === 'string')
-        : undefined;
-      const quantizationsDefined = quantizations && quantizations.length > 0 ? quantizations : undefined;
-      if (quantizationsDefined) return { name: e.provider_name, tag, quantizations: quantizationsDefined, ...(pricing ? { pricing } : {}) };
+      const quantization = typeof e.quantization === 'string' && e.quantization ? e.quantization : undefined;
+      if (quantization) return { name: e.provider_name, tag, quantization, ...(pricing ? { pricing } : {}) };
       return pricing ? { name: e.provider_name, tag, pricing } : { name: e.provider_name, tag };
     });
 }

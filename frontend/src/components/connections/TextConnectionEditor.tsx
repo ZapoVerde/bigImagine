@@ -127,7 +127,7 @@ function providerOrderFromDraft(draft: Draft): string[] | undefined {
 function openRouterPricingFor(
   draft: Draft,
   modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
-  providerOptions: { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[],
+  providerOptions: { name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[],
 ): { inputPerMillion: string; outputPerMillion: string } | null {
   const pinned = providerOptions.find((p) => p.tag === draft.providerPrimary)?.pricing;
   const pricing = pinned ?? modelOptions.find((m) => m.id === draft.model)?.pricing;
@@ -188,7 +188,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   const [modelOptions, setModelOptions] = useState<{ id: string; pricing?: { prompt: string; completion: string } }[]>([]);
   const [modelsError, setModelsError] = useState('');
   const [providerOptions, setProviderOptions] = useState<
-    { name: string; tag: string; quantizations?: string[]; pricing?: { prompt: string; completion: string } }[]
+    { name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[]
   >([]);
   const [providersError, setProvidersError] = useState('');
   // Provider-reliability sweep (io/providerReliability.ts) — the live per-provider tally for this
@@ -324,9 +324,10 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   const dirty = isNew || (selected != null && !draftEqualsConnection(draft, selected));
   const sweepRunning = reliability?.status === 'running';
   // The sweep's Quantization dropdown options — the distinct quantization formats the model's
-  // endpoints report, in the panel's own order (first-seen across providers, deduped).
+  // endpoints report (union of providerOptions[].quantization), in first-seen order. 'unknown' is
+  // dropped: it means the endpoint reported none, and you can't filter by it.
   const reliabilityQuantizationOptions = [
-    ...new Set(providerOptions.flatMap((p) => p.quantizations ?? [])),
+    ...new Set(providerOptions.flatMap((p) => (p.quantization && p.quantization !== 'unknown' ? [p.quantization] : []))),
   ];
 
   async function save() {
