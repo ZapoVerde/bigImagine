@@ -212,7 +212,11 @@ export default function ConnectionsView() {
                 {c.name}
               </span>
               <span className="connections-row-badge">{c.kind}</span>
-              {c.isActive && <span className="connections-row-badge connections-row-badge-active">active</span>}
+              {c.isActive && (
+                <span className="connections-row-badge connections-row-badge-active" title="active — Text LLM">
+                  (txt)
+                </span>
+              )}
             </div>
           ))}
           {imageConnections.map((c) => (
@@ -226,7 +230,14 @@ export default function ConnectionsView() {
                 {c.name}
               </span>
               <span className="connections-row-badge">{c.kind}</span>
-              {c.isActive && <span className="connections-row-badge connections-row-badge-active">active</span>}
+              {c.isActive && (
+                <span
+                  className="connections-row-badge connections-row-badge-active"
+                  title={c.purpose === 'portrait' ? 'active — Portrait image connection' : 'active — Background image connection'}
+                >
+                  {c.purpose === 'portrait' ? '(prt)' : '(bg)'}
+                </span>
+              )}
             </div>
           ))}
         </div>

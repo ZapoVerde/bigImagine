@@ -3,6 +3,7 @@ import {
   ApiError,
   callTool,
   createPortraitEntity,
+  deletePortraitEntity,
   deletePortraitWikiEntry,
   generatePortraitCandidates,
   getPortraitLayerManifest,
@@ -196,6 +197,23 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     }
   }
 
+  async function deleteEntity(entity: PortraitEntityRow) {
+    if (!window.confirm(`Delete "${entity.name}"? This can't be undone.`)) return;
+    try {
+      await deletePortraitEntity(entity.entity_id, apiKey);
+      setSelections((s) => {
+        if (s[entity.layer_id] !== entity.entity_id) return s;
+        const next = { ...s };
+        delete next[entity.layer_id];
+        return next;
+      });
+      if (siEntityId === entity.entity_id) setSiEntityId(null);
+      await refreshEntities();
+    } catch (err) {
+      setGenerateError(errMessage(err, 'failed to delete entity'));
+    }
+  }
+
   async function generate() {
     const missing = promptableLayers.filter((l) => !selections[l.id]);
     if (missing.length > 0) {
@@ -337,7 +355,8 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     setLayersDraft((d) => (d ? { ...d, layers: d.layers.map((l) => (l.id === layerId ? { ...l, ...patch } : l)) } : d));
   }
 
-  function removeLayer(layerId: string) {
+  function removeLayer(layerId: string, label: string) {
+    if (!window.confirm(`Remove layer "${label}"? This can't be undone once you save the manifest.`)) return;
     setLayersDraft((d) => (d ? { ...d, layers: d.layers.filter((l) => l.id !== layerId) } : d));
   }
 
@@ -410,6 +429,18 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
                 </select>
                 <button type="button" onClick={() => startCreate(layer.id)}>
                   {creatingLayer === layer.id ? 'cancel' : '+ new'}
+                </button>
+                <button
+                  type="button"
+                  className="portrait-wiki-delete"
+                  disabled={!selections[layer.id]}
+                  title={!selections[layer.id] ? 'pick an entity to delete' : undefined}
+                  onClick={() => {
+                    const entity = layerEntities.find((e) => e.entity_id === selections[layer.id]);
+                    if (entity) void deleteEntity(entity);
+                  }}
+                >
+                  delete
                 </button>
               </div>
               {creatingLayer === layer.id && (
@@ -608,7 +639,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
                     className="portrait-wiki-delete"
                     disabled={!removable}
                     title={isSubject ? 'the subject layer cannot be removed' : inUse ? 'entities are still attached to this layer' : undefined}
-                    onClick={() => removeLayer(layer.id)}
+                    onClick={() => removeLayer(layer.id, layer.label)}
                   >
                     Remove
                   </button>
