@@ -17,6 +17,7 @@ import {
   stopProviderReliabilitySweep,
 } from '../dist/io/providerReliability.js';
 import { parseReliabilitySweepBody } from '../dist/server/adminServer.js';
+import { handleAdminConnectionRoutes } from '../dist/server/handleAdminConnections.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -25,6 +26,21 @@ function assert(cond, message) {
   } else {
     console.log(`ok: ${message}`);
   }
+}
+
+// --- Fake ServerResponse, mirroring verify-visual-portrait-bridge.mjs: sendJson writes
+// writeHead(status) + end(JSON-string); we capture the pair. ---
+function fakeRes() {
+  const res = {
+    responses: [],
+    writeHead(status) {
+      this.statusCode = status;
+    },
+    end(payload) {
+      this.responses.push({ status: this.statusCode, body: payload ? JSON.parse(payload) : undefined });
+    },
+  };
+  return res;
 }
 
 function sleep(ms) {
@@ -296,6 +312,34 @@ async function waitFor(cond, timeoutMs = 2000) {
   const again = stopProviderReliabilitySweep('conn-stop');
   assert(again?.status === 'cancelled', 'stopping an already-cancelled sweep is a no-op returning the same state');
   assert(stopProviderReliabilitySweep('never-existed') === undefined, 'stopping a sweep that never existed returns undefined');
+}
+
+// --- Route wiring: POST .../reliability/stop must reach stopProviderReliabilitySweep. The module
+// tests above can't catch a URL-parse bug (segments split per path component, so the stop path is
+// [id, 'reliability', 'stop']); this exercises handleAdminConnectionRoutes end to end. ---
+{
+  const routeDeps = { llmConnections: fakeStore };
+  const res = fakeRes();
+  await handleAdminConnectionRoutes(
+    { method: 'POST' },
+    res,
+    routeDeps,
+    new URL('http://localhost/v1/admin/connections/conn-stop/reliability/stop'),
+  );
+  const response = res.responses[0];
+  assert(
+    response && response.status === 200 && response.body.state?.status === 'cancelled',
+    'the /reliability/stop route reaches stopProviderReliabilitySweep (200 + the cancelled state)',
+  );
+
+  const missingRes = fakeRes();
+  await handleAdminConnectionRoutes(
+    { method: 'POST' },
+    missingRes,
+    routeDeps,
+    new URL('http://localhost/v1/admin/connections/route-never/reliability/stop'),
+  );
+  assert(missingRes.responses[0]?.status === 404, 'the /reliability/stop route 404s for a connection with no sweep');
 }
 
 if (process.exitCode) {

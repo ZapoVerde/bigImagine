@@ -96,7 +96,7 @@ export async function handleAdminCredentialsSet(
 // handleFolders.ts's handleFolderRoutes. GET/POST on the collection; GET/PATCH/DELETE plus two
 // catalog-preview sub-routes on one connection by id.
 export async function handleAdminConnectionRoutes(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, url: URL): Promise<void> {
-  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test' | '/<id>/reliability'
+  const rest = url.pathname.slice('/v1/admin/connections'.length); // '' | '/<id>' | '/<id>/activate' | '/<id>/models' | '/<id>/providers' | '/<id>/test' | '/<id>/reliability[/stop]'
   const segments = rest.split('/').filter(Boolean);
 
   if (segments.length === 0) {
@@ -271,7 +271,7 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
     return;
   }
 
-  if (segments.length === 2 && segments[1] === 'reliability/stop' && req.method === 'POST') {
+  if (segments.length === 3 && segments[1] === 'reliability' && segments[2] === 'stop' && req.method === 'POST') {
     const state = stopProviderReliabilitySweep(id);
     if (!state) {
       sendJson(res, 404, { error: 'no reliability sweep exists for this connection' });
