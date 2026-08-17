@@ -44,5 +44,10 @@ export async function fetchThroughPiaProxy(settings: OrchestratorSettingsStore, 
   if (!piaProxyUrl) {
     throw new Error('pia_proxy_url is not configured in Settings');
   }
-  return fetchWithRetry(`${piaProxyUrl}/fetch?url=${encodeURIComponent(targetUrl)}`, {});
+  return fetchWithRetry(`${piaProxyUrl}/fetch?url=${encodeURIComponent(targetUrl)}`, {
+    // Bound the tunnel hop: a stalled pia-proxy/WireGuard leg must not hold a withUserScope
+    // transaction open for undici's default ~300s (the 2026-08-17 524 incident). 30s is far past
+    // any legitimate chub fetch. fetchWithRetry already treats AbortError as non-retryable.
+    signal: AbortSignal.timeout(30_000),
+  });
 }

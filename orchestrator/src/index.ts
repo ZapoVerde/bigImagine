@@ -96,6 +96,14 @@ async function main(): Promise<void> {
     database: requireEnv('BIGBRAIN_PG_DATABASE'),
     user: requireEnv('BIGBRAIN_PG_APP_USER'),
     password: requireEnv('BIGBRAIN_APP_PASSWORD'),
+    // A hung upstream call can hold a withUserScope transaction open for minutes (see
+    // postgres.ts's inTransaction) — enough hung calls exhaust the default 10-connection pool and
+    // every later request would wait on pool.connect() forever (the 2026-08-17 524 incident).
+    // connectionTimeoutMillis turns that wedge into a fast 5xx, and idle_in_transaction_session_timeout
+    // aborts any transaction that goes quiet too long at the DB level. 60s dwarfs the lifetime of
+    // any real transaction here — nothing holds a session open across a pause anywhere near that long.
+    connectionTimeoutMillis: 10_000,
+    options: '-c idle_in_transaction_session_timeout=60s',
   });
   const db = createPostgresClient(pool);
 

@@ -29,11 +29,14 @@ const realFetch = globalThis.fetch;
   }
 }
 
-// --- Builds the correct request URL when configured ---
+// --- Builds the correct request URL when configured, with a bounded-timeout signal so a stalled
+//     pia-proxy leg can never hold a withUserScope transaction open indefinitely ---
 {
   let requestedUrl;
-  globalThis.fetch = async (url) => {
+  let requestedInit;
+  globalThis.fetch = async (url, init) => {
     requestedUrl = url;
+    requestedInit = init;
     return new Response(JSON.stringify({ ok: true }), { status: 200 });
   };
 
@@ -43,6 +46,10 @@ const realFetch = globalThis.fetch;
   assert(
     requestedUrl === `http://pia-proxy:8080/fetch?url=${encodeURIComponent(target)}`,
     'constructs the correct pia-proxy /fetch?url= request, with the target URL encoded',
+  );
+  assert(
+    requestedInit?.signal instanceof AbortSignal && !requestedInit.signal.aborted,
+    'the fetch carries an AbortSignal timeout, so a hung pia-proxy leg times out instead of hanging',
   );
   assert(response.status === 200, 'returns the raw Response from pia-proxy');
 }
