@@ -59,6 +59,11 @@ export function createVoyageEmbeddingProvider(config: VoyageConfig): EmbeddingPr
           model: config.model,
           output_dimension: config.outputDimension,
         }),
+        // embed() is called from inside withUserScope by several tool handlers (recall/search/save
+        // tools) — a hung Voyage response must not pin that transaction's connection for undici's
+        // default ~300s (the same class of failure as the 2026-08-17 524 incident, io/piaProxyFetch.ts).
+        // fetchWithRetry already treats AbortError as non-retryable.
+        signal: AbortSignal.timeout(30_000),
       });
 
       if (!response.ok) {
