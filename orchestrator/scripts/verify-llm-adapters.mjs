@@ -8,6 +8,7 @@
 
 import { createAnthropicLlmProvider } from '../dist/io/llm/anthropic.js';
 import { createOpenAiCompatibleLlmProvider } from '../dist/io/llm/openaiCompatible.js';
+import { createLlmProviderForProfile } from '../dist/io/llm/index.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createToolRegistry } from '../dist/orchestrator/toolRegistry.js';
 import { runTurn } from '../dist/orchestrator/loop.js';
@@ -686,6 +687,38 @@ await withMockedFetch(
     );
   },
 );
+
+// Provider kinds (deepseek/openrouter, db/migrations/0117) both dispatch to the openai-compatible
+// adapter — the kind names the provider (and where its shared key lives), not a different wire
+// shape, so createLlmProviderForProfile must route them exactly like a freeform openai-compatible
+// profile. Prove the real dispatch resolves to an openai-compatible provider (its name is the
+// adapter's identity; canonical baseUrl handling is covered by verify-llm-connections.mjs and
+// profiles.ts).
+{
+  const deepseek = createLlmProviderForProfile({
+    kind: 'deepseek',
+    model: 'deepseek-v4-flash',
+    apiKey: 'sk-shared-deepseek',
+    baseUrl: 'https://api.deepseek.com',
+    supportsVision: false,
+  });
+  assert(
+    deepseek.name === 'openai-compatible' && deepseek.supportsVision === false,
+    'a deepseek profile dispatches to the openai-compatible adapter',
+  );
+
+  const openrouter = createLlmProviderForProfile({
+    kind: 'openrouter',
+    model: 'deepseek/deepseek-chat',
+    apiKey: 'sk-shared-openrouter',
+    baseUrl: 'https://openrouter.ai/api/v1',
+    supportsVision: false,
+  });
+  assert(
+    openrouter.name === 'openai-compatible' && openrouter.supportsVision === false,
+    'an openrouter profile dispatches to the openai-compatible adapter',
+  );
+}
 
 if (process.exitCode) {
   console.error('\nLLM adapter verification FAILED');

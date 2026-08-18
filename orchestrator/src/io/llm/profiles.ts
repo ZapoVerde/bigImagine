@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/llm/profiles.ts
- * @stamp 2026-08-06
+ * @stamp 2026-08-18
  * @architectural-role Pure Function — LLM connection shape + one-time env-seed parsing
  * @description
  * LlmProfile is the shape io/llm/index.ts's createLlmProviderForProfile consumes — today built
@@ -9,6 +9,14 @@
  * still exists for exactly one caller: index.ts's first-boot seed, which parses the env var once to
  * populate llm_connections when that table is empty, so an existing deployment's connections/keys
  * carry over without a manual DB write on cutover. Every later boot never calls this again.
+ *
+ * `kind` names the connection's provider, not just its wire adapter: `deepseek` and `openrouter`
+ * are provider kinds that still speak the OpenAI-compatible shape (db/migrations/0117), so their
+ * `baseUrl` may be omitted and defaults to the canonical endpoint. The seed can therefore emit
+ * provider-kind profiles; io/llmConnections.ts resolves their key from provider_credentials at call
+ * time. Everything downstream (io/llm/index.ts's dispatch) treats the two exactly like
+ * `openai-compatible`, which is why this file's validation mirrors that defaulting rather than
+ * inventing a parallel rule.
  *
  * The withOverriddenApiKeys/withOverriddenModel/withOverriddenSupportsVision splice functions this
  * file used to export are gone — they existed to patch a field onto an *env-defined* profile before
@@ -30,12 +38,15 @@
  *     external_io:     []
  */
 
+import type { LlmConnectionKind } from '../llmConnections.js';
+
 export interface LlmProfile {
-  kind: 'anthropic' | 'openai-compatible';
+  kind: LlmConnectionKind;
   model: string;
   apiKey: string;
   /** Required when kind is 'openai-compatible' (there's no sane default across vendors);
-   *  optional override for 'anthropic', which already defaults to the real Anthropic API. */
+   *  optional for 'anthropic' (defaults to the real Anthropic API) and for the provider kinds
+   *  'deepseek'/'openrouter', which default to their canonical endpoints. */
   baseUrl?: string;
   /** Whether this connection's model can accept image attachments. Never auto-detected — set
    *  explicitly per connection (io/llmConnections.ts), since there's no reliable way to detect
@@ -71,14 +82,28 @@ export interface LlmProfile {
   pricePeakCacheHitPerMillion?: number;
 }
 
+/** The canonical endpoint for each provider kind, defaulted when a profile omits baseUrl (only the
+ *  freeform 'openai-compatible' kind demands one — see validateProfile). Kept as a module-level map
+ *  so io/llmConnections.ts's store and this parser agree on one source of truth. */
+export const CANONICAL_PROVIDER_BASE_URL: Record<'deepseek' | 'openrouter', string> = {
+  deepseek: 'https://api.deepseek.com',
+  openrouter: 'https://openrouter.ai/api/v1',
+};
+
 function validateProfile(name: string, value: unknown): LlmProfile {
   if (typeof value !== 'object' || value === null) {
     throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"] must be an object`);
   }
   const v = value as Record<string, unknown>;
 
-  if (v.kind !== 'anthropic' && v.kind !== 'openai-compatible') {
-    throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"].kind must be "anthropic" or "openai-compatible", got ${JSON.stringify(v.kind)}`);
+  const kind = v.kind as LlmConnectionKind;
+  if (
+    kind !== 'anthropic' &&
+    kind !== 'openai-compatible' &&
+    kind !== 'deepseek' &&
+    kind !== 'openrouter'
+  ) {
+    throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"].kind must be one of "anthropic", "openai-compatible", "deepseek", "openrouter", got ${JSON.stringify(v.kind)}`);
   }
   if (typeof v.model !== 'string' || !v.model) {
     throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"].model must be a non-empty string`);
@@ -86,15 +111,24 @@ function validateProfile(name: string, value: unknown): LlmProfile {
   if (typeof v.apiKey !== 'string' || !v.apiKey) {
     throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"].apiKey must be a non-empty string`);
   }
-  if (v.kind === 'openai-compatible' && (typeof v.baseUrl !== 'string' || !v.baseUrl)) {
+  if (kind === 'openai-compatible' && (typeof v.baseUrl !== 'string' || !v.baseUrl)) {
     throw new Error(`BIGBRAIN_LLM_PROFILES["${name}"].baseUrl is required when kind is "openai-compatible"`);
   }
 
+  const baseUrl =
+    kind === 'deepseek' || kind === 'openrouter'
+      ? typeof v.baseUrl === 'string' && v.baseUrl
+        ? v.baseUrl
+        : CANONICAL_PROVIDER_BASE_URL[kind]
+      : typeof v.baseUrl === 'string'
+        ? v.baseUrl
+        : undefined;
+
   return {
-    kind: v.kind,
+    kind,
     model: v.model,
     apiKey: v.apiKey,
-    baseUrl: typeof v.baseUrl === 'string' ? v.baseUrl : undefined,
+    baseUrl,
     supportsVision: v.supportsVision === true,
   };
 }

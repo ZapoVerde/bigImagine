@@ -226,6 +226,13 @@
   border-color: var(--color-accent);
 }
 
+/* "no shared key" badge on a provider-kind row whose shared credential isn't configured — amber,
+   not red: the connection can still be edited/configured, it just can't serve until the key lands. */
+.connections-row-badge-warning {
+  color: var(--color-danger, #b45309);
+  border-color: var(--color-danger, #b45309);
+}
+
 .connections-editor-header {
   display: flex;
   align-items: center;
@@ -296,6 +303,16 @@
 .status {
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
+}
+
+/* The shared-key readout for provider-kind connections (deepseek/openrouter, db/migrations/0117) —
+   amber tint when the shared provider_credentials row isn't configured yet, so "this connection
+   can't serve until you set it" reads as a warning, not a routine status line. */
+.connections-shared-key-warning {
+  border: 1px solid var(--color-danger, #b45309);
+  color: var(--color-danger, #b45309);
+  padding: 0.5rem 0.7rem;
+  border-radius: var(--radius-md);
 }
 
 .connections-provider-pin {

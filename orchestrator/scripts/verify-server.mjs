@@ -63,9 +63,17 @@ const PRICING_FIXTURE = `
 // llmConnections.ts's own DB/encryption logic. listModelsForConnection/listProvidersForConnection
 // build a real adapter (createLlmProviderForProfile) around whatever resolveById returns, so seeded
 // rows need real-shaped baseUrls for the mocked-fetch model-catalog test further down to intercept.
-function createFakeLlmConnectionStore(seedRows = []) {
+// Since db/migrations/0117 the store mirrors provider-kind (deepseek/openrouter) key semantics: such
+// rows store no key and draw the shared provider_credentials credential instead, tracked here by the
+// optional `sharedConfigured` set of credential names ('deepseek_api_key'/'openrouter_api_key').
+function createFakeLlmConnectionStore(seedRows = [], sharedConfigured = new Set()) {
   const rows = new Map(seedRows.map((r) => [r.id, { ...r }]));
   let nextId = 1;
+  function isProviderKind(kind) {
+    return kind === 'deepseek' || kind === 'openrouter';
+  }
+  const SHARED_BY_KIND = { deepseek: 'deepseek_api_key', openrouter: 'openrouter_api_key' };
+  const CANONICAL = { deepseek: 'https://api.deepseek.com', openrouter: 'https://openrouter.ai/api/v1' };
   function toPublic(row) {
     const {
       apiKey,
@@ -87,13 +95,23 @@ function createFakeLlmConnectionStore(seedRows = []) {
     if (pricePeakOutputPerMillion !== undefined && pricePeakOutputPerMillion !== null) pub.pricePeakOutputPerMillion = pricePeakOutputPerMillion;
     if (pricePeakCacheHitPerMillion !== undefined && pricePeakCacheHitPerMillion !== null) pub.pricePeakCacheHitPerMillion = pricePeakCacheHitPerMillion;
     if (row.priceSyncedAt !== undefined && row.priceSyncedAt !== null) pub.priceSyncedAt = row.priceSyncedAt;
+    pub.usesSharedKey = isProviderKind(row.kind);
+    pub.sharedKeyConfigured = isProviderKind(row.kind) ? sharedConfigured.has(SHARED_BY_KIND[row.kind]) : true;
     return pub;
   }
   function toProfile(row) {
+    const apiKey = isProviderKind(row.kind)
+      ? (() => {
+          if (!sharedConfigured.has(SHARED_BY_KIND[row.kind])) {
+            throw new Error(`${SHARED_BY_KIND[row.kind]} is not configured — set the shared ${row.kind} key in Settings`);
+          }
+          return `sk-shared-${row.kind}`;
+        })()
+      : row.apiKey;
     return {
       kind: row.kind,
       model: row.model,
-      apiKey: row.apiKey,
+      apiKey,
       baseUrl: row.baseUrl ?? undefined,
       supportsVision: row.supportsVision,
       priceInputPerMillion: row.priceInputPerMillion ?? undefined,
@@ -106,18 +124,35 @@ function createFakeLlmConnectionStore(seedRows = []) {
   }
   return {
     rows,
+    sharedConfigured,
     async list() {
       return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name)).map(toPublic);
     },
     async create(init) {
+      // Same kind-dependent key rules the real store enforces (io/llmConnections.ts's create):
+      // provider kinds draw the shared credential and must NOT carry a per-connection key.
+      if (isProviderKind(init.kind)) {
+        if (init.apiKey !== undefined || init.copyApiKeyFrom !== undefined) {
+          throw new Error(`kind "${init.kind}" uses the shared ${init.kind} key — apiKey/copyApiKeyFrom are not allowed`);
+        }
+      } else if ((init.apiKey === undefined) === (init.copyApiKeyFrom === undefined)) {
+        throw new Error('exactly one of apiKey/copyApiKeyFrom is required for this connection kind');
+      }
+      if (init.kind === 'openai-compatible' && !init.baseUrl) {
+        throw new Error('baseUrl is required for kind "openai-compatible"');
+      }
       const id = `conn-${nextId++}`;
       const row = {
         id,
         name: init.name,
         kind: init.kind,
         model: init.model,
-        apiKey: init.copyApiKeyFrom ? rows.get(init.copyApiKeyFrom)?.apiKey : init.apiKey,
-        baseUrl: init.baseUrl ?? null,
+        apiKey: isProviderKind(init.kind)
+          ? null
+          : init.copyApiKeyFrom
+            ? rows.get(init.copyApiKeyFrom)?.apiKey
+            : init.apiKey,
+        baseUrl: isProviderKind(init.kind) ? CANONICAL[init.kind] : (init.baseUrl ?? null),
         supportsVision: init.supportsVision ?? false,
         providerOrder: init.providerOrder ?? null,
         allowFallbacks: init.allowFallbacks ?? true,
@@ -137,9 +172,26 @@ function createFakeLlmConnectionStore(seedRows = []) {
     async update(id, patch) {
       const row = rows.get(id);
       if (!row) return undefined;
+      const targetKind = patch.kind ?? row.kind;
+      const switchingFromProvider = !isProviderKind(targetKind) && isProviderKind(row.kind);
+      if (isProviderKind(targetKind)) {
+        if (patch.apiKey !== undefined || patch.copyApiKeyFrom !== undefined) {
+          throw new Error(`kind "${targetKind}" uses the shared ${targetKind} key — apiKey/copyApiKeyFrom are not allowed`);
+        }
+      }
+      if (switchingFromProvider && patch.apiKey === undefined && patch.copyApiKeyFrom === undefined) {
+        throw new Error(`kind "${targetKind}" needs its own key — provide apiKey or copyApiKeyFrom when leaving the shared-key "${row.kind}" kind`);
+      }
       const { copyApiKeyFrom, ...rest } = patch;
       Object.assign(row, rest, { updatedAt: new Date().toISOString() });
-      if (copyApiKeyFrom) row.apiKey = rows.get(copyApiKeyFrom)?.apiKey;
+      if (isProviderKind(targetKind)) {
+        row.apiKey = null;
+        row.baseUrl = CANONICAL[targetKind];
+      } else {
+        if (copyApiKeyFrom !== undefined) row.apiKey = rows.get(copyApiKeyFrom)?.apiKey;
+        else if (patch.apiKey !== undefined) row.apiKey = patch.apiKey;
+        if (patch.baseUrl !== undefined) row.baseUrl = patch.baseUrl;
+      }
       return toPublic(row);
     },
     async remove(id) {
@@ -1422,6 +1474,95 @@ const syncGetRes = await fetch(`${base}/v1/admin/connections/pricing-sync`, {
   headers: { authorization: 'Bearer the-admin-key' },
 });
 assert(syncGetRes.status === 404, 'a GET on /v1/admin/connections/pricing-sync falls through to the :id handler and 404s');
+
+// Provider kinds (deepseek/openrouter, db/migrations/0117): create/update key rules, the shared-key
+// readout fields (usesSharedKey/sharedKeyConfigured), and the store-level validation errors the
+// routes surface as 400s. The main server's fake store has no shared credential configured here,
+// so a freshly created provider-kind row reads sharedKeyConfigured === false until the set is seeded.
+const providerKeyRejectedRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'bad-deepseek', kind: 'deepseek', model: 'deepseek-v4-flash', apiKey: 'sk-x' }),
+});
+assert(providerKeyRejectedRes.status === 400, 'POST /v1/admin/connections rejects a provider kind carrying apiKey');
+
+const providerCopyRejectedRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'bad-openrouter', kind: 'openrouter', model: 'deepseek/deepseek-chat', copyApiKeyFrom: 'conn-openrouter' }),
+});
+assert(providerCopyRejectedRes.status === 400, 'POST /v1/admin/connections rejects a provider kind carrying copyApiKeyFrom');
+
+const providerNoKeyRes = await fetch(`${base}/v1/admin/connections`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ name: 'native-deepseek', kind: 'deepseek', model: 'deepseek-v4-flash' }),
+});
+const providerNoKeyBody = await providerNoKeyRes.json();
+assert(
+  providerNoKeyRes.status === 201 &&
+    providerNoKeyBody.kind === 'deepseek' &&
+    providerNoKeyBody.usesSharedKey === true &&
+    providerNoKeyBody.sharedKeyConfigured === false &&
+    !('apiKey' in providerNoKeyBody) &&
+    providerNoKeyBody.baseUrl === 'https://api.deepseek.com',
+  'POST /v1/admin/connections creates a provider-kind connection with no key, the canonical base URL, and the shared-key readout',
+);
+
+// Seeding the shared credential flips sharedKeyConfigured on the same row in the next list.
+llmConnections.sharedConfigured.add('deepseek_api_key');
+const providerListedConfigured = (
+  await (await fetch(`${base}/v1/admin/connections`, { headers: { authorization: 'Bearer the-admin-key' } })).json()
+).connections.find((c) => c.id === providerNoKeyBody.id);
+assert(
+  providerListedConfigured && providerListedConfigured.sharedKeyConfigured === true,
+  'GET /v1/admin/connections reflects the shared credential once it is configured',
+);
+
+const patchProviderKeyRejectedRes = await fetch(`${base}/v1/admin/connections/${providerNoKeyBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ apiKey: 'sk-rotate' }),
+});
+assert(patchProviderKeyRejectedRes.status === 400, 'PATCH /v1/admin/connections rejects a per-connection key on a provider-kind target');
+
+const patchProviderToFreeformNoKeyRes = await fetch(`${base}/v1/admin/connections/${providerNoKeyBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ kind: 'openai-compatible' }),
+});
+assert(
+  patchProviderToFreeformNoKeyRes.status === 400,
+  'PATCH /v1/admin/connections: switching a provider-kind connection to freeform without supplying a key is a 400',
+);
+
+const patchProviderToFreeformRes = await fetch(`${base}/v1/admin/connections/${providerNoKeyBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ kind: 'openai-compatible', apiKey: 'sk-fresh', baseUrl: 'https://example.invalid/x' }),
+});
+const patchProviderToFreeformBody = await patchProviderToFreeformRes.json();
+assert(
+  patchProviderToFreeformRes.status === 200 &&
+    patchProviderToFreeformBody.kind === 'openai-compatible' &&
+    patchProviderToFreeformBody.usesSharedKey === false &&
+    patchProviderToFreeformBody.sharedKeyConfigured === true &&
+    llmConnections.rows.get(providerNoKeyBody.id).apiKey === 'sk-fresh',
+  'PATCH /v1/admin/connections: leaving a shared-key kind stores the fresh per-connection key',
+);
+
+const patchProviderSneakKeyRes = await fetch(`${base}/v1/admin/connections/${providerNoKeyBody.id}`, {
+  method: 'PATCH',
+  headers: { 'content-type': 'application/json', authorization: 'Bearer the-admin-key' },
+  body: JSON.stringify({ kind: 'openrouter', apiKey: 'sk-x' }),
+});
+assert(patchProviderSneakKeyRes.status === 400, 'PATCH /v1/admin/connections rejects switching into another provider kind while carrying a key');
+
+await fetch(`${base}/v1/admin/connections/${providerNoKeyBody.id}`, {
+  method: 'DELETE',
+  headers: { authorization: 'Bearer the-admin-key' },
+}); // cleanup — the converted connection is no longer active, so this succeeds
+llmConnections.sharedConfigured.delete('deepseek_api_key');
 
 const patchUnknownRes = await fetch(`${base}/v1/admin/connections/not-a-real-id`, {
   method: 'PATCH',

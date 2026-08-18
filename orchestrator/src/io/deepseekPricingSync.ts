@@ -10,10 +10,11 @@
  *
  * fetch the static pricing page (io/httpRetry.ts's fetchWithRetry — a fixed first-party docs URL,
  * so no fetchUntrusted/SSRF treatment), parse it with io/llm/deepseekPricing.ts's pure parser, and
- * for every connection whose base_url host is api.deepseek.com AND whose model id is on the page,
- * update all six price fields (off-peak/base + peak) plus price_synced_at. A matched connection's
- * manual prices are overwritten by the official rates — that is the point of the feature. Anything
- * else (host mismatch, model not on the page, unparseable base URL) is left untouched.
+ * for every connection whose kind is 'deepseek' (or whose base_url host is api.deepseek.com — the
+ * pre-0117 freeform spelling of the same thing) AND whose model id is on the page, update all six
+ * price fields (off-peak/base + peak) plus price_synced_at. A matched connection's manual prices
+ * are overwritten by the official rates — that is the point of the feature. Anything else (kind
+ * mismatch, host mismatch, model not on the page, unparseable base URL) is left untouched.
  *
  * One failed fetch aborts the whole pass and the caller (loop/route) surfaces the error — a
  * deployment's prices are simply whatever the last successful sync wrote; rows are per-update
@@ -62,6 +63,13 @@ function pricingForConnection(
   connection: LlmConnectionRow,
   byModel: Map<string, DeepSeekPricing>,
 ): DeepSeekPricing | undefined {
+  // A kind-marked native DeepSeek connection matches by kind alone — no URL parsing, and robust to
+  // a nonstandard baseUrl. Freeform rows (kind === 'openai-compatible') keep the legacy host check
+  // (io/llm/deepseekPricing.ts's matchDeepSeekPricing) so an api.deepseek.com connection created
+  // before the 0117 kinds still syncs.
+  if (connection.kind === 'deepseek') {
+    return byModel.get(connection.model);
+  }
   const match = matchDeepSeekPricing(connection.baseUrl, connection.model, byModel);
   if (match.status === 'unparseable-url') {
     log.warn(`deepseek pricing sync: skipping "${connection.name}" — unparseable base URL "${connection.baseUrl}"`);

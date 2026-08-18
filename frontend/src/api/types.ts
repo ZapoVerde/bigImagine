@@ -119,13 +119,22 @@ export interface CredentialSummary {
 // orchestrator/src/io/llmConnections.ts LlmConnectionRow — the Connections tab's list/detail shape.
 // No apiKey field at all (write-only by construction, same as CredentialSummary above) — a
 // connection always has one set (required at creation), so there's no "configured" state to track.
+// Provider-kind connections (deepseek/openrouter, db/migrations/0117) are the exception: their key
+// is the shared provider_credentials row, tracked via usesSharedKey/sharedKeyConfigured below.
 export interface LlmConnectionSummary {
   id: string;
   name: string;
-  kind: 'anthropic' | 'openai-compatible';
+  kind: 'anthropic' | 'openai-compatible' | 'deepseek' | 'openrouter';
   model: string;
   baseUrl: string | null;
   supportsVision: boolean;
+  /** True for provider-kind (deepseek/openrouter) rows: their key comes from the shared
+   *  provider_credentials row (set/rotated in Settings), not this connection's own ciphertext. */
+  usesSharedKey: boolean;
+  /** Whether the shared credential behind a provider-kind row is configured — the "key set?"
+   *  readout the Connections UI shows for these kinds. Always true for freeform rows (they own
+   *  their key). */
+  sharedKeyConfigured: boolean;
   providerOrder: string[] | null;
   allowFallbacks: boolean;
   quantizations: string[] | null;
@@ -148,12 +157,13 @@ export interface LlmConnectionSummary {
 }
 
 // orchestrator/src/server/adminServer.ts parseCreateConnectionBody's expected shape (LlmConnectionInit)
-// — exactly one of apiKey/copyApiKeyFrom must be sent: a fresh key, or reuse an existing
-// connection's (by id) instead of re-pasting the same key into every connection that shares one
-// underlying provider.
+// — provider kinds (deepseek/openrouter) take no key (their shared provider_credentials key is set
+// in Settings); freeform kinds (anthropic/openai-compatible) need exactly one of apiKey/
+// copyApiKeyFrom: a fresh key, or reuse an existing connection's (by id) instead of re-pasting the
+// same key into every connection that shares one underlying provider.
 export interface CreateConnectionInput {
   name: string;
-  kind: 'anthropic' | 'openai-compatible';
+  kind: 'anthropic' | 'openai-compatible' | 'deepseek' | 'openrouter';
   model: string;
   apiKey?: string;
   copyApiKeyFrom?: string;
@@ -174,13 +184,15 @@ export interface CreateConnectionInput {
 
 // orchestrator/src/server/adminServer.ts parseUpdateConnectionBody's expected shape
 // (LlmConnectionPatch) — every field optional (a PATCH); baseUrl/providerOrder/quantizations
-// additionally accept null to explicitly clear a previously-set value.
+// additionally accept null to explicitly clear a previously-set value. `kind` is optional too —
+// changing it switches a connection's provider; provider-kind targets reject apiKey/copyApiKeyFrom.
 export interface UpdateConnectionInput {
   name?: string;
+  kind?: 'anthropic' | 'openai-compatible' | 'deepseek' | 'openrouter';
   model?: string;
-  /** Omit to leave the stored key untouched — only send when actually rotating it. Mutually exclusive with copyApiKeyFrom. */
+  /** Omit to leave the stored key untouched — only send when actually rotating it. Mutually exclusive with copyApiKeyFrom. Provider kinds reject this. */
   apiKey?: string;
-  /** Rotate by copying another connection's key instead of typing one. Mutually exclusive with apiKey. */
+  /** Rotate by copying another connection's key instead of typing one. Mutually exclusive with apiKey. Provider kinds reject this. */
   copyApiKeyFrom?: string;
   baseUrl?: string | null;
   supportsVision?: boolean;

@@ -55,7 +55,7 @@ import { startChatMemorySyncLoop } from './orchestrator/chatMemorySync.js';
 import { startCleanupLoop } from './orchestrator/cleanupLoop.js';
 import { startDeepSeekPricingSyncLoop } from './orchestrator/deepseekPricingSyncLoop.js';
 import { parseLlmProfiles } from './io/llm/profiles.js';
-import { createLlmConnectionStore } from './io/llmConnections.js';
+import { createLlmConnectionStore, SHARED_CREDENTIAL_BY_KIND } from './io/llmConnections.js';
 import { createImageConnectionStore } from './io/imageConnections.js';
 import { createEmbeddingProvider } from './io/embeddings/index.js';
 import { createRetryingEmbeddingProvider } from './io/embeddings/retry.js';
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
   const cipher = createFieldCipher();
   const credentials = createProviderCredentialStore(db, cipher);
   const settings = createOrchestratorSettingsStore(db);
-  const llmConnections = createLlmConnectionStore(db, cipher);
+  const llmConnections = createLlmConnectionStore(db, cipher, credentials);
   const imageConnections = createImageConnectionStore(db, cipher);
 
   const voyageKey = await credentials.resolve('voyage_api_key', process.env.BIGBRAIN_EMBEDDINGS_API_KEY);
@@ -143,20 +143,21 @@ async function main(): Promise<void> {
       // its own BIGBRAIN_LLM_PROFILES entry, which was always its only source. Fails closed same
       // as before: a scrubbed post-cutover UNMANAGED_SENTINEL env value with no DB row throws here
       // rather than seeding a dead key that only fails later, at the first real LLM call.
-      const apiKey =
-        name === 'deepseek'
-          ? await credentials.resolve('deepseek_api_key', profile.apiKey)
-          : name === 'openrouter'
-            ? await credentials.resolve('openrouter_api_key', profile.apiKey)
-            : profile.apiKey;
+      // A profile named deepseek/openrouter becomes the matching provider kind (db/migrations/0117):
+      // its key lives in provider_credentials and is shared by every connection of that kind, so
+      // create() is called without a per-connection apiKey.
+      const providerKind = name === 'deepseek' ? 'deepseek' : name === 'openrouter' ? 'openrouter' : undefined;
+      const apiKey = providerKind
+        ? await credentials.resolve(SHARED_CREDENTIAL_BY_KIND[providerKind], profile.apiKey)
+        : profile.apiKey;
       if (!apiKey) {
         throw new Error(`${name}_api_key has no provider_credentials row and no usable env fallback`);
       }
       const created = await llmConnections.create({
         name,
-        kind: profile.kind,
+        kind: providerKind ?? profile.kind,
         model: profile.model,
-        apiKey,
+        ...(providerKind ? {} : { apiKey }),
         baseUrl: profile.baseUrl,
         supportsVision: visionCapableProfiles.includes(name),
       });

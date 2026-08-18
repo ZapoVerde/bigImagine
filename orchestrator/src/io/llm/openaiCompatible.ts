@@ -195,7 +195,11 @@ function buildOaiRequest(
       : undefined,
     // DeepSeek-specific, harmless elsewhere: reasoning models reject a forced tool_choice
     // while "thinking" — ST's own DeepSeek integration (st-source/src/endpoints/backends/
-    // chat-completions.js) hits the same conflict and disables thinking the same way.
+    // chat-completions.js) hits the same conflict and disables thinking the same way. Confirmed
+    // live 2026-08-18 this field is NOT the cause of a pinned OpenRouter connection's "No
+    // endpoints found" 404s — see the household-default connection's provider_order comment in
+    // db/migrations instead; the real cause is a pinned provider that doesn't support forced
+    // (by-name) tool_choice at all, independent of this field.
     ...(options?.forceTool ? { thinking: { type: 'disabled' } } : {}),
     ...(config.provider
       ? {

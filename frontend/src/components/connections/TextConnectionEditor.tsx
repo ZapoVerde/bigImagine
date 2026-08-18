@@ -21,9 +21,23 @@ import type { ConnectionTestResult, LlmConnectionSummary, ReliabilitySweepSnapsh
 // whose key to reuse (LlmConnectionInit/Patch.copyApiKeyFrom) — the escape hatch for several named
 // connections that share one underlying provider (e.g. three OpenRouter connections, one model
 // each) without re-pasting the same key into every one of them.
+type ConnectionKind = 'anthropic' | 'openai-compatible' | 'deepseek' | 'openrouter';
+
+// db/migrations/0117: provider kinds draw their key from the shared provider_credentials row (set
+// in Settings), never from a per-connection ciphertext — they store no key, so the whole API-key
+// control and the Base URL field are hidden for them.
+function isProviderKind(kind: ConnectionKind): kind is 'deepseek' | 'openrouter' {
+  return kind === 'deepseek' || kind === 'openrouter';
+}
+
+const SHARED_CREDENTIAL_NAME: Record<'deepseek' | 'openrouter', string> = {
+  deepseek: 'DeepSeek',
+  openrouter: 'OpenRouter',
+};
+
 interface Draft {
   name: string;
-  kind: 'anthropic' | 'openai-compatible';
+  kind: ConnectionKind;
   model: string;
   apiKey: string;
   keySource: string;
@@ -131,17 +145,19 @@ function providerOrderFromDraft(draft: Draft): string[] | undefined {
 
 // OpenRouter-only autofill for the Pricing fieldset (adminServer.ts's listModelsForConnection/
 // listProviders carry per-token USD strings straight from OR's /models and /models/{id}/endpoints).
-// Fills the manual receipt fields from the current source so the admin never copies OR's numbers in
-// by hand — the pinned provider's own rate when one is pinned (the endpoint that actually serves),
-// else the model's platform-wide rate. Converts per-token to the receipt's USD-per-1M-token unit.
-// OR's pricing shape has no cache-hit tier (openaiCompatible.ts reads only prompt/completion), so
-// cache-hit is deliberately left untouched — never guessed. No-op for native DeepSeek and other
-// non-OR endpoints, whose /models carries no pricing field at all (pricing stays undefined).
+// Only offered to kind 'openrouter' (db/migrations/0117) — a native DeepSeek connection's /models
+// carries no pricing at all and its rates sync from the official page instead; any other kind has no
+// OR catalog. Fills the manual receipt fields from the current source so the admin never copies OR's
+// numbers in by hand — the pinned provider's own rate when one is pinned (the endpoint that actually
+// serves), else the model's platform-wide rate. Converts per-token to the receipt's USD-per-1M-token
+// unit. OR's pricing shape has no cache-hit tier (openaiCompatible.ts reads only prompt/completion),
+// so cache-hit is deliberately left untouched — never guessed.
 function openRouterPricingFor(
   draft: Draft,
   modelOptions: { id: string; pricing?: { prompt: string; completion: string } }[],
   providerOptions: { name: string; tag: string; quantization?: string; pricing?: { prompt: string; completion: string } }[],
 ): { inputPerMillion: string; outputPerMillion: string } | null {
+  if (draft.kind !== 'openrouter') return null;
   const pinned = providerOptions.find((p) => p.name === draft.providerPrimary)?.pricing;
   const pricing = pinned ?? modelOptions.find((m) => m.id === draft.model)?.pricing;
   if (!pricing) return null;
@@ -293,7 +309,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   // error banner. Refetches whenever the draft's own model field changes, so the picker previews
   // routing for whatever model is about to be saved, not necessarily the stored one.
   useEffect(() => {
-    if (!selected || isNew || draft.kind !== 'openai-compatible' || !draft.model) {
+    if (!selected || isNew || draft.kind !== 'openrouter' || !draft.model) {
       setProviderOptions([]);
       return;
     }
@@ -350,19 +366,21 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
   ];
 
   async function save() {
-    if (!draft.name.trim() || !draft.model.trim()) {
-      setError('Name and model are required.');
+    if (!draft.name.trim()) {
+      setError('Name is required.');
       return;
     }
     if (draft.kind === 'openai-compatible' && !draft.baseUrl.trim()) {
       setError('Base URL is required for an OpenAI-compatible connection.');
       return;
     }
-    if (draft.keySource === 'new' && !draft.apiKey.trim()) {
+    // Key-required checks only apply to freeform kinds — provider kinds (deepseek/openrouter) draw
+    // the shared provider_credentials key and take no per-connection key at all.
+    if (!isProviderKind(draft.kind) && draft.keySource === 'new' && !draft.apiKey.trim()) {
       setError('An API key is required, or pick an existing connection to reuse its key.');
       return;
     }
-    if (isNew && !draft.keySource) {
+    if (isNew && !isProviderKind(draft.kind) && !draft.keySource) {
       setError('Pick an API key source: a new key, or reuse an existing connection’s.');
       return;
     }
@@ -385,9 +403,15 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             name: draft.name.trim(),
             kind: draft.kind,
             model: draft.model.trim(),
-            apiKey: draft.keySource === 'new' ? draft.apiKey : undefined,
-            copyApiKeyFrom: draft.keySource === 'new' ? undefined : draft.keySource,
-            baseUrl: draft.kind === 'openai-compatible' ? draft.baseUrl.trim() : draft.baseUrl.trim() || undefined,
+            // Provider kinds send no key — the shared provider_credentials key is resolved at call
+            // time; the server rejects apiKey/copyApiKeyFrom for them anyway.
+            ...(isProviderKind(draft.kind)
+              ? {}
+              : {
+                  apiKey: draft.keySource === 'new' ? draft.apiKey : undefined,
+                  copyApiKeyFrom: draft.keySource === 'new' ? undefined : draft.keySource,
+                }),
+            baseUrl: isProviderKind(draft.kind) ? undefined : draft.baseUrl.trim() || undefined,
             supportsVision: draft.supportsVision,
             providerOrder: providerOrderFromDraft(draft),
             allowFallbacks: draft.allowFallbacks,
@@ -407,10 +431,18 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
           selected.id,
           {
             name: draft.name.trim(),
+            kind: draft.kind,
             model: draft.model.trim(),
-            ...(draft.keySource === 'new' && draft.apiKey.trim() ? { apiKey: draft.apiKey } : {}),
-            ...(draft.keySource && draft.keySource !== 'new' ? { copyApiKeyFrom: draft.keySource } : {}),
-            baseUrl: draft.baseUrl.trim() || null,
+            // For provider kinds never send a key rotation — the server rejects key fields for a
+            // provider-kind target; switching a freeform connection to a provider kind just drops
+            // its old per-connection key (the store nulls it) in favor of the shared credential.
+            ...(!isProviderKind(draft.kind) && draft.keySource === 'new' && draft.apiKey.trim()
+              ? { apiKey: draft.apiKey }
+              : {}),
+            ...(!isProviderKind(draft.kind) && draft.keySource && draft.keySource !== 'new'
+              ? { copyApiKeyFrom: draft.keySource }
+              : {}),
+            baseUrl: isProviderKind(draft.kind) ? undefined : draft.baseUrl.trim() || null,
             supportsVision: draft.supportsVision,
             providerOrder: providerOrderFromDraft(draft) ?? null,
             allowFallbacks: draft.allowFallbacks,
@@ -564,6 +596,15 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
     }
   }
 
+  // sharedKeyConfigured is a property of the *kind*, not any one row — every connection of that kind
+  // reads the same provider_credentials entry. selected.sharedKeyConfigured only answers for
+  // selected's own (saved) kind, which goes stale the moment the Kind dropdown changes; prefer any
+  // other connection already on this kind, and fall back to "unknown" (not a false negative) if none
+  // exists yet — e.g. the very first connection of a brand-new kind.
+  const draftSharedKeyConfigured = isProviderKind(draft.kind)
+    ? (selected?.kind === draft.kind ? selected : connections.find((c) => c.kind === draft.kind))?.sharedKeyConfigured
+    : undefined;
+
   return (
     <>
       {error && <div className="error-banner">{error}</div>}
@@ -608,7 +649,19 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             <select
               value={draft.kind}
               onChange={(e) => {
-                const kind = e.target.value as Draft['kind'];
+                const kind = e.target.value as ConnectionKind;
+                // Switching an existing freeform connection to a provider kind drops its own key in
+                // favor of the shared credential (db/migrations/0117) — a real behavior change, so
+                // confirm it before committing. New connections need no confirm.
+                if (!isNew && isProviderKind(kind) && !isProviderKind(draft.kind)) {
+                  if (
+                    !window.confirm(
+                      `This connection will stop using its own key and draw the shared ${SHARED_CREDENTIAL_NAME[kind]} key instead.`,
+                    )
+                  ) {
+                    return;
+                  }
+                }
                 setDraft((d) => ({
                   ...d,
                   kind,
@@ -622,7 +675,9 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
                 }));
               }}
             >
-              <option value="openai-compatible">OpenAI-compatible (OpenRouter, DeepSeek, etc.)</option>
+              <option value="openai-compatible">OpenAI-compatible (generic endpoint)</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="openrouter">OpenRouter</option>
               <option value="anthropic">Anthropic</option>
             </select>
           </label>
@@ -638,53 +693,65 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             </label>
           )}
 
-          <label>
-            API key
-            <select
-              value={draft.keySource}
-              onChange={(e) => {
-                const value = e.target.value;
-                setDraft((d) => {
-                  const source = connections.find((c) => c.id === value);
-                  return {
-                    ...d,
-                    keySource: value,
-                    // Convenience default, not a lock — only fills an empty Base URL, never
-                    // overwrites one the admin already typed.
-                    baseUrl: !d.baseUrl && source?.baseUrl ? source.baseUrl : d.baseUrl,
-                  };
-                });
-              }}
+          {isProviderKind(draft.kind) ? (
+            <div
+              className={`status${draftSharedKeyConfigured === false ? ' connections-shared-key-warning' : ''}`}
             >
-              {!isNew && <option value="">Leave unchanged</option>}
-              <option value="new">Enter a new key</option>
-              {connections.filter((c) => c.kind === draft.kind && c.id !== selected?.id).length > 0 && (
-                <optgroup label="Reuse an existing connection's key">
-                  {connections
-                    .filter((c) => c.kind === draft.kind && c.id !== selected?.id)
-                    .map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                </optgroup>
+              {draftSharedKeyConfigured === undefined
+                ? `Uses the shared ${SHARED_CREDENTIAL_NAME[draft.kind]} key — set it in Settings once, if you haven't already.`
+                : draftSharedKeyConfigured
+                  ? `Uses the shared ${SHARED_CREDENTIAL_NAME[draft.kind]} key — rotate it once in Settings.`
+                  : `Uses the shared ${SHARED_CREDENTIAL_NAME[draft.kind]} key, which isn't set yet — set it in Settings before this connection can serve.`}
+            </div>
+          ) : (
+            <label>
+              API key
+              <select
+                value={draft.keySource}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  setDraft((d) => {
+                    const source = connections.find((c) => c.id === value);
+                    return {
+                      ...d,
+                      keySource: value,
+                      // Convenience default, not a lock — only fills an empty Base URL, never
+                      // overwrites one the admin already typed.
+                      baseUrl: !d.baseUrl && source?.baseUrl ? source.baseUrl : d.baseUrl,
+                    };
+                  });
+                }}
+              >
+                {!isNew && <option value="">Leave unchanged</option>}
+                <option value="new">Enter a new key</option>
+                {connections.filter((c) => c.kind === draft.kind && !isProviderKind(c.kind) && c.id !== selected?.id).length > 0 && (
+                  <optgroup label="Reuse an existing connection's key">
+                    {connections
+                      .filter((c) => c.kind === draft.kind && !isProviderKind(c.kind) && c.id !== selected?.id)
+                      .map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                  </optgroup>
+                )}
+              </select>
+              {draft.keySource === 'new' && (
+                <input
+                  type="password"
+                  value={draft.apiKey}
+                  onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
+                  placeholder="required"
+                />
               )}
-            </select>
-            {draft.keySource === 'new' && (
-              <input
-                type="password"
-                value={draft.apiKey}
-                onChange={(e) => setDraft((d) => ({ ...d, apiKey: e.target.value }))}
-                placeholder="required"
-              />
-            )}
-            {draft.keySource && draft.keySource !== 'new' && (
-              <div className="connections-field-note">
-                Will reuse {connections.find((c) => c.id === draft.keySource)?.name ?? 'the selected connection'}&rsquo;s key — no
-                need to re-enter it.
-              </div>
-            )}
-          </label>
+              {draft.keySource && draft.keySource !== 'new' && (
+                <div className="connections-field-note">
+                  Will reuse {connections.find((c) => c.id === draft.keySource)?.name ?? 'the selected connection'}&rsquo;s key — no
+                  need to re-enter it.
+                </div>
+              )}
+            </label>
+          )}
 
           <label>
             Model
@@ -730,7 +797,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             {' '}This connection can see images (vision)
           </label>
 
-          {draft.kind === 'openai-compatible' && (
+          {draft.kind === 'openrouter' && (
             <fieldset className="connections-provider-pin">
               <legend>Provider routing (OpenRouter only)</legend>
               <div className="status">
@@ -796,7 +863,7 @@ export default function TextConnectionEditor({ connections, selected, isNew, adm
             </fieldset>
           )}
 
-          {draft.kind === 'openai-compatible' && (
+          {draft.kind === 'openrouter' && (
             <fieldset className="connections-provider-pin">
               <legend>Provider reliability (OpenRouter)</legend>
               <div className="status">

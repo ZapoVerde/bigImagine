@@ -217,6 +217,14 @@ export default function ConnectionsView() {
                   (txt)
                 </span>
               )}
+              {c.usesSharedKey && !c.sharedKeyConfigured && (
+                <span
+                  className="connections-row-badge connections-row-badge-warning"
+                  title={`Shared ${c.kind} key isn't set yet — configure it in Settings before this connection can serve`}
+                >
+                  ⚠ no shared key
+                </span>
+              )}
             </div>
           ))}
           {imageConnections.map((c) => (

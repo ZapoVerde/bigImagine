@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/adminServer.ts
- * @stamp 2026-08-10
+ * @stamp 2026-08-18
  * @architectural-role Pure Function (request parsing) + IO Wrapper (credential store IO) — same
  * dual-role split already established by toolInvoke.ts for this codebase's other additive HTTP
  * surface
@@ -49,8 +49,13 @@
  * parseSetCredentialBody(raw) — validates {name, value}; undefined on any malformed shape
  * listCredentials(store) — CredentialSummary[] for every fixed name in CREDENTIAL_NAMES
  * setCredential(store, name, value) — encrypts + upserts the one named credential
- * parseCreateConnectionBody(raw) — validates an LlmConnectionInit; undefined on any malformed shape
- * parseUpdateConnectionBody(raw) — validates an LlmConnectionPatch; undefined on any malformed shape
+ * parseCreateConnectionBody(raw) — validates an LlmConnectionInit; undefined on any malformed shape.
+ *   Provider kinds (deepseek/openrouter) take no key (their shared provider_credentials key is set in
+ *   Settings); freeform kinds need exactly one of apiKey/copyApiKeyFrom
+ * parseUpdateConnectionBody(raw) — validates an LlmConnectionPatch; undefined on any malformed shape.
+ *   Optional `kind` lets an admin change a connection's provider; provider-kind targets reject
+ *   apiKey/copyApiKeyFrom, and the reverse transition must supply a per-connection key (the store
+ *   enforces that last one and the route surfaces it as a 400)
  * parseCreateImageConnectionBody(raw) — validates an ImageConnectionInit (apiKey optional — only
  *   a local comfyui endpoint has none; every cloud provider, Pollinations included, requires one,
  *   endpoint.md §2.1); undefined on any malformed shape
@@ -129,6 +134,7 @@ import { CREDENTIAL_NAMES } from '../io/providerCredentials.js';
 import type { OrchestratorSettingsStore, SettingName } from '../io/orchestratorSettings.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import type { LlmConnectionInit, LlmConnectionPatch, LlmConnectionStore } from '../io/llmConnections.js';
+import { isProviderKind } from '../io/llmConnections.js';
 import type {
   ImageConnectionInit,
   ImageConnectionKind,
@@ -270,14 +276,23 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
     priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion,
     pricePeakInputPerMillion, pricePeakOutputPerMillion, pricePeakCacheHitPerMillion } = raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
-  if (kind !== 'anthropic' && kind !== 'openai-compatible') return undefined;
-  if (typeof model !== 'string' || !model) return undefined;
-  // Exactly one of apiKey/copyApiKeyFrom — a fresh key, or reuse another connection's by id
-  // (io/llmConnections.ts's copyCiphertext) instead of re-pasting the same key into every
-  // connection that shares one underlying provider.
+  if (kind !== 'anthropic' && kind !== 'openai-compatible' && kind !== 'deepseek' && kind !== 'openrouter') return undefined;
+  // Empty is allowed on create: the model catalog preview (listModelsForConnection) needs a saved
+  // connection's own id to query, so an admin picking a kind for the first time has nowhere to pick
+  // a model from until after this first save — a name + kind shell, filled in on the next save.
+  if (typeof model !== 'string') return undefined;
   const hasApiKey = typeof apiKey === 'string' && apiKey.length > 0;
   const hasCopyFrom = typeof copyApiKeyFrom === 'string' && copyApiKeyFrom.length > 0;
-  if (hasApiKey === hasCopyFrom) return undefined;
+  // Key rules are kind-dependent: provider kinds (deepseek/openrouter) draw the shared
+  // provider_credentials key and must NOT carry a per-connection key; freeform kinds
+  // (anthropic/openai-compatible) need exactly one of apiKey/copyApiKeyFrom — a fresh key, or
+  // reuse another connection's by id (io/llmConnections.ts's copyCiphertext) instead of re-pasting
+  // the same key into every connection that shares one underlying provider.
+  if (isProviderKind(kind)) {
+    if (hasApiKey || hasCopyFrom) return undefined;
+  } else if (hasApiKey === hasCopyFrom) {
+    return undefined;
+  }
   if (kind === 'openai-compatible' && (typeof baseUrl !== 'string' || !baseUrl)) return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
   if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
@@ -316,16 +331,26 @@ export function parseCreateConnectionBody(raw: unknown): LlmConnectionInit | und
 // io/llmConnections.ts's own LlmConnectionPatch already expects.
 export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
-  const { name, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
+  const { name, kind, model, apiKey, copyApiKeyFrom, baseUrl, supportsVision, providerOrder, allowFallbacks, quantizations,
     priceInputPerMillion, priceOutputPerMillion, priceCacheHitPerMillion,
     pricePeakInputPerMillion, pricePeakOutputPerMillion, pricePeakCacheHitPerMillion } = raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
-  if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
+  if (kind !== undefined && kind !== 'anthropic' && kind !== 'openai-compatible' && kind !== 'deepseek' && kind !== 'openrouter') return undefined;
+  // Empty is allowed here too, same reasoning as parseCreateConnectionBody: switching an existing
+  // connection's kind mid-edit invalidates its old model with nowhere yet to pick a replacement
+  // from (the catalog preview needs this save to land first) — a same-request kind change must be
+  // able to clear model rather than being blocked on a value that no longer means anything.
+  if (model !== undefined && typeof model !== 'string') return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
   if (copyApiKeyFrom !== undefined && (typeof copyApiKeyFrom !== 'string' || !copyApiKeyFrom)) return undefined;
   // Rotating the key at most one way per request — pick a fresh one or reuse another connection's,
   // not both at once.
   if (apiKey !== undefined && copyApiKeyFrom !== undefined) return undefined;
+  // A provider-kind target (deepseek/openrouter) never takes a per-connection key — its key is the
+  // shared provider_credentials row, rotated in Settings. The reverse transition (provider kind ->
+  // freeform, which DOES need a key) can't be fully validated here because the current row's kind
+  // lives in the DB; the store's update() enforces it and the route turns that into a 400.
+  if (kind !== undefined && isProviderKind(kind) && (apiKey !== undefined || copyApiKeyFrom !== undefined)) return undefined;
   if (baseUrl !== undefined && baseUrl !== null && typeof baseUrl !== 'string') return undefined;
   if (supportsVision !== undefined && typeof supportsVision !== 'boolean') return undefined;
   if (providerOrder !== undefined && providerOrder !== null && !isStringArray(providerOrder)) return undefined;
@@ -340,6 +365,7 @@ export function parseUpdateConnectionBody(raw: unknown): LlmConnectionPatch | un
 
   const patch: LlmConnectionPatch = {};
   if (name !== undefined) patch.name = (name as string).trim();
+  if (kind !== undefined) patch.kind = kind as LlmConnectionPatch['kind'];
   if (model !== undefined) patch.model = model as string;
   if (apiKey !== undefined) patch.apiKey = apiKey as string;
   if (copyApiKeyFrom !== undefined) patch.copyApiKeyFrom = copyApiKeyFrom as string;

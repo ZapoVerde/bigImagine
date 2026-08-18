@@ -131,13 +131,21 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
       if (!parsed) {
         sendJson(res, 400, {
           error:
-            'expected { name: non-empty string, kind: "anthropic" | "openai-compatible", model: non-empty string, ' +
-            'apiKey OR copyApiKeyFrom (exactly one, both non-empty strings), baseUrl? (required for openai-compatible), ' +
-            'supportsVision?, providerOrder?: string[], allowFallbacks?, quantizations?: string[] }',
+            'expected { name: non-empty string, kind: "anthropic" | "openai-compatible" | "deepseek" | "openrouter", model: non-empty string, ' +
+            'apiKey OR copyApiKeyFrom (exactly one, both non-empty strings — omitted entirely for deepseek/openrouter, whose shared key is set in Settings), ' +
+            'baseUrl? (required for openai-compatible), supportsVision?, providerOrder?: string[], allowFallbacks?, quantizations?: string[] }',
         });
         return;
       }
-      const created = await deps.llmConnections.create(parsed);
+      let created;
+      try {
+        created = await deps.llmConnections.create(parsed);
+      } catch (err) {
+        // A store-level validation error (e.g. a provider kind sneaking a key through) is a 400,
+        // not a 500.
+        sendJson(res, 400, { error: err instanceof Error ? err.message : 'failed to create connection' });
+        return;
+      }
       sendJson(res, 201, created);
       return;
     }
@@ -161,7 +169,15 @@ export async function handleAdminConnectionRoutes(req: IncomingMessage, res: Ser
         sendJson(res, 400, { error: 'expected a partial connection patch — see POST /v1/admin/connections for field shapes' });
         return;
       }
-      const updated = await deps.llmConnections.update(id, parsed);
+      let updated;
+      try {
+        updated = await deps.llmConnections.update(id, parsed);
+      } catch (err) {
+        // A store-level validation error (e.g. switching away from a shared-key kind without
+        // supplying a per-connection key) is a 400, not a 500.
+        sendJson(res, 400, { error: err instanceof Error ? err.message : 'failed to update connection' });
+        return;
+      }
       if (!updated) {
         sendJson(res, 404, { error: 'not found' });
         return;

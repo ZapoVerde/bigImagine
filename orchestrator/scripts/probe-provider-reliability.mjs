@@ -106,18 +106,34 @@ async function main() {
   });
   await client.connect();
   const result = await client.query(
-    `select model, base_url, api_key_ciphertext from llm_connections where name = $1`,
+    `select model, base_url, kind, api_key_ciphertext from llm_connections where name = $1`,
     [CONNECTION_NAME],
   );
-  await client.end();
 
   const row = result.rows[0];
   if (!row) {
+    await client.end();
     console.error(`no llm_connections row named "${CONNECTION_NAME}"`);
     process.exitCode = 1;
     return;
   }
-  const apiKey = cipher.decrypt(row.api_key_ciphertext);
+
+  // A provider-kind row (deepseek/openrouter, db/migrations/0117) stores no per-row key — its key is
+  // the shared provider_credentials ciphertext of the same name, resolved exactly like the runtime's
+  // io/llmConnections.ts does. Freeform rows keep decrypting their own api_key_ciphertext.
+  let apiKey = row.api_key_ciphertext ? cipher.decrypt(row.api_key_ciphertext) : null;
+  if (!apiKey && (row.kind === 'deepseek' || row.kind === 'openrouter')) {
+    const credName = row.kind === 'deepseek' ? 'deepseek_api_key' : 'openrouter_api_key';
+    const creds = await client.query(`select ciphertext from provider_credentials where name = $1`, [credName]);
+    if (creds.rows[0]) apiKey = cipher.decrypt(creds.rows[0].ciphertext);
+  }
+  await client.end();
+
+  if (!apiKey) {
+    console.error(`no API key available for connection "${CONNECTION_NAME}" (kind ${row.kind}) — the shared provider key isn't configured`);
+    process.exitCode = 1;
+    return;
+  }
 
   console.log(`probing ${row.model} via ${row.base_url}`);
   console.log(`${ATTEMPTS_PER_PROVIDER} attempts per provider, ${DELAY_MS}ms between every call\n`);

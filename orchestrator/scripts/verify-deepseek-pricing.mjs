@@ -11,9 +11,10 @@
 //     every other connection always bills at the base rate, UTC hour irrelevant, so a non-DeepSeek
 //     provider never goes blank for ~7 UTC hours a day.
 //  4. syncDeepSeekPricing (fetchHtml injected) writes off-peak + peak rates onto every native
-//     DeepSeek connection (base_url host api.deepseek.com AND model on the page), overwriting
-//     manual prices, stamps price_synced_at, and leaves host-mismatched / model-less / broken-URL
-//     connections untouched; a failed fetch aborts the pass.
+//     DeepSeek connection — matched by kind ('deepseek', db/migrations/0117) OR by the legacy
+//     api.deepseek.com host check for freeform rows — with a model on the page, overwriting manual
+//     prices, stamps price_synced_at, and leaves openrouter-kind / host-mismatched / model-less /
+//     broken-URL connections untouched; a failed fetch aborts the pass.
 //
 //  5. The HTTP route (POST /v1/admin/connections/pricing-sync) is covered in verify-server.mjs,
 //     which injects the same fetchHtml seam through HttpServerDeps.
@@ -197,6 +198,12 @@ function createFakeConnectionsStore(rows) {
     { id: 'b', name: 'OpenRouter', kind: 'openai-compatible', model: 'deepseek-v4-flash', baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'x' },
     { id: 'c', name: 'DeepSeek old model', kind: 'openai-compatible', model: 'deepseek-v3', baseUrl: 'https://api.deepseek.com', apiKey: 'x' },
     { id: 'd', name: 'Broken URL', kind: 'openai-compatible', model: 'deepseek-v4-flash', baseUrl: 'not a url', apiKey: 'x' },
+    // A kind-marked native DeepSeek connection (db/migrations/0117) matches by kind alone — robust
+    // even to a nonstandard base URL, since the kind (not the URL) is now the provider predicate.
+    { id: 'e', name: 'DeepSeek mirror', kind: 'deepseek', model: 'deepseek-v4-flash', baseUrl: 'https://mirror.example.com', apiKey: null },
+    // DeepSeek models routed through OpenRouter are NOT native: same model id, but kind 'openrouter'
+    // and an openrouter host — must stay excluded, exactly as the host check already excluded it.
+    { id: 'f', name: 'DeepSeek via OpenRouter', kind: 'openrouter', model: 'deepseek-v4-flash', baseUrl: 'https://openrouter.ai/api/v1', apiKey: null },
   ]);
 
   const result = await syncDeepSeekPricing({
@@ -204,8 +211,8 @@ function createFakeConnectionsStore(rows) {
     fetchHtml: async () => FIXTURE,
   });
   assert(
-    result.checked === 4 && result.updated === 1,
-    `the sync scans every connection but updates only the one native DeepSeek match (checked ${result.checked}, updated ${result.updated})`,
+    result.checked === 6 && result.updated === 2,
+    `the sync scans every connection but updates only the two native DeepSeek matches (checked ${result.checked}, updated ${result.updated})`,
   );
 
   const updatedRow = store.rows.get('a');
@@ -223,17 +230,30 @@ function createFakeConnectionsStore(rows) {
     'a matched connection has its price_synced_at stamped to now',
   );
 
+  const mirrored = store.rows.get('e');
+  assert(
+    mirrored &&
+      mirrored.priceInputPerMillion === 0.14 &&
+      mirrored.pricePeakOutputPerMillion === 0.56 &&
+      typeof mirrored.priceSyncedAt === 'string',
+    'a kind-marked native connection matches by kind even when its base URL is nonstandard',
+  );
+
   assert(
     store.rows.get('b').priceInputPerMillion === undefined && store.rows.get('c').priceInputPerMillion === undefined,
     'host-mismatched and model-not-on-page connections are left untouched — the sync never guesses across providers',
+  );
+  assert(
+    store.rows.get('f').priceInputPerMillion === undefined,
+    'an openrouter-kind connection is left untouched even when its model id matches the pricing page — DeepSeek-via-OpenRouter is not native',
   );
   assert(
     store.rows.get('d').priceInputPerMillion === undefined,
     'a connection with an unparseable base URL is skipped, not crashed on',
   );
   assert(
-    store.updates.length === 1,
-    'exactly one update() call reaches the store',
+    store.updates.length === 2,
+    'exactly two update() calls reach the store',
   );
 }
 

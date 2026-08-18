@@ -42,7 +42,11 @@ export function createLlmProviderForProfile(profile: LlmProfile): LlmProvider {
       supportsVision: profile.supportsVision,
     });
   }
-  // profile.kind === 'openai-compatible'; profiles.ts already guarantees baseUrl is set for this kind.
+  // kind === 'openai-compatible' | 'deepseek' | 'openrouter' — all three speak the OpenAI-compatible
+  // wire shape through the same adapter. The provider kinds are just a named provider identity
+  // (db/migrations/0117): their baseUrl is always set (canonical endpoint, profiles.ts's
+  // CANONICAL_PROVIDER_BASE_URL / the connection row's canonical base_url), so baseUrl is never
+  // undefined here the way 'openai-compatible' guarantees it via profiles.ts's validator.
   return createOpenAiCompatibleLlmProvider({
     apiKey: profile.apiKey,
     model: profile.model,
