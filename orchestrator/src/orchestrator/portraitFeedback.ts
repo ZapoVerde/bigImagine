@@ -329,12 +329,13 @@ async function persistAttempt(
   status: 'concluded' | 'insufficient_evidence' | 'failed',
   snapshot: ReflectionSnapshot,
   output: LessonOutput | { error: string } | { status: 'insufficient_evidence'; operatorRecorded: boolean },
+  connection: string | null = null,
 ): Promise<string> {
   const rows = await deps.db.withUserScope(userId, (session) =>
     session.query<{ learning_id: string }>(
-      `insert into visual_episode_learning (user_id, episode_id, attempt, status, input_snapshot, output_snapshot)
-       values ($1, $2, $3, $4, $5::jsonb, $6::jsonb) returning learning_id`,
-      [userId, episodeId, attempt, status, JSON.stringify(snapshot), JSON.stringify(output)],
+      `insert into visual_episode_learning (user_id, episode_id, attempt, status, input_snapshot, output_snapshot, connection)
+       values ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7) returning learning_id`,
+      [userId, episodeId, attempt, status, JSON.stringify(snapshot), JSON.stringify(output), connection],
     ),
   );
   return rows[0].learning_id;
@@ -355,9 +356,10 @@ async function persistFailedAttempt(
   attempt: number,
   snapshot: ReflectionSnapshot,
   err: unknown,
+  connection: string | null = null,
 ): Promise<ReflectionOutcome> {
   const reason = err instanceof Error ? err.message : String(err);
-  const learningId = await persistAttempt(deps, userId, episodeId, attempt, 'failed', snapshot, { error: reason });
+  const learningId = await persistAttempt(deps, userId, episodeId, attempt, 'failed', snapshot, { error: reason }, connection);
   await deps.db.withUserScope(userId, (session) =>
     session.query(
       `insert into visual_episode_events (user_id, episode_id, event_type, payload)
@@ -399,6 +401,7 @@ async function runReflectionCall(
   ctx: ReflectionPassContext,
   snapshot: ReflectionSnapshot,
   attempt: number,
+  connection: string | null = null,
 ): Promise<ReflectionOutcome> {
   const override = await deps.settings.get('visual_reflection_system_prompt_override');
   const system = (override ?? '').trim() || DEFAULT_REFLECTION_SYSTEM_PROMPT;
@@ -413,15 +416,15 @@ async function runReflectionCall(
 
   const call = turn.toolCalls.find((c) => c.name === 'submit_lesson');
   if (!call) {
-    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error('no submit_lesson tool call in reply'));
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error('no submit_lesson tool call in reply'), connection);
   }
   const validated = validateLessonCall(call);
   if (!validated.ok) {
-    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error(validated.reason));
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error(validated.reason), connection);
   }
   const output = validated.output;
   const status = output.status === 'conclusion' ? 'concluded' : 'insufficient_evidence';
-  const learningId = await persistAttempt(deps, userId, ctx.episodeId, attempt, status, snapshot, output);
+  const learningId = await persistAttempt(deps, userId, ctx.episodeId, attempt, status, snapshot, output, connection);
 
   if (output.status === 'insufficient_evidence') {
     await deps.db.withUserScope(userId, (session) =>
@@ -469,12 +472,14 @@ async function runReflectionPass(
   ctx: ReflectionPassContext,
 ): Promise<ReflectionOutcome> {
   const attempt = await nextAttempt(deps.db, userId, ctx.episodeId);
+  const connection = (await deps.settings.get('portrait_llm_connection'))?.trim() || null;
   let snapshot: ReflectionSnapshot;
   try {
     snapshot = await buildReflectionSnapshot(deps, userId, ctx);
   } catch (err) {
     log.error('portraitFeedback: reflection snapshot build failed', { episodeId: ctx.episodeId, attempt, err });
-    return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };
+    const emptySnapshot: ReflectionSnapshot = { goal: ctx.goal, parentSlots: {}, candidates: [], rationale: ctx.rationale, layerAssessments: ctx.layerAssessments, priorLessonIds: [], wikiContext: '', wikiRevisionIds: [] };
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, emptySnapshot, err, connection);
   }
   await deps.db.withUserScope(userId, (session) =>
     session.query(
@@ -484,9 +489,9 @@ async function runReflectionPass(
     ),
   );
   try {
-    return await runReflectionCall(deps, llm, userId, ctx, snapshot, attempt);
+    return await runReflectionCall(deps, llm, userId, ctx, snapshot, attempt, connection);
   } catch (err) {
-    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, err);
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, err, connection);
   }
 }
 
