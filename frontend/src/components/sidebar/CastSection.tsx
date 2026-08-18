@@ -72,6 +72,13 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   // in flight (the button shows a busy state), and the most recent per-row result/error message.
   const [studioBusyId, setStudioBusyId] = useState<string | null>(null);
   const [studioMessage, setStudioMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
+  // rp-cast-delete-plan.md: the per-row remove-from-chat affordance. removingId marks which
+  // character's remove is in flight; removeMessage is the latest per-row result/error (same
+  // transient auto-clear as studioMessage); pendingRemoveId is a two-step confirm gate so a
+  // cast remove never fires on a single unfocused tap (no window.confirm mid-list).
+  const [removingId, setRemovingId] = useState<string | null>(null);
+  const [removeMessage, setRemoveMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
+  const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
 
   useEffect(() => {
     if (collapsed) return;
@@ -122,6 +129,48 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
     }
   }
 
+  // rp-cast-delete-plan.md: remove this character from the active chat's cast. chatId is passed
+  // to callTool so the ?chat_id= query-string scoping applies (same as get_characters/get_scenes),
+  // so a removal can never assert against a different chat. Guarded by loadChatId so a removal
+  // fired just before a chat switch never updates the new chat's roster.
+  async function removeFromCast(characterId: string) {
+    setRemovingId(characterId);
+    setRemoveMessage(null);
+    try {
+      const result = await callTool<{ removed: boolean }>('remove_character_from_chat', { characterId }, apiKey, chatId);
+      if (loadChatId === chatId) {
+        if (result.removed) {
+          setRoster((r) => (r ? r.filter((c) => c.characterId !== characterId) : r));
+          setRemoveMessage({ id: characterId, text: 'Removed from chat.', ok: true });
+        } else {
+          // The link (or user-scoped link) didn't exist — treat as an idempotent success: just
+          // drop the row rather than surfacing an error (plan's Edge Cases).
+          setRoster((r) => (r ? r.filter((c) => c.characterId !== characterId) : r));
+          setRemoveMessage({ id: characterId, text: 'Removed from chat.', ok: true });
+        }
+        window.setTimeout(() => setRemoveMessage((m) => (m?.id === characterId ? null : m)), 4000);
+      }
+    } catch (err) {
+      if (loadChatId === chatId) {
+        setRemoveMessage({ id: characterId, text: err instanceof ApiError ? err.message : 'Remove failed.', ok: false });
+      }
+    } finally {
+      setRemovingId(null);
+      setPendingRemoveId(null);
+    }
+  }
+
+  // Two-step in-row confirm: first tap arms the ✕ (turns into a "Confirm?"), a second tap removes.
+  function onRemoveClick(characterId: string) {
+    if (removingId === characterId) return;
+    if (pendingRemoveId === characterId) {
+      void removeFromCast(characterId);
+    } else {
+      setPendingRemoveId(characterId);
+      setRemoveMessage(null);
+    }
+  }
+
   return (
     <section className="cast-section">
       <div className="cast-header">
@@ -163,6 +212,22 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
                     >
                       {studioBusyId === c.characterId ? '…' : 'Send to Studio'}
                     </button>
+                    <button
+                      type="button"
+                      className="cast-row-remove-btn"
+                      disabled={removingId === c.characterId}
+                      title={
+                        pendingRemoveId === c.characterId
+                          ? 'Confirm removing this character from the chat'
+                          : "Remove this character from the chat's cast"
+                      }
+                      onClick={() => onRemoveClick(c.characterId)}
+                    >
+                      {removingId === c.characterId ? '…' : pendingRemoveId === c.characterId ? 'Confirm?' : '✕'}
+                    </button>
+                    {removeMessage?.id === c.characterId && (
+                      <span className={`cast-row-remove-status${removeMessage.ok ? '' : ' err'}`}>{removeMessage.text}</span>
+                    )}
                     <span
                       className={`cast-presence${present ? ' on' : ''}`}
                       title={present ? 'Present in the current scene' : 'Not present in the current scene'}

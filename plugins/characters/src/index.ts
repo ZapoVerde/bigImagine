@@ -16,7 +16,8 @@
  * info — plugin identity
  * registerTools(deps) — returns [create_character, get_characters, get_character,
  *   update_character, delete_character, import_character_card, import_character_card_from_url,
- *   search_chub_characters, export_character_card, get_character_avatar, apply_character_to_chat]
+ *   search_chub_characters, export_character_card, get_character_avatar, apply_character_to_chat,
+ *   remove_character_from_chat]
  *
  * @contract
  *   assertions:
@@ -36,6 +37,7 @@ import { createGetCharacterTool } from './getCharacterTool.js';
 import { createGetCharactersTool } from './getCharactersTool.js';
 import { createImportCharacterCardTool } from './importCharacterCardTool.js';
 import { createImportCharacterCardFromUrlTool } from './importCharacterCardFromUrlTool.js';
+import { createRemoveCharacterFromChatTool } from './removeCharacterFromChatTool.js';
 import { createSearchChubCharactersTool } from './searchChubCharactersTool.js';
 import { createUpdateCharacterTool } from './updateCharacterTool.js';
 
@@ -59,5 +61,6 @@ export async function registerTools(deps: PluginDeps): Promise<RegisteredTool[]>
     createExportCharacterCardTool(),
     createGetCharacterAvatarTool(),
     createApplyCharacterToChatTool(),
+    createRemoveCharacterFromChatTool(),
   ];
 }

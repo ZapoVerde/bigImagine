@@ -32,7 +32,10 @@ function createFakePool() {
   const lorebooks = [];
   const lorebookEntries = [];
   const lorebookLinks = [];
+  const scenes = []; // {scene_id, chat_id, user_id, name}
+  const scenesPresence = []; // {scene_id, character_id, user_id} (junction, migration 0046)
   let counter = 0;
+  const runSql = [];
 
   return {
     characters,
@@ -43,6 +46,12 @@ function createFakePool() {
     lorebooks,
     lorebookEntries,
     lorebookLinks,
+    scenes,
+    scenesPresence,
+    // Every SQL issued through a session, in order — lets a test prove a tool never runs a
+    // particular statement (e.g. remove_character_from_chat must never itself `delete from
+    // characters`; the migration-0096 trigger effect is modeled separately below).
+    runSql,
     async connect() {
       let scopedUserId;
       return {
@@ -52,6 +61,7 @@ function createFakePool() {
             scopedUserId = params[0];
             return { rows: [] };
           }
+          runSql.push(sql);
 
           // --- create_character ---
           if (sql.startsWith('insert into characters') && !sql.includes('spec_version')) {
@@ -218,6 +228,51 @@ function createFakePool() {
             return { rows: removed.map((c) => ({ chat_id: c.chat_id })) };
           }
 
+          // --- remove_character_from_chat: unlink (scoped by the characters.user_id exists guard)
+          // Model the migration-0096 trigger effect: deleting the last character_chat_links row
+          // for a character reaps the characters row (cleanup_orphaned_character). This is the
+          // DB's behavior, NOT something the tool itself does — the tool's own SQL is asserted
+          // (via runSql) to never delete from characters directly. ---
+          if (sql.startsWith('delete from character_chat_links')) {
+            const [characterId, chatId, userId] = params;
+            assert(scopedUserId === userId, "remove_character_from_chat's link delete is scoped to the requesting user");
+            const owned = characters.some((c) => c.character_id === characterId && c.user_id === userId);
+            const idx = characterChatLinks.findIndex((l) => l.character_id === characterId && l.chat_id === chatId && owned);
+            if (idx === -1) return { rows: [] };
+            characterChatLinks.splice(idx, 1);
+            // Trigger effect (0096): if this was the last link, clean up the characters row. The
+            // characters table is intentionally NOT touched by the tool's own SQL — this fidelity
+            // emulation is what lets the test prove "the tool doesn't delete characters".
+            if (!characterChatLinks.some((l) => l.character_id === characterId)) {
+              const ci = characters.findIndex((c) => c.character_id === characterId);
+              if (ci !== -1) characters.splice(ci, 1);
+            }
+            return { rows: [{ character_id: characterId }] };
+          }
+
+          // --- remove_character_from_chat: clear presence for this chat's scenes only (scoped by
+          // scenes.chat_id and scenes.user_id) ---
+          if (sql.startsWith('delete from scene_presence sp')) {
+            const [characterId, userId, chatId] = params;
+            assert(scopedUserId === userId, "remove_character_from_chat's presence prune is scoped to the requesting user");
+            const chatSceneIds = new Set(scenes.filter((s) => s.chat_id === chatId && s.user_id === userId).map((s) => s.scene_id));
+            const removed = scenesPresence.filter(
+              (p) => p.character_id === characterId && p.user_id === userId && chatSceneIds.has(p.scene_id),
+            );
+            for (const row of removed) {
+              const i = scenesPresence.indexOf(row);
+              if (i !== -1) scenesPresence.splice(i, 1);
+            }
+            return { rows: [] };
+          }
+
+          // --- remove_character_from_chat: survivor count for the IO-seam log ---
+          if (sql.startsWith('select count(*)::text as count from character_chat_links')) {
+            const [characterId] = params;
+            const count = characterChatLinks.filter((l) => l.character_id === characterId).length;
+            return { rows: [{ count: String(count) }] };
+          }
+
           // --- export_character_card ---
           if (sql.startsWith('select name, persona, scenario, system_prompt, example_dialogue, greetings, source_json')) {
             const [characterId, userId] = params;
@@ -330,7 +385,7 @@ function createFakePool() {
 assert(info.id === 'characters' && /^[a-z0-9_-]+$/.test(info.id), 'info.id is present and matches the required format');
 
 const pluginTools = await registerTools({ llm: null, embeddings: null, cipher: null, db: null, credentials: null, settings: null });
-assert(pluginTools.length === 11, 'registerTools returns exactly eleven tools');
+assert(pluginTools.length === 12, 'registerTools returns exactly twelve tools');
 
 const registry = createToolRegistry(pluginTools);
 const EXPECTED_TOOL_NAMES = [
@@ -345,6 +400,7 @@ const EXPECTED_TOOL_NAMES = [
   'export_character_card',
   'get_character_avatar',
   'apply_character_to_chat',
+  'remove_character_from_chat',
 ];
 for (const name of EXPECTED_TOOL_NAMES) {
   assert(registry.definitions().some((d) => d.name === name), `${name} is registered`);
@@ -377,6 +433,7 @@ const importTool = registry.get('import_character_card');
 const exportTool = registry.get('export_character_card');
 const avatarTool = registry.get('get_character_avatar');
 const applyTool = registry.get('apply_character_to_chat');
+const removeTool = registry.get('remove_character_from_chat');
 
 // --- create_character ---
 const elara = await db.withUserScope(userId, (session) =>
@@ -768,6 +825,133 @@ assert(
   deleteOtherUsers.deleted === false && Array.isArray(deleteOtherUsers.deletedChatIds) && deleteOtherUsers.deletedChatIds.length === 0,
   "delete_character can't delete another user's character",
 );
+
+// --- remove_character_from_chat ---
+{
+  // Two chat-scoped scenes for presence-hygiene checks: chac-remove-a and chac-remove-b each
+  // belong to the calling user; chac-other is a DIFFERENT chat (to prove cross-chat presence
+  // and links survive).
+  pool.scenes.push({ scene_id: 'scene-a', chat_id: 'chac-remove-a', user_id: userId, name: 'Keep' });
+  pool.scenes.push({ scene_id: 'scene-b', chat_id: 'chac-remove-b', user_id: userId, name: 'Keep too' });
+  pool.scenes.push({ scene_id: 'scene-other', chat_id: 'chac-other', user_id: userId, name: 'Other' });
+
+  // A character linked to BOTH this chat and another: removing from this chat must survive —
+  // the characters row and the other chat's link stay.
+  const sharedChar = await db.withUserScope(userId, (session) =>
+    createTool.handler({ name: 'Shared Riverfang' }, { userId, db: session }),
+  );
+  pool.characterChatLinks.push({ character_id: sharedChar.characterId, chat_id: 'chac-remove-a', anchor_swipe_id: 'sw' });
+  pool.characterChatLinks.push({ character_id: sharedChar.characterId, chat_id: 'chac-other', anchor_swipe_id: 'sw' });
+  pool.scenesPresence.push({ scene_id: 'scene-a', character_id: sharedChar.characterId, user_id: userId });
+  pool.scenesPresence.push({ scene_id: 'scene-other', character_id: sharedChar.characterId, user_id: userId });
+
+  // A character linked ONLY to this chat: the trigger (modeled in the fake pool) reaps its
+  // characters row after the last link goes.
+  const soleChar = await db.withUserScope(userId, (session) =>
+    createTool.handler({ name: 'Sole Wisp' }, { userId, db: session }),
+  );
+  pool.characterChatLinks.push({ character_id: soleChar.characterId, chat_id: 'chac-remove-a', anchor_swipe_id: 'sw' });
+  pool.scenesPresence.push({ scene_id: 'scene-a', character_id: soleChar.characterId, user_id: userId });
+  pool.scenesPresence.push({ scene_id: 'scene-b', character_id: soleChar.characterId, user_id: userId });
+
+  // An other-user character never linked to any of this user's chats.
+  pool.characterChatLinks.push({ character_id: otherUsersChar.characterId, chat_id: 'chac-other', anchor_swipe_id: 'sw' });
+  pool.scenesPresence.push({ scene_id: 'scene-other', character_id: otherUsersChar.characterId, user_id: otherUserId });
+
+  const before = pool.runSql.length;
+
+  // A character linked to two chats: removing one chat's link leaves the characters row AND the
+  // other chat's link intact.
+  const removeShared = await db.withUserScope(userId, (session) =>
+    removeTool.handler({ characterId: sharedChar.characterId }, { userId, db: session, chatId: 'chac-remove-a' }),
+  );
+  assert(removeShared.removed === true, 'remove_character_from_chat removes an owned, linked character');
+  assert(
+    !pool.characterChatLinks.some((l) => l.character_id === sharedChar.characterId && l.chat_id === 'chac-remove-a'),
+    'the removed chat-remove-a link is gone',
+  );
+  assert(
+    pool.characterChatLinks.some((l) => l.character_id === sharedChar.characterId && l.chat_id === 'chac-other'),
+    "a character linked to another chat keeps that chat's link after a cast removal",
+  );
+  assert(
+    pool.characters.some((c) => c.character_id === sharedChar.characterId),
+    "a character with a surviving link is NOT deleted — the orphan trigger requires zero remaining links",
+  );
+
+  const removeSole = await db.withUserScope(userId, (session) =>
+    removeTool.handler({ characterId: soleChar.characterId }, { userId, db: session, chatId: 'chac-remove-a' }),
+  );
+  assert(removeSole.removed === true, 'a character with only this chat link is still removable');
+  assert(
+    !pool.characters.some((c) => c.character_id === soleChar.characterId),
+    "a character's row is cleaned up (modeling migration-0096's trigger) once its last link is gone",
+  );
+  assert(
+    !pool.runSql.slice(before).some((q) => /delete\s+from\s+characters/i.test(q)),
+    'the tool itself never issues a DELETE on characters — the trigger (not app code) owns row cleanup',
+  );
+
+  // Presence hygiene: this chat's scenes had both characters present; the delete should clear
+  // scene-a rows for both shared and sole (and scene-b for sole), but never the OTHER chat's
+  // scene-other rows (shared stays present there via its own link).
+  const thisChatSceneIds = new Set(pool.scenes.filter((s) => s.chat_id === 'chac-remove-a').map((s) => s.scene_id));
+  const presenceLeftInThisChat = pool.scenesPresence.some(
+    (p) => p.user_id === userId && thisChatSceneIds.has(p.scene_id) && (p.character_id === sharedChar.characterId || p.character_id === soleChar.characterId),
+  );
+  assert(!presenceLeftInThisChat, "remove_character_from_chat clears the removed characters' presence in THIS chat's scenes");
+  assert(
+    pool.scenesPresence.some((p) => p.character_id === sharedChar.characterId && p.scene_id === 'scene-other'),
+    "a character present in a DIFFERENT chat's scene keeps that scene_presence row (presence is scoped per chat)",
+  );
+  assert(
+    pool.scenesPresence.some((p) => p.character_id === soleChar.characterId && p.scene_id === 'scene-b'),
+    "presence in another of this user's chats' scenes is untouched — the prune is scoped to this chat's scenes only",
+  );
+
+  // Foreign/missing characterId → idempotent not-found, no data touched.
+  const removeMissing = await db.withUserScope(userId, (session) =>
+    removeTool.handler({ characterId: 'no-such-char' }, { userId, db: session, chatId: 'chac-remove-a' }),
+  );
+  assert(removeMissing.removed === false && removeMissing.reason === 'not-found', "a missing characterId returns removed:false, reason 'not-found'");
+
+  const preForeign = {
+    links: pool.characterChatLinks.length,
+    chars: pool.characters.length,
+    presence: pool.scenesPresence.length,
+  };
+  const removeForeign = await db.withUserScope(userId, (session) =>
+    removeTool.handler({ characterId: otherUsersChar.characterId }, { userId, db: session, chatId: 'chac-remove-a' }),
+  );
+  assert(removeForeign.removed === false && removeForeign.reason === 'not-found', "another user's character returns removed:false, reason 'not-found'");
+  assert(
+    pool.characterChatLinks.length === preForeign.links &&
+      pool.characters.length === preForeign.chars &&
+      pool.scenesPresence.length === preForeign.presence,
+    "a foreign user's character deletes nothing (safe scoped no-op)",
+  );
+
+  // A call with no chat context refuses (foreign-chat hazard) without touching anything.
+  const preNoChat = { links: pool.characterChatLinks.length, chars: pool.characters.length, presence: pool.scenesPresence.length };
+  const removeNoChat = await db.withUserScope(userId, (session) =>
+    removeTool.handler({ characterId: sharedChar.characterId }, { userId, db: session }),
+  );
+  assert(removeNoChat.removed === false && removeNoChat.reason === 'not-found', 'a call with no chat context is refused as not-found');
+  assert(pool.scenesPresence.length === preNoChat.presence && pool.characterChatLinks.length === preNoChat.links, 'no chat context deletes nothing');
+
+  // Malformed args throw before any query runs.
+  let removeThrew = false;
+  const preThrow = pool.runSql.length;
+  try {
+    await db.withUserScope(userId, (session) =>
+      removeTool.handler({ characterId: '' }, { userId, db: session, chatId: 'chac-remove-a' }),
+    );
+  } catch {
+    removeThrew = true;
+  }
+  assert(removeThrew, 'remove_character_from_chat rejects a blank characterId before reaching SQL');
+  assert(pool.runSql.length === preThrow, 'a malformed call runs no query');
+}
 
 if (process.exitCode) {
   console.error('\ncharacters verification FAILED');

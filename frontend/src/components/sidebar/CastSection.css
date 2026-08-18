@@ -132,6 +132,48 @@
   color: var(--color-danger);
 }
 
+/* rp-cast-delete-plan.md — the per-row remove-from-cast affordance. Mirrors the Send-to-Studio
+   ghost button (compact, subtle at rest) but with a danger hover so the higher-stakes action
+   saturates on hover instead of looking like a bare edit. A two-step confirm (✕ → Confirm?)
+   means it never fires on a single unfocused tap, so it can stay visually quiet. */
+.cast-row-remove-btn {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: var(--font-size-xs, 0.7rem);
+  line-height: 1;
+  padding: 0.3rem 0.4rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-strong);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.cast-row-remove-btn:hover:not(:disabled) {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: var(--color-accent-contrast);
+}
+
+.cast-row-remove-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-row-remove-status {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs, 0.7rem);
+  color: var(--color-text-muted);
+}
+
+.cast-row-remove-status.err {
+  color: var(--color-danger);
+}
+
 /* The live presence indicator: a small dot, filled when the character is in the active scene's
    character_ids (the current Present: roster), outlined otherwise. */
 .cast-presence {
