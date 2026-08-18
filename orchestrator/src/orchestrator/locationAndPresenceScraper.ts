@@ -199,13 +199,27 @@ export async function scrapeTurnPresence(
  *  appeared nowhere in its own SQL text — Postgres can't infer a type for a placeholder that's
  *  never referenced, which raised 42P18 ("could not determine data type of parameter"). Naming
  *  the placeholder here makes each call site's params array the only source of truth for its own
- *  parameter count. idColumn/linkTable are left unqualified against the outer query's single
- *  locations/characters table — every call site here either queries that table alone or joins it
- *  under a name no other joined table shares, so no aliasing is needed. */
-const eligibleClause = (idColumn: 'location_id' | 'character_id', linkTable: 'location_chat_links' | 'character_chat_links', chatIdPlaceholder: string) => `(
+ *  parameter count.
+ *
+ *  outerTable/alias must qualify the correlated side explicitly: the exists() subquery's own FROM
+ *  is linkTable, which has a column of the very same name as idColumn (location_chat_links.location_id,
+ *  character_chat_links.character_id) — an unqualified idColumn on the left previously bound to
+ *  that *inner* column instead of the outer row (Postgres resolves an unqualified name to the
+ *  closest enclosing scope that has it), collapsing the correlation to
+ *  "linkTable.idColumn = linkTable.idColumn", which is trivially true. That made exists() answer
+ *  "does *any* row for this chat_id exist in linkTable" instead of "is *this* row linked to this
+ *  chat_id" — every non-inactive auto-registered row leaked into every chat that had linked at
+ *  least one row of its own. Bug, not a design choice; found live via the known-locations block
+ *  pulling in locations from unrelated chats. */
+const eligibleClause = (
+  idColumn: 'location_id' | 'character_id',
+  linkTable: 'location_chat_links' | 'character_chat_links',
+  chatIdPlaceholder: string,
+  outerTable: string,
+) => `(
   status is null
   or (status <> 'inactive' and exists (
-    select 1 from ${linkTable} where ${idColumn} = ${linkTable}.${idColumn} and ${linkTable}.chat_id = ${chatIdPlaceholder}
+    select 1 from ${linkTable} where ${linkTable}.${idColumn} = ${outerTable}.${idColumn} and ${linkTable}.chat_id = ${chatIdPlaceholder}
   ))
 )`;
 
@@ -292,7 +306,7 @@ async function resolveOrCreateLocationRow(
 ): Promise<string> {
   const matched = await session.query<{ location_id: string; status: string | null; parent_location_id: string | null }>(
     `select location_id, status, parent_location_id from locations
-     where user_id = $1 and name = $2 and ${eligibleClause('location_id', 'location_chat_links', '$3')}
+     where user_id = $1 and name = $2 and ${eligibleClause('location_id', 'location_chat_links', '$3', 'locations')}
      order by (status is null) desc, (status = 'permanent') desc, location_id`,
     [userId, name, chatId],
   );
@@ -462,7 +476,7 @@ async function resolvePresentCharacters(
   for (const name of names) {
     const matched = await session.query<{ character_id: string; status: string | null }>(
       `select character_id, status from characters
-       where user_id = $1 and name = $2 and ${eligibleClause('character_id', 'character_chat_links', '$3')}
+       where user_id = $1 and name = $2 and ${eligibleClause('character_id', 'character_chat_links', '$3', 'characters')}
        order by (status is null) desc, (status = 'permanent') desc, character_id`,
       [userId, name, chatId],
     );
@@ -574,7 +588,7 @@ export async function loadLocationBlock(
          join scenes s on s.scene_id = cs.scene_id
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where cs.chat_id = $2
-           and ${eligibleClause('location_id', 'location_chat_links', '$3')}
+           and ${eligibleClause('location_id', 'location_chat_links', '$3', 'l')}
          limit 1`,
         [userId, chatId, chatId],
       );
@@ -596,7 +610,7 @@ export async function loadLocationBlock(
         session.query<{ name: string }>(
           `select name from locations
            where user_id = $1 and parent_location_id is null
-             and ${eligibleClause('location_id', 'location_chat_links', '$2')}
+             and ${eligibleClause('location_id', 'location_chat_links', '$2', 'locations')}
            order by name`,
           [userId, chatId],
         ),
@@ -605,7 +619,7 @@ export async function loadLocationBlock(
               `select name from locations
                where user_id = $1
                  and (parent_location_id = $2 or name like $4)
-                 and ${eligibleClause('location_id', 'location_chat_links', '$3')}
+                 and ${eligibleClause('location_id', 'location_chat_links', '$3', 'locations')}
                order by name`,
               [userId, parentRowId, chatId, `${currentParent} - %`],
             )
