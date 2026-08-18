@@ -9,14 +9,18 @@ has no way to drop one from the chat. This plan adds a delete affordance to each
 character can be removed from the chat, and pins down the cascade: removing a character from the
 cast deletes its `character_chat_links` row for that chat, lets the existing orphan-characters
 trigger (`db/migrations/0096`) remove the `characters` row whenever that was its last link, and
-clears the character's leftover `scene_presence` rows so it stops showing as present immediately
-rather than lingering until the next `Present:` scrape.
+clears the character's leftover `scene_presence` rows for hygiene (the presence dot itself already
+stops lighting up the instant the link is gone — see Cascade decision).
 
-It draws on three prior plans for its shape: `apply_character_to_chat` is the link-creating inverse
-we mirror (`applyCharacterToChatTool.ts`); the orphan/cleanup semantics are exactly what
-`db/migrations/0096` already set up and this plan deliberately leans on rather than re-implements;
-and the cast row's existing per-row action (Send to Studio) is the UI pattern a row-level remove
-button follows (`portrait-studio-standalone-subjects-plan.md` Part C).
+It draws on three prior things for its shape: `applyCharacterToChatTool.ts`'s args-guard/handler
+style is the coding convention we mirror (note it is *not* what creates `character_chat_links` rows
+— that's `resolvePresentCharacters` in `locationAndPresenceScraper.ts`, the `Present:` auto-
+registration path; `apply_character_to_chat` only stamps `chat_sessions.character_id`/`params.system`
+for a manually-applied protagonist and is otherwise unrelated to the cast/link mechanism this plan
+touches); the orphan/cleanup semantics are exactly what `db/migrations/0096` already set up and this
+plan deliberately leans on rather than re-implements; and the cast row's existing per-row action
+(Send to Studio) is the UI pattern a row-level remove button follows
+(`portrait-studio-standalone-subjects-plan.md` Part C).
 
 ## Cascade decision (the "or both" from `docs/todo.md` item 2)
 
@@ -32,13 +36,17 @@ row, or both." The data model answers it for us and the answer is: **the link ro
   `delete from characters where character_id = old.character_id and not exists (select 1 from
   character_chat_links where character_id = old.character_id)`). Deleting the link lets this
   trigger do the row cleanup as designed — we do not add a second, parallel delete path.
-- **`scene_presence`**: must be cleared too. `scene_presence` references the character and is what
-  the cast's green dot reads; leaving the row means the user removes someone from the cast yet
-  they still render as *present in the current scene* until the very next turn re-scrapes the
-  `Present:` line. That contradiction is a silent-correctness hazard (bi_principles.md §11). We
-  clear the character's `scene_presence` rows for this chat's scenes as part of the same removal.
-  We scope by scene, not globally — the character may still be present in a *different* chat's
-  scene with its own link, and presence is its own record.
+- **`scene_presence`**: cleared too, though this is hygiene rather than a correctness fix.
+  `getScenesTool.ts`'s `character_ids` aggregate already re-checks `exists(select 1 from
+  character_chat_links where character_id = ... and chat_id = $2)` live on every read (segway.md
+  §2.6's eligibility filter) — so the moment this chat's `character_chat_links` row is gone, the
+  cast's presence dot already stops lighting up on the very next `get_scenes` call, with or without
+  touching `scene_presence` at all. There is no "still renders as present until the next re-scrape"
+  bug to fix here. We still delete the character's `scene_presence` rows for this chat's scenes so a
+  chat that never gets another `Present:` scrape doesn't carry a permanently-orphaned junction row
+  (it would otherwise sit invisible-but-inert until, if ever, `replaceScenePresence` next touches
+  that scene). We scope by scene, not globally — the character may still be present in a *different*
+  chat's scene with its own link, and presence is its own record.
 
 So: `delete character_chat_links` (this chat) + `delete scene_presence` (this chat's scenes);
 the orphan trigger decides the `characters` row. No FK, RLS, or trigger change is needed — nothing
@@ -83,13 +91,13 @@ In `removeCharacterFromChatTool.ts`, following the established plugin style (fil
 - Clear presence for the removed character in this chat's scenes, scoped to this user's rows:
   `delete from scene_presence sp using scenes s where sp.character_id = $1 and sp.scene_id =
   s.scene_id and s.user_id = ctx.userId and s.chat_id = $2` (only this chat's scenes).
-- Since the two deletes are two statements and the tool runs on the expression-style
-  `ctx.db` helper each existing tool uses, run them in whatever transaction mechanism is already
-  available on the injected session (if the helpers expose a transaction — mirror how
-  `deleteCharacterTool.ts`/`locationAndPresenceScraper.ts` sequence statements; do not jump to a
-  different DB abstraction). The important invariant: **if the link delete succeeds, presence is
-  deleted in the same commit** so a partial failure can't leave a removed character still marked
-  present.
+- The two deletes need no special transaction handling: `postgres.ts`'s `withUserScope` already
+  wraps the *entire* tool invocation in one `BEGIN`/`COMMIT`, the same way every other multi-statement
+  tool here (e.g. `deleteCharacterTool.ts`'s two deletes) already relies on implicitly — just issue
+  both `ctx.db.query` calls in sequence, nothing more. (Not that atomicity is load-bearing for
+  presence correctness anyway — see the Cascade decision section on why `get_scenes`'s own
+  eligibility filter already makes the link delete alone sufficient; the same-commit delete is
+  simply the natural, zero-extra-effort way to also drop the now-irrelevant `scene_presence` rows.)
 - Do **not** delete the `characters` row in code. The `cleanup_orphaned_character()` trigger
   handles it, and only when appropriate (last link gone). This keeps the plan aligned with
   migration `0096`'s "deletion is self-healing via FK/trigger, not app code."
