@@ -231,6 +231,17 @@ export type CycleSwipeResult =
 export interface ChatDetail {
   session: ChatSessionRow;
   messages: StoredChatMessage[];
+  /** Present only for an 'rp' chat with at least one closed sync point (docs/plans/
+   *  rp-sync-boundary-rollout-plan.md): the live, un-synced tail is everything after the last
+   *  closed sync point's anchor; everything at or before it has been consumed by the rolling
+   *  sync pipeline. Undefined (absent) for 'chat'-lane chats and for an 'rp' chat with no closed
+   *  point yet. `pages` is every closed sync point, newest first, uncapped — the message span a
+   *  page covers is derived from its anchor's index in the ordered `messages` array by the
+   *  client, never by comparing `lastMessageId` values (message ids are random UUIDs). */
+  syncBoundary?: {
+    lastMessageId: string;
+    pages: { syncId: string; lastMessageId: string; ordinal: number; createdAt: string }[];
+  };
 }
 
 /** One chat's view of the rolling sync loop (orchestrator/chatMemorySync.ts) — the per-chat slice
@@ -613,8 +624,42 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             swipesByMessage.set(row.message_id, list);
           }
         }
+        const sessionRow = sessions[0];
+        // Sync boundary for the rollout display (docs/plans/rp-sync-boundary-rollout-plan.md):
+        // an 'rp' chat only, and only when a closed sync point exists. The same closed-only
+        // narrowing getChatSyncStatus/findDueChats use — an eagerly-opened (closed_at null)
+        // sync point is chunk-progress only, never a consolidation boundary. Pages are uncapped,
+        // newest first; the client derives page spans from each anchor's index in the ordered
+        // `messages` array. `lastMessageId` is the newest closed point's anchor — everything at
+        // or before it is consumed.
+        let syncBoundary: ChatDetail['syncBoundary'];
+        if (sessionRow.kind === 'rp') {
+          const boundaryRows = await session.query<{
+            sync_id: string;
+            last_message_id: string;
+            ordinal: number;
+            created_at: string;
+          }>(
+            `select sync_id, last_message_id, ordinal, created_at
+             from chat_sync_points
+             where chat_id = $1 and closed_at is not null
+             order by ordinal desc`,
+            [chatId],
+          );
+          if (boundaryRows.length > 0) {
+            syncBoundary = {
+              lastMessageId: boundaryRows[0].last_message_id,
+              pages: boundaryRows.map((sp) => ({
+                syncId: sp.sync_id,
+                lastMessageId: sp.last_message_id,
+                ordinal: sp.ordinal,
+                createdAt: sp.created_at,
+              })),
+            };
+          }
+        }
         return {
-          session: toSessionRow(sessions[0]),
+          session: toSessionRow(sessionRow),
           messages: messages.map((m) => {
             const swipeRows = swipesByMessage.get(m.message_id);
             return {
@@ -632,6 +677,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
                 : undefined,
             };
           }),
+          syncBoundary,
         };
       });
     },

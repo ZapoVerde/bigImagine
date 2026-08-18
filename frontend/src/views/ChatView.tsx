@@ -34,6 +34,7 @@ import type { TurnSnapshot } from '../lib/turnTimelineReport';
 import type {
   ApplyPromptStackToChatResult,
   ChatBackgroundSettings,
+  ChatDetail,
   ChatLegibilitySettings,
   ChatMessage,
   ChatParams,
@@ -404,6 +405,15 @@ export default function ChatView({
     };
   }, []);
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
+  // Sync boundary for the rollout display (docs/plans/rp-sync-boundary-rollout-plan.md): how many
+  // of the newest *closed* sync points the user has revealed above the marker (0 = none, i.e. the
+  // default bounded view). Reveal is always a newest-first contiguous prefix of the boundary's
+  // `pages` (each scroll-to-the-marker reveals the next-older sync nearest it), so a count
+  // suffices. Reset to 0 on send (the "next turn hides it again" guarantee); on a boundary
+  // advance a re-derived clamp keeps revealed pages to those still present in the refreshed
+  // `pages`.
+  const [syncBoundary, setSyncBoundary] = useState<ChatDetail['syncBoundary']>(undefined);
+  const [revealedSyncCount, setRevealedSyncCount] = useState(0);
   // Composer draft lives in ChatComposer (composer-render-isolation-plan.md) — typing must not
   // re-render ChatView, so the draft's state and its localStorage persistence moved there with
   // it. ChatView keeps only the one reactive signal it actually needs (the Send/Resend button's
@@ -578,6 +588,10 @@ export default function ChatView({
   );
 
   const historyRef = useRef<HTMLDivElement | null>(null);
+  // The rollout's boundary marker element (docs/plans/rp-sync-boundary-rollout-plan.md): observed
+  // by the lazy-load effect below, so that when the reader scrolls up to it, the next-older
+  // archived page is revealed. Non-interactive — it's a status strip, not a button.
+  const boundaryMarkerRef = useRef<HTMLDivElement | null>(null);
   // Set true right after a chat's messages are (re)loaded from the server (opening a tab, or
   // switching this tab to a different chat) so the messages-effect below knows to jump to the
   // last turn exactly once. Left false the rest of the time so sending/editing/swiping — which
@@ -676,6 +690,8 @@ export default function ChatView({
       setSelectionStart(null);
       setError(null);
       setEditingId(null);
+      setSyncBoundary(undefined);
+      setRevealedSyncCount(0);
       stopBgPoll();
       return;
     }
@@ -691,6 +707,8 @@ export default function ChatView({
       .then((detail) => {
         setActiveChat(detail.session);
         setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+        setSyncBoundary(detail.syncBoundary);
+        setRevealedSyncCount(0);
         pendingInitialScrollRef.current = true;
         // Robust-chat-turns plan: a remounted tab reopens while a turn is still running
         // server-side (the reload happened mid-turn and local `sending` was lost) — the local
@@ -958,6 +976,28 @@ export default function ChatView({
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
     setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+    // Boundary advance (docs/plans/rp-sync-boundary-rollout-plan.md): a background sync may have
+    // consolidated part of the live tail since the last render, so the refreshed boundary's
+    // anchor moves up and the collapsed region grows. Revealed pages whose sync is no longer in
+    // the refreshed `pages` (a now-consumed page, or a truncate that cascaded its sync point) are
+    // dropped by capping the reveal count at the new pages length; the live tail re-anchors to
+    // the new boundary on the next render.
+    setSyncBoundary(detail.syncBoundary);
+    // Page-drop observability (bi_principles.md §11 + docs/plans/rp-sync-boundary-rollout-plan.md):
+    // a revealed page that vanished from the refreshed `pages` was consumed (or truncated), and
+    // silently collapsing it would be an invisible display change. Log only the unusual case —
+    // the reveal count needing to shrink — never the routine refresh.
+    setRevealedSyncCount((prev) => {
+      const next = detail.syncBoundary ? Math.min(prev, detail.syncBoundary.pages.length) : 0;
+      if (next < prev) {
+        console.warn('[chat] dropped a revealed archive page on boundary change', {
+          chatId,
+          previousRevealed: prev,
+          remainingPages: detail.syncBoundary?.pages.length ?? 0,
+        });
+      }
+      return next;
+    });
     setActiveChat(detail.session);
     refreshLocationImage(chatId);
   }
@@ -1345,6 +1385,10 @@ export default function ChatView({
       ? messages
       : [...messages, { role: 'user', content: displayText }];
     setMessages(nextMessages);
+    // Rollout re-collapse on send (rp-sync-boundary-rollout-plan.md): the "next turn hides it
+    // again" guarantee is unconditional — any revealed pages drop back to the single marker, and
+    // the post-turn refresh re-anchors the (possibly advanced) boundary.
+    setRevealedSyncCount(0);
     // The sent draft must not resurrect from localStorage on a later remount — clear() resets
     // the state AND removes the key immediately (the debounced write-through effect would clear
     // it 250ms later anyway; doing it here makes the intent explicit and immediate).
@@ -1930,6 +1974,122 @@ export default function ChatView({
     return { lastAssistantIndex: lastAssistant, lastUserIndex: lastUser };
   }, [messages]);
 
+  // The rollout display (docs/plans/rp-sync-boundary-rollout-plan.md): split the full message
+  // array into the consumed (rolled-out) region, the revealed archive pages the reader has scrolled
+  // to reveal above the boundary marker, and the live un-synced tail. Everything indexes into the
+  // full `messages` array so lastAssistantIndex/lastUserIndex, selection, and the streaming
+  // placeholder keep their meaning — this is purely which indices the render loop emits.
+  const rollout = useMemo(() => {
+    if (!syncBoundary) {
+      return { boundaryIndex: -1, revealedBlocks: [] as { start: number; end: number }[], totalPages: 0 };
+    }
+    // The last closed sync point's anchor — everything at or before it is consumed.
+    const boundaryIndex = messages.findIndex((m) => m.messageId === syncBoundary.lastMessageId);
+    // A stale/cached boundary whose newest anchor can't be located (a truncate cascaded its sync
+    // point) falls back to rendering the whole transcript rather than a bogus collapse.
+    if (boundaryIndex < 0) return { boundaryIndex: -1, revealedBlocks: [], totalPages: 0 };
+    // Survivors newest-first: drop any page whose anchor no longer exists in the message array
+    // (docs/plans/rp-sync-boundary-rollout-plan.md Edge Cases — truncate-away anchors). The page
+    // spans are always re-derived from the current array, so a dropped page re-bounds its
+    // neighbors onto the next surviving anchor.
+    const survivors = syncBoundary.pages.filter((p) => messages.some((m) => m.messageId === p.lastMessageId));
+    // Compute every page's message-index span against ALL survivors (not just the revealed ones),
+    // oldest-first (DOM order top-to-bottom): a page's inclusive upper bound is its own anchor;
+    // its lower bound is the next-older surviving page's anchor (exclusive), or index 0 for the
+    // oldest page. Never compares messageId values directly — only array index position (message
+    // ids are random UUIDs, so only the ordered array is a valid ordering signal).
+    const survivorsOldestFirst = [...survivors].reverse();
+    const allSpans: { start: number; end: number }[] = [];
+    for (let j = 0; j < survivorsOldestFirst.length; j++) {
+      const anchorIndex = messages.findIndex((m) => m.messageId === survivorsOldestFirst[j].lastMessageId);
+      // anchorIndex is >= 0: the page "survived" the filter above precisely because its anchor
+      // still exists in the message array.
+      const start = j === 0 ? 0 : messages.findIndex((m) => m.messageId === survivorsOldestFirst[j - 1].lastMessageId) + 1;
+      allSpans.push({ start, end: anchorIndex });
+    }
+    // The revealed region is the newest `revealedSyncCount` pages (each push reveals the next
+    // older sync nearest the marker), which are the LAST `revealedSyncCount` spans of the
+    // oldest-first list — rendered in order so the newest sits directly above the marker.
+    const revealedCount = Math.min(revealedSyncCount, allSpans.length);
+    const revealedBlocks = revealedCount === 0 ? [] : allSpans.slice(allSpans.length - revealedCount);
+    return { boundaryIndex, revealedBlocks, totalPages: survivors.length };
+  }, [syncBoundary, messages, revealedSyncCount]);
+
+  // Lazy-load reveal (docs/plans/rp-sync-boundary-rollout-plan.md): the boundary marker is the
+  // trigger. When the reader scrolls up so the marker enters the scrollable history container,
+  // reveal the next-older archived page. IntersectionObserver fires only on viewport-entry
+  // transitions, so each scroll-approach of the marker reveals exactly one page, never a cascade;
+  // the newly inserted page (above the marker) pushes the marker back out of view, and the user
+  // must scroll up again to reveal the next one. Reading the live tail at the bottom never
+  // reveals anything. Re-arm is implicit: the observer keeps watching the (moved) marker.
+  useEffect(() => {
+    const root = historyRef.current;
+    const marker = boundaryMarkerRef.current;
+    if (!rollout.totalPages || !root || !marker) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries[0]?.isIntersecting) return;
+        // Reveal one more page only while older content remains; the end-cap hint (when all pages
+        // are revealed) is purely presentational — reveal is governed here, not by the marker.
+        setRevealedSyncCount((c) => Math.min(c + 1, rollout.totalPages));
+      },
+      { root, rootMargin: '0px 0px -20% 0px' },
+    );
+    observer.observe(marker);
+    return () => observer.disconnect();
+    // Rebind when the number of revealable pages changes (boundary advance / fresh chat); the
+    // marker element identity is stable for a given chat, so `marker` need not be a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rollout.totalPages]);
+
+  // One ChatMessageRow with its real full-array index — the rollout skips indices rather than
+  // renumbering, so every index-based consumer (lastAssistant/lastUser/selection/tail placeholder)
+  // sees an unchanged array. Extracted from the inline map below so the no-boundary case and the
+  // boundary case (revealed archive pages + live tail) share one row definition.
+  const renderMessageRow = (m: DisplayMessage, i: number) => {
+    const isLastAssistant = m.role === 'assistant' && i === lastAssistantIndex;
+    // The user's last message can be saved in place (no resend) — editing it with the
+    // resend path would burn a regeneration just to fix the wording. Earlier user messages
+    // keep the branch-and-resend semantic (an in-place save mid-conversation would silently
+    // orphan the exchange that followed).
+    const isLastUserMsg = m.role === 'user' && i === lastUserIndex;
+    const isOpeningGreeting = i === 0 && m.role === 'assistant';
+    const isLiveReasoningTarget =
+      liveReasoning !== null &&
+      (m.messageId ? m.messageId === liveReasoningTargetId : i === messages.length - 1);
+    const shownReasoning =
+      m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
+    const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
+    return (
+      <ChatMessageRow
+        key={m.messageId ?? `pending-${i}`}
+        message={m}
+        index={i}
+        isLastAssistant={isLastAssistant}
+        isLastUserMsg={isLastUserMsg}
+        isOpeningGreeting={isOpeningGreeting}
+        selectionMode={selectionMode}
+        selected={selectionStart !== null && i >= selectionStart}
+        editing={editingId === m.messageId}
+        editDraft={editDraft}
+        onEditDraftChange={setEditDraft}
+        onSubmitEdit={stableSubmitEdit}
+        onCancelEdit={stableCancelEdit}
+        sending={sending}
+        swipingId={swipingId}
+        actionsVisible={actionsVisibleId === m.messageId}
+        onToggleActions={stableToggleMessageActions}
+        onToggleSelect={stableToggleSelect}
+        onSwipe={stableSwipe}
+        onStartEdit={stableStartEdit}
+        onForkFrom={stableForkFrom}
+        onRemoveMessage={stableRemoveMessage}
+        shownReasoning={shownReasoning}
+        reasoningLiveOpen={reasoningLiveOpen}
+      />
+    );
+  };
+
   return (
     <div
       className={`chat-view${mobileShowCanvas ? ' mobile-canvas' : ''}`}
@@ -2044,66 +2204,34 @@ export default function ChatView({
               <PinnedNotesDrawer apiKey={apiKey} />
             </div>
           )}
-          {messages.map((m, i) => {
-            const isLastAssistant = m.role === 'assistant' && i === lastAssistantIndex;
-            // The user's last message can be saved in place (no resend) — editing it with the
-            // resend path would burn a regeneration just to fix the wording. Earlier user messages
-            // keep the branch-and-resend semantic (an in-place save mid-conversation would silently
-            // orphan the exchange that followed).
-            const isLastUserMsg = m.role === 'user' && i === lastUserIndex;
-            // The chat's very first message being an assistant message only ever happens via
-            // apply_character_to_chat's greeting seed (applyCharacterToChatTool.ts) — there's no
-            // other path that produces an assistant reply with no user message before it. Its
-            // "swipes" are a card's pre-written alternate_greetings, not earlier LLM turns, so
-            // running past the last one must stop there rather than fall into Rerun's regenerate
-            // path (server/httpServer.ts's swipe route enforces the same rule; this just keeps the
-            // button/gesture from offering an action the server would reject anyway).
-            const isOpeningGreeting = i === 0 && m.role === 'assistant';
-            // Reasoning blocks (docs/plans/reasoning-blocks-plan.md): the block renders whenever
-            // this assistant message has a persisted `reasoning` (the canonical row) or is the
-            // live target of an in-flight turn's reasoning buffer — the id-less tail placeholder
-            // during a send, or the being-regenerated message during a swipe. The live buffer
-            // wins while the message IS the streaming target (a swipe regenerating a message
-            // that already has reasoning from an older variant must show the new thinking, not
-            // the stale span); the persisted field is authoritative everywhere else, and takes
-            // over the moment the post-stream refresh lands. The live block stays open while the
-            // turn streams and collapses once done (liveReasoningDone — mirrors ST's default
-            // off-after-done); the canonical block always renders collapsed, opened on demand.
-            const isLiveReasoningTarget =
-              liveReasoning !== null &&
-              (m.messageId ? m.messageId === liveReasoningTargetId : i === messages.length - 1);
-            const shownReasoning =
-              m.role === 'assistant' ? (isLiveReasoningTarget ? liveReasoning! : m.reasoning) : undefined;
-            const reasoningLiveOpen = isLiveReasoningTarget && !liveReasoningDone;
-            return (
-              <ChatMessageRow
-                key={m.messageId ?? `pending-${i}`}
-                message={m}
-                index={i}
-                isLastAssistant={isLastAssistant}
-                isLastUserMsg={isLastUserMsg}
-                isOpeningGreeting={isOpeningGreeting}
-                selectionMode={selectionMode}
-                selected={selectionStart !== null && i >= selectionStart}
-                editing={editingId === m.messageId}
-                editDraft={editDraft}
-                onEditDraftChange={setEditDraft}
-                onSubmitEdit={stableSubmitEdit}
-                onCancelEdit={stableCancelEdit}
-                sending={sending}
-                swipingId={swipingId}
-                actionsVisible={actionsVisibleId === m.messageId}
-                onToggleActions={stableToggleMessageActions}
-                onToggleSelect={stableToggleSelect}
-                onSwipe={stableSwipe}
-                onStartEdit={stableStartEdit}
-                onForkFrom={stableForkFrom}
-                onRemoveMessage={stableRemoveMessage}
-                shownReasoning={shownReasoning}
-                reasoningLiveOpen={reasoningLiveOpen}
-              />
-            );
-          })}
+          {rollout.boundaryIndex >= 0 ? (
+            <>
+              {/* Revealed archive pages, oldest at the top, newest just above the marker
+                  (rp-sync-boundary-rollout-plan.md). Each page is a block of verbatim rows; the
+                  marker then sits directly above the live tail. */}
+              {rollout.revealedBlocks.map(({ start, end }) =>
+                messages.slice(start, end + 1).map((m, k) => renderMessageRow(m, start + k)),
+              )}
+              <div className="sync-boundary-marker" ref={boundaryMarkerRef}>
+                <span className="marker-text">
+                  Earlier in this story is archived{' '}
+                  <span className="marker-rolled">(rolled into memory)</span>
+                </span>
+                {revealedSyncCount < rollout.totalPages ? (
+                  <span className="marker-hint" aria-hidden="true">
+                    scroll up to keep showing previous turns
+                  </span>
+                ) : (
+                  <span className="marker-at-start">— you&apos;re at the start of the story —</span>
+                )}
+              </div>
+              {messages.slice(rollout.boundaryIndex + 1).map((m, k) =>
+                renderMessageRow(m, rollout.boundaryIndex + 1 + k),
+              )}
+            </>
+          ) : (
+            messages.map((m, i) => renderMessageRow(m, i))
+          )}
           {(sending || resumingTurn) && !liveStreaming && (
             <div className="chat-bubble assistant pending">{resumingTurn ? 'still generating…' : (turnStatus ?? '…')}</div>
           )}

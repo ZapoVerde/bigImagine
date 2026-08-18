@@ -920,6 +920,17 @@ export interface StoredChatMessage {
 export interface ChatDetail {
   session: ChatSessionRow;
   messages: StoredChatMessage[];
+  /** Present only for an 'rp' chat with at least one closed sync point
+   *  (docs/plans/rp-sync-boundary-rollout-plan.md): the live, un-synced tail is everything after
+   *  the last closed sync point's anchor, and everything at or before it has been consumed by
+   *  the rolling sync pipeline. Absent (undefined) for 'chat'-lane chats and for an 'rp' chat
+   *  with no closed sync point yet. `pages` is every closed sync point, newest first, uncapped;
+   *  the message span each page covers is derived by the client from that anchor's index in the
+   *  ordered `messages` array, never by comparing message ids directly (they are random UUIDs). */
+  syncBoundary?: {
+    lastMessageId: string;
+    pages: { syncId: string; lastMessageId: string; ordinal: number; createdAt: string }[];
+  };
 }
 
 // GET /v1/chats/:id/lineage's node shape — the Branch Map panel's data source. Deliberately

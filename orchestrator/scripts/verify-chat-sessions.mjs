@@ -219,6 +219,19 @@ function createFakePool() {
               }));
             return { rows };
           }
+          // getChat's sync-boundary read (docs/plans/rp-sync-boundary-rollout-plan.md) — the
+          // `select sync_id, last_message_id, ordinal, created_at` opening distinguishes it from
+          // every other chat_sync_points query in this pool. Returns only CLOSED points (the
+          // same closed-only narrowing getChatSyncStatus/findDueChats use), newest-first, so the
+          // boundary's lastMessageId and page ordering come straight off the pipeline's own
+          // consolidation anchors.
+          if (sql.includes('select sync_id, last_message_id, ordinal, created_at')) {
+            const rows = syncPoints
+              .filter((sp) => sp.chat_id === params[0] && sp.closed_at)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .map((sp) => ({ sync_id: sp.sync_id, last_message_id: sp.last_message_id, ordinal: sp.ordinal, created_at: sp.created_at }));
+            return { rows };
+          }
           // forkChat's eligible sync-point read (chatSessions.ts) — the `order by ordinal`
           // distinguishes it from the unsynced-count stub below, and its rows feed the chunk
           // copy (migration 0100): the copied prefix's chunks must link in ordinal order.
@@ -698,6 +711,56 @@ await store.appendMessages(USER_A, created.chatId, [
   assert(detail !== undefined, 'getChat finds the session');
   assert(detail.messages.length === 2, 'both appended messages come back');
   assert(detail.messages[0].role === 'user' && detail.messages[1].role === 'assistant', 'messages keep their order');
+}
+
+// --- rp-sync-boundary (docs/plans/rp-sync-boundary-rollout-plan.md): the rollout payload ---
+// A 'chat'-lane chat and a never-synced 'rp' chat omit syncBoundary; an 'rp' chat with ≥1 closed
+// sync point carries it (newest-first pages + the boundary's lastMessageId), with an open
+// (eager-chunk-only) sync point excluded from the boundary per the closed-only narrowing.
+{
+  // 'chat' lane: absent regardless of messages.
+  const chatDetail = await store.getChat(USER_A, created.chatId);
+  assert(chatDetail.syncBoundary === undefined, "'chat'-lane chat never carries syncBoundary");
+
+  // 'rp' with no closed sync point: absent.
+  const freshRp = await store.createChat(USER_A, { title: 'RP fresh', kind: 'rp' });
+  await store.appendMessages(USER_A, freshRp.chatId, [{ role: 'user', content: 'hello' }]);
+  const freshDetail = await store.getChat(USER_A, freshRp.chatId);
+  assert(freshDetail.syncBoundary === undefined, 'an rp chat with no closed sync point omits syncBoundary');
+
+  // 'rp' with closed sync points: boundary present, newest-first, closed-only, correctly anchored.
+  const rpBoundary = await store.createChat(USER_A, { title: 'RP bound', kind: 'rp' });
+  const b = await store.appendMessages(USER_A, rpBoundary.chatId, [
+    { role: 'user', content: 'word a', messageId: 'b-m1' },
+    { role: 'assistant', content: 'word b', messageId: 'b-m2' },
+    { role: 'user', content: 'word c', messageId: 'b-m3' },
+    { role: 'assistant', content: 'word d', messageId: 'b-m4' },
+  ]);
+  // page 0 = oldest closed sync (anchors b-m2); page 1 = newest closed sync (anchors b-m4).
+  // A third sync point stays eager-open (closed_at null) and must NOT appear in the boundary.
+  pool.syncPoints.push(
+    { sync_id: 'b-sp1', chat_id: rpBoundary.chatId, user_id: USER_A, ordinal: 0, last_message_id: b[1].messageId, created_at: '2026-08-13T00:00:00.000Z', closed_at: '2026-08-13T00:00:00.000Z' },
+    { sync_id: 'b-sp2', chat_id: rpBoundary.chatId, user_id: USER_A, ordinal: 1, last_message_id: b[3].messageId, created_at: '2026-08-13T00:01:00.000Z', closed_at: '2026-08-13T00:01:00.000Z' },
+    { sync_id: 'b-sp3', chat_id: rpBoundary.chatId, user_id: USER_A, ordinal: 2, last_message_id: b[3].messageId, created_at: '2026-08-13T00:02:00.000Z', closed_at: null },
+  );
+  const boundaryDetail = await store.getChat(USER_A, rpBoundary.chatId);
+  assert(
+    boundaryDetail.syncBoundary !== undefined,
+    'an rp chat with a closed sync point carries syncBoundary',
+  );
+  assert(
+    boundaryDetail.syncBoundary.lastMessageId === b[3].messageId,
+    'syncBoundary.lastMessageId is the newest CLOSED sync point anchor',
+  );
+  assert(
+    boundaryDetail.syncBoundary.pages.length === 2,
+    'syncBoundary.pages has the closed points only (open/eager point excluded)',
+  );
+  assert(
+    boundaryDetail.syncBoundary.pages[0].lastMessageId === b[3].messageId &&
+      boundaryDetail.syncBoundary.pages[1].lastMessageId === b[1].messageId,
+    'syncBoundary.pages is newest-first by ordinal',
+  );
 }
 {
   const detail = await store.getChat(USER_B, created.chatId);
