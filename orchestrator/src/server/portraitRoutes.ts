@@ -40,6 +40,10 @@
  * handlePortraitLayersGet / handlePortraitLayersSet — GET/POST /v1/portraits/layers
  * handlePortraitGenerate / handlePortraitFeedback — POST /v1/portraits/generate,
  *   /v1/portraits/feedback
+ * handlePortraitEpisodeReflect — POST /v1/portraits/episodes/:id/reflect (retry reflection on a
+ *   failed/incomplete episode — the reflection state machine is retryable by design)
+ * handlePortraitHistory — GET /v1/portraits/history (episode → lesson → use → result ledger)
+ * handlePortraitLessons — GET /v1/portraits/lessons (the lesson ledger, state included)
  * handlePortraitsEnabledGet / handlePortraitsEnabledSet — GET /v1/portraits-enabled and
  *   GET/POST /v1/admin/portraits-enabled (portrait-chain-hardening-plan.md's kill switch)
  * handlePortraitLlmConnectionGet / handlePortraitLlmConnectionSet — GET/POST
@@ -243,40 +247,55 @@ export interface GenerateBody {
   entityIds: Record<string, string>;
   goal: string;
   pendingFeedback?: string;
+  /** A concluded lesson to drive this round with (plan §API step 6 — lesson-driven vs
+   *  exploratory provenance). Optional; absent = explicitly exploratory. */
+  lessonId?: string;
 }
 
-/** POST /v1/portraits/generate — { entityIds: { [layerId]: entityId }, goal, pendingFeedback? }. */
+/** POST /v1/portraits/generate — { entityIds: { [layerId]: entityId }, goal, pendingFeedback?,
+ *  lessonId? }. */
 export function parseGenerateBody(raw: unknown): GenerateBody | undefined {
   if (!isRecord(raw) || !isRecord(raw.entityIds)) return undefined;
   if (!Object.values(raw.entityIds).every((v) => typeof v === 'string' && v !== '')) return undefined;
   if (typeof raw.goal !== 'string' || !raw.goal.trim()) return undefined;
   if (raw.pendingFeedback !== undefined && typeof raw.pendingFeedback !== 'string') return undefined;
+  if (raw.lessonId !== undefined && (typeof raw.lessonId !== 'string' || !raw.lessonId)) return undefined;
   return {
     entityIds: raw.entityIds as Record<string, string>,
     goal: raw.goal.trim(),
     ...(typeof raw.pendingFeedback === 'string' && raw.pendingFeedback !== '' ? { pendingFeedback: raw.pendingFeedback } : {}),
+    ...(typeof raw.lessonId === 'string' && raw.lessonId !== '' ? { lessonId: raw.lessonId } : {}),
   };
 }
 
 export interface FeedbackBody {
-  entityIds: Record<string, string>;
-  goal: string;
-  candidateIds: string[];
-  winnerId: string;
+  /** Retry/complete feedback on an existing episode (re-runs reflection as attempt N+1). When
+   *  present, entityIds/goal/candidateIds are not needed — the episode provides them. */
+  episodeId?: string;
+  entityIds?: Record<string, string>;
+  goal?: string;
+  candidateIds?: string[];
+  /** Optional — a no-winner submission stays awaiting_feedback and never triggers reflection. */
+  winnerId?: string;
+  /** The operator explicitly records "no acceptable candidate" → insufficient_evidence. */
+  noAcceptableCandidate?: boolean;
   ratings?: Record<string, number>;
   notes?: Record<string, string>;
   rationale?: string;
+  layerAssessments?: { layer: string; assessment: 'improved' | 'unchanged' | 'regressed' }[];
 }
 
-/** POST /v1/portraits/feedback — { entityIds, goal, candidateIds, winnerId, ratings?,
- *  notes?, rationale? }. ratings values are validated as 1-5 integers here so the route can 400
+/** POST /v1/portraits/feedback — either a fresh round ({ entityIds, goal, candidateIds,
+ *  winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments? }) or an
+ *  episode retry ({ episodeId, winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?,
+ *  layerAssessments? }). ratings values are validated as 1-5 integers here so the route can 400
  *  before the orchestrator's skip-with-log fallback (the orchestrator still guards — §11). */
 export function parseFeedbackBody(raw: unknown): FeedbackBody | undefined {
-  if (!isRecord(raw) || !isRecord(raw.entityIds)) return undefined;
-  if (!Object.values(raw.entityIds).every((v) => typeof v === 'string' && v !== '')) return undefined;
-  if (typeof raw.goal !== 'string' || !raw.goal.trim()) return undefined;
-  if (!Array.isArray(raw.candidateIds) || !raw.candidateIds.every((v) => typeof v === 'string' && v !== '')) return undefined;
-  if (typeof raw.winnerId !== 'string' || !raw.winnerId) return undefined;
+  if (!isRecord(raw)) return undefined;
+  if (raw.episodeId !== undefined && (typeof raw.episodeId !== 'string' || !raw.episodeId)) return undefined;
+  if (raw.winnerId !== undefined && (typeof raw.winnerId !== 'string' || !raw.winnerId)) return undefined;
+  if (raw.noAcceptableCandidate !== undefined && typeof raw.noAcceptableCandidate !== 'boolean') return undefined;
+  if (raw.rationale !== undefined && typeof raw.rationale !== 'string') return undefined;
   if (raw.ratings !== undefined) {
     if (!isRecord(raw.ratings)) return undefined;
     for (const [id, rating] of Object.entries(raw.ratings)) {
@@ -286,15 +305,32 @@ export function parseFeedbackBody(raw: unknown): FeedbackBody | undefined {
   if (raw.notes !== undefined) {
     if (!isRecord(raw.notes) || !Object.values(raw.notes).every((v) => typeof v === 'string')) return undefined;
   }
-  if (raw.rationale !== undefined && typeof raw.rationale !== 'string') return undefined;
+  if (raw.layerAssessments !== undefined) {
+    if (!Array.isArray(raw.layerAssessments)) return undefined;
+    for (const a of raw.layerAssessments) {
+      if (!isRecord(a) || typeof a.layer !== 'string' || !a.layer) return undefined;
+      if (a.assessment !== 'improved' && a.assessment !== 'unchanged' && a.assessment !== 'regressed') return undefined;
+    }
+  }
+  if (raw.episodeId === undefined) {
+    if (!isRecord(raw.entityIds)) return undefined;
+    if (!Object.values(raw.entityIds).every((v) => typeof v === 'string' && v !== '')) return undefined;
+    if (typeof raw.goal !== 'string' || !raw.goal.trim()) return undefined;
+    if (!Array.isArray(raw.candidateIds) || !raw.candidateIds.every((v) => typeof v === 'string' && v !== '')) return undefined;
+  }
   return {
-    entityIds: raw.entityIds as Record<string, string>,
-    goal: raw.goal.trim(),
-    candidateIds: raw.candidateIds as string[],
-    winnerId: raw.winnerId,
+    ...(typeof raw.episodeId === 'string' && raw.episodeId !== '' ? { episodeId: raw.episodeId } : {}),
+    ...(typeof raw.winnerId === 'string' && raw.winnerId !== '' ? { winnerId: raw.winnerId } : {}),
+    ...(raw.noAcceptableCandidate !== undefined ? { noAcceptableCandidate: raw.noAcceptableCandidate } : {}),
+    ...(isRecord(raw.entityIds) ? { entityIds: raw.entityIds as Record<string, string> } : {}),
+    ...(typeof raw.goal === 'string' && raw.goal !== '' ? { goal: raw.goal.trim() } : {}),
+    ...(Array.isArray(raw.candidateIds) ? { candidateIds: raw.candidateIds as string[] } : {}),
     ...(raw.ratings !== undefined ? { ratings: raw.ratings as Record<string, number> } : {}),
     ...(raw.notes !== undefined ? { notes: raw.notes as Record<string, string> } : {}),
     ...(typeof raw.rationale === 'string' && raw.rationale !== '' ? { rationale: raw.rationale } : {}),
+    ...(Array.isArray(raw.layerAssessments)
+      ? { layerAssessments: raw.layerAssessments as FeedbackBody['layerAssessments'] }
+      : {}),
   };
 }
 
@@ -853,7 +889,7 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
   }
   const parsed = parseGenerateBody(raw);
   if (!parsed) {
-    sendJson(res, 400, { error: 'expected { entityIds: { [layerId]: entityId }, goal: non-empty string, pendingFeedback? }' });
+    sendJson(res, 400, { error: 'expected { entityIds: { [layerId]: entityId }, goal: non-empty string, pendingFeedback?, lessonId? }' });
     return;
   }
   const result = await runPortraitGenerationRound({ db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections }, await resolvePortraitLlm(deps), userId, parsed);
@@ -861,7 +897,7 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: result.error ?? 'generation failed' });
     return;
   }
-  sendJson(res, 200, { candidates: result.candidates });
+  sendJson(res, 200, { candidates: result.candidates, lesson: result.lesson });
 }
 
 /** POST /v1/portraits/candidates/:id/retry — re-render one candidate (typically one whose
@@ -883,8 +919,10 @@ export async function handlePortraitCandidateRetry(req: IncomingMessage, res: Se
   sendJson(res, 200, { imageUrl: result.imageUrl, composedPrompt: result.composedPrompt, ...(result.failed !== undefined ? { failed: result.failed } : {}) });
 }
 
-/** POST /v1/portraits/feedback — record the human evaluation and run the Reflection
- *  Investigation for the calling user. */
+/** POST /v1/portraits/feedback — record the human evaluation for the calling user: a fresh round
+ *  or an episode retry (episodeId). The truthful reflection outcome maps: 200 with the episode id
+ *  + reflection outcome; a structured failure (missing rationale for a winner, unknown candidate,
+ *  ...) → 400 with its stable error code. */
 export async function handlePortraitFeedback(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
   if (!(await requirePortraitsEnabled(deps, res))) return;
   let raw: unknown;
@@ -898,7 +936,8 @@ export async function handlePortraitFeedback(req: IncomingMessage, res: ServerRe
   if (!parsed) {
     sendJson(res, 400, {
       error:
-        'expected { entityIds: { [layerId]: entityId }, goal, candidateIds: string[], winnerId, ratings?, notes?, rationale? }',
+        'expected { entityIds, goal, candidateIds, winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments? } ' +
+        'or an episode retry { episodeId, winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments? }',
     });
     return;
   }
@@ -908,4 +947,262 @@ export async function handlePortraitFeedback(req: IncomingMessage, res: ServerRe
     return;
   }
   sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection });
+}
+
+/** POST /v1/portraits/episodes/:id/reflect — retry reflection on one existing episode (plan §UI:
+ *  a failed reflection offers retry instead of silently closing the round). Thin: the reflect
+ *  action IS feedback-with-episodeId, so this reuses submitPortraitFeedback with the winner
+ *  already stored on the episode. */
+export async function handlePortraitEpisodeReflect(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string, url: URL): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
+  const rest = url.pathname.slice('/v1/portraits/episodes'.length);
+  const segments = rest.split('/').filter(Boolean);
+  if (req.method !== 'POST' || segments.length !== 2 || segments[1] !== 'reflect') {
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseFeedbackBody({ episodeId: segments[0], ...(isRecord(raw) ? raw : {}) });
+  if (!parsed) {
+    sendJson(res, 400, {
+      error: 'expected { winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments? }',
+    });
+    return;
+  }
+  const result = await submitPortraitFeedback({ db: deps.db, settings: deps.settings }, await resolvePortraitLlm(deps), userId, parsed);
+  if (!result.ok) {
+    sendJson(res, 400, { error: result.error ?? 'reflect failed' });
+    return;
+  }
+  sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection });
+}
+
+/** One episode's learning chain for GET /v1/portraits/history — episode → lesson → use → result
+ *  (plan §UI's compact history view). */
+export interface HistoryLearningEntry {
+  learningId: string;
+  attempt: number;
+  status: string;
+  lessonId: string | null;
+  statement: string | null;
+  evidence: string | null;
+  nextChange: { layer: string; instruction: string } | null;
+  preserve: string[] | null;
+  confidence: string | null;
+  createdAt: string;
+}
+
+export interface HistoryEpisode {
+  episodeId: string;
+  goal: string;
+  rationale: string | null;
+  createdAt: string;
+  reflectionStatus: string;
+  winnerCandidateId: string | null;
+  candidates: { candidateId: string; imageUrl: string | null; rating: number | null; note: string | null; lessonId: string | null }[];
+  learning: HistoryLearningEntry[];
+}
+
+export interface HistoryLesson {
+  lessonId: string;
+  statement: string;
+  evidence: string;
+  nextChange: { layer: string; instruction: string };
+  preserve: string[];
+  confidence: string;
+  state: string;
+  createdAt: string;
+  sourceEpisodeId: string | null;
+  uses: { useId: string; lessonId: string; episodeId: string | null; appliedChange: unknown; resultCandidateIds: string[]; createdAt: string }[];
+}
+
+/** GET /v1/portraits/history — the compact episode → lesson → use → result ledger: every episode
+ *  with its candidates' outcomes and reflection attempts (visual_episode_learning), every lesson,
+ *  and every lesson use. The UI can render the whole learning chain from this one call. */
+export async function handlePortraitHistory(res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
+  const episodes = await deps.db.withUserScope(userId, (session) =>
+    session.query<{
+      episode_id: string;
+      goal: string;
+      rationale: string | null;
+      created_at: string;
+      reflection_status: string;
+      selected_candidate_id: string | null;
+      candidate_ids: string[];
+    }>(
+      `select episode_id, goal, rationale, created_at, reflection_status, selected_candidate_id, candidate_ids
+       from visual_episodes where user_id = $1 order by created_at desc`,
+      [userId],
+    ),
+  );
+  const allCandidateIds = [...new Set(episodes.flatMap((e) => e.candidate_ids ?? []))];
+  const candidates = allCandidateIds.length > 0
+    ? await deps.db.withUserScope(userId, (session) =>
+        session.query<{
+          candidate_id: string;
+          image_url: string | null;
+          rating: number | null;
+          note: string | null;
+          lesson_id: string | null;
+        }>(
+          `select candidate_id, image_url, rating, note, lesson_id
+           from visual_candidates where user_id = $1 and candidate_id = any($2::uuid[])`,
+          [userId, allCandidateIds],
+        ),
+      )
+    : [];
+  const episodeIds = episodes.map((e) => e.episode_id);
+  const learning = episodeIds.length > 0
+    ? await deps.db.withUserScope(userId, (session) =>
+        session.query<{
+          learning_id: string;
+          episode_id: string;
+          attempt: number;
+          status: string;
+          output_snapshot: unknown;
+          created_at: string;
+        }>(
+          `select learning_id, episode_id, attempt, status, output_snapshot, created_at
+           from visual_episode_learning where user_id = $1 and episode_id = any($2::uuid[]) order by attempt`,
+          [userId, episodeIds],
+        ),
+      )
+    : [];
+
+  const lessons = await deps.db.withUserScope(userId, (session) =>
+    session.query<{
+      lesson_id: string;
+      source_episode_id: string | null;
+      statement: string;
+      evidence: string;
+      next_change: { layer: string; instruction: string };
+      preserve: string[];
+      confidence: string;
+      state: string;
+      created_at: string;
+    }>(
+      `select lesson_id, source_episode_id, statement, evidence, next_change, preserve, confidence, state, created_at
+       from visual_lessons where user_id = $1 order by created_at`,
+      [userId],
+    ),
+  );
+  const lessonUses = await deps.db.withUserScope(userId, (session) =>
+    session.query<{
+      use_id: string;
+      lesson_id: string;
+      episode_id: string | null;
+      applied_change: unknown;
+      result_candidates: { candidateIds: string[] } | null;
+      created_at: string;
+    }>(
+      `select use_id, lesson_id, episode_id, applied_change, result_candidates, created_at
+       from visual_lesson_uses where user_id = $1 order by created_at`,
+      [userId],
+    ),
+  );
+
+  const history: HistoryEpisode[] = episodes.map((e) => {
+    const episodeCandidates = candidates.filter((c) => (e.candidate_ids ?? []).includes(c.candidate_id));
+    const learningEntries: HistoryLearningEntry[] = learning
+      .filter((l) => l.episode_id === e.episode_id)
+      .map((l) => {
+        const out = (l.output_snapshot ?? {}) as { lesson?: string; evidence?: string; nextChange?: { layer: string; instruction: string }; preserve?: string[]; confidence?: string };
+        return {
+          learningId: l.learning_id,
+          attempt: l.attempt,
+          status: l.status,
+          lessonId: null,
+          statement: null,
+          evidence: null,
+          nextChange: null,
+          preserve: null,
+          confidence: null,
+          createdAt: l.created_at,
+          ...(out.lesson !== undefined ? { statement: out.lesson } : {}),
+          ...(out.evidence !== undefined ? { evidence: out.evidence } : {}),
+          ...(out.nextChange !== undefined ? { nextChange: out.nextChange } : {}),
+          ...(out.preserve !== undefined ? { preserve: out.preserve } : {}),
+          ...(out.confidence !== undefined ? { confidence: out.confidence } : {}),
+        };
+      });
+    return {
+      episodeId: e.episode_id,
+      goal: e.goal,
+      rationale: e.rationale,
+      createdAt: e.created_at,
+      reflectionStatus: e.reflection_status,
+      winnerCandidateId: e.selected_candidate_id,
+      candidates: episodeCandidates.map((c) => ({
+        candidateId: c.candidate_id,
+        imageUrl: c.image_url,
+        rating: c.rating,
+        note: c.note,
+        lessonId: c.lesson_id,
+      })),
+      learning: learningEntries,
+    };
+  });
+  const historyLessons: HistoryLesson[] = lessons.map((l) => ({
+    lessonId: l.lesson_id,
+    statement: l.statement,
+    evidence: l.evidence,
+    nextChange: l.next_change,
+    preserve: l.preserve ?? [],
+    confidence: l.confidence,
+    state: l.state,
+    createdAt: l.created_at,
+    sourceEpisodeId: l.source_episode_id,
+    uses: lessonUses
+      .filter((u) => u.lesson_id === l.lesson_id)
+      .map((u) => ({
+        useId: u.use_id,
+        lessonId: u.lesson_id,
+        episodeId: u.episode_id,
+        appliedChange: u.applied_change,
+        resultCandidateIds: u.result_candidates?.candidateIds ?? [],
+        createdAt: u.created_at,
+      })),
+  }));
+  sendJson(res, 200, { episodes: history, lessons: historyLessons });
+}
+
+/** GET /v1/portraits/lessons — the lesson ledger (state included), for the Studio's lesson list
+ *  and the lesson-picker that drives a lesson-driven mutation round (generate body's lessonId). */
+export async function handlePortraitLessons(res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
+  const lessons = await deps.db.withUserScope(userId, (session) =>
+    session.query<{
+      lesson_id: string;
+      source_episode_id: string | null;
+      statement: string;
+      evidence: string;
+      next_change: { layer: string; instruction: string };
+      preserve: string[];
+      confidence: string;
+      state: string;
+      created_at: string;
+    }>(
+      `select lesson_id, source_episode_id, statement, evidence, next_change, preserve, confidence, state, created_at
+       from visual_lessons where user_id = $1 order by created_at desc`,
+      [userId],
+    ),
+  );
+  sendJson(res, 200, {
+    lessons: lessons.map((l) => ({
+      lessonId: l.lesson_id,
+      statement: l.statement,
+      evidence: l.evidence,
+      nextChange: l.next_change,
+      preserve: l.preserve ?? [],
+      confidence: l.confidence,
+      state: l.state,
+      createdAt: l.created_at,
+      sourceEpisodeId: l.source_episode_id,
+    })),
+  });
 }

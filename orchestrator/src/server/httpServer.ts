@@ -262,10 +262,13 @@ import {
   handlePortraitCandidateRetry,
   handlePortraitEntities,
   handlePortraitEntityFromCastCharacter,
+  handlePortraitEpisodeReflect,
   handlePortraitFeedback,
   handlePortraitGenerate,
+  handlePortraitHistory,
   handlePortraitLayersGet,
   handlePortraitLayersSet,
+  handlePortraitLessons,
   handlePortraitLlmConnectionGet,
   handlePortraitLlmConnectionSet,
   handlePortraitsEnabledGet,
@@ -672,6 +675,11 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
   { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
   { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
+  { method: 'POST', family: '/v1/portraits/episodes', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitEpisodeReflect(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
+  { method: 'GET', path: '/v1/portraits/history', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitHistory(res, deps, userId); }) },
+  { method: 'GET', path: '/v1/portraits/lessons', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitLessons(res, deps, userId); }) },
   { method: 'POST', family: '/v1/portraits/candidates', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       await handlePortraitCandidateRetry(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
     }) },

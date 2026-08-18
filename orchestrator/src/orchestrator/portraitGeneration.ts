@@ -18,16 +18,21 @@
  *      structured error. An *unspecified* layer falls back to that layer's most-recently-used
  *      entity, or a fresh placeholder entity (empty slots, name = the layer's label) when the
  *      user has none yet — playground's seed-on-first-use behavior (plan §Generation round step 1).
- *   3. Load the whole wiki (loadAllWikiEntries) and split it two ways (wiki.ts's three-path
- *      model, 2026-08-17): (a)/(b) formatSubscribedEntries — every entry subscribed to an active
- *      entity id or an active whole-layer type, full body, uncapped; (c)
- *      formatUnsubscribedTagIndex — every other entry, title+tags+id only, pullable on demand
- *      (step 4) when relevant despite carrying no structural subscription to this round.
+ *   3. Load the whole wiki (loadAllWikiEntries, with each entry's current revision id) and split it
+ *      two ways (wiki.ts's three-path model, 2026-08-17): (a)/(b) formatBoundedSubscribedEntries
+ *      under the visual_wiki_context_budget character cap — every entry subscribed to an active
+ *      entity id or an active whole-layer type, full body, but never the entire wiki — and the
+ *      revision ids of exactly the entries that made the cut are recorded as the round's
+ *      attributable provenance; (c) formatUnsubscribedTagIndex — every other entry, title+tags+id
+ *      only, pullable on demand (step 4) when relevant despite carrying no structural subscription
+ *      to this round.
  *   4. Build the mutation prompt (evoprompt.ts buildMutationPrompt) and run it: PULL_WIKI_ENTRY_TOOL
  *      is offered (never forced) whenever (c) is non-empty, for up to MAX_WIKI_PULLS round-trips;
  *      the final call always drops the tool, forcing a plain-text reply. Parse that reply
  *      (evoprompt.ts parseCandidateResponse) into visual_mutation_candidate_count (default 3)
- *      candidate chromosomes.
+ *      candidate chromosomes. When the round is lesson-driven (input.lessonId resolves to a
+ *      provisional/supported visual_lessons row), the lesson is injected as a hard requirement
+ *      (evoprompt.ts guidingLesson) and recorded in visual_lesson_uses.
  *   5. enforceSlotKeys reconciles every parsed chromosome against the parent — the entities'
  *      own slots (the mutation LLM's "current candidate" is exactly that union, so parent
  *      fidelity means the round can neither hallucinate a slot key no entity owns nor drop one
@@ -38,7 +43,9 @@
  *      imageUrl null — omitted from the grid, never an aborted round (plan §Edge Cases).
  *   7. Write one visual_candidates row per candidate (chromosome + generation preserved even
  *      when its render failed — the training record is the round, not just the successful grid),
- *      return them.
+ *      each with its immutable provenance: parent chromosome, composed prompt, render metadata,
+ *      the bounded wiki revision ids shown, and the lesson_id that drove the round. Return them
+ *      plus the applied lesson (null = exploratory).
  *
  * Two deliberate ordering/scope decisions, disclosed:
  * - The portrait connection is resolved *before* the mutation LLM call, not at plan step 6.
@@ -62,9 +69,15 @@
  * PortraitGenerationDeps — db, settings, imageConnections (the same three generateLocationImage
  *   needs)
  * runPortraitGenerationRound(deps, llm, userId, input) -> Promise<PortraitGenerationRoundResult>
- *   — fail-open; { ok, candidates?: PortraitCandidateResult[], error? }
+ *   — fail-open; { ok, candidates?: PortraitCandidateResult[], lesson?: { lessonId, statement } |
+ *   null, error? } (lesson null = exploratory round)
  * PortraitCandidateResult — candidateId, chromosome, composedPrompt, imageUrl (null = provider
  *   failure), failed? (the provider error, when present)
+ * loadAllWikiEntries(db, userId) -> Promise<WikiEntryRowWithRevision[]> — every owned entry plus
+ *   its current revision id (needed by portraitFeedback.ts's bounded reflection context too)
+ * selectBoundedWikiContext(entries, activeEntityIds, activeLayerTypes, budgetChars) ->
+ *   BoundedWikiContext — pure budget-capped Path-1 selection with attributable revision ids
+ * DEFAULT_WIKI_CONTEXT_BUDGET — the visual_wiki_context_budget fallback (2400)
  * retryPortraitCandidateRender(deps, userId, candidateId) -> Promise<PortraitCandidateRetryResult>
  *   — re-renders one already-written candidate's stored chromosome (no mutation call, same
  *   candidate_id) when its original render failed; fail-open, same imageUrl/failed shape
@@ -91,7 +104,7 @@ import { compileTemplate, type SlotMap } from '../portraits/composer.js';
 import { buildMutationPrompt, parseCandidateResponse, parsePullWikiEntryId, PULL_WIKI_ENTRY_TOOL } from '../portraits/evoprompt.js';
 import { loadLayerManifest, getPromptableLayers, formatLayerDefinitions, type LayerDefinition } from '../portraits/layerStack.js';
 import { enforceSlotKeys, type CandidateChromosome } from '../portraits/reconcile.js';
-import { formatSubscribedEntries, formatUnsubscribedTagIndex, type WikiEntryRow, type WikiSubscription } from '../portraits/wiki.js';
+import { formatBoundedSubscribedEntries, formatUnsubscribedTagIndex, type WikiEntryRow, type WikiSubscription } from '../portraits/wiki.js';
 
 export interface PortraitGenerationDeps {
   db: PostgresClient;
@@ -107,6 +120,10 @@ export interface PortraitGenerationInput {
   goal: string;
   /** Human rationale/notes from the last episode, fed back into this round's mutation, if any. */
   pendingFeedback?: string;
+  /** A concluded lesson to drive this round with (docs/plans/portrait-studio-vision-review-
+   *  harness-plan.md §API step 6). Absent → the round is explicitly exploratory. The lesson is
+   *  loaded, injected as a hard requirement, and recorded in visual_lesson_uses. */
+  lessonId?: string;
 }
 
 export interface PortraitCandidateResult {
@@ -126,6 +143,9 @@ export interface PortraitCandidateResult {
 export interface PortraitGenerationRoundResult {
   ok: boolean;
   candidates?: PortraitCandidateResult[];
+  /** The concluded lesson this round was driven by, when one was supplied and usable — lets the
+   *  Studio mark the round lesson-driven (null = exploratory). */
+  lesson?: { lessonId: string; statement: string } | null;
   error?: string;
 }
 
@@ -202,21 +222,61 @@ function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDe
  *  Fetched once and handed to both formatSubscribedEntries (Path 1 a/b, full body) and
  *  formatUnsubscribedTagIndex (Path 1c, title+tags+id) — each does its own pure filtering over
  *  the same set, and Path 1c's pull loop looks entries up from this in-memory array by id rather
- *  than a second query. */
-async function loadAllWikiEntries(db: PostgresClient, userId: string): Promise<WikiEntryRow[]> {
+ *  than a second query. Also carries each entry's current revision id (the latest
+ *  visual_wiki_revisions row) so the round can record exactly which revisions it was shown —
+ *  bounded, attributable context (bi_principles.md §16). */
+export interface WikiEntryRowWithRevision extends WikiEntryRow {
+  current_revision_id: string | null;
+}
+
+export async function loadAllWikiEntries(db: PostgresClient, userId: string): Promise<WikiEntryRowWithRevision[]> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<{ entry_id: string; title: string; body: string; tags: string[]; subscriptions: unknown }>(
       `select entry_id, title, body, tags, subscriptions from visual_wiki_entries where user_id = $1 order by created_at`,
       [userId],
     ),
   );
+  const revisionRows = await db.withUserScope(userId, (session) =>
+    session.query<{ entry_id: string; revision_id: string }>(
+      `select distinct on (entry_id) entry_id, revision_id
+       from visual_wiki_revisions where user_id = $1 order by entry_id, revision_number desc`,
+      [userId],
+    ),
+  );
+  const revisionByEntry = new Map(revisionRows.map((r) => [r.entry_id, r.revision_id]));
   return rows.map((r) => ({
     entry_id: r.entry_id,
     title: r.title,
     body: r.body,
     tags: r.tags ?? [],
     subscriptions: (Array.isArray(r.subscriptions) ? r.subscriptions : []) as WikiSubscription[],
+    current_revision_id: revisionByEntry.get(r.entry_id) ?? null,
   }));
+}
+
+export interface BoundedWikiContext {
+  /** The bounded full-body text Path 1 sends (never the entire wiki). */
+  text: string;
+  /** The entry ids that made the cut, in order. */
+  entryIds: string[];
+  /** The current revision ids of those entries — the attributable provenance. */
+  revisionIds: string[];
+}
+
+/** Pure selection of the bounded Path-1 context over already-loaded entries, with the revision ids
+ *  that back it. budgetChars <= 0 means "no full-body wiki context at all". */
+export function selectBoundedWikiContext(
+  entries: WikiEntryRowWithRevision[],
+  activeEntityIds: string[],
+  activeLayerTypes: string[],
+  budgetChars: number,
+): BoundedWikiContext {
+  const budget = Number.isInteger(budgetChars) && budgetChars > 0 ? budgetChars : 0;
+  const { text, entryIds } = formatBoundedSubscribedEntries(entries, activeEntityIds, activeLayerTypes, budget);
+  const revisionIds = entries
+    .filter((e) => entryIds.includes(e.entry_id) && e.current_revision_id !== null)
+    .map((e) => e.current_revision_id as string);
+  return { text, entryIds, revisionIds };
 }
 
 /** The per-subject round counter the task-id `attempt` derives from (plan §Layer manifest):
@@ -230,6 +290,43 @@ async function nextAttempt(db: PostgresClient, userId: string, subjectEntityId: 
     ),
   );
   return rows[0]?.attempt ?? 1;
+}
+
+/** The built-in cap on Path-1 full-body wiki text sent to a mutation or reflection call
+ *  (visual_wiki_context_budget, default). Same "default + bespoke" numeric shape as every other
+ *  setting — unset/corrupt falls back here, never "unlimited". */
+export const DEFAULT_WIKI_CONTEXT_BUDGET = 2400;
+
+interface LessonRow {
+  lesson_id: string;
+  statement: string;
+  evidence: string;
+  next_change: { layer: string; instruction: string };
+  preserve: string[];
+  confidence: string;
+  state: string;
+}
+
+/** Load a concluded lesson for use by a mutation round. Only provisional/supported lessons are
+ *  usable — rejected and superseded ones come back undefined (the round stays exploratory). */
+async function loadLessonForUse(db: PostgresClient, userId: string, lessonId: string): Promise<LessonRow | undefined> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<LessonRow>(
+      `select lesson_id, statement, evidence, next_change, preserve, confidence, state
+       from visual_lessons where lesson_id = $1 and user_id = $2`,
+      [lessonId, userId],
+    ),
+  );
+  const row = rows[0];
+  if (!row) {
+    log.warn('portraitGeneration: lesson not found, round stays exploratory', { lessonId });
+    return undefined;
+  }
+  if (row.state !== 'provisional' && row.state !== 'supported') {
+    log.info('portraitGeneration: lesson not usable in its current state, round stays exploratory', { lessonId, state: row.state });
+    return undefined;
+  }
+  return row;
 }
 
 /** A structured, non-throwing entity-resolution failure — thrown internally, caught at the top
@@ -278,17 +375,39 @@ export async function runPortraitGenerationRound(
     const resolvedEntityIds: Record<string, string> = {};
     for (const [layerId, entity] of entities) resolvedEntityIds[layerId] = entity.entity_id;
 
-    // 3. Path-1 wiki: (a)/(b) rows subscribed to an active entity id or an active whole-layer
-    //    type, full body, uncapped (wiki.ts formatSubscribedEntries). (c) every other entry,
-    //    title+tags+id only (wiki.ts formatUnsubscribedTagIndex) — a lesson can be relevant to
-    //    this round's goal without ever having been subscribed to this entity or layer, so the
-    //    mutation call gets to pull one on demand (PULL_WIKI_ENTRY_TOOL below) instead of staying
-    //    blind to everything outside its structural (a)/(b) subscriptions.
+// 3. Path-1 wiki: (a)/(b) rows subscribed to an active entity id or an active whole-layer
+    //    type, full body, UNDER the visual_wiki_context_budget character cap (docs/plans/
+    //    portrait-studio-vision-review-harness-plan.md §Wiki policy — "never the entire wiki");
+    //    the revision ids of exactly those entries are recorded as the round's attributable
+    //    provenance. (c) every other entry, title+tags+id only (wiki.ts
+    //    formatUnsubscribedTagIndex) — a lesson can be relevant to this round's goal without ever
+    //    having been subscribed to this entity or layer, so the mutation call gets to pull one on
+    //    demand (PULL_WIKI_ENTRY_TOOL below) instead of staying blind to everything outside its
+    //    structural (a)/(b) subscriptions.
     const activeEntityIds = [...entities.values()].map((e) => e.entity_id);
     const activeLayerTypes = layers.map((l) => l.id);
+    const [budgetRaw] = await Promise.all([deps.settings.get('visual_wiki_context_budget')]);
+    const budgetChars = budgetRaw ? Number(budgetRaw) : NaN;
+    const wikiBudget = Number.isInteger(budgetChars) && budgetChars > 0 ? budgetChars : DEFAULT_WIKI_CONTEXT_BUDGET;
     const allWikiEntries = await loadAllWikiEntries(deps.db, userId);
-    const wikiText = formatSubscribedEntries(allWikiEntries, activeEntityIds, activeLayerTypes);
+    const boundedWiki = selectBoundedWikiContext(allWikiEntries, activeEntityIds, activeLayerTypes, wikiBudget);
+    const wikiText = boundedWiki.text;
+    const wikiRevisionIds = boundedWiki.revisionIds;
     const unsubscribedWikiTagIndex = formatUnsubscribedTagIndex(allWikiEntries, activeEntityIds, activeLayerTypes);
+
+    // The lesson driving this round, when one was supplied (docs/plans/portrait-studio-vision-
+    // review-harness-plan.md §API step 6). Rejected/superseded lessons are ignored with a log —
+    // the round stays exploratory rather than silently applying a dead lesson.
+    let usedLesson: LessonRow | undefined;
+    let guidingLesson: string | undefined;
+    if (input.lessonId) {
+      usedLesson = await loadLessonForUse(deps.db, userId, input.lessonId);
+      if (usedLesson) {
+        guidingLesson =
+          `"${usedLesson.statement}" — next change: ${usedLesson.next_change.layer}: ${usedLesson.next_change.instruction}` +
+          (usedLesson.preserve.length > 0 ? ` (keep unchanged: ${usedLesson.preserve.join(', ')})` : '');
+      }
+    }
 
     // 6 (deliberately early — see header): the portrait connection gates the round before a
     //    single mutation token is spent.
@@ -324,6 +443,7 @@ export async function runPortraitGenerationRound(
         unsubscribedWikiTagIndex,
         layerDefinitions: formatLayerDefinitions(manifest),
         pendingFeedback: input.pendingFeedback,
+        guidingLesson,
       },
       count,
       mutationOverride,
@@ -399,16 +519,43 @@ export async function runPortraitGenerationRound(
     );
 
     // 7. One visual_candidates row per candidate — the chromosome + generation survive even a
-    //    failed render (the row is the training record; the grid filters on image_url).
+    //    failed render (the row is the training record; the grid filters on image_url). Every row
+    //    now also persists the immutable provenance that lets the episode be replayed later:
+    //    parent chromosome, composed prompt, render metadata, the bounded wiki revision ids that
+    //    were shown to the mutation call, and the lesson_id that drove the round.
+    const renderMetadata = {
+      model: profile.model,
+      width: profile.width,
+      height: profile.height,
+      steps: profile.samplingSteps,
+      cfgScale: profile.cfgScale,
+      samplerName: profile.samplerName,
+    };
+    const candidateIds: string[] = [];
     const candidates: PortraitCandidateResult[] = [];
     for (const result of dispatched) {
       const rows = await deps.db.withUserScope(userId, (session) =>
         session.query<{ candidate_id: string }>(
-          `insert into visual_candidates (user_id, entity_ids, generation, chromosome, image_url)
-           values ($1, $2::jsonb, $3, $4::jsonb, $5) returning candidate_id`,
-          [userId, JSON.stringify(resolvedEntityIds), attempt, JSON.stringify(result.chromosome), result.imageUrl],
+          `insert into visual_candidates
+             (user_id, entity_ids, generation, chromosome, image_url,
+              parent_chromosome, composed_prompt, render_metadata, wiki_revision_ids, lesson_id)
+           values ($1, $2::jsonb, $3, $4::jsonb, $5, $6::jsonb, $7, $8::jsonb, $9::uuid[], $10)
+           returning candidate_id`,
+          [
+            userId,
+            JSON.stringify(resolvedEntityIds),
+            attempt,
+            JSON.stringify(result.chromosome),
+            result.imageUrl,
+            JSON.stringify(parent),
+            result.composedPrompt,
+            JSON.stringify(renderMetadata),
+            wikiRevisionIds.length > 0 ? wikiRevisionIds : null,
+            usedLesson?.lesson_id ?? null,
+          ],
         ),
       );
+      candidateIds.push(rows[0].candidate_id);
       candidates.push({
         candidateId: rows[0].candidate_id,
         chromosome: result.chromosome,
@@ -418,14 +565,35 @@ export async function runPortraitGenerationRound(
       });
     }
 
+    // The lesson-use record: a lesson-driven round is explicitly attributable; without a lesson
+    // the round is exploratory and writes nothing here. The episode_id fills in when the round's
+    // feedback lands.
+    if (usedLesson) {
+      await deps.db.withUserScope(userId, (session) =>
+        session.query(
+          `insert into visual_lesson_uses (user_id, lesson_id, episode_id, mutation_call, applied_change, result_candidates)
+           values ($1, $2, null, $3::jsonb, $4::jsonb, $5::jsonb)`,
+          [
+            userId,
+            usedLesson.lesson_id,
+            JSON.stringify({ goal: input.goal, attempt, wikiRevisionIds }),
+            JSON.stringify({ next_change: usedLesson.next_change, preserve: usedLesson.preserve }),
+            JSON.stringify({ candidateIds }),
+          ],
+        ),
+      );
+      log.info('portraitGeneration: lesson-driven round recorded', { subjectEntityId, attempt, lessonId: usedLesson.lesson_id });
+    }
+
     log.info('portraitGeneration: round complete', {
       subjectEntityId,
       attempt,
       goal: input.goal,
       candidates: candidates.length,
       rendered: candidates.filter((c) => c.imageUrl).length,
+      lessonDriven: usedLesson?.lesson_id ?? null,
     });
-    return { ok: true, candidates };
+    return { ok: true, candidates, lesson: usedLesson ? { lessonId: usedLesson.lesson_id, statement: usedLesson.statement } : null };
   } catch (err) {
     // bi_principles.md §11: log the seam. A failed round is a missing grid, never a broken
     // orchestrator — the operator retries from the Studio.

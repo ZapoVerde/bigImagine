@@ -1,21 +1,23 @@
-// Proves the portrait wiki read paths + the Reflection Investigation loop's turn-cap forcing
-// (orchestrator/src/portraits/wiki.ts + orchestrator/orchestrator/portraitFeedback.ts, plan
-// §Tests):
-//   - Path 1 (formatSubscribedEntries): subscribed entries only, full title+body, uncapped,
-//     whole-layer-type subscriptions reaching every entity of that type;
+// Proves the portrait wiki read paths (orchestrator/src/portraits/wiki.ts, plan §Tests + the
+// vision-review-harness plan's §Wiki policy — "Send mutation a bounded selected set of current
+// revisions, never the entire wiki"):
+//   - Path 1 (formatSubscribedEntries): subscribed entries only, full title+body, whole-layer-type
+//     subscriptions reaching every entity of that type;
+//   - Path 1 bounded (formatBoundedSubscribedEntries): the same subscription selection UNDER a
+//     character budget — accumulating in row order, truncating a lone oversized block rather than
+//     dropping it, and returning the entry ids that made the cut (the caller's attributable
+//     revision provenance);
 //   - Path 1c (formatUnsubscribedTagIndex): the tag-catch-all — every entry Path 1 (a)/(b) did
 //     NOT already reach, title+tags+id, so mutation can pull one on demand;
 //   - Path 2 (buildWikiIndex): title+tags only, grouped by layer type, across the whole manifest;
-//   - subscriptionsFor: the create-conclusion subscription constructor;
-//   - the investigation loop's cap-forcing behavior driven through submitPortraitFeedback with a
-//     fake gate that never calls submit_conclusion on its own — the forced final call must land
-//     the conclusion (plan §Edge Cases), and an amend-miss must fall back to create (§Edge Cases).
-// The loop test runs against a fake Postgres pool + fake settings + fake LLM gate — no server,
-// no real provider.
+//   - subscriptionsFor: the create-conclusion subscription constructor.
+// Pure formatting only — the reflection pass that used to drive wiki writes here now runs through
+// the lesson ledger (verify-visual-reflection-learning.mjs drives it against a fake gate; the
+// wiki itself is a separate operator-approved projection).
+// All pure — no server, no provider.
 
 import { DEFAULT_LAYER_MANIFEST } from '../dist/portraits/layerStack.js';
-import { buildWikiIndex, formatSubscribedEntries, formatUnsubscribedTagIndex, subscriptionsFor } from '../dist/portraits/wiki.js';
-import { submitPortraitFeedback } from '../dist/orchestrator/portraitFeedback.js';
+import { buildWikiIndex, formatBoundedSubscribedEntries, formatSubscribedEntries, formatUnsubscribedTagIndex, subscriptionsFor } from '../dist/portraits/wiki.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -63,7 +65,7 @@ const entries = [
   },
 ];
 
-// --- Path 1: subscribed only, full body, uncapped. ---
+// --- Path 1: subscribed only, full body, uncapped (the function remains the full-form path). ---
 const path1 = formatSubscribedEntries(entries, [SUBJECT_ENTITY], ['outfit', 'style']);
 assert(path1.includes('## Keep coats short\nCoats read bulky below the knee; shorten them.'), 'wiki: Path 1 includes full title+body for subscribed entries');
 assert(path1.includes('## Rin prefers teal\n'), 'wiki: Path 1 entity-specific subscription matches the active entity');
@@ -104,6 +106,24 @@ assert((formatSubscribedEntries(dedupEntries, [SUBJECT_ENTITY], ['subject']).mat
 
 // Empty when nothing matches.
 assert(formatSubscribedEntries(entries, ['e-nowhere'], ['nowhere']) === '', 'wiki: Path 1 returns "" when nothing matches');
+
+// --- Path 1 bounded (formatBoundedSubscribedEntries): same subscription selection, capped at a
+//     character budget — the vision-review-harness plan's "never the entire wiki". ---
+const bounded = formatBoundedSubscribedEntries(entries, [SUBJECT_ENTITY], ['outfit', 'style'], 150);
+assert(bounded.text.includes('## Keep coats short') && bounded.text.includes('## Rin prefers teal'), 'wiki: bounded Path 1 still reaches subscribed entries');
+assert(bounded.entryIds.includes('w1') && bounded.entryIds.includes('w2'), 'wiki: bounded Path 1 returns the entry ids that made the cut (revision provenance)');
+assert(!bounded.text.includes('## Amber eyes carry') && !bounded.entryIds.includes('w3'), 'wiki: bounded Path 1 stops before the block that would blow the remaining budget');
+assert(!bounded.entryIds.includes('w4'), 'wiki: bounded Path 1 excludes unsubscribed entries');
+const notCut = formatBoundedSubscribedEntries(entries, [SUBJECT_ENTITY], ['outfit', 'style'], 1);
+assert(notCut.text.length === 1 && notCut.text.startsWith('#'), 'wiki: bounded Path 1 truncates a lone oversized block rather than dropping it');
+
+// The budget is inclusive of every block up to the cap — an entry whose block would exceed the
+// remaining budget is skipped (later entries), never partially appended after others.
+const budgetBlock = formatBoundedSubscribedEntries(entries, [SUBJECT_ENTITY], ['outfit', 'style'], 80);
+assert(budgetBlock.text.includes('## Keep coats short') && !budgetBlock.text.includes('## Rin prefers teal'), 'wiki: bounded Path 1 stops before an entry whose block would blow the remaining budget');
+
+// Zero/negative budget = no full-body wiki context at all (the caller's "no wiki" posture).
+assert(formatBoundedSubscribedEntries(entries, [SUBJECT_ENTITY], ['outfit', 'style'], 0).text === '', 'wiki: bounded Path 1 with budget 0 sends no context');
 
 // --- Path 2: title+tags only, grouped by layer type in manifest order, whole manifest. ---
 const index = buildWikiIndex(entries, layers);
@@ -164,236 +184,3 @@ const sub1 = subscriptionsFor('style', STYLE_ENTITY);
 assert(sub1.length === 1 && sub1[0].layerType === 'style' && sub1[0].layerEntityId === STYLE_ENTITY, 'wiki: subscriptionsFor with entity → entity-specific subscription');
 const sub2 = subscriptionsFor('style', null);
 assert(sub2.length === 1 && sub2[0].layerType === 'style' && sub2[0].layerEntityId === null, 'wiki: subscriptionsFor without entity → whole-layer-type subscription');
-
-// ============================================================================
-// Reflection Investigation loop — turn-cap forcing through submitPortraitFeedback.
-// ============================================================================
-
-const USER = 'u1';
-const WINNER = 'c1';
-const CANDIDATE_IDS = ['c1', 'c2', 'c3'];
-
-function makeSettings(overrides = {}) {
-  const map = new Map([
-    ['visual_layer_stack', JSON.stringify(DEFAULT_LAYER_MANIFEST)],
-    ['visual_wiki_investigation_max_turns', '3'],
-    ['visual_reflection_system_prompt_override', ''],
-    ...Object.entries(overrides),
-  ]);
-  return {
-    get: async (key) => map.get(key) ?? null,
-    set: async (key, value) => { map.set(key, value); },
-  };
-}
-
-function makeDb() {
-  const state = {
-    candidates: CANDIDATE_IDS.map((id, i) => ({
-      candidate_id: id,
-      entity_ids: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' },
-      image_url: `https://img/${id}.png`,
-      chromosome: {
-        slots: {
-          subject: { subject_identity: `Rin V${i + 1}` },
-          outfit: { outfit_style: 'red coat' },
-          style: { style_style: 'VLZ hybrid' },
-          expression: { expression_emotion: 'calm' },
-        },
-      },
-    })),
-    // The style entity's custom template — reflection must read it off the WINNER's
-    // entity_ids (the round's resolved map), so composed prompts recompute like generation did.
-    styleTemplates: [{ entity_id: 'e-style', template: 'PORTRAIT {{subject_overflow}} / {{style_overflow}}' }],
-    wikiEntries: [
-      {
-        entry_id: 'w-existing',
-        title: 'Keep coats short',
-        body: 'Coats read bulky below the knee.',
-        tags: ['outfit'],
-        subscriptions: [{ layerType: 'outfit', layerEntityId: null }],
-      },
-    ],
-    episodes: 0,
-    wikiWrites: [], // { action, entry_id?, origin_episode_id?, title, body, tags, subscriptions }
-    promoted: [], // entity ids promoted with last_image_url
-    ratingWrites: [],
-    episodeCounter: 0,
-    wikiCounter: 0,
-  };
-  const db = {
-    state,
-    withUserScope: async (_userId, fn) => fn({ query }),
-  };
-  function query(sql, params = []) {
-    const s = sql;
-    if (s.includes('from visual_candidates')) {
-      const ids = params[1];
-      return state.candidates.filter((c) => ids.includes(c.candidate_id));
-    }
-    if (s.startsWith('insert into visual_episodes')) {
-      state.episodeCounter += 1;
-      const episodeId = `ep-${state.episodeCounter}`;
-      state.episodes = episodeId;
-      return [{ episode_id: episodeId }];
-    }
-    if (s.startsWith('update visual_entities')) {
-      const entityId = s.includes('slots = $3') ? params[4] : params[3];
-      state.promoted.push({ entityId, imageUrl: params[0], candidateId: params[1] });
-      return [];
-    }
-    if (s.includes('update visual_candidates set rating')) {
-      state.ratingWrites.push({ candidateId: params[0], rating: params[1] });
-      return [];
-    }
-    if (s.includes('update visual_candidates set note')) {
-      return [];
-    }
-    if (s.includes('from visual_entities')) {
-      // style template resolution: select template from visual_entities where ... entity_id = $2
-      return state.styleTemplates.filter((r) => r.entity_id === params[1]);
-    }
-    if (s.includes('from visual_wiki_entries') && s.includes('order by created_at')) {
-      return [...state.wikiEntries];
-    }
-    if (s.includes('select entry_id, title, body') && s.includes('from visual_wiki_entries')) {
-      return state.wikiEntries.filter((e) => e.entry_id === params[0]);
-    }
-    if (s.includes('select entry_id from visual_wiki_entries')) {
-      return state.wikiEntries.filter((e) => e.entry_id === params[0]);
-    }
-    if (s.startsWith('update visual_wiki_entries')) {
-      return [];
-    }
-    if (s.startsWith('insert into visual_wiki_entries')) {
-      state.wikiCounter += 1;
-      const entryId = `wiki-new-${state.wikiCounter}`;
-      state.wikiWrites.push({
-        action: 'create',
-        entryId,
-        originEpisodeId: params[5],
-        title: params[1],
-        body: params[2],
-        tags: params[3],
-        subscriptions: params[4],
-      });
-      state.wikiEntries.push({
-        entry_id: entryId,
-        title: params[1],
-        body: params[2],
-        tags: params[3],
-        subscriptions: JSON.parse(params[4]),
-      });
-      return [{ entry_id: entryId }];
-    }
-    throw new Error(`unexpected SQL: ${s.slice(0, 80)}`);
-  }
-  return db;
-}
-
-function conclusionCall(args) {
-  return {
-    message: { role: 'assistant', content: '' },
-    toolCalls: [{ id: 'concl-1', name: 'submit_conclusion', arguments: args }],
-  };
-}
-function emptyTurn() {
-  return { message: { role: 'assistant', content: 'still thinking' }, toolCalls: [] };
-}
-
-const input = {
-  entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' },
-  goal: 'A calmer evening variant of Rin.',
-  candidateIds: CANDIDATE_IDS,
-  winnerId: WINNER,
-  ratings: { c1: 5, c2: 3 },
-  notes: { c1: 'keep the pose' },
-  rationale: 'The quiet pose wins; coats still too long.',
-};
-
-// --- The fake gate: never calls submit_conclusion on its own (text-only turns) — only the
-//     forced final call lands the conclusion. That must cap the loop and conclude. ---
-{
-  const db = makeDb();
-  const calls = [];
-  const gateLlm = {
-    name: 'fake-gate',
-    async complete(_messages, tools, options) {
-      calls.push({ tools, options });
-      if (options?.forceTool === 'submit_conclusion') {
-        return conclusionCall({ action: 'create', title: 'Coats end above the knee', body: 'Shorten coats.', tags: ['outfit'], layerId: 'outfit' });
-      }
-      return emptyTurn(); // never concludes on its own
-    },
-  };
-  const result = await submitPortraitFeedback({ db, settings: makeSettings() }, gateLlm, USER, input);
-
-  assert(result.ok === true && result.episodeId === 'ep-1', `feedback: round records an episode -> ${result.episodeId}`);
-  assert(result.reflection?.action === 'created' && result.reflection.entryId === 'wiki-new-1', 'feedback: forced final conclusion lands a created entry');
-  assert(calls.length === 3, `feedback: loop ran exactly the cap's ${3} turns -> ${calls.length}`);
-  const finalCall = calls[calls.length - 1];
-  assert(finalCall.tools.length === 1 && finalCall.tools[0].name === 'submit_conclusion', 'feedback: final call sees submit_conclusion as the ONLY tool');
-  assert(finalCall.options?.forceTool === 'submit_conclusion', 'feedback: final call is forced onto submit_conclusion');
-  assert(calls[0].tools.length === 2 && !calls[0].options?.forceTool, 'feedback: pre-cap calls see both tools and no forceTool');
-  assert(
-    db.state.promoted.length === 4
-      && db.state.promoted.every((p) => p.imageUrl === 'https://img/c1.png' && p.candidateId === 'c1')
-      && ['e-sub', 'e-out', 'e-style', 'e-expr'].every((id) => db.state.promoted.some((p) => p.entityId === id)),
-    'feedback: winner entity ids promoted with the winner image',
-  );
-  assert(db.state.ratingWrites.length === 2 && db.state.ratingWrites.some((w) => w.candidateId === 'c1' && w.rating === 5), 'feedback: ratings written through');
-  const wikiWrite = db.state.wikiWrites[0];
-  assert(wikiWrite && wikiWrite.originEpisodeId === 'ep-1', 'feedback: created entry carries origin_episode_id');
-  assert(wikiWrite && wikiWrite.subscriptions.includes('"layerEntityId":null') && wikiWrite.subscriptions.includes('"layerType":"outfit"'), 'feedback: whole-layer-type subscription written for a layer-only lesson');
-}
-
-// Same loop, but the gate captures messages so we can prove the winner-resolved template.
-{
-  const db = makeDb();
-  let firstUserContent = '';
-  const gateLlm = {
-    name: 'fake-gate-capture',
-    async complete(messages, _tools, options) {
-      if (messages[1]?.role === 'user' && !firstUserContent) firstUserContent = messages[1].content;
-      if (options?.forceTool === 'submit_conclusion') {
-        return conclusionCall({ action: 'create', title: 'T', body: 'B', tags: [], layerId: 'style' });
-      }
-      return emptyTurn();
-    },
-  };
-  await submitPortraitFeedback({ db, settings: makeSettings() }, gateLlm, USER, input);
-  assert(
-    firstUserContent.includes('prompt: PORTRAIT subject_identity: Rin V1 / style_style: VLZ hybrid'),
-    'feedback: composed prompts recomputed with the WINNER-resolved style template',
-  );
-  assert(firstUserContent.includes('Existing wiki entries (title + tags only'), 'feedback: first reflection call receives the Path-2 index');
-}
-
-// --- Fail-open gates: winner not in candidates / unknown candidate id. ---
-{
-  const db = makeDb();
-  const r1 = await submitPortraitFeedback({ db, settings: makeSettings() }, { name: 'x', complete: async () => emptyTurn() }, USER, {
-    ...input,
-    winnerId: 'nope',
-  });
-  assert(r1.ok === false && r1.error === 'winner_not_in_candidates', 'feedback: winner outside candidateIds → winner_not_in_candidates');
-  const r2 = await submitPortraitFeedback({ db, settings: makeSettings() }, { name: 'x', complete: async () => emptyTurn() }, USER, {
-    ...input,
-    candidateIds: ['c1', 'ghost'],
-  });
-  assert(r2.ok === false && r2.error === 'unknown_candidate_id', 'feedback: candidate id missing from the store → unknown_candidate_id');
-}
-
-// --- Amend-miss → create fallback (plan §Edge Cases): the gate concludes amend with an id that
-//     matches no existing entry; the write falls back to create and is logged. ---
-{
-  const db = makeDb();
-  const amendMissLlm = {
-    name: 'fake-amend-miss',
-    async complete() {
-      return conclusionCall({ action: 'amend', id: 'no-such-entry', title: 'Lesson', body: 'Body', tags: ['a'], layerId: 'style' });
-    },
-  };
-  const result = await submitPortraitFeedback({ db, settings: makeSettings() }, amendMissLlm, USER, input);
-  assert(result.ok === true && result.reflection?.action === 'created', `feedback: amend-miss falls back to create -> ${result.reflection?.action}`);
-  assert(result.reflection?.entryId === 'wiki-new-1', 'feedback: fallback create returns the new entry id');
-}

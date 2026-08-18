@@ -50,7 +50,8 @@
  *
  * Wiki lessons reach the mutation call two ways (2026-08-17, the wiki's three-path model — a:
  * entity-specific, b: whole-layer-type, c: tag-catch-all): (a)/(b) are `ctx.wikiEntries` —
- * wiki.ts's formatSubscribedEntries, full title+body, uncapped, already resolved by the caller
+ * wiki.ts's formatSubscribedEntries, full title+body (bounded by the caller via
+ * formatBoundedSubscribedEntries before this file ever runs), already resolved by the caller
  * before this file ever runs. (c) is `ctx.unsubscribedWikiTagIndex` — wiki.ts's
  * formatUnsubscribedTagIndex, title+tags+id only, for every entry (a)/(b) did NOT already reach —
  * a lesson can be relevant to a round's goal without ever having been subscribed to this entity
@@ -109,6 +110,10 @@ export interface MutationContext {
   layerDefinitions: string;
   /** Human rationale/notes from the last episode, if any. */
   pendingFeedback?: string;
+  /** A concluded reflection lesson the operator chose to drive this round with — the lesson
+   *  statement + next change, injected as a hard requirement (docs/plans/portrait-studio-vision-
+   *  review-harness-plan.md §API step 6). Undefined = an explicitly exploratory round. */
+  guidingLesson?: string;
 }
 
 /** Wiki path (c)'s tool: fetch one entry's full title+body by the id shown in the
@@ -204,6 +209,9 @@ export function buildMutationPrompt(
     formatSlotsForPrompt(ctx.parentSlots),
     'Wiki lessons:',
     ctx.wikiEntries.trim() ? ctx.wikiEntries : '(none)',
+    ...(ctx.guidingLesson?.trim()
+      ? ['Guiding lesson (from the last concluded reflection — treat as a hard requirement):', ctx.guidingLesson.trim()]
+      : []),
     ...(unsubscribedIndex
       ? [
           'Other wiki entries (not directly linked to this round — call pull_wiki_entry on one ' +

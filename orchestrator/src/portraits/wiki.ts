@@ -10,8 +10,9 @@
  *   `visual_wiki_entries` row whose subscriptions include any of the round's active entity ids,
  *   or the active layer types at the whole-layer-type level (a subscription with a null
  *   `layerEntityId` reaches every entity of that layer type, not just the ones named), and
- *   formats the full title+body, uncapped — the same flat-inclusion posture playground's §23.4
- *   settled on. Empty when nothing matches.
+ *   formats the full title+body, uncapped (this function remains the full-form path; the
+ *   mutation/reflection callers bound it via `formatBoundedSubscribedEntries`) — the same
+ *   flat-inclusion posture playground's §23.4 settled on. Empty when nothing matches.
  *
  * - `buildWikiIndex` is Path 2 — what the *reflection* loop's first call sees. A title+tags-only
  *   index of every entry, grouped by the layer type each of its subscriptions names, across the
@@ -43,6 +44,8 @@
  * buildWikiIndex(entries, layers) -> string — pure, title+tags grouped by layer type
  * formatUnsubscribedTagIndex(entries, activeEntityIds, activeLayerTypes) -> string — pure,
  *   title+tags+id for entries Path 1 (a/b) didn't already surface, '' when nothing qualifies
+ * formatBoundedSubscribedEntries(entries, activeEntityIds, activeLayerTypes, budgetChars) ->
+ *   { text, entryIds } — pure, Path 1 under a character budget (never the entire wiki)
  * subscriptionsFor(layerId, entityId) -> WikiSubscription[] — pure
  *
  * @contract
@@ -111,6 +114,38 @@ export function buildWikiIndex(entries: WikiEntryRow[], layers: LayerDefinition[
     }
   }
   return lines.join('\n');
+}
+
+/** Pure: Path 1 under a character budget (docs/plans/portrait-studio-vision-review-harness-plan.md
+ *  §Wiki policy — "Send mutation a bounded selected set of current revisions, never the entire
+ *  wiki", bi_principles.md §16). Full title+body for subscribed entries in row order, accumulating
+ *  until the next block would exceed budgetChars; the first block alone is truncated to the budget
+ *  rather than dropped, so a single oversized lesson still reaches the call in some form. Returns
+ *  the entry ids included (the caller maps them to current revision ids for provenance). */
+export function formatBoundedSubscribedEntries(
+  entries: WikiEntryRow[],
+  activeEntityIds: string[],
+  activeLayerTypes: string[],
+  budgetChars: number,
+): { text: string; entryIds: string[] } {
+  const budget = Number.isInteger(budgetChars) && budgetChars > 0 ? budgetChars : 0;
+  const blocks: string[] = [];
+  const entryIds: string[] = [];
+  let used = 0;
+  for (const entry of entries) {
+    if (!isSubscribed(entry, activeEntityIds, activeLayerTypes)) continue;
+    const block = `## ${entry.title}\n${entry.body}`;
+    if (blocks.length === 0 && block.length > budget) {
+      blocks.push(block.slice(0, budget));
+      entryIds.push(entry.entry_id);
+      break;
+    }
+    if (used + block.length > budget) break;
+    blocks.push(block);
+    entryIds.push(entry.entry_id);
+    used += block.length;
+  }
+  return { text: blocks.join('\n\n'), entryIds };
 }
 
 /** Pure: Path 1c — every entry Path 1's a/b subscription match (isSubscribed) does NOT already

@@ -247,9 +247,12 @@
  * many mutated candidate chromosomes a generation round produces (integer-as-text, default '3'),
  * the two *_system_prompt_override keys are the mutation/reflection loop's "default + bespoke"
  * prompt overrides (empty = the built-in default in portraits/evoprompt.ts, the same §17 fallback
- * as every prompt key), and visual_wiki_investigation_max_turns caps the Reflection Investigation
- * loop's tool-calling turns (integer-as-text, default '6'). All five are read live on every call,
- * no restart, editable from the admin-gated Settings fieldset.
+ * as every prompt key), visual_wiki_investigation_max_turns caps the Reflection Investigation
+ * loop's tool-calling turns (integer-as-text, default '6'), and visual_wiki_context_budget (migration
+ * 0118, docs/plans/portrait-studio-vision-review-harness-plan.md §Wiki policy) caps how many
+ * characters of full-body wiki context a generation or reflection call is sent (integer-as-text,
+ * default 2400 — the bounded, evidence-based projection, never the entire wiki). All are read live
+ * on every call, no restart, editable from the admin-gated Settings fieldset.
  *
  * visual_portraits_enabled (migration 0108, docs/plans/portrait-chain-hardening-plan.md) is the
  * household kill switch for the whole Portrait Studio chain — routes under /v1/portraits/* (except
@@ -392,6 +395,7 @@ export const SETTING_NAMES = [
   'visual_mutation_system_prompt_override',
   'visual_reflection_system_prompt_override',
   'visual_wiki_investigation_max_turns',
+  'visual_wiki_context_budget',
   'visual_portraits_enabled',
   'portrait_subject_describer_prompt',
   'portrait_llm_connection',

@@ -1,53 +1,64 @@
 /**
  * @file orchestrator/src/orchestrator/portraitFeedback.ts
- * @stamp 2026-08-16
- * @architectural-role Orchestrator — human evaluation, episode logging, and the Reflection
- *   Investigation wiki-writing loop (docs/plans/completed/portrait-studio-plan.md §Human evaluation and
- *   episode logging / §Reflection Investigation)
+ * @stamp 2026-08-18
+ * @architectural-role Orchestrator — human evaluation, episode logging, the truthful reflection
+ *   state machine, and the lesson ledger (docs/plans/portrait-studio-vision-review-harness-plan.md
+ *   §Reflection contract / §State machine / §Data model)
  * @description
- * The feedback half of Portrait Studio: submitPortraitFeedback writes the visual_episodes row,
- * promotes the winner per-entity, per-layer (each entity's own slots from the winning
- * chromosome, plus last_image_url / current_best_candidate_id), persists per-candidate
- * ratings/notes, then runs the Reflection
- * Investigation — the plan's genuinely new loop: build a Path-2 title+tags wiki index (wiki.ts
- * buildWikiIndex), let the model pull full entries and conclude with a two-tool schema, capped
- * at visual_wiki_investigation_max_turns (default 6) with a forced final submit_conclusion so a
- * round never silently drops its lesson.
+ * The feedback half of Portrait Studio, rebuilt for reliable reflection: submitPortraitFeedback
+ * writes the visual_episodes row with a truthful reflection_status, stores per-candidate
+ * ratings/notes and the episode-level rationale, promotes the winner per-entity per-layer (with a
+ * winner_applied visual_episode_events row — changing slots is not evidence that learning
+ * occurred), and — only when an explicit winner is selected — runs ONE bounded, evidence-based
+ * reflection call (the plan retires the old multi-turn investigation loop and its
+ * pull_wiki_entry/submit_conclusion tools).
  *
- * The loop's mechanics (plan §Reflection Investigation):
- *   1. Build the index across the *whole* active manifest's layers (not just the round's) —
- *      reflection already sees every entity's full record, so narrower wiki visibility would be
- *      the actual inconsistency.
- *   2. Call the gated LLM (taskId `visual-<subjectEntityId>-reflection`, kind 'system' — same
- *      seam as the mutation call) with that index, the winning and losing candidates' composed
- *      prompts/slot values, and the human's rationale + per-candidate ratings/notes. Tools:
- *      pull_wiki_entry(id) and submit_conclusion({action, id?, title, body, tags[], layerId,
- *      entityId?}).
- *   3. Loop: pull_wiki_entry → feed the full entry back and call again; submit_conclusion →
- *      stop; a text-only reply (no tool call) counts toward the cap and the loop continues. On
- *      reaching the cap without a conclusion, the final call is made with submit_conclusion as
- *      the only available tool and forceTool (plan §Edge Cases).
- *   4. create → insert a visual_wiki_entries row with subscriptions built by wiki.ts's
- *      subscriptionsFor (entity-specific when the model named an entity, whole-layer-type when
- *      it named a layer only). amend → look up by id; a missing entry falls back to create and
- *      logs the mismatch (fail-open, never silently discarded — playground §14.2's posture).
+ * The reflection pass (plan §Reflection contract):
+ *   1. Build the compact episode record from the immutable snapshot: goal, parent chromosome,
+ *      server-computed per-candidate diffs (portraits/reflection.ts computeCandidateDiff — the
+ *      model must never rediscover them from composed prompts), the human's
+ *      ratings/notes/rationale/layer assessments, prior lesson ids (from the candidates' lesson_id
+ *      provenance), and a bounded wiki context (visual_wiki_context_budget, never the entire wiki)
+ *      with its revision ids.
+ *   2. Call the gated LLM with the single forced submit_lesson tool (portraits/reflection.ts
+ *      SUBMIT_LESSON_TOOL, taskId `visual-<subjectEntityId>-reflection`, kind 'system' — the same
+ *      seam as the mutation call). No loop, no raw JSON.
+ *   3. validateLessonCall is the strict gate: invalid output, provider errors, and timeouts become
+ *      a failed attempt. The attempt is persisted to visual_episode_learning (immutable, one row
+ *      per attempt) BEFORE the episode's learning state changes (plan §API step 4).
+ *   4. conclusion → one visual_lessons row (state provisional) + a lesson_created event; the
+ *      episode honestly reaches 'concluded'. insufficient_evidence → 'insufficient_evidence'
+ *      without inventing a lesson. failure → 'failed', left visible and retryable.
  *
- * Fail-open end to end, same contract as generateLocationImage.ts: the episode + entity update
- * are the feedback's primary write (they happen first); a Reflection failure is logged and
- * surfaced in the result as `reflection: { action: 'failed', reason }` — a lesson is never worth
- * losing the round's evaluation record.
+ * A no-winner submission still creates the episode in 'awaiting_feedback' and stores the supplied
+ * ratings/notes/rationale; it does not trigger reflection (plan §State machine). An operator can
+ * explicitly record "no acceptable candidate", which produces insufficient_evidence without an
+ * LLM call. Retrying an episode (submitPortraitFeedback with episodeId) re-runs reflection as
+ * attempt N+1 — a fresh immutable learning row per attempt, idempotent against prior attempts.
+ *
+ * Fail-open end to end: the episode + entity update are the feedback's primary write (they happen
+ * first); a reflection failure is logged, persisted as a failed attempt, and surfaced in the
+ * result as reflection: { action: 'failed', reason } — never a silently successful round.
  *
  * @api-declaration
- * PortraitFeedbackDeps — db, settings (the reflection needs the manifest for index grouping)
+ * PortraitFeedbackDeps — db, settings
  * submitPortraitFeedback(deps, llm, userId, input) -> Promise<PortraitFeedbackResult>
  *   — fail-open; { ok, episodeId?, reflection?, error? }
- * ReflectionOutcome — { action: 'created' | 'amended' | 'failed', entryId?, reason? }
+ * PortraitFeedbackInput — { episodeId? (retry an existing episode), entityIds?, goal?,
+ *   candidateIds?, winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?,
+ *   layerAssessments? }
+ * ReflectionOutcome — { action: 'concluded' | 'insufficient_evidence' | 'failed' |
+ *   'awaiting_feedback', lessonId?, reason? }
+ * LayerAssessmentInput — { layer, assessment: 'improved' | 'unchanged' | 'regressed' }
+ * DEFAULT_REFLECTION_SYSTEM_PROMPT — re-exported from portraits/reflection.ts (adminServer.ts's
+ *   Settings fieldset renders the default, §17)
  *
  * @contract
  *   assertions:
- *     purity:          impure (Postgres IO, settings read, LLM tool-calling loop, wiki writes)
+ *     purity:          impure (Postgres IO, settings read, one bounded LLM tool call, lesson writes)
  *     state_ownership: []
  *     external_io:     [Postgres (visual_episodes/visual_candidates/visual_entities/
+ *                       visual_episode_learning/visual_lessons/visual_episode_events/
  *                       visual_wiki_entries via db.withUserScope), orchestrator_settings (read),
  *                       the LLM via the injected provider]
  *     never:           throws. Every failure path logs and folds into the structured result.
@@ -55,41 +66,69 @@
 
 import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
-import type { LlmMessage, LlmProvider, LlmTurn, ToolCall, ToolDefinition } from '../io/llm/types.js';
+import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
-import { compileTemplate } from '../portraits/composer.js';
-import { loadLayerManifest, type LayerManifest } from '../portraits/layerStack.js';
+import { loadLayerManifest } from '../portraits/layerStack.js';
 import type { CandidateChromosome } from '../portraits/reconcile.js';
-import { buildWikiIndex, subscriptionsFor, type WikiEntryRow, type WikiSubscription } from '../portraits/wiki.js';
+import {
+  buildReflectionUserPrompt,
+  computeCandidateDiff,
+  DEFAULT_REFLECTION_SYSTEM_PROMPT,
+  SUBMIT_LESSON_TOOL,
+  validateLessonCall,
+  type LessonConclusion,
+  type LessonOutput,
+  type ReflectionSnapshot,
+} from '../portraits/reflection.js';
+import { DEFAULT_WIKI_CONTEXT_BUDGET, loadAllWikiEntries, selectBoundedWikiContext } from './portraitGeneration.js';
+
+export { DEFAULT_REFLECTION_SYSTEM_PROMPT } from '../portraits/reflection.js';
 
 export interface PortraitFeedbackDeps {
   db: PostgresClient;
   settings: OrchestratorSettingsStore;
 }
 
+export interface LayerAssessmentInput {
+  layer: string;
+  assessment: 'improved' | 'unchanged' | 'regressed';
+}
+
 export interface PortraitFeedbackInput {
-  /** The round's entity map — the episode's entity_ids record. */
-  entityIds: Record<string, string>;
-  /** The round's goal, recorded on the episode and given to reflection. */
-  goal: string;
-  /** Every candidate in the round, in grid order. */
-  candidateIds: string[];
-  /** The human-picked winner — must be one of candidateIds. */
-  winnerId: string;
+  /** Retry/complete feedback on an existing episode — re-runs reflection as attempt N+1 (its own
+   *  immutable visual_episode_learning row). When set, entityIds/goal/candidateIds are not needed;
+   *  the episode provides them. */
+  episodeId?: string;
+  /** The round's entity map — the episode's entity_ids record. Required for a fresh round. */
+  entityIds?: Record<string, string>;
+  /** The round's goal. Required for a fresh round. */
+  goal?: string;
+  /** Every candidate in the round, in grid order. Required for a fresh round. */
+  candidateIds?: string[];
+  /** The human-picked winner — must be one of the round's candidates. Optional: a no-winner
+   *  submission stays awaiting_feedback and does not trigger reflection (plan §State machine). */
+  winnerId?: string;
+  /** The operator explicitly records "no acceptable candidate" — produces insufficient_evidence
+   *  without an LLM call (plan §State machine). */
+  noAcceptableCandidate?: boolean;
   /** Per-candidate 1-5 ratings, { [candidateId]: rating }. */
   ratings?: Record<string, number>;
   /** Per-candidate notes, { [candidateId]: note }. */
   notes?: Record<string, string>;
-  /** The human's overall rationale, recorded on the episode and given to reflection. */
+  /** The human's overall rationale — required when marking a winner (a rating without an
+   *  explanation is preference data, not a completed lesson). */
   rationale?: string;
+  /** Optional per-layer assessments (improved/unchanged/regressed); when omitted, the reflection
+   *  prompt tells the model they were not supplied. */
+  layerAssessments?: LayerAssessmentInput[];
 }
 
 export interface ReflectionOutcome {
-  action: 'created' | 'amended' | 'failed';
-  /** The written/amended entry, when a conclusion landed. */
-  entryId?: string;
-  /** Why the pass failed (LLM error, undecodable conclusion, empty lesson) — always logged. */
+  action: 'concluded' | 'insufficient_evidence' | 'failed' | 'awaiting_feedback';
+  /** The created lesson id, when a conclusion landed. */
+  lessonId?: string;
+  /** Why the pass failed (LLM error, undecodable/ invalid conclusion) — always logged. */
   reason?: string;
 }
 
@@ -102,6 +141,12 @@ export interface PortraitFeedbackResult {
 
 interface EpisodeRow {
   episode_id: string;
+  entity_ids: Record<string, string>;
+  goal: string;
+  rationale: string | null;
+  selected_candidate_id: string | null;
+  candidate_ids: string[];
+  reflection_status: string;
 }
 
 interface CandidateRow {
@@ -109,340 +154,499 @@ interface CandidateRow {
   entity_ids: Record<string, string>;
   image_url: string | null;
   chromosome: CandidateChromosome;
+  parent_chromosome: CandidateChromosome | null;
+  composed_prompt: string | null;
+  render_metadata: Record<string, unknown> | null;
+  wiki_revision_ids: string[] | null;
+  lesson_id: string | null;
+  rating: number | null;
+  note: string | null;
 }
 
-interface WikiEntryRowFull extends WikiEntryRow {
-  entry_id: string;
-  title: string;
-  body: string;
-  tags: string[];
-  subscriptions: WikiSubscription[];
-}
-
-/** The built-in reflection system prompt — the same "default + bespoke" shape as every prompt
- *  key (bi_principles.md §17): empty visual_reflection_system_prompt_override → this; non-empty
- *  → the override verbatim. */
-export const DEFAULT_REFLECTION_SYSTEM_PROMPT =
-  'You are the Portrait Studio reflection engine. You evaluate one human-evaluated portrait ' +
-  'generation round and decide whether to write or amend a lesson in the studio\'s wiki, which ' +
-  'future generation rounds read as guidance. You are given the round\'s goal, the winning and ' +
-  'losing candidates, the human\'s ratings and rationale, and an index of existing wiki entries ' +
-  'grouped by layer. Pull a full entry before amending it. When you have decided, call ' +
-  'submit_conclusion: action "create" for a new lesson, "amend" for an existing one (with its ' +
-  'id). Prefer a precise, actionable lesson over a vague one, and name an entity only when the ' +
-  'lesson is genuinely specific to that entity rather than its whole layer.';
-
-/** The reflection loop's two tools. submit_conclusion carries the whole conclusion in one call —
- *  the loop terminates on it, so everything the wiki write needs (action, lesson, subscription
- *  scope) must arrive in that single call. */
-export const REFLECTION_TOOLS: ToolDefinition[] = [
-  {
-    name: 'pull_wiki_entry',
-    description: 'Fetch the full title and body of one wiki entry from the index above, by its id.',
-    parameters: {
-      type: 'object',
-      properties: { id: { type: 'string', description: 'The entry id shown in the index.' } },
-      required: ['id'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'submit_conclusion',
-    description:
-      'Write the round\'s lesson to the wiki: action "create" for a new entry, "amend" for an ' +
-      'existing one. layerId is the layer type the lesson applies to; entityId scopes the lesson ' +
-      'to one entity of that layer when given (omit to reach the whole layer type).',
-    parameters: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['create', 'amend'], description: '"create" for a new entry, "amend" for an existing one.' },
-        id: { type: 'string', description: 'The entry id, required when action is "amend".' },
-        title: { type: 'string', description: 'The lesson\'s title.' },
-        body: { type: 'string', description: 'The lesson\'s full body.' },
-        tags: { type: 'array', items: { type: 'string' }, description: 'Open-vocabulary tags.' },
-        layerId: { type: 'string', description: 'The layer type this lesson applies to (subject, outfit, style, expression, ...).' },
-        entityId: { type: 'string', description: 'Optional: scope the lesson to one entity of layerId.' },
-      },
-      required: ['action', 'title', 'body', 'layerId'],
-      additionalProperties: false,
-    },
-  },
-];
-
-/** The tool set the forced final call sees — submit_conclusion only (plan §Edge Cases: a round
- *  that hits the cap without concluding gets one last call it cannot dodge). */
-const FINAL_TOOL = REFLECTION_TOOLS.filter((t) => t.name === 'submit_conclusion');
-
-/** The built-in cap on the investigation loop's tool-calling turns. */
-const DEFAULT_INVESTIGATION_MAX_TURNS = 6;
-
-interface ReflectionConclusion {
-  action: 'create' | 'amend';
-  id?: string;
-  title: string;
-  body: string;
-  tags: string[];
-  layerId: string;
-  entityId: string | null;
-}
-
-/** Decode a tool call's arguments — adapters may hand back an object or a JSON string (the same
- *  tolerance evoprompt.ts's decoder has). Throws on undecodable input; the caller folds it into
- *  a failed reflection outcome. */
-function decodeArguments(raw: unknown): Record<string, unknown> {
-  if (typeof raw === 'string') {
-    try {
-      raw = JSON.parse(raw);
-    } catch {
-      throw new Error('submit_conclusion arguments were not valid JSON');
-    }
-  }
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    throw new Error('submit_conclusion arguments were not an object');
-  }
-  return raw as Record<string, unknown>;
-}
-
-/** Lenient parse of a submit_conclusion call — every field optional at the shape level; the
- *  apply step is the strict gate (an empty title/body logs and fails rather than writing an
- *  empty lesson). */
-function parseConclusion(call: ToolCall): ReflectionConclusion {
-  const args = decodeArguments(call.arguments);
-  const action = args.action === 'amend' ? 'amend' : 'create';
-  const tags = Array.isArray(args.tags) ? args.tags.filter((t): t is string => typeof t === 'string') : [];
-  return {
-    action,
-    id: typeof args.id === 'string' && args.id !== '' ? args.id : undefined,
-    title: typeof args.title === 'string' ? args.title.trim() : '',
-    body: typeof args.body === 'string' ? args.body.trim() : '',
-    tags,
-    layerId: typeof args.layerId === 'string' ? args.layerId : '',
-    entityId: typeof args.entityId === 'string' && args.entityId !== '' ? args.entityId : null,
-  };
-}
-
-function parsePullId(call: ToolCall): string | undefined {
-  try {
-    const args = decodeArguments(call.arguments);
-    return typeof args.id === 'string' && args.id !== '' ? args.id : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/** The round's candidates as reflection context — composed prompts recomputed from each
- *  candidate's stored chromosome (the same template resolution the generation round used), with
- *  the human's rating/note attached. */
-function formatCandidateForReflection(candidate: CandidateRow, rating: number | undefined, note: string | undefined, template: string, manifest: LayerManifest): string {
-  const composed = compileTemplate(template, candidate.chromosome.slots ?? {}, manifest.layers);
-  const ratingText = rating !== undefined ? ` rating ${rating}/5` : '';
-  const noteText = note && note !== '' ? ` note: ${note}` : '';
-  return `- ${candidate.candidate_id}${ratingText}${noteText}\n  prompt: ${composed}`;
-}
-
-/** The reflection call's user content — Path-2 index, winner, losers, human evaluation. */
-function buildReflectionUserPrompt(ctx: {
+interface ReflectionPassContext {
+  subjectEntityId: string;
+  episodeId: string;
+  episodeEntityIds: Record<string, string>;
   goal: string;
-  rationale?: string;
-  index: string;
-  winner: CandidateRow;
-  winnerRating?: number;
-  winnerNote?: string;
-  losers: CandidateRow[];
-  loserRatings: Record<string, number>;
-  loserNotes: Record<string, string>;
-  template: string;
-  manifest: LayerManifest;
-}): string {
-  const parts = [`Round goal: ${ctx.goal}`];
-  if (ctx.rationale && ctx.rationale !== '') parts.push(`Human rationale: ${ctx.rationale}`);
-  parts.push(
-    'Winning candidate:',
-    formatCandidateForReflection(ctx.winner, ctx.winnerRating, ctx.winnerNote, ctx.template, ctx.manifest),
-  );
-  if (ctx.losers.length > 0) {
-    parts.push(
-      'Losing candidates:',
-      ctx.losers.map((c) => formatCandidateForReflection(c, ctx.loserRatings[c.candidate_id], ctx.loserNotes[c.candidate_id], ctx.template, ctx.manifest)).join('\n'),
-    );
-  }
-  if (ctx.index.trim() !== '') {
-    parts.push('Existing wiki entries (title + tags only — pull an entry for its full body):', ctx.index);
-  } else {
-    parts.push('The wiki is empty — any lesson you write will be the first entry.');
-  }
-  parts.push('Call pull_wiki_entry to read a full entry before amending it, then submit_conclusion when you have decided.');
-  return parts.join('\n\n');
+  rationale: string;
+  candidates: CandidateRow[];
+  /** Undefined = no acceptable candidate (the "no winner" record). */
+  winnerId?: string;
+  ratings: Record<string, number>;
+  notes: Record<string, string>;
+  layerAssessments: LayerAssessmentInput[];
 }
 
-/** Load one wiki entry by id for the pull_wiki_entry feedback message; undefined → the
- *  "not found" reply (the model is told, and can create instead). */
-async function loadWikiEntry(db: PostgresClient, userId: string, entryId: string): Promise<WikiEntryRowFull | undefined> {
+// ---- DB seams ------------------------------------------------------------------
+
+async function loadEpisode(db: PostgresClient, userId: string, episodeId: string): Promise<EpisodeRow | undefined> {
   const rows = await db.withUserScope(userId, (session) =>
-    session.query<WikiEntryRowFull>(
-      `select entry_id, title, body, tags, subscriptions
-       from visual_wiki_entries where entry_id = $1 and user_id = $2`,
-      [entryId, userId],
+    session.query<EpisodeRow>(
+      `select episode_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status
+       from visual_episodes where episode_id = $1 and user_id = $2`,
+      [episodeId, userId],
     ),
   );
   return rows[0];
 }
 
-/** Apply a concluded lesson: create inserts; amend looks up by id and falls back to create when
- *  the id doesn't match anything (plan §Edge Cases — fail-open, logged). Returns the applied
- *  entry id. */
-async function applyConclusion(
-  db: PostgresClient,
-  userId: string,
-  episodeId: string,
-  conclusion: ReflectionConclusion,
-): Promise<{ entryId: string; action: 'created' | 'amended' }> {
-  if (conclusion.title === '' || conclusion.body === '' || conclusion.layerId === '') {
-    throw new Error('submit_conclusion returned an empty lesson (title/body/layerId missing)');
-  }
-  const subscriptions = JSON.stringify(subscriptionsFor(conclusion.layerId, conclusion.entityId));
-  if (conclusion.action === 'amend' && conclusion.id) {
-    const existing = await db.withUserScope(userId, (session) =>
-      session.query<{ entry_id: string }>(
-        'select entry_id from visual_wiki_entries where entry_id = $1 and user_id = $2',
-        [conclusion.id, userId],
-      ),
-    );
-    if (existing[0]) {
-      await db.withUserScope(userId, (session) =>
-        session.query(
-          `update visual_wiki_entries set title = $2, body = $3, tags = $4::text[], subscriptions = $5::jsonb, updated_at = now()
-           where entry_id = $1 and user_id = $6`,
-          [conclusion.id, conclusion.title, conclusion.body, conclusion.tags, subscriptions, userId],
-        ),
-      );
-      return { entryId: conclusion.id, action: 'amended' };
-    }
-    log.warn('portraitFeedback: amend target not found, falling back to create', { entryId: conclusion.id });
-  }
-  const rows = await db.withUserScope(userId, (session) =>
-    session.query<{ entry_id: string }>(
-      `insert into visual_wiki_entries (user_id, title, body, tags, subscriptions, origin_episode_id)
-       values ($1, $2, $3, $4::text[], $5::jsonb, $6) returning entry_id`,
-      [userId, conclusion.title, conclusion.body, conclusion.tags, subscriptions, episodeId],
+async function loadCandidates(db: PostgresClient, userId: string, candidateIds: string[]): Promise<CandidateRow[]> {
+  return db.withUserScope(userId, (session) =>
+    session.query<CandidateRow>(
+      `select candidate_id, entity_ids, image_url, chromosome, parent_chromosome, composed_prompt,
+              render_metadata, wiki_revision_ids, lesson_id, rating, note
+       from visual_candidates where user_id = $1 and candidate_id = any($2::uuid[])
+       order by array_position($2::uuid[], candidate_id)`,
+      [userId, candidateIds],
     ),
   );
-  return { entryId: rows[0].entry_id, action: 'created' };
 }
 
-/** The Reflection Investigation loop itself (plan §Reflection Investigation steps 1-4) — the
- *  part verify-visual-wiki.mjs drives with a fake gate. Fail-open: every failure mode logs and
- *  resolves to a 'failed' outcome; the episode write that precedes this is never rolled back. */
-async function runReflectionInvestigation(
+async function nextAttempt(db: PostgresClient, userId: string, episodeId: string): Promise<number> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<{ n: string }>(
+      'select count(*)::text as n from visual_episode_learning where user_id = $1 and episode_id = $2',
+      [userId, episodeId],
+    ),
+  );
+  const n = Number(rows[0]?.n ?? '0');
+  return Number.isFinite(n) ? n + 1 : 1;
+}
+
+async function storeRatingsAndNotes(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  ratings: Record<string, number> | undefined,
+  notes: Record<string, string> | undefined,
+): Promise<void> {
+  for (const [candidateId, rating] of Object.entries(ratings ?? {})) {
+    if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+      log.warn('portraitFeedback: skipping out-of-range rating', { candidateId, rating });
+      continue;
+    }
+    await deps.db.withUserScope(userId, (session) =>
+      session.query('update visual_candidates set rating = $2 where candidate_id = $1 and user_id = $3', [candidateId, rating, userId]),
+    );
+  }
+  for (const [candidateId, note] of Object.entries(notes ?? {})) {
+    if (typeof note !== 'string') continue;
+    await deps.db.withUserScope(userId, (session) =>
+      session.query('update visual_candidates set note = $2 where candidate_id = $1 and user_id = $3', [candidateId, note, userId]),
+    );
+  }
+}
+
+/** Winner promotion — per-entity, per-layer: each [layerId, entityId] pair in the winning
+ *  candidate's entity_ids (the round's authoritative record) gets its own layer's values from the
+ *  winning chromosome written onto its `slots` column — never another layer's values, never the
+ *  whole chromosome, and a layer absent from the chromosome leaves that entity's slots untouched
+ *  rather than overwriting hand-tuned values with an empty object. The winning shape becomes the
+ *  entity's durable state, so the next round's parent chromosome refines it instead of the original
+ *  placeholder. The promotion is recorded as its own winner_applied event: changing slots is not
+ *  evidence that learning occurred (plan §State machine). Fail-open (§11): an entity deleted
+ *  mid-round simply affects zero rows. */
+async function applyWinner(deps: PortraitFeedbackDeps, userId: string, episodeId: string, winner: CandidateRow): Promise<void> {
+  const winnerSlots = winner.chromosome?.slots ?? {};
+  for (const [layerId, entityId] of Object.entries(winner.entity_ids ?? {})) {
+    const layerSlots = winnerSlots[layerId];
+    await deps.db.withUserScope(userId, (session) =>
+      session.query(
+        layerSlots !== undefined
+          ? `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, slots = $3::jsonb, updated_at = now()
+             where user_id = $4 and entity_id = $5`
+          : `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, updated_at = now()
+             where user_id = $3 and entity_id = $4`,
+        layerSlots !== undefined
+          ? [winner.image_url, winner.candidate_id, JSON.stringify(layerSlots), userId, entityId]
+          : [winner.image_url, winner.candidate_id, userId, entityId],
+      ),
+    );
+  }
+  await deps.db.withUserScope(userId, (session) =>
+    session.query(
+      `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+       values ($1, $2, 'winner_applied', $3::jsonb)`,
+      [userId, episodeId, JSON.stringify({ candidateId: winner.candidate_id, appliedChromosome: winner.chromosome })],
+    ),
+  );
+}
+
+/** The visual_wiki_context_budget cap, same "default + bespoke" numeric shape as every numeric
+ *  setting — unset/corrupt falls back to the built-in, never "unlimited" (never the entire wiki). */
+async function wikiBudget(deps: PortraitFeedbackDeps): Promise<number> {
+  const raw = await deps.settings.get('visual_wiki_context_budget');
+  const n = raw ? Number(raw) : NaN;
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_WIKI_CONTEXT_BUDGET;
+}
+
+// ---- Reflection -----------------------------------------------------------------
+
+/** The compact episode record as the immutable input snapshot: goal, parent chromosome,
+ *  server-computed diffs, the human's evaluation, prior lesson ids (from the candidates' lesson_id
+ *  provenance), and the bounded wiki context with the revision ids that back it. */
+async function buildReflectionSnapshot(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  ctx: ReflectionPassContext,
+): Promise<ReflectionSnapshot> {
+  const manifest = await loadLayerManifest({ settings: deps.settings });
+  const allWikiEntries = await loadAllWikiEntries(deps.db, userId);
+  const activeEntityIds = [...new Set(Object.values(ctx.episodeEntityIds ?? {}))];
+  const bounded = selectBoundedWikiContext(
+    allWikiEntries,
+    activeEntityIds,
+    manifest.layers.map((l) => l.id),
+    await wikiBudget(deps),
+  );
+  const parentSlots = ctx.candidates[0]?.parent_chromosome?.slots ?? {};
+  const priorLessonIds = [...new Set(ctx.candidates.map((c) => c.lesson_id).filter((v): v is string => v !== null))];
+  return {
+    goal: ctx.goal,
+    parentSlots,
+    candidates: ctx.candidates.map((c) => ({
+      candidateId: c.candidate_id,
+      isWinner: ctx.winnerId !== undefined && c.candidate_id === ctx.winnerId,
+      rating: ctx.ratings[c.candidate_id] ?? c.rating ?? undefined,
+      note: ctx.notes[c.candidate_id] ?? c.note ?? undefined,
+      diff: computeCandidateDiff(parentSlots, c.chromosome?.slots ?? {}),
+    })),
+    rationale: ctx.rationale,
+    layerAssessments: ctx.layerAssessments,
+    priorLessonIds,
+    wikiContext: bounded.text,
+    wikiRevisionIds: bounded.revisionIds,
+  };
+}
+
+/** Persist the immutable attempt row BEFORE any learning state changes (plan §API step 4). status
+ *  is the truthful outcome ('concluded' | 'insufficient_evidence' | 'failed'); output_snapshot is
+ *  the validated lesson or the provider/validation error (jsonb — any truthful snapshot shape). */
+async function persistAttempt(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  episodeId: string,
+  attempt: number,
+  status: 'concluded' | 'insufficient_evidence' | 'failed',
+  snapshot: ReflectionSnapshot,
+  output: LessonOutput | { error: string } | { status: 'insufficient_evidence'; operatorRecorded: boolean },
+): Promise<string> {
+  const rows = await deps.db.withUserScope(userId, (session) =>
+    session.query<{ learning_id: string }>(
+      `insert into visual_episode_learning (user_id, episode_id, attempt, status, input_snapshot, output_snapshot)
+       values ($1, $2, $3, $4, $5::jsonb, $6::jsonb) returning learning_id`,
+      [userId, episodeId, attempt, status, JSON.stringify(snapshot), JSON.stringify(output)],
+    ),
+  );
+  return rows[0].learning_id;
+}
+
+async function setEpisodeStatus(deps: PortraitFeedbackDeps, userId: string, episodeId: string, status: string): Promise<void> {
+  await deps.db.withUserScope(userId, (session) =>
+    session.query('update visual_episodes set reflection_status = $2 where episode_id = $1 and user_id = $3', [episodeId, status, userId]),
+  );
+}
+
+/** A failed attempt: persisted (immutable, retryable), a reflection_failed event, and the episode
+ *  honestly marked 'failed'. */
+async function persistFailedAttempt(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  episodeId: string,
+  attempt: number,
+  snapshot: ReflectionSnapshot,
+  err: unknown,
+): Promise<ReflectionOutcome> {
+  const reason = err instanceof Error ? err.message : String(err);
+  const learningId = await persistAttempt(deps, userId, episodeId, attempt, 'failed', snapshot, { error: reason });
+  await deps.db.withUserScope(userId, (session) =>
+    session.query(
+      `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+       values ($1, $2, 'reflection_failed', $3::jsonb)`,
+      [userId, episodeId, JSON.stringify({ learningId, reason })],
+    ),
+  );
+  await setEpisodeStatus(deps, userId, episodeId, 'failed');
+  log.error('portraitFeedback: reflection failed', { episodeId, attempt, reason });
+  return { action: 'failed', reason };
+}
+
+/** Only a validated conclusion creates a lesson (plan §Data model / §Wiki policy) — state
+ *  provisional until repeated supporting episodes or explicit operator approval promote it. */
+async function insertLesson(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  episodeId: string,
+  learningId: string,
+  output: LessonConclusion,
+): Promise<string> {
+  const rows = await deps.db.withUserScope(userId, (session) =>
+    session.query<{ lesson_id: string }>(
+      `insert into visual_lessons (user_id, source_episode_id, source_learning_id, statement, evidence, next_change, preserve, confidence, state)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7::text[], $8, 'provisional') returning lesson_id`,
+      [userId, episodeId, learningId, output.lesson, output.evidence, JSON.stringify(output.nextChange), output.preserve ?? [], output.confidence],
+    ),
+  );
+  return rows[0].lesson_id;
+}
+
+/** The one bounded reflection call (plan §Reflection contract) — forced submit_lesson, no loop.
+ *  The attempt is persisted before the episode's state changes; the episode reaches its truthful
+ *  terminal state ('concluded' | 'insufficient_evidence' | 'failed') only after that. */
+async function runReflectionCall(
   deps: PortraitFeedbackDeps,
   llm: LlmProvider,
   userId: string,
-  ctx: {
-    subjectEntityId: string;
-    episodeId: string;
-    goal: string;
-    rationale?: string;
-    candidates: CandidateRow[];
-    winnerId: string;
-    ratings: Record<string, number>;
-    notes: Record<string, string>;
-    template: string;
-    manifest: LayerManifest;
-  },
+  ctx: ReflectionPassContext,
+  snapshot: ReflectionSnapshot,
+  attempt: number,
 ): Promise<ReflectionOutcome> {
-  try {
-    const [maxTurnsRaw, reflectionOverride] = await Promise.all([
-      deps.settings.get('visual_wiki_investigation_max_turns'),
-      deps.settings.get('visual_reflection_system_prompt_override'),
-    ]);
-    const maxTurns = maxTurnsRaw ? Number(maxTurnsRaw) : NaN;
-    const cap = Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : DEFAULT_INVESTIGATION_MAX_TURNS;
+  const override = await deps.settings.get('visual_reflection_system_prompt_override');
+  const system = (override ?? '').trim() || DEFAULT_REFLECTION_SYSTEM_PROMPT;
+  const messages: LlmMessage[] = [
+    { role: 'system', content: system },
+    { role: 'user', content: buildReflectionUserPrompt(snapshot) },
+  ];
+  const turn: LlmTurn = await runWithCallContext(
+    { taskId: `visual-${ctx.subjectEntityId}-reflection`, kind: 'system', userId },
+    () => withCallLabel('portrait:reflection', () => llm.complete(messages, [SUBMIT_LESSON_TOOL], { forceTool: 'submit_lesson' })),
+  );
 
-    const entries = await deps.db.withUserScope(userId, (session) =>
-      session.query<WikiEntryRowFull>(
-        `select entry_id, title, body, tags, subscriptions
-         from visual_wiki_entries where user_id = $1 order by created_at`,
-        [userId],
+  const call = turn.toolCalls.find((c) => c.name === 'submit_lesson');
+  if (!call) {
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error('no submit_lesson tool call in reply'));
+  }
+  const validated = validateLessonCall(call);
+  if (!validated.ok) {
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error(validated.reason));
+  }
+  const output = validated.output;
+  const status = output.status === 'conclusion' ? 'concluded' : 'insufficient_evidence';
+  const learningId = await persistAttempt(deps, userId, ctx.episodeId, attempt, status, snapshot, output);
+
+  if (output.status === 'insufficient_evidence') {
+    await deps.db.withUserScope(userId, (session) =>
+      session.query(
+        `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+         values ($1, $2, 'insufficient_evidence', $3::jsonb)`,
+        [userId, ctx.episodeId, JSON.stringify({ learningId })],
       ),
     );
-    const index = buildWikiIndex(entries, ctx.manifest.layers);
+    await setEpisodeStatus(deps, userId, ctx.episodeId, 'insufficient_evidence');
+    log.info('portraitFeedback: reflection concluded insufficient_evidence', { episodeId: ctx.episodeId, attempt });
+    return { action: 'insufficient_evidence' };
+  }
 
-    const winner = ctx.candidates.find((c) => c.candidate_id === ctx.winnerId);
-    if (!winner) throw new Error(`winner ${ctx.winnerId} not among the round's candidates`);
-    const losers = ctx.candidates.filter((c) => c.candidate_id !== ctx.winnerId);
-    const system = (reflectionOverride ?? '').trim() || DEFAULT_REFLECTION_SYSTEM_PROMPT;
-    const userPrompt = buildReflectionUserPrompt({
-      goal: ctx.goal,
-      rationale: ctx.rationale,
-      index,
-      winner,
-      winnerRating: ctx.ratings[ctx.winnerId],
-      winnerNote: ctx.notes[ctx.winnerId],
-      losers,
-      loserRatings: ctx.ratings,
-      loserNotes: ctx.notes,
-      template: ctx.template,
-      manifest: ctx.manifest,
-    });
+  const lessonId = await insertLesson(deps, userId, ctx.episodeId, learningId, output);
+  await deps.db.withUserScope(userId, (session) =>
+    session.query(
+      `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+       values ($1, $2, 'lesson_created', $3::jsonb)`,
+      [
+        userId,
+        ctx.episodeId,
+        JSON.stringify({
+          learningId,
+          lessonId,
+          statement: output.lesson,
+          nextChange: output.nextChange,
+          preserve: output.preserve ?? [],
+          confidence: output.confidence,
+        }),
+      ],
+    ),
+  );
+  await setEpisodeStatus(deps, userId, ctx.episodeId, 'concluded');
+  log.info('portraitFeedback: reflection concluded a lesson', { episodeId: ctx.episodeId, attempt, lessonId });
+  return { action: 'concluded', lessonId };
+}
 
-    const messages: LlmMessage[] = [
-      { role: 'system', content: system },
-      { role: 'user', content: userPrompt },
-    ];
-
-    for (let turn = 0; turn < cap; turn++) {
-      const isFinal = turn === cap - 1;
-      const result: LlmTurn = await runWithCallContext(
-        { taskId: `visual-${ctx.subjectEntityId}-reflection`, kind: 'system', userId },
-        () =>
-          withCallLabel('portrait:reflection', () =>
-            llm.complete(messages, isFinal ? FINAL_TOOL : REFLECTION_TOOLS, isFinal ? { forceTool: 'submit_conclusion' } : undefined),
-          ),
-      );
-      // The assistant message is always appended (toolCalls may be empty) so the conversation
-      // stays well-formed for the next complete() call — LlmMessage.toolCalls is required to
-      // trace a 'tool' message back to a preceding assistant tool call.
-      messages.push({ role: 'assistant', content: result.message.content, toolCalls: result.toolCalls });
-
-      const conclusionCall = result.toolCalls.find((c) => c.name === 'submit_conclusion');
-      if (conclusionCall) {
-        const conclusion = parseConclusion(conclusionCall);
-        const applied = await applyConclusion(deps.db, userId, ctx.episodeId, conclusion);
-        log.info('portraitFeedback: reflection conclusion applied', {
-          episodeId: ctx.episodeId,
-          action: applied.action,
-          entryId: applied.entryId,
-          turns: turn + 1,
-        });
-        return { action: applied.action, entryId: applied.entryId };
-      }
-
-      const pullCall = result.toolCalls.find((c) => c.name === 'pull_wiki_entry');
-      if (pullCall) {
-        const entryId = parsePullId(pullCall);
-        const entry = entryId ? await loadWikiEntry(deps.db, userId, entryId) : undefined;
-        messages.push({
-          role: 'tool',
-          toolCallId: pullCall.id,
-          content: entry ? `## ${entry.title}\n${entry.body}` : `No wiki entry with id ${entryId ?? '(missing id)'} — you may create one instead.`,
-        });
-        continue;
-      }
-
-      // A text-only reply (no tool call) — not a conclusion, and there is nothing to feed back;
-      // the turn counts toward the cap and the next call sees the model's own prose. The cap is
-      // the bound; the forced final call guarantees a conclusion before the loop can exhaust.
-      log.debug('portraitFeedback: reflection turn had no tool call, continuing', { episodeId: ctx.episodeId, turn: turn + 1 });
-    }
-
-    // Unreachable by construction (the final iteration forces submit_conclusion), but the guard
-    // costs nothing and keeps the fail-open contract total even if a provider ignores forceTool.
-    log.warn('portraitFeedback: investigation cap reached without a conclusion', { episodeId: ctx.episodeId, cap });
-    return { action: 'failed', reason: 'cap_reached_without_conclusion' };
+/** The reflection pass: persist nothing about learning until the snapshot is built; mark
+ *  reflection_started; run the one call; every failure folds into a persisted failed attempt. */
+async function runReflectionPass(
+  deps: PortraitFeedbackDeps,
+  llm: LlmProvider,
+  userId: string,
+  ctx: ReflectionPassContext,
+): Promise<ReflectionOutcome> {
+  const attempt = await nextAttempt(deps.db, userId, ctx.episodeId);
+  let snapshot: ReflectionSnapshot;
+  try {
+    snapshot = await buildReflectionSnapshot(deps, userId, ctx);
   } catch (err) {
-    log.error('portraitFeedback: reflection investigation failed', { err });
+    log.error('portraitFeedback: reflection snapshot build failed', { episodeId: ctx.episodeId, attempt, err });
     return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };
   }
+  await deps.db.withUserScope(userId, (session) =>
+    session.query(
+      `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+       values ($1, $2, 'reflection_started', $3::jsonb)`,
+      [userId, ctx.episodeId, JSON.stringify({ attempt, wikiRevisionIds: snapshot.wikiRevisionIds })],
+    ),
+  );
+  try {
+    return await runReflectionCall(deps, llm, userId, ctx, snapshot, attempt);
+  } catch (err) {
+    return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, err);
+  }
+}
+
+/** The operator's explicit "no acceptable candidate" — insufficient_evidence without an LLM call
+ *  (plan §State machine). The attempt row + event keep the ledger honest. */
+async function recordNoAcceptableCandidate(
+  deps: PortraitFeedbackDeps,
+  userId: string,
+  ctx: ReflectionPassContext,
+): Promise<ReflectionOutcome> {
+  const attempt = await nextAttempt(deps.db, userId, ctx.episodeId);
+  let snapshot: ReflectionSnapshot;
+  try {
+    snapshot = await buildReflectionSnapshot(deps, userId, ctx);
+  } catch (err) {
+    log.error('portraitFeedback: no-acceptable-candidate snapshot build failed', { episodeId: ctx.episodeId, attempt, err });
+    return { action: 'failed', reason: err instanceof Error ? err.message : String(err) };
+  }
+  const learningId = await persistAttempt(deps, userId, ctx.episodeId, attempt, 'insufficient_evidence', snapshot, {
+    status: 'insufficient_evidence',
+    operatorRecorded: true,
+  });
+  await deps.db.withUserScope(userId, (session) =>
+    session.query(
+      `insert into visual_episode_events (user_id, episode_id, event_type, payload)
+       values ($1, $2, 'insufficient_evidence', $3::jsonb)`,
+      [userId, ctx.episodeId, JSON.stringify({ learningId, operatorRecorded: true })],
+    ),
+  );
+  await setEpisodeStatus(deps, userId, ctx.episodeId, 'insufficient_evidence');
+  log.info('portraitFeedback: operator recorded no acceptable candidate', { episodeId: ctx.episodeId, attempt });
+  return { action: 'insufficient_evidence' };
+}
+
+// ---- Orchestration -----------------------------------------------------------------
+
+/** A fresh round's feedback: episode row first (the primary write), then ratings/notes, then — on
+ *  an explicit winner — winner promotion + reflection. A no-winner submission stays awaiting_
+ *  feedback and never triggers reflection. */
+async function submitFreshRound(
+  deps: PortraitFeedbackDeps,
+  llm: LlmProvider,
+  userId: string,
+  input: PortraitFeedbackInput,
+): Promise<PortraitFeedbackResult> {
+  const goal = (input.goal ?? '').trim();
+  const entityIds = input.entityIds;
+  const candidateIds = input.candidateIds;
+  if (!entityIds || !goal || !candidateIds?.length) {
+    return { ok: false, error: 'missing_required_fields' };
+  }
+  if (input.winnerId) {
+    if (!candidateIds.includes(input.winnerId)) return { ok: false, error: 'winner_not_in_candidates' };
+    if (!input.rationale?.trim()) return { ok: false, error: 'rationale_required_for_winner' };
+  }
+
+  const candidates = await loadCandidates(deps.db, userId, candidateIds);
+  if (candidates.length !== candidateIds.length) {
+    return { ok: false, error: 'unknown_candidate_id' };
+  }
+
+  const status = input.winnerId || input.noAcceptableCandidate ? 'reflecting' : 'awaiting_feedback';
+  const episode = await deps.db.withUserScope(userId, (session) =>
+    session.query<EpisodeRow>(
+      `insert into visual_episodes (user_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status)
+       values ($1, $2::jsonb, $3, $4, $5, $6::uuid[], $7) returning episode_id`,
+      [userId, JSON.stringify(entityIds), goal, input.rationale?.trim() ?? null, input.winnerId ?? null, candidateIds, status],
+    ),
+  );
+  const episodeId = episode[0].episode_id;
+
+  await storeRatingsAndNotes(deps, userId, input.ratings, input.notes);
+
+  const ctx: ReflectionPassContext = {
+    subjectEntityId: entityIds['subject'] ?? '',
+    episodeId,
+    episodeEntityIds: entityIds,
+    goal,
+    rationale: input.rationale?.trim() ?? '',
+    candidates,
+    winnerId: input.winnerId,
+    ratings: input.ratings ?? {},
+    notes: input.notes ?? {},
+    layerAssessments: input.layerAssessments ?? [],
+  };
+
+  if (input.winnerId) {
+    const winner = candidates.find((c) => c.candidate_id === input.winnerId)!;
+    await applyWinner(deps, userId, episodeId, winner);
+    const reflection = await runReflectionPass(deps, llm, userId, ctx);
+    return { ok: true, episodeId, reflection };
+  }
+
+  if (input.noAcceptableCandidate) {
+    const reflection = await recordNoAcceptableCandidate(deps, userId, ctx);
+    return { ok: true, episodeId, reflection };
+  }
+
+  log.info('portraitFeedback: episode recorded awaiting_feedback', { episodeId });
+  return { ok: true, episodeId, reflection: { action: 'awaiting_feedback' } };
+}
+
+/** Retry/complete an existing episode (plan §UI — failed reflection offers retry instead of
+ *  silently closing the round): update ratings/notes/rationale if supplied, (re)select a winner,
+ *  then re-run reflection as attempt N+1. Idempotent: each attempt is its own immutable row. */
+async function submitEpisodeRetry(
+  deps: PortraitFeedbackDeps,
+  llm: LlmProvider,
+  userId: string,
+  input: PortraitFeedbackInput,
+): Promise<PortraitFeedbackResult> {
+  const episode = await loadEpisode(deps.db, userId, input.episodeId!);
+  if (!episode) return { ok: false, error: 'unknown_episode' };
+  const candidates = await loadCandidates(deps.db, userId, episode.candidate_ids);
+  if (candidates.length !== episode.candidate_ids.length) return { ok: false, error: 'unknown_candidate_id' };
+
+  await storeRatingsAndNotes(deps, userId, input.ratings, input.notes);
+  const rationale = typeof input.rationale === 'string' && input.rationale.trim() !== '' ? input.rationale.trim() : undefined;
+  if (rationale && rationale !== (episode.rationale ?? '')) {
+    await deps.db.withUserScope(userId, (session) =>
+      session.query('update visual_episodes set rationale = $2 where episode_id = $1 and user_id = $3', [episode.episode_id, rationale, userId]),
+    );
+    episode.rationale = rationale;
+  }
+
+  const winnerId = input.winnerId ?? episode.selected_candidate_id;
+  const ctx: ReflectionPassContext = {
+    subjectEntityId: episode.entity_ids['subject'] ?? '',
+    episodeId: episode.episode_id,
+    episodeEntityIds: episode.entity_ids,
+    goal: episode.goal,
+    rationale: episode.rationale ?? '',
+    candidates,
+    winnerId: winnerId ?? undefined,
+    ratings: input.ratings ?? {},
+    notes: input.notes ?? {},
+    layerAssessments: input.layerAssessments ?? [],
+  };
+
+  if (winnerId) {
+    if (!candidates.some((c) => c.candidate_id === winnerId)) return { ok: false, error: 'winner_not_in_candidates' };
+    if (!episode.rationale?.trim()) return { ok: false, error: 'rationale_required_for_winner' };
+    if (winnerId !== episode.selected_candidate_id) {
+      await deps.db.withUserScope(userId, (session) =>
+        session.query('update visual_episodes set selected_candidate_id = $2 where episode_id = $1 and user_id = $3', [episode.episode_id, winnerId, userId]),
+      );
+      const winner = candidates.find((c) => c.candidate_id === winnerId)!;
+      await applyWinner(deps, userId, episode.episode_id, winner);
+    }
+    const reflection = await runReflectionPass(deps, llm, userId, ctx);
+    return { ok: true, episodeId: episode.episode_id, reflection };
+  }
+
+  if (input.noAcceptableCandidate) {
+    const reflection = await recordNoAcceptableCandidate(deps, userId, ctx);
+    return { ok: true, episodeId: episode.episode_id, reflection };
+  }
+
+  log.info('portraitFeedback: episode still awaiting_feedback', { episodeId: episode.episode_id });
+  return { ok: true, episodeId: episode.episode_id, reflection: { action: 'awaiting_feedback' } };
 }
 
 export async function submitPortraitFeedback(
@@ -452,113 +656,8 @@ export async function submitPortraitFeedback(
   input: PortraitFeedbackInput,
 ): Promise<PortraitFeedbackResult> {
   try {
-    if (!input.candidateIds.includes(input.winnerId)) {
-      return { ok: false, error: 'winner_not_in_candidates' };
-    }
-
-    // Load every candidate in the round — the episode write, the entity promotion, and the
-    // reflection context all need the stored rows (chromosome + image_url + entity_ids).
-    const candidates = await deps.db.withUserScope(userId, (session) =>
-      session.query<CandidateRow>(
-        `select candidate_id, entity_ids, image_url, chromosome
-         from visual_candidates where user_id = $1 and candidate_id = any($2::uuid[])
-         order by array_position($2::uuid[], candidate_id)`,
-        [userId, input.candidateIds],
-      ),
-    );
-    if (candidates.length !== input.candidateIds.length) {
-      return { ok: false, error: 'unknown_candidate_id' };
-    }
-
-    // Primary write first: the episode row — the round's reconstructible evaluation record.
-    const episode = await deps.db.withUserScope(userId, (session) =>
-      session.query<EpisodeRow>(
-        `insert into visual_episodes (user_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids)
-         values ($1, $2::jsonb, $3, $4, $5, $6::uuid[]) returning episode_id`,
-        [userId, JSON.stringify(input.entityIds), input.goal, input.rationale ?? null, input.winnerId, input.candidateIds],
-      ),
-    );
-    const episodeId = episode[0].episode_id;
-
-    // Winner promotion — per-entity, per-layer: each
-    // [layerId, entityId] pair in the winning candidate's entity_ids (the round's authoritative
-    // record) gets its own layer's values from the winning chromosome written onto its `slots`
-    // column — never another layer's values, never the whole chromosome, and a layer absent
-    // from the chromosome (malformed data, shouldn't happen — every promptable layer is always
-    // populated per buildParentChromosome) leaves that entity's slots untouched rather than
-    // overwriting hand-tuned values with an empty object. This makes the winning shape the
-    // entity's durable state, so the next round's ensureEntityForLayer read — and the next
-    // mutation call's parentSlots — refines it instead of the original placeholder. Fail-open
-    // (§11): an entity deleted mid-round simply affects zero rows.
-    const winner = candidates.find((c) => c.candidate_id === input.winnerId)!;
-    const winnerSlots = winner.chromosome?.slots ?? {};
-    for (const [layerId, entityId] of Object.entries(winner.entity_ids ?? {})) {
-      const layerSlots = winnerSlots[layerId];
-      await deps.db.withUserScope(userId, (session) =>
-        session.query(
-          layerSlots !== undefined
-            ? `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, slots = $3::jsonb, updated_at = now()
-               where user_id = $4 and entity_id = $5`
-            : `update visual_entities set last_image_url = $1, current_best_candidate_id = $2, updated_at = now()
-               where user_id = $3 and entity_id = $4`,
-          layerSlots !== undefined
-            ? [winner.image_url, winner.candidate_id, JSON.stringify(layerSlots), userId, entityId]
-            : [winner.image_url, winner.candidate_id, userId, entityId],
-        ),
-      );
-    }
-
-    // Per-candidate ratings/notes — pass through; the 1-5 range is the migration's CHECK, and a
-    // malformed value is skipped with a log, not an aborted feedback (fail-open).
-    for (const [candidateId, rating] of Object.entries(input.ratings ?? {})) {
-      if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
-        log.warn('portraitFeedback: skipping out-of-range rating', { candidateId, rating });
-        continue;
-      }
-      await deps.db.withUserScope(userId, (session) =>
-        session.query('update visual_candidates set rating = $2 where candidate_id = $1 and user_id = $3', [candidateId, rating, userId]),
-      );
-    }
-    for (const [candidateId, note] of Object.entries(input.notes ?? {})) {
-      if (typeof note !== 'string') continue;
-      await deps.db.withUserScope(userId, (session) =>
-        session.query('update visual_candidates set note = $2 where candidate_id = $1 and user_id = $3', [candidateId, note, userId]),
-      );
-    }
-
-    // Reflection: manifest for index grouping + the style template override resolution the
-    // generation round used (the composed prompts recomputed here must match what was
-    // rendered). The style entity is read off the winner's entity_ids — the round's *resolved*
-    // map (a placeholder fallback for an unspecified layer is recorded there, not in the
-    // feedback input), and it is authoritative for which entities actually rendered.
-    const manifest = await loadLayerManifest({ settings: deps.settings });
-    const styleEntityId = winner.entity_ids?.['style'];
-    let template = manifest.template;
-    if (styleEntityId) {
-      const styleRows = await deps.db.withUserScope(userId, (session) =>
-        session.query<{ template: string | null }>(
-          `select template from visual_entities where user_id = $1 and entity_id = $2`,
-          [userId, styleEntityId],
-        ),
-      );
-      if (styleRows[0]?.template) template = styleRows[0].template;
-    }
-
-    const reflection = await runReflectionInvestigation(deps, llm, userId, {
-      subjectEntityId: input.entityIds['subject'] ?? '',
-      episodeId,
-      goal: input.goal,
-      rationale: input.rationale,
-      candidates,
-      winnerId: input.winnerId,
-      ratings: input.ratings ?? {},
-      notes: input.notes ?? {},
-      template,
-      manifest,
-    });
-
-    log.info('portraitFeedback: episode recorded', { episodeId, winnerId: input.winnerId, reflection: reflection.action });
-    return { ok: true, episodeId, reflection };
+    if (input.episodeId) return await submitEpisodeRetry(deps, llm, userId, input);
+    return await submitFreshRound(deps, llm, userId, input);
   } catch (err) {
     log.error('portraitFeedback: feedback failed', { userId, winnerId: input.winnerId, err });
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

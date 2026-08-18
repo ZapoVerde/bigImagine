@@ -18,10 +18,13 @@
 //     bridge is never touched or re-pointed (no refresh-in-place, no per-character dedup);
 //   - set-as-avatar (Part C): the route is removed — the CRUD family 404s it instead of the old
 //     always-overwrite promotion;
-//   - submitPortraitFeedback (Part B/D): the winning chromosome's per-layer slots land on the
-//     winning entities; an entity only a losing candidate referenced is left untouched; NO
-//     characters row is ever touched — zero queries against the characters table, no avatar_path
-//     write, no writeAvatar call (Part D, promotion retired);
+//   - submitPortraitFeedback (Part B/D + the vision-review-harness plan): the winning
+//     chromosome's per-layer slots land on the winning entities; an entity only a losing candidate
+//     referenced is left untouched; NO characters row is ever touched — zero queries against the
+//     characters table, no avatar_path write, no writeAvatar call (Part D, promotion retired);
+//     the reflection pass concludes through the single forced submit_lesson tool, persisting the
+//     immutable attempt row (visual_episode_learning) before the episode's state changes, and
+//     records winner_applied / lesson_created events;
 //   - the kill switch (portrait-chain-hardening-plan.md): visual_portraits_enabled = 'false'
 //     makes every gated handler 403 with the pinned error body before touching the DB or
 //     issuing a fetch, while the layer-manifest pair stays reachable either way;
@@ -114,6 +117,9 @@ function makeDb() {
     promoted: [], // { entityId, imageUrl, candidateId, slotsJson? }
     ratingWrites: [],
     noteWrites: [],
+    learning: [], // visual_episode_learning rows
+    lessons: [], // visual_lessons rows
+    events: [], // visual_episode_events rows
   };
   const query = (sql, params = []) => {
     const s = sql;
@@ -211,6 +217,27 @@ function makeDb() {
     }
     if (s.includes('from visual_wiki_entries')) {
       return state.wikiEntries;
+    }
+    if (s.includes('from visual_wiki_revisions')) {
+      return []; // no revisions in this fake — bounded context resolves with zero revision ids
+    }
+    if (s.includes('from visual_episode_learning')) {
+      return [{ n: String(state.learning.length) }]; // nextAttempt count
+    }
+    if (s.startsWith('insert into visual_episode_events')) {
+      state.events.push({ eventType: s.match(/'(winner_applied|reflection_started|reflection_failed|lesson_created|insufficient_evidence)'/)?.[1], payload: JSON.parse(params[2]) });
+      return [];
+    }
+    if (s.startsWith('insert into visual_episode_learning')) {
+      state.learning.push({ status: params[3], inputSnapshot: params[4], outputSnapshot: params[5] });
+      return [{ learning_id: `learn-${state.learning.length}` }];
+    }
+    if (s.startsWith('insert into visual_lessons')) {
+      state.lessons.push({ lessonId: `lesson-${state.lessons.length + 1}`, statement: params[3] });
+      return [{ lesson_id: `lesson-${state.lessons.length}` }];
+    }
+    if (s.startsWith('update visual_episodes set reflection_status')) {
+      return [];
     }
     if (s.startsWith('insert into visual_wiki_entries')) {
       state.wikiCounter += 1;
@@ -588,7 +615,18 @@ const concludeLlm = {
     return {
       message: { role: 'assistant', content: '' },
       toolCalls: [
-        { id: 'concl-1', name: 'submit_conclusion', arguments: { action: 'create', title: 'Lesson', body: 'Body', tags: ['outfit'], layerId: 'outfit' } },
+        {
+          id: 'less-1',
+          name: 'submit_lesson',
+          arguments: {
+            status: 'conclusion',
+            lesson: 'Keep coats above the knee for evening scenes.',
+            evidence: 'The shorter red coat won with the calm expression and the human picked it.',
+            next_change: { layer: 'outfit', instruction: 'End the coat above the knee.' },
+            preserve: ['expression'],
+            confidence: 'medium',
+          },
+        },
       ],
     };
   },
@@ -599,6 +637,7 @@ const feedbackInput = {
   goal: 'A calmer evening variant of Rin.',
   candidateIds: [WINNER, LOSER],
   winnerId: WINNER,
+  rationale: 'The calm expression and shorter coat read best for evening.',
 };
 
 // --- Winner promotion happens; the characters table is NEVER touched (Part D). ---
@@ -618,7 +657,12 @@ const feedbackInput = {
   assert(other.last_image_url === 'https://img/old.png' && other.slots.outfit_style === 'old wool', 'feedback: an entity only a losing candidate referenced is left untouched');
 
   assert(db.state.charQueries === 0, 'feedback: NO characters-table query fires — avatar promotion is retired (Part D)');
-  assert(res.responses[0].body.reflection?.action === 'created', 'feedback: the reflection investigation concludes and reports the wiki write');
+  assert(res.responses[0].body.reflection?.action === 'concluded', 'feedback: the reflection pass concludes with a lesson');
+  assert(res.responses[0].body.reflection?.lessonId === 'lesson-1', 'feedback: the concluded lesson id is returned');
+  assert(db.state.lessons.length === 1 && db.state.lessons[0].statement.includes('above the knee'), 'feedback: a provisional visual_lessons row is created');
+  assert(db.state.learning.length === 1 && db.state.learning[0].status === 'concluded', 'feedback: the immutable attempt row is persisted before the state change');
+  assert(db.state.events.some((e) => e.eventType === 'winner_applied'), 'feedback: winner promotion is recorded as its own winner_applied event');
+  assert(db.state.events.some((e) => e.eventType === 'lesson_created'), 'feedback: a lesson_created event is recorded');
 }
 
 // ============================================================================
