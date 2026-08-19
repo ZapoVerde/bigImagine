@@ -33,6 +33,15 @@
  * `subscriptionsFor` is the pure constructor for the subscriptions jsonb a `create` conclusion
  *   writes: entity-specific when the model named an entity, whole-layer-type when it didn't.
  *
+ * - `formatLessonIndex` (docs/plans/portrait-studio-lesson-amend-plan.md) is reflection's
+ *   existing-lesson index: id + statement + target layer + maturity for every non-terminal
+ *   (provisional/supported) lesson whose wiki entry reaches this round — same subscription-reach
+ *   rule as every other formatter here (entity-scoped only when scoped to one of this round's
+ *   active entities; not-entity-scoped always reaches). Shown unconditionally every round,
+ *   uncapped (id+statement is compact by construction, unlike full-body Path 1) — so reflection
+ *   can choose to amend an existing lesson (submit_lesson's supersedes_lesson_id) instead of
+ *   writing a near-duplicate.
+ *
  * Pure by construction: identical inputs always produce identical output — no IO, no state, no
  * randomness.
  *
@@ -47,6 +56,9 @@
  * formatBoundedSubscribedEntries(entries, activeEntityIds, activeLayerTypes, budgetChars) ->
  *   { text, entryIds } — pure, Path 1 under a character budget (never the entire wiki)
  * subscriptionsFor(layerId, entityId) -> WikiSubscription[] — pure
+ * LessonIndexRow — { lesson_id, statement, layer, state, subscriptions }
+ * formatLessonIndex(lessons, activeEntityIds, activeLayerTypes) -> string — pure, '' when nothing
+ *   reaches
  *
  * @contract
  *   assertions:
@@ -72,14 +84,21 @@ export interface WikiEntryRow {
   subscriptions: WikiSubscription[];
 }
 
-/** Pure: an entry is subscribed to a round when any subscription names an active entity id
- *  (entity-specific) or a whole-layer-type subscription matches an active layer type. */
-function isSubscribed(entry: WikiEntryRow, activeEntityIds: string[], activeLayerTypes: string[]): boolean {
-  return entry.subscriptions.some(
+/** Pure: does any of these subscriptions reach the round — an active entity id (entity-specific)
+ *  or a whole-layer-type subscription (null layerEntityId) matching an active layer type? Shared
+ *  by every formatter below that gates on subscription reach. */
+function subscriptionReaches(subscriptions: WikiSubscription[], activeEntityIds: string[], activeLayerTypes: string[]): boolean {
+  return subscriptions.some(
     (sub) =>
       (sub.layerEntityId !== null && sub.layerEntityId !== undefined && activeEntityIds.includes(sub.layerEntityId)) ||
       (sub.layerEntityId === null && activeLayerTypes.includes(sub.layerType)),
   );
+}
+
+/** Pure: an entry is subscribed to a round when any subscription names an active entity id
+ *  (entity-specific) or a whole-layer-type subscription matches an active layer type. */
+function isSubscribed(entry: WikiEntryRow, activeEntityIds: string[], activeLayerTypes: string[]): boolean {
+  return subscriptionReaches(entry.subscriptions, activeEntityIds, activeLayerTypes);
 }
 
 /** Pure: Path 1 — the subscribed entries' full title+body, flat and uncapped, in row order.
@@ -168,4 +187,28 @@ export function formatUnsubscribedTagIndex(entries: WikiEntryRow[], activeEntity
  *  Investigation step 4). */
 export function subscriptionsFor(layerId: string, entityId: string | null): WikiSubscription[] {
   return [{ layerType: layerId, layerEntityId: entityId ?? null }];
+}
+
+/** A visual_lessons row joined to its wiki entry's subscriptions (portraitFeedback.ts's
+ *  buildReflectionSnapshot query) — the fields formatLessonIndex needs to decide reach and
+ *  render one line. */
+export interface LessonIndexRow {
+  lesson_id: string;
+  statement: string;
+  layer: string;
+  state: string;
+  subscriptions: WikiSubscription[];
+}
+
+/** Pure: reflection's existing-lesson index (docs/plans/portrait-studio-lesson-amend-plan.md) —
+ *  id + target layer + maturity + statement for every lesson whose wiki-entry subscription
+ *  reaches this round, sorted by statement. Never full evidence — this is meant to be read
+ *  whole, every round, so reflection can name an id to amend via submit_lesson's
+ *  supersedes_lesson_id instead of writing a near-duplicate. '' when nothing reaches. */
+export function formatLessonIndex(lessons: LessonIndexRow[], activeEntityIds: string[], activeLayerTypes: string[]): string {
+  return lessons
+    .filter((l) => subscriptionReaches(l.subscriptions, activeEntityIds, activeLayerTypes))
+    .sort((a, b) => a.statement.localeCompare(b.statement))
+    .map((l) => `- ${l.lesson_id} [${l.layer}, ${l.state}]: ${l.statement}`)
+    .join('\n');
 }

@@ -1554,6 +1554,9 @@ export interface PortraitReflectionOutcome {
   action: 'concluded' | 'insufficient_evidence' | 'failed' | 'awaiting_feedback';
   lessonId?: string;
   lessonTitle?: string;
+  /** Set when this conclusion amended an existing lesson instead of creating a new one — the
+   *  superseded lesson's id (docs/plans/portrait-studio-lesson-amend-plan.md). */
+  supersedesLessonId?: string;
   reason?: string;
 }
 

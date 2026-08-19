@@ -62,6 +62,11 @@ export type LessonOutput =
       nextChange: { layer: string; instruction: string };
       preserve: string[];
       confidence: LessonConfidence;
+      /** An existing lesson id (from the Existing lessons index in the user prompt) this
+       *  conclusion revises — the old lesson is marked superseded and its wiki entry amended in
+       *  place, instead of a near-duplicate being created (docs/plans/
+       *  portrait-studio-lesson-amend-plan.md). Undefined = a genuinely new lesson. */
+      supersedesLessonId?: string;
     };
 
 /** The conclusion branch of LessonOutput — the only output that creates a lesson. */
@@ -104,6 +109,13 @@ export const SUBMIT_LESSON_TOOL: ToolDefinition = {
         enum: ['low', 'medium', 'high'],
         description: 'How confident the conclusion is, given the supplied evidence.',
       },
+      supersedes_lesson_id: {
+        type: 'string',
+        description:
+          'If this conclusion revises, narrows, or duplicates an existing lesson shown in the ' +
+          'Existing lessons index, that lesson\'s id — the old lesson is retired and its wiki ' +
+          'entry is updated in place. Omit to write a genuinely new lesson.',
+      },
     },
     required: ['status'],
     additionalProperties: false,
@@ -117,13 +129,20 @@ export const DEFAULT_REFLECTION_SYSTEM_PROMPT =
   'You are the Portrait Studio reflection engine. You receive one human-evaluated portrait ' +
   'generation round as a compact record: the goal, the parent chromosome, the server-computed ' +
   'before→after diffs for every candidate, the human\'s ratings, notes, rationale, and optional ' +
-  'layer assessments, the prior lessons used, and a bounded set of existing wiki lessons.\n\n' +
+  'layer assessments, the prior lessons used, an Existing lessons index of lessons that already ' +
+  'apply to this round\'s entities, and a bounded set of existing wiki lessons.\n\n' +
   'You have NOT seen any image. Never claim or imply that you have. Reason only from the supplied ' +
   'evidence — the human\'s assessment and the diffs.\n\n' +
+  'Before writing a new lesson, check the Existing lessons index. If this round\'s finding ' +
+  'revises, narrows, sharpens, or duplicates an existing lesson\'s next_change for the same layer, ' +
+  'set supersedes_lesson_id to that lesson\'s id instead of writing a near-duplicate — the old ' +
+  'lesson is retired and its wiki entry is updated in place. Only omit supersedes_lesson_id when ' +
+  'nothing in the index already covers this finding.\n\n' +
   'Call submit_lesson with exactly one of:\n' +
   '- status "conclusion": one actionable next_change (a layer id + a precise instruction for the ' +
   'next mutation), the unchanged layers to preserve, the supporting evidence, a confidence of ' +
-  'low/medium/high, and a short reusable lesson statement.\n' +
+  'low/medium/high, a short reusable lesson statement, and supersedes_lesson_id when it revises an ' +
+  'existing lesson from the index.\n' +
   '- status "insufficient_evidence": when the rationale, ratings, notes, and diffs do not clearly ' +
   'support one actionable change. A clear, specific human instruction tied to the goal or observed ' +
   'result is sufficient evidence for a provisional low-confidence conclusion, even when the images ' +
@@ -141,6 +160,7 @@ interface DecodedLessonArgs {
   next_change?: unknown;
   preserve?: unknown;
   confidence?: unknown;
+  supersedes_lesson_id?: unknown;
 }
 
 /** Decode a tool call's arguments — adapters may hand back an object or a JSON string (the same
@@ -213,6 +233,7 @@ export function validateLessonCall(call: ToolCall): LessonValidation {
     if (preserve.includes(nextChange.layer)) {
       return { ok: false, reason: `submit_lesson layer "${nextChange.layer}" appears in both next_change and preserve` };
     }
+    const supersedesLessonId = isNonEmptyString(args.supersedes_lesson_id) ? args.supersedes_lesson_id.trim() : undefined;
 
     return {
       ok: true,
@@ -223,6 +244,7 @@ export function validateLessonCall(call: ToolCall): LessonValidation {
         nextChange,
         preserve: [...new Set(preserve)],
         confidence: args.confidence as LessonConfidence,
+        ...(supersedesLessonId ? { supersedesLessonId } : {}),
       },
     };
   } catch (err) {
@@ -284,6 +306,10 @@ export interface ReflectionSnapshot {
   wikiContext: string;
   /** The revision ids the wiki context was selected from. */
   wikiRevisionIds: string[];
+  /** wiki.ts's formatLessonIndex output — every non-terminal lesson whose wiki entry reaches this
+   *  round's entities, id + statement + layer + maturity (docs/plans/
+   *  portrait-studio-lesson-amend-plan.md). '' when nothing reaches. */
+  existingLessonsIndex: string;
 }
 
 function formatSlots(slots: SlotMap): string {
@@ -332,6 +358,11 @@ export function buildReflectionUserPrompt(snapshot: ReflectionSnapshot): string 
   parts.push(`Winner: ${snapshot.candidates.find((c) => c.isWinner)?.candidateId ?? '(none)'}`);
   parts.push(
     `Prior lessons used: ${snapshot.priorLessonIds.length > 0 ? snapshot.priorLessonIds.join(', ') : '(none — exploratory round)'}`,
+  );
+  parts.push(
+    `Existing lessons (amend one via supersedes_lesson_id if this round's finding is close, rather than creating a near-duplicate):\n${
+      snapshot.existingLessonsIndex.trim() !== '' ? snapshot.existingLessonsIndex : '(none yet)'
+    }`,
   );
   parts.push(
     snapshot.wikiContext.trim() !== ''

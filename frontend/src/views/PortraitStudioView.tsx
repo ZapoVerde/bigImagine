@@ -93,7 +93,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [failedEpisodeId, setFailedEpisodeId] = useState<string | null>(null);
-  const [banner, setBanner] = useState<{ lessonTitle?: string } | null>(null);
+  const [banner, setBanner] = useState<{ lessonTitle?: string; amended: boolean } | null>(null);
   // Per-candidate retry (a failed render gets a placeholder + Retry in the grid rather than being
   // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -329,7 +329,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         setTelemetryRefreshToken((t) => t + 1);
       }
       if (res.reflection?.action === 'concluded') {
-        setBanner({ lessonTitle: res.reflection.lessonTitle });
+        setBanner({ lessonTitle: res.reflection.lessonTitle, amended: res.reflection.supersedesLessonId !== undefined });
         setFailedEpisodeId(null);
         setSubmitted(true);
       } else {
@@ -562,7 +562,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
       {submitting && <div className="portrait-submitting">Recording evaluation and running Reflection…</div>}
       {banner && (
         <div className="portrait-banner">
-          {`Reflection concluded a new lesson${banner.lessonTitle ? `: ${lessonSnippet(banner.lessonTitle)}` : '.'}`}
+          {`Reflection ${banner.amended ? 'amended an existing lesson' : 'concluded a new lesson'}${banner.lessonTitle ? `: ${lessonSnippet(banner.lessonTitle)}` : '.'}`}
         </div>
       )}
 

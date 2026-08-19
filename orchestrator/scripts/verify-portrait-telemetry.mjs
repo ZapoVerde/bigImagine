@@ -226,6 +226,7 @@ function makeFakePool() {
     candidates: [],
     episodes: [],
     wikiEntries: [],
+    wikiRevisions: [],
     revisions: [],
     learning: [],
     lessons: [],
@@ -234,7 +235,7 @@ function makeFakePool() {
     imageCalls: [],
     llmCalls: [],
     writeLog: [],
-    counters: { entity: 0, candidate: 0, episode: 0, learning: 0, lesson: 0, round: 0, imageCall: 0, wiki: 0 },
+    counters: { entity: 0, candidate: 0, episode: 0, learning: 0, lesson: 0, round: 0, imageCall: 0, wiki: 0, revision: 0 },
   };
   // One subscribed entry (outfit layer — full-body Path-1 context) and one unsubscribed entry
   // (lands in the pull tool's tag index — drives the wiki-pull round-trip test).
@@ -280,6 +281,66 @@ function makeFakePool() {
       const row = { entity_id: `ent-${state.counters.entity}`, user_id: params[0], layer_id: params[1], name: params[2], slots: {}, template: null, updated_at: 0 };
       state.entities.push(row);
       return { rows: [row] };
+    }
+    // insertLesson's supersedes_lesson_id target lookup/write and buildReflectionSnapshot's
+    // existing-lessons index (docs/plans/portrait-studio-lesson-amend-plan.md) — checked BEFORE
+    // the generic visual_lessons/visual_wiki_entries/visual_wiki_revisions reads below, since
+    // several of these SQL strings are substrings of the generic ones.
+    if (s.startsWith('select lesson_id from visual_lessons where lesson_id = $1') && s.includes('state in')) {
+      return { rows: state.lessons.filter((l) => l.lesson_id === params[0] && l.user_id === params[1] && (l.state === 'provisional' || l.state === 'supported')) };
+    }
+    if (s.startsWith("update visual_lessons set state = 'superseded'")) {
+      const row = state.lessons.find((l) => l.lesson_id === params[0] && l.user_id === params[1]);
+      if (row) row.state = 'superseded';
+      return { rows: [] };
+    }
+    if (s.startsWith('select l.lesson_id, l.statement')) {
+      const rows = state.wikiEntries
+        .filter((w) => w.lesson_id && w.user_id === params[0])
+        .map((w) => {
+          const lesson = state.lessons.find((l) => l.lesson_id === w.lesson_id);
+          return lesson && (lesson.state === 'provisional' || lesson.state === 'supported')
+            ? { lesson_id: lesson.lesson_id, statement: lesson.statement, layer: lesson.next_change?.layer, state: lesson.state, subscriptions: w.subscriptions }
+            : null;
+        })
+        .filter(Boolean);
+      return { rows };
+    }
+    if (s.startsWith('select entry_id from visual_wiki_entries where lesson_id = $1')) {
+      const row = state.wikiEntries.find((w) => w.lesson_id === params[0] && w.user_id === params[1]);
+      return { rows: row ? [{ entry_id: row.entry_id }] : [] };
+    }
+    if (s.startsWith('update visual_wiki_entries set title = $2')) {
+      const row = state.wikiEntries.find((w) => w.entry_id === params[0] && w.user_id === params[6]);
+      if (row) {
+        row.title = params[1];
+        row.body = params[2];
+        row.tags = params[3];
+        row.subscriptions = JSON.parse(params[4]);
+        row.lesson_id = params[5];
+      }
+      return { rows: [] };
+    }
+    if (s.startsWith('select coalesce(max(revision_number), 0) + 1 as n from visual_wiki_revisions')) {
+      const nums = state.wikiRevisions.filter((r) => r.entry_id === params[0] && r.user_id === params[1]).map((r) => r.revision_number);
+      return { rows: [{ n: (nums.length ? Math.max(...nums) : 0) + 1 }] };
+    }
+    if (s.startsWith('insert into visual_wiki_revisions')) {
+      state.counters.revision = (state.counters.revision ?? 0) + 1;
+      const kind = s.includes("'amended'") ? 'amended' : 'created';
+      const revisionNumber = kind === 'amended' ? params[2] : 1;
+      const lessonIds = kind === 'amended' ? params[4] : params[3];
+      const episodeIds = kind === 'amended' ? params[5] : params[4];
+      state.wikiRevisions.push({
+        revision_id: `rev-${state.counters.revision}`,
+        user_id: params[0],
+        entry_id: params[1],
+        revision_number: revisionNumber,
+        kind,
+        lesson_ids: lessonIds,
+        episode_ids: episodeIds,
+      });
+      return { rows: [] };
     }
     if (s.includes('from visual_lessons where lesson_id = $1')) {
       return { rows: state.lessons.filter((l) => l.lesson_id === params[0] && l.user_id === params[1]) };
@@ -419,13 +480,22 @@ function makeFakePool() {
     if (s.startsWith('insert into visual_lessons')) {
       state.counters.lesson += 1;
       const lessonId = `lesson-${state.counters.lesson}`;
-      state.lessons.push({ lesson_id: lessonId, user_id: params[0], source_episode_id: params[1], statement: params[3], state: 'provisional' });
+      state.lessons.push({ lesson_id: lessonId, user_id: params[0], source_episode_id: params[1], statement: params[3], next_change: JSON.parse(params[5]), state: 'provisional' });
       return { rows: [{ lesson_id: lessonId }] };
     }
     if (s.startsWith('insert into visual_wiki_entries')) {
       state.counters.wiki += 1;
       const entryId = `wiki-${state.counters.wiki}`;
-      state.wikiEntries.push({ entry_id: entryId, title: params[1], body: params[2], tags: params[3], subscriptions: JSON.parse(params[4]) });
+      state.wikiEntries.push({
+        entry_id: entryId,
+        user_id: params[0],
+        title: params[1],
+        body: params[2],
+        tags: params[3],
+        subscriptions: JSON.parse(params[4]),
+        origin_episode_id: params[5],
+        lesson_id: params[6],
+      });
       return { rows: [{ entry_id: entryId }] };
     }
 

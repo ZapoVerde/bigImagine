@@ -220,6 +220,33 @@ function makeDb() {
       state.noteWrites.push({ candidateId: params[0], note: params[1] });
       return [];
     }
+    // insertLesson's supersedes_lesson_id target lookup/write and buildReflectionSnapshot's
+    // existing-lessons index (docs/plans/portrait-studio-lesson-amend-plan.md) — checked BEFORE
+    // the generic visual_wiki_entries/visual_wiki_revisions reads below, since several of these
+    // SQL strings are substrings of the generic ones. This fake's fixtures never seed a
+    // provisional lesson with a linked entry, so the index/target lookups always come back empty
+    // — none of this file's tests exercise the amend path.
+    if (s.startsWith('select lesson_id from visual_lessons where lesson_id = $1') && s.includes('state in')) {
+      return [];
+    }
+    if (s.startsWith("update visual_lessons set state = 'superseded'")) {
+      return [];
+    }
+    if (s.startsWith('select l.lesson_id, l.statement')) {
+      return [];
+    }
+    if (s.startsWith('select entry_id from visual_wiki_entries where lesson_id = $1')) {
+      return [];
+    }
+    if (s.startsWith('update visual_wiki_entries set title = $2')) {
+      return [];
+    }
+    if (s.startsWith('select coalesce(max(revision_number), 0) + 1 as n from visual_wiki_revisions')) {
+      return [{ n: 1 }];
+    }
+    if (s.startsWith('insert into visual_wiki_revisions')) {
+      return [];
+    }
     if (s.includes('from visual_wiki_entries')) {
       return state.wikiEntries;
     }
