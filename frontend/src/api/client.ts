@@ -52,6 +52,8 @@ import type {
   PortraitGenerateInput,
   PortraitGenerateResult,
   PortraitLayerManifest,
+  PortraitPreviewInput,
+  PortraitPreviewResult,
   PortraitRoundTelemetry,
   PortraitWikiEntry,
   CreatePortraitEntityInput,
@@ -1797,6 +1799,13 @@ export async function setPortraitLayerManifest(manifest: PortraitLayerManifest, 
  *  (portrait-studio-telemetry-plan.md — echoed to feedback and polled by the telemetry panel). */
 export async function generatePortraitCandidates(input: PortraitGenerateInput, apiKey: string | null): Promise<PortraitGenerateResult> {
   return jsonRequest<PortraitGenerateResult>('/v1/portraits/generate', apiKey, { method: 'POST', body: input });
+}
+
+/** POST /v1/portraits/preview — render one image straight from the current layer picks, no goal
+ *  and no mutation call. imageUrl stays null (with `failed` set) on a provider failure — still a
+ *  200, not a thrown ApiError; nothing is persisted either way. */
+export function renderPortraitPreview(input: PortraitPreviewInput, apiKey: string | null): Promise<PortraitPreviewResult> {
+  return jsonRequest<PortraitPreviewResult>('/v1/portraits/preview', apiKey, { method: 'POST', body: input });
 }
 
 /** POST /v1/portraits/feedback — record the round's evaluation and run the Reflection

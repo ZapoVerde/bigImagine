@@ -28,7 +28,7 @@ const { DEFAULT_LAYER_MANIFEST } = await import('../dist/portraits/layerStack.js
 const { buildRoundTelemetry, computeRoundTotals, mergeRoundCalls } = await import('../dist/portraits/portraitTelemetry.js');
 const { createGatedLlmProvider } = await import('../dist/io/llm/llmGate.js');
 const { createPostgresClient } = await import('../dist/io/postgres.js');
-const { runPortraitGenerationRound, retryPortraitCandidateRender } = await import('../dist/orchestrator/portraitGeneration.js');
+const { runPortraitGenerationRound, retryPortraitCandidateRender, renderPortraitPreview } = await import('../dist/orchestrator/portraitGeneration.js');
 const { submitPortraitFeedback } = await import('../dist/orchestrator/portraitFeedback.js');
 const { handlePortraitRoundTelemetry } = await import('../dist/server/portraitTelemetryRoutes.js');
 
@@ -897,6 +897,92 @@ function conclusionTurn() {
   const retrySeeded = await retryPortraitCandidateRender({ db, settings, imageConnections: imageConnectionsSeeded }, USER, 'c-retry-seed');
   assert(retrySeeded.ok === true, 'seeded retry: succeeds with a connection-level seed set');
   assert(retrySeeded.imageUrl?.includes('seed=20260819'), `seeded retry: the retry re-reads the connection's seed too -> "${retrySeeded.imageUrl}"`);
+}
+
+// ============================================================================
+// renderPortraitPreview — the Studio's mutation-free single render (no goal, no candidate row,
+// no round/telemetry ledger; "as they are in the wrapper" is exactly the parent chromosome the
+// round loop's own reconciliation baseline already is — buildParentChromosome/buildParentDetails
+// reused verbatim, just never handed to the mutation call).
+// ============================================================================
+
+// --- Composes straight from the named entities' persisted slots/details, renders once, and
+// writes NOTHING durable — no visual_candidates row, no llm_calls row, no visual_rounds row. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: { format_shot: 'bust' }, template: null, details: '', updated_at: 5 });
+  pool.state.entities.find((e) => e.entity_id === 'e-sub').details = 'an Italian woman in her 30s';
+
+  const preview = await renderPortraitPreview(
+    { db, settings, imageConnections },
+    USER,
+    { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+  );
+  assert(preview.ok === true && !!preview.imageUrl, 'preview: renders successfully from the named entities\' current state');
+  assert(preview.composedPrompt.includes('an Italian woman in her 30s'), 'preview: the composed prompt carries the entity\'s authored details, unmutated');
+  assert(preview.composedPrompt.includes('outfit_style: long coat'), 'preview: the composed prompt carries the entity\'s own slots, unmutated');
+  assert(pool.state.candidates.length === 0, 'preview: writes no visual_candidates row — a preview is disposable, not a training record');
+  assert(pool.state.llmCalls.length === 0, 'preview: makes no LLM call — no mutation step at all');
+  assert(pool.state.rounds.length === 0, 'preview: creates no visual_rounds row — no telemetry ledger entry');
+}
+
+// --- A named-but-missing entity is a caller bug, not a fallback case — the preview fails with a
+// structured error instead of silently substituting a placeholder or most-recently-used entity. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+
+  const preview = await renderPortraitPreview(
+    { db, settings, imageConnections },
+    USER,
+    { subject: 'does-not-exist', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+  );
+  assert(preview.ok === false && preview.error === 'entity_not_found', 'preview: a named-but-missing entity fails with a structured error, never a silent substitution');
+  assert(pool.state.candidates.length === 0 && pool.state.llmCalls.length === 0, 'preview: a failed entity resolution writes nothing');
+}
+
+// --- No active portrait connection aborts before any render is attempted. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+  const noConnection = { resolveActive: async () => null };
+
+  const preview = await renderPortraitPreview(
+    { db, settings, imageConnections: noConnection },
+    USER,
+    { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+  );
+  assert(preview.ok === false && preview.error === 'no_active_connection', 'preview: no active portrait connection aborts with no_active_connection');
+}
+
+// --- A provider failure is still a 200-shaped result (ok: true, imageUrl null, failed set) —
+// same fail-open contract as the round loop and retry: the render was attempted, only the
+// provider call itself failed. Pollinations throws synchronously when the connection has no
+// apiKey (its own documented failure mode) — no network needed to exercise this path. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+  const keylessProfile = { ...PROFILE, apiKey: null };
+  const keylessConnections = { resolveActive: async (purpose) => (purpose === 'portrait' ? keylessProfile : null) };
+
+  const preview = await renderPortraitPreview(
+    { db, settings, imageConnections: keylessConnections },
+    USER,
+    { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+  );
+  assert(preview.ok === true && preview.imageUrl === null && !!preview.failed, 'preview: a provider failure stays fail-open — ok true, imageUrl null, failed set');
+  assert(pool.state.candidates.length === 0, 'preview: a failed render still writes nothing durable');
 }
 
 // ============================================================================

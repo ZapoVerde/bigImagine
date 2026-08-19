@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/portraitGeneration.ts
- * @stamp 2026-08-19
+ * @stamp 2026-08-19c
  * @architectural-role Orchestrator — one Portrait Studio generation round
  *   (docs/plans/completed/portrait-studio-plan.md §Generation round)
  * @description
@@ -81,6 +81,9 @@
  * retryPortraitCandidateRender(deps, userId, candidateId) -> Promise<PortraitCandidateRetryResult>
  *   — re-renders one already-written candidate's stored chromosome (no mutation call, same
  *   candidate_id) when its original render failed; fail-open, same imageUrl/failed shape
+ * renderPortraitPreview(deps, userId, entityIds) -> Promise<PortraitPreviewResult> — renders one
+ *   image straight from the named entities' own persisted slots/details, no mutation call and no
+ *   visual_candidates row (the Studio's "Preview" action); fail-open, same imageUrl/failed shape
  *
  * @contract
  *   assertions:
@@ -775,6 +778,86 @@ export async function runPortraitGenerationRound(
       );
     }
     log.error('portraitGeneration: round failed', { userId, goal: input.goal, err });
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+export interface PortraitPreviewResult {
+  ok: boolean;
+  imageUrl?: string | null;
+  composedPrompt?: string;
+  /** The provider error message on a failed render — same meaning as
+   *  PortraitCandidateResult.failed, distinct from `error` (a preview-itself failure: missing
+   *  entity, no active connection). */
+  failed?: string;
+  error?: string;
+}
+
+/** Renders exactly one image straight from the current entities' own persisted slots/details —
+ *  no mutation call, no reconciliation, no visual_candidates row, no round/telemetry ledger, no
+ *  reflection loop. The Studio's "Preview" action: what the wrapper compiles today, unedited by
+ *  the evoprompt loop — every promptable layer's entity is required by name, same hard-contract
+ *  rule ensureEntityForLayer applies to a named round entity (bi_principles.md §3: an explicit
+ *  entity pick outranks whatever a most-recently-used or placeholder fallback would infer).
+ *  Nothing here is written to the database — a preview is disposable by design, not a training
+ *  record (bi_principles.md §1: only the round loop's candidates feed the ledger). */
+export async function renderPortraitPreview(
+  deps: PortraitGenerationDeps,
+  userId: string,
+  entityIds: Record<string, string>,
+): Promise<PortraitPreviewResult> {
+  try {
+    const manifest = await loadLayerManifest({ settings: deps.settings });
+    const layers = getPromptableLayers(manifest);
+
+    const entities = new Map<string, EntityRow>();
+    try {
+      for (const layer of layers) {
+        entities.set(layer.id, await ensureEntityForLayer(deps.db, userId, layer, entityIds[layer.id]));
+      }
+    } catch (err) {
+      if (err instanceof EntityResolutionError) {
+        log.warn('portraitGeneration: preview entity resolution failed', { layerId: err.layerId, error: err.message });
+        return { ok: false, error: err.code };
+      }
+      throw err;
+    }
+
+    const profile = await deps.imageConnections.resolveActive('portrait');
+    if (!profile) {
+      log.warn('portraitGeneration: preview aborted, no active portrait image connection configured', { userId });
+      return { ok: false, error: 'no_active_connection' };
+    }
+
+    const parent = buildParentChromosome(entities, layers);
+    const parentDetails = buildParentDetails(entities, layers);
+    const template = entities.get('style')?.template ?? manifest.template;
+    const composedPrompt = compileTemplate(template, parent.slots, manifest.layers, parentDetails);
+
+    try {
+      const imageUrl = await createImageGenProvider(profile).generate({
+        prompt: composedPrompt,
+        negativePrompt: profile.masterNegativePrompt ?? '',
+        model: profile.model,
+        apiKey: profile.apiKey,
+        baseUrl: profile.baseUrl,
+        width: profile.width,
+        height: profile.height,
+        seed: profile.seed,
+        steps: profile.samplingSteps,
+        cfgScale: profile.cfgScale,
+        samplerName: profile.samplerName,
+        workflowParameters: profile.workflowParameters,
+      });
+      log.info('portraitGeneration: preview render succeeded', { userId });
+      return { ok: true, imageUrl: imageUrl as string, composedPrompt };
+    } catch (err) {
+      const failed = err instanceof Error ? err.message : String(err);
+      log.warn('portraitGeneration: preview render failed', { userId, error: failed });
+      return { ok: true, imageUrl: null, composedPrompt, failed };
+    }
+  } catch (err) {
+    log.error('portraitGeneration: preview errored', { userId, err });
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

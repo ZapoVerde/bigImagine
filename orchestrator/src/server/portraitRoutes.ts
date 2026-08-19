@@ -40,6 +40,8 @@
  * handlePortraitLayersGet / handlePortraitLayersSet — GET/POST /v1/portraits/layers
  * handlePortraitGenerate / handlePortraitFeedback — POST /v1/portraits/generate,
  *   /v1/portraits/feedback
+ * handlePortraitPreview — POST /v1/portraits/preview (renderPortraitPreview — one image straight
+ *   from the named entities' current slots/details, no mutation call, no candidate row)
  * handlePortraitEpisodeReflect — POST /v1/portraits/episodes/:id/reflect (retry reflection on a
  *   failed/incomplete episode — the reflection state machine is retryable by design)
  * handlePortraitHistory — GET /v1/portraits/history (episode → lesson → use → result ledger)
@@ -70,7 +72,7 @@ import { loadLayerManifest, type LayerDefinition, type LayerManifest } from '../
 import type { WikiSubscription } from '../portraits/wiki.js';
 import { describeStudioSubject } from '../orchestrator/describeStudioSubject.js';
 import { describeStudioSlots } from '../orchestrator/describeStudioSlots.js';
-import { runPortraitGenerationRound, retryPortraitCandidateRender } from '../orchestrator/portraitGeneration.js';
+import { runPortraitGenerationRound, retryPortraitCandidateRender, renderPortraitPreview } from '../orchestrator/portraitGeneration.js';
 import { submitPortraitFeedback } from '../orchestrator/portraitFeedback.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
@@ -284,6 +286,18 @@ export function parseGenerateBody(raw: unknown): GenerateBody | undefined {
     ...(typeof raw.pendingFeedback === 'string' && raw.pendingFeedback !== '' ? { pendingFeedback: raw.pendingFeedback } : {}),
     ...(typeof raw.lessonId === 'string' && raw.lessonId !== '' ? { lessonId: raw.lessonId } : {}),
   };
+}
+
+export interface PreviewBody {
+  entityIds: Record<string, string>;
+}
+
+/** POST /v1/portraits/preview — { entityIds: { [layerId]: entityId } }, every promptable layer
+ *  required, no goal — the mutation-free single render. */
+export function parsePreviewBody(raw: unknown): PreviewBody | undefined {
+  if (!isRecord(raw) || !isRecord(raw.entityIds)) return undefined;
+  if (!Object.values(raw.entityIds).every((v) => typeof v === 'string' && v !== '')) return undefined;
+  return { entityIds: raw.entityIds as Record<string, string> };
 }
 
 export interface FeedbackBody {
@@ -976,6 +990,32 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
     return;
   }
   sendJson(res, 200, { candidates: result.candidates, lesson: result.lesson, ...(result.roundId ? { roundId: result.roundId } : {}) });
+}
+
+/** POST /v1/portraits/preview — render one image straight from the named entities' current
+ *  slots/details (renderPortraitPreview's doc comment). The fail-open result maps the same way as
+ *  generate/retry: ok → 200 with the image (or null + failed on a provider error); a structured
+ *  pre-render failure (missing entity, no active connection) → 400 with its stable error code. */
+export async function handlePortraitPreview(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps, userId: string): Promise<void> {
+  if (!(await requirePortraitsEnabled(deps, res))) return;
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parsePreviewBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { entityIds: { [layerId]: entityId } }' });
+    return;
+  }
+  const result = await renderPortraitPreview({ db: deps.db, settings: deps.settings, imageConnections: deps.imageConnections }, userId, parsed.entityIds);
+  if (!result.ok) {
+    sendJson(res, 400, { error: result.error ?? 'preview failed' });
+    return;
+  }
+  sendJson(res, 200, { imageUrl: result.imageUrl, composedPrompt: result.composedPrompt, ...(result.failed !== undefined ? { failed: result.failed } : {}) });
 }
 
 /** POST /v1/portraits/candidates/:id/retry — re-render one candidate (typically one whose

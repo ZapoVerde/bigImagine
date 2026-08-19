@@ -1548,6 +1548,20 @@ export interface PortraitGenerateInput {
   pendingFeedback?: string;
 }
 
+/** POST /v1/portraits/preview body — the current layer picks, no goal (no mutation call). */
+export interface PortraitPreviewInput {
+  entityIds: Record<string, string>;
+}
+
+/** POST /v1/portraits/preview response — a single mutation-free render straight from the named
+ *  entities' current slots/details; imageUrl null + failed set means the provider itself failed
+ *  (the render was attempted, nothing is persisted either way — this action writes no row). */
+export interface PortraitPreviewResult {
+  imageUrl: string | null;
+  composedPrompt: string;
+  failed?: string;
+}
+
 /** POST /v1/portraits/feedback body — ratings are 1-5 integers (server 400s otherwise). roundId
  *  (optional) is echoed from the round's generate so the server correlates this feedback's
  *  reflection calls to the same round (portrait-studio-telemetry-plan.md); a retry omits it and

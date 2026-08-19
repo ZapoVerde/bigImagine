@@ -8,6 +8,7 @@ import {
   getPortraitLayerManifest,
   listPortraitEntities,
   listPortraitWikiEntries,
+  renderPortraitPreview,
   retryPortraitCandidate,
   retryPortraitFeedback,
   setPortraitLayerManifest,
@@ -27,8 +28,11 @@ import PortraitCandidateGrid from '../components/portraits/PortraitCandidateGrid
 import './PortraitStudioView.css';
 
 // Portrait Studio (docs/plans/completed/portrait-studio-plan.md §Frontend) — the training/authoring surface
-// for character portraits: per-layer entity pickers + create-new drive a Generate action; the
-// round's candidates land in PortraitCandidateGrid for winner-pick + 1-5 rating + note; feedback
+// for character portraits: per-layer entity pickers + create-new drive a Generate action; "Preview
+// current layers" (above Round goal) is a separate, mutation-free single render of the same picks
+// as they currently compile — no goal, no candidate grid, nothing persisted — for a quick look at
+// the wrapper before spending a round on it. The round's candidates land in PortraitCandidateGrid
+// for winner-pick + 1-5 rating + note; feedback
 // runs the Reflection state machine (portraitFeedback.ts) and surfaces its truthful outcome:
 // 'concluded' bannered as a new lesson, 'insufficient_evidence'/'failed' left retryable via the
 // same failedEpisodeId path; a Wiki panel lists/edits/deletes the reflection's lessons — the
@@ -89,6 +93,14 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   const [creatingLayer, setCreatingLayer] = useState<string | null>(null);
   const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE);
   const [creatingSaving, setCreatingSaving] = useState(false);
+
+  // Preview: one mutation-free render of the current layer picks exactly as they sit in the
+  // wrapper today — no goal, no candidate grid, nothing persisted. Its own state, separate from
+  // the round's generating/candidates/error, so a preview never clobbers (or is clobbered by) an
+  // in-flight round.
+  const [previewing, setPreviewing] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewResult, setPreviewResult] = useState<{ imageUrl: string | null; composedPrompt: string; failed?: string } | null>(null);
 
   // The round goal survives a reload (localStorage write-through, same debounced pattern as
   // ChatComposer's draft) — a single global key, since Portrait Studio has no per-tab scoping.
@@ -331,6 +343,25 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
       setGenerateError(errMessage(err, 'generation failed'));
     } finally {
       setGenerating(false);
+    }
+  }
+
+  async function renderPreview() {
+    const missing = promptableLayers.filter((l) => !selections[l.id]);
+    if (missing.length > 0) {
+      setPreviewError(`pick an entity for: ${missing.map((l) => l.label).join(', ')}`);
+      return;
+    }
+    setPreviewing(true);
+    setPreviewError(null);
+    setPreviewResult(null);
+    try {
+      const res = await renderPortraitPreview({ entityIds: selections }, apiKey);
+      setPreviewResult(res);
+    } catch (err) {
+      setPreviewError(errMessage(err, 'preview failed'));
+    } finally {
+      setPreviewing(false);
     }
   }
 
@@ -645,6 +676,23 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
 
       {/* Generate. */}
       <section className="portrait-generate">
+        {/* Preview: exactly what the current layer picks compile to today, no goal, no mutation,
+            nothing persisted — a quick look at the wrapper before spending a round on it. */}
+        <button type="button" onClick={renderPreview} disabled={previewing}>
+          {previewing ? 'Rendering…' : 'Preview current layers'}
+        </button>
+        {previewError && <div className="error-banner">{previewError}</div>}
+        {previewResult && (
+          <div className="portrait-preview-result">
+            {previewResult.imageUrl ? (
+              <img src={previewResult.imageUrl} alt="Preview of current layer picks" />
+            ) : (
+              <div className="error-banner">{previewResult.failed ?? 'render failed'}</div>
+            )}
+            <p className="portrait-preview-prompt">{previewResult.composedPrompt}</p>
+          </div>
+        )}
+
         <label>
           Round goal
           <input value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="e.g. A calmer evening variant of Rin at the teahouse" />

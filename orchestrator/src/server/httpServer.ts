@@ -265,6 +265,7 @@ import {
   handlePortraitEpisodeReflect,
   handlePortraitFeedback,
   handlePortraitGenerate,
+  handlePortraitPreview,
   handlePortraitHistory,
   handlePortraitLayersGet,
   handlePortraitLayersSet,
@@ -675,6 +676,7 @@ const routes: Route[] = [
   { method: 'GET', path: '/v1/portraits/layers', run: async (req, res, deps) => withUser(req, res, deps, async () => { await handlePortraitLayersGet(res, deps); }) },
   { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
   { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
+  { method: 'POST', path: '/v1/portraits/preview', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitPreview(req, res, deps, userId); }) },
   { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
   // portrait-studio-telemetry-plan.md — the durable per-round receipt. GET only, user-gated; the
   // handler parses /v1/portraits/rounds/:roundId/telemetry and runs its own ownership check
