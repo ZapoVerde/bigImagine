@@ -71,6 +71,7 @@ import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { loadLayerManifest } from '../portraits/layerStack.js';
 import type { CandidateChromosome } from '../portraits/reconcile.js';
+import { formatLessonIndex, type LessonIndexRow } from '../portraits/wiki.js';
 import {
   buildReflectionUserPrompt,
   computeCandidateDiff,
@@ -135,6 +136,10 @@ export interface ReflectionOutcome {
   lessonId?: string;
   /** The human-readable lesson title/statement for UI receipts; the id remains the durable key. */
   lessonTitle?: string;
+  /** Set when this conclusion amended an existing lesson (docs/plans/
+   *  portrait-studio-lesson-amend-plan.md) rather than creating a new one — the old lesson's id,
+   *  now state='superseded'. */
+  supersedesLessonId?: string;
   /** Why the pass failed (LLM error, undecodable/ invalid conclusion) — always logged. */
   reason?: string;
 }
@@ -296,9 +301,27 @@ async function wikiBudget(deps: PortraitFeedbackDeps): Promise<number> {
 
 // ---- Reflection -----------------------------------------------------------------
 
+/** Every non-terminal (provisional/supported) lesson the user owns, joined to its wiki entry's
+ *  subscriptions — formatLessonIndex's raw input (docs/plans/portrait-studio-lesson-amend-plan.md).
+ *  A lesson with no linked wiki entry (a legacy row predating migration 0120's lesson_id column,
+ *  or a genuine data gap) is excluded — it has no subscription reach to test and would otherwise
+ *  need an invented one. */
+async function loadExistingLessonsIndexRows(db: PostgresClient, userId: string): Promise<LessonIndexRow[]> {
+  return db.withUserScope(userId, (session) =>
+    session.query<LessonIndexRow>(
+      `select l.lesson_id, l.statement, l.next_change ->> 'layer' as layer, l.state, w.subscriptions
+       from visual_lessons l
+       join visual_wiki_entries w on w.lesson_id = l.lesson_id and w.user_id = l.user_id
+       where l.user_id = $1 and l.state in ('provisional', 'supported')`,
+      [userId],
+    ),
+  );
+}
+
 /** The compact episode record as the immutable input snapshot: goal, parent chromosome,
  *  server-computed diffs, the human's evaluation, prior lesson ids (from the candidates' lesson_id
- *  provenance), and the bounded wiki context with the revision ids that back it. */
+ *  provenance), the bounded wiki context with the revision ids that back it, and the existing-
+ *  lesson index reflection can amend from instead of duplicating. */
 async function buildReflectionSnapshot(
   deps: PortraitFeedbackDeps,
   userId: string,
@@ -307,12 +330,9 @@ async function buildReflectionSnapshot(
   const manifest = await loadLayerManifest({ settings: deps.settings });
   const allWikiEntries = await loadAllWikiEntries(deps.db, userId);
   const activeEntityIds = [...new Set(Object.values(ctx.episodeEntityIds ?? {}))];
-  const bounded = selectBoundedWikiContext(
-    allWikiEntries,
-    activeEntityIds,
-    manifest.layers.map((l) => l.id),
-    await wikiBudget(deps),
-  );
+  const activeLayerTypes = manifest.layers.map((l) => l.id);
+  const bounded = selectBoundedWikiContext(allWikiEntries, activeEntityIds, activeLayerTypes, await wikiBudget(deps));
+  const existingLessons = await loadExistingLessonsIndexRows(deps.db, userId);
   const parentSlots = ctx.candidates[0]?.parent_chromosome?.slots ?? {};
   const priorLessonIds = [...new Set(ctx.candidates.map((c) => c.lesson_id).filter((v): v is string => v !== null))];
   return {
@@ -330,6 +350,7 @@ async function buildReflectionSnapshot(
     priorLessonIds,
     wikiContext: bounded.text,
     wikiRevisionIds: bounded.revisionIds,
+    existingLessonsIndex: formatLessonIndex(existingLessons, activeEntityIds, activeLayerTypes),
   };
 }
 
@@ -388,7 +409,18 @@ async function persistFailedAttempt(
 }
 
 /** Only a validated conclusion creates a lesson (plan §Data model / §Wiki policy) — state
- *  provisional until repeated supporting episodes or explicit operator approval promote it. */
+ *  provisional until repeated supporting episodes or explicit operator approval promote it.
+ *
+ *  When output.supersedesLessonId names an existing owned provisional/supported lesson (shown to
+ *  the model via the Existing lessons index — docs/plans/portrait-studio-lesson-amend-plan.md),
+ *  that lesson is marked superseded and its wiki entry is amended in place (a new
+ *  visual_wiki_revisions row, kind='amended') instead of a near-duplicate entry being written. An
+ *  id that doesn't resolve — wrong user, already terminal, or simply invented — is a caller
+ *  (model) mistake, not a hard failure: it's logged and the round falls back to a plain create,
+ *  never silently drops the new lesson (bi_principles.md §11). The plain create path now also
+ *  writes its own visual_wiki_revisions row (kind='created') — previously only the legacy backfill
+ *  in migration 0118 ever populated that table, so reflection-created entries had no history at
+ *  all until their first amendment. */
 async function insertLesson(
   deps: PortraitFeedbackDeps,
   userId: string,
@@ -396,14 +428,17 @@ async function insertLesson(
   learningId: string,
   episodeEntityIds: Record<string, string>,
   output: LessonConclusion,
-): Promise<{ lessonId: string; lessonTitle: string }> {
-  const lessonTitle = `Provisional lesson: ${output.lesson.slice(0, 100)}`;
-  const rows = await deps.db.withUserScope(userId, async (session) => {
+): Promise<{ lessonId: string; lessonTitle: string; supersedesLessonId?: string }> {
+  const lessonTitle = output.lesson.slice(0, 100);
+  const body = `${output.lesson}\n\nEvidence: ${output.evidence}`;
+  const result = await deps.db.withUserScope(userId, async (session) => {
     const lessonRows = await session.query<{ lesson_id: string }>(
       `insert into visual_lessons (user_id, source_episode_id, source_learning_id, statement, evidence, next_change, preserve, confidence, state)
        values ($1, $2, $3, $4, $5, $6::jsonb, $7::text[], $8, 'provisional') returning lesson_id`,
       [userId, episodeId, learningId, output.lesson, output.evidence, JSON.stringify(output.nextChange), output.preserve ?? [], output.confidence],
     );
+    const newLessonId = lessonRows[0].lesson_id;
+
     const layerType = output.nextChange.layer;
     const layerEntityId = episodeEntityIds[layerType] ?? null;
     const entityRows = layerEntityId
@@ -414,27 +449,66 @@ async function insertLesson(
       : [];
     const slug = (value: string): string => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     const tags = [...new Set([
-      'provisional',
       slug(layerType),
       ...(entityRows[0]?.name ? [slug(entityRows[0].name)] : []),
     ].filter(Boolean))];
     const subscriptions = [{ layerType, layerEntityId }];
-    await session.query(
-      `insert into visual_wiki_entries
-         (user_id, title, body, tags, subscriptions, origin_episode_id)
-       values ($1, $2, $3, $4::text[], $5::jsonb, $6)`,
-      [
-        userId,
-        lessonTitle,
-        `${output.lesson}\n\nEvidence: ${output.evidence}`,
-        tags,
-        JSON.stringify(subscriptions),
-        episodeId,
-      ],
+
+    const target = output.supersedesLessonId
+      ? await session.query<{ lesson_id: string }>(
+          `select lesson_id from visual_lessons where lesson_id = $1 and user_id = $2 and state in ('provisional', 'supported')`,
+          [output.supersedesLessonId, userId],
+        )
+      : [];
+    if (output.supersedesLessonId && target.length === 0) {
+      log.warn('portraitFeedback: supersedes_lesson_id did not resolve to an amendable lesson, falling back to create', {
+        supersedesLessonId: output.supersedesLessonId,
+      });
+    }
+
+    if (target.length > 0) {
+      const supersededId = output.supersedesLessonId as string;
+      await session.query(`update visual_lessons set state = 'superseded' where lesson_id = $1 and user_id = $2`, [supersededId, userId]);
+      const entryRows = await session.query<{ entry_id: string }>(
+        `select entry_id from visual_wiki_entries where lesson_id = $1 and user_id = $2`,
+        [supersededId, userId],
+      );
+      if (entryRows[0]) {
+        const entryId = entryRows[0].entry_id;
+        await session.query(
+          `update visual_wiki_entries set title = $2, body = $3, tags = $4::text[], subscriptions = $5::jsonb, lesson_id = $6, updated_at = now()
+           where entry_id = $1 and user_id = $7`,
+          [entryId, lessonTitle, body, tags, JSON.stringify(subscriptions), newLessonId, userId],
+        );
+        const revRows = await session.query<{ n: number }>(
+          `select coalesce(max(revision_number), 0) + 1 as n from visual_wiki_revisions where entry_id = $1 and user_id = $2`,
+          [entryId, userId],
+        );
+        await session.query(
+          `insert into visual_wiki_revisions (user_id, entry_id, revision_number, content, kind, lesson_ids, episode_ids, source)
+           values ($1, $2, $3, $4::jsonb, 'amended', $5::uuid[], $6::uuid[], 'reflection')`,
+          [userId, entryId, revRows[0].n, JSON.stringify({ title: lessonTitle, body, tags, subscriptions }), [supersededId, newLessonId], [episodeId]],
+        );
+        return { lessonId: newLessonId, supersededId };
+      }
+      // The superseded lesson had no linked wiki entry (a gap the migration 0120 backfill
+      // couldn't close) — the old lesson is still correctly marked superseded above; fall through
+      // to write a fresh entry for the new lesson, same as a plain create.
+    }
+
+    const entryRows = await session.query<{ entry_id: string }>(
+      `insert into visual_wiki_entries (user_id, title, body, tags, subscriptions, origin_episode_id, lesson_id)
+       values ($1, $2, $3, $4::text[], $5::jsonb, $6, $7) returning entry_id`,
+      [userId, lessonTitle, body, tags, JSON.stringify(subscriptions), episodeId, newLessonId],
     );
-    return lessonRows;
+    await session.query(
+      `insert into visual_wiki_revisions (user_id, entry_id, revision_number, content, kind, lesson_ids, episode_ids, source)
+       values ($1, $2, 1, $3::jsonb, 'created', $4::uuid[], $5::uuid[], 'reflection')`,
+      [userId, entryRows[0].entry_id, JSON.stringify({ title: lessonTitle, body, tags, subscriptions }), [newLessonId], [episodeId]],
+    );
+    return { lessonId: newLessonId, supersededId: undefined as string | undefined };
   });
-  return { lessonId: rows[0].lesson_id, lessonTitle };
+  return { lessonId: result.lessonId, lessonTitle, ...(result.supersededId ? { supersedesLessonId: result.supersededId } : {}) };
 }
 
 /** The one bounded reflection call (plan §Reflection contract) — forced submit_lesson, no loop.
@@ -504,13 +578,24 @@ async function runReflectionCall(
           nextChange: output.nextChange,
           preserve: output.preserve ?? [],
           confidence: output.confidence,
+          ...(lesson.supersedesLessonId ? { supersedesLessonId: lesson.supersedesLessonId } : {}),
         }),
       ],
     ),
   );
   await setEpisodeStatus(deps, userId, ctx.episodeId, 'concluded');
-  log.info('portraitFeedback: reflection concluded a lesson', { episodeId: ctx.episodeId, attempt, lessonId: lesson.lessonId });
-  return { action: 'concluded', lessonId: lesson.lessonId, lessonTitle: lesson.lessonTitle };
+  log.info('portraitFeedback: reflection concluded a lesson', {
+    episodeId: ctx.episodeId,
+    attempt,
+    lessonId: lesson.lessonId,
+    supersedesLessonId: lesson.supersedesLessonId ?? null,
+  });
+  return {
+    action: 'concluded',
+    lessonId: lesson.lessonId,
+    lessonTitle: lesson.lessonTitle,
+    ...(lesson.supersedesLessonId ? { supersedesLessonId: lesson.supersedesLessonId } : {}),
+  };
 }
 
 /** The reflection pass: persist nothing about learning until the snapshot is built; mark
@@ -528,7 +613,7 @@ async function runReflectionPass(
     snapshot = await buildReflectionSnapshot(deps, userId, ctx);
   } catch (err) {
     log.error('portraitFeedback: reflection snapshot build failed', { episodeId: ctx.episodeId, attempt, err });
-    const emptySnapshot: ReflectionSnapshot = { goal: ctx.goal, parentSlots: {}, candidates: [], rationale: ctx.rationale, layerAssessments: ctx.layerAssessments, priorLessonIds: [], wikiContext: '', wikiRevisionIds: [] };
+    const emptySnapshot: ReflectionSnapshot = { goal: ctx.goal, parentSlots: {}, candidates: [], rationale: ctx.rationale, layerAssessments: ctx.layerAssessments, priorLessonIds: [], wikiContext: '', wikiRevisionIds: [], existingLessonsIndex: '' };
     return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, emptySnapshot, err, connection);
   }
   await deps.db.withUserScope(userId, (session) =>

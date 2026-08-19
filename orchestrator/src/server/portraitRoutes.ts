@@ -771,13 +771,12 @@ export async function handlePortraitWiki(
          insert into visual_wiki_entries
            (user_id, title, body, tags, subscriptions, origin_episode_id)
          select $1,
-                'Provisional lesson: ' || left(statement, 100),
+                left(statement, 100),
                 statement || E'\n\nEvidence: ' || evidence,
-                array[
-                  'provisional',
+                array_remove(array[
                   regexp_replace(lower(layer_type), '[^a-z0-9]+', '-', 'g'),
                   nullif(regexp_replace(lower(coalesce(entity_name, '')), '[^a-z0-9]+', '-', 'g'), '')
-                ]::text[],
+                ]::text[], null::text),
                 jsonb_build_array(jsonb_build_object('layerType', layer_type, 'layerEntityId', entity_id)),
                 source_episode_id
          from missing_lessons
