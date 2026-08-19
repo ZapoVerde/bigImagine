@@ -868,7 +868,9 @@ export async function handlePortraitWiki(
     if (req.method === 'DELETE') {
       const rows = await deps.db.withUserScope(userId, (session) =>
         session.query<{ entry_id: string }>(
-          `with deleted as (
+          `with deleted_revisions as (
+             delete from visual_wiki_revisions where entry_id = $1 and user_id = $2
+           ), deleted as (
              delete from visual_wiki_entries where entry_id = $1 and user_id = $2
              returning entry_id, lesson_id, origin_episode_id
            ), dismissed as (

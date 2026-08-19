@@ -30,6 +30,9 @@ function response() {
 const state = {
   lessons: [{ lesson_id: LESSON, user_id: USER, source_episode_id: EPISODE, state: 'provisional', wiki_dismissed_at: null }],
   entries: [{ entry_id: ENTRY, user_id: USER, lesson_id: LESSON, origin_episode_id: EPISODE, title: 'Keep the collar visible', body: 'Keep the collar visible.', tags: [], subscriptions: [] }],
+  // Reflection-created entries always get a 'created' revision row (portraitFeedback.ts); the
+  // real bug this reproduces is the FK violation from deleting an entry that has revisions.
+  revisions: [{ revision_id: 'rev-1', user_id: USER, entry_id: ENTRY }],
 };
 
 const db = {
@@ -45,9 +48,16 @@ const db = {
         return [];
       }
       if (sql.startsWith('select entry_id, title, body')) return state.entries.filter((entry) => entry.user_id === params[0]);
-      if (sql.includes('with deleted as')) {
+      if (sql.includes('with deleted_revisions as')) {
+        // visual_wiki_revisions.entry_id is a NOT NULL FK with no cascade — the query must delete
+        // an entry's revision rows itself, in the same transaction, or Postgres rejects the entry
+        // delete with visual_wiki_revisions_entry_id_fkey. This fake enforces that ordering too.
+        if (!sql.includes('delete from visual_wiki_revisions')) {
+          throw new Error('update or delete on table "visual_wiki_entries" violates foreign key constraint "visual_wiki_revisions_entry_id_fkey"');
+        }
         const index = state.entries.findIndex((entry) => entry.entry_id === params[0] && entry.user_id === params[1]);
         if (index === -1) return [];
+        state.revisions = state.revisions.filter((r) => !(r.entry_id === params[0] && r.user_id === params[1]));
         const [deleted] = state.entries.splice(index, 1);
         const lesson = deleted.lesson_id !== null
           ? state.lessons.find((candidate) => candidate.user_id === params[1] && candidate.lesson_id === deleted.lesson_id)
@@ -63,8 +73,9 @@ const db = {
 const deps = { db, settings: { get: async () => 'true' } };
 const deleteRes = response();
 await handlePortraitWiki({ method: 'DELETE' }, deleteRes, deps, USER, new URL(`http://x/v1/portraits/wiki/${ENTRY}`));
-assert(deleteRes.responses[0]?.status === 200, 'delete returns success');
+assert(deleteRes.responses[0]?.status === 200, 'delete returns success for an entry with revision history');
 assert(state.lessons[0].wiki_dismissed_at !== null, 'delete persists the linked lesson dismissal');
+assert(!state.revisions.some((r) => r.entry_id === ENTRY), 'delete clears the entry\'s revision rows (no FK violation)');
 
 const listRes = response();
 await handlePortraitWiki({ method: 'GET' }, listRes, deps, USER, new URL('http://x/v1/portraits/wiki'));
