@@ -34,8 +34,10 @@ import './PortraitStudioView.css';
 // same failedEpisodeId path; a Wiki panel lists/edits/deletes the reflection's lessons — the
 // durable cross-round guidance channel; per-entity content is split three ways
 // (docs/plans/portrait-studio-layer-details-plan.md): Details (human-owned, always-editable prose,
-// compiled into the prompt via {{<layerId>_details}} tokens), Slots (LLM-owned structured
-// attributes, shown read-only in an expandable section), Wiki (durable cross-round guidance);
+// compiled into the prompt via {{<layerId>_details}} tokens), Slots (structured attributes the
+// mutation loop normally owns, but editable behind an expandable section — a hand-edit here is
+// "explicit outranks inferred", bi_principles.md §3, same as any other hand-fill), Wiki (durable
+// cross-round guidance);
 // Manage Layers (admin-gated — visual_layer_stack is a settings write, per the plan's auth note)
 // edits the manifest with the subject layer locked and in-use layers unremovable. All portrait
 // reads/writes are user-scoped (apiKey); only the layers write takes the admin key. Per
@@ -100,9 +102,15 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
-  // Per-entity slots — read-only expandable section (the ground truth compiled into the image
-  // prompt; composer.ts's compileTemplate reads only this, never a free-text field).
+  // Per-entity slots — expandable, editable section (the ground truth compiled into the image
+  // prompt; composer.ts's compileTemplate reads only this). Editing a value is the same
+  // "explicit outranks inferred" hand-fill as create-time slots (bi_principles.md §3); editing
+  // the key set changes what the mutation loop's enforceSlotKeys treats as this layer's
+  // vocabulary going forward (reconcile.ts) — a deliberate, not accidental, effect of editing here.
   const [expandedSlotsEntityId, setExpandedSlotsEntityId] = useState<string | null>(null);
+  const [slotsDraft, setSlotsDraft] = useState<Array<{ key: string; value: string }>>([]);
+  const [slotsSaving, setSlotsSaving] = useState(false);
+  const [slotsError, setSlotsError] = useState<string | null>(null);
 
   // Per-entity rename editor — same toggle-open-inline-input-Save shape as the instructions editor.
   const [renamingEntityId, setRenamingEntityId] = useState<string | null>(null);
@@ -114,7 +122,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   // authored prose compiled into the prompt via {{<layerId>_details}} tokens. Mirrors the rename
   // pattern (editingDetailsEntityId/detailsDraft/detailsSaving) but renders ALWAYS-VISIBLE as a
   // compact labeled textarea rather than behind another expand/collapse toggle — Details is
-  // primary authored content, not a secondary advanced field like the read-only Slots dump.
+  // primary authored content, not a secondary advanced field like the Slots editor below it.
   const [editingDetailsEntityId, setEditingDetailsEntityId] = useState<string | null>(null);
   const [detailsDraft, setDetailsDraft] = useState('');
   const [detailsSaving, setDetailsSaving] = useState(false);
@@ -412,6 +420,37 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
     }
   }
 
+  function openSlots(entity: PortraitEntityRow) {
+    setExpandedSlotsEntityId((cur) => {
+      if (cur === entity.entity_id) return null; // toggle closed
+      setSlotsDraft(Object.entries(entity.slots).map(([key, value]) => ({ key, value })));
+      setSlotsError(null);
+      return entity.entity_id;
+    });
+  }
+
+  async function saveSlots(entity: PortraitEntityRow) {
+    if (slotsSaving) return; // already in flight — a second click must not double-PATCH
+    // Blank keys are dropped (an empty add-row left untouched); a key typed twice keeps its last
+    // value, same "last write wins" a plain object literal would give a caller building one by hand.
+    const slots: Record<string, string> = {};
+    for (const { key, value } of slotsDraft) {
+      const trimmedKey = key.trim();
+      if (trimmedKey) slots[trimmedKey] = value;
+    }
+    setSlotsSaving(true);
+    setSlotsError(null);
+    try {
+      await updatePortraitEntity(entity.entity_id, { slots }, apiKey);
+      setExpandedSlotsEntityId(null);
+      await refreshEntities();
+    } catch (err) {
+      setSlotsError(errMessage(err, 'failed to save slots'));
+    } finally {
+      setSlotsSaving(false);
+    }
+  }
+
   function openWikiEditor(entry: PortraitWikiEntry) {
     setEditingEntryId(entry.entry_id);
     setWikiDraft({ title: entry.title, body: entry.body, tags: entry.tags.join(', ') });
@@ -662,10 +701,13 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         </details>
       </section>
 
-      {/* Entities — per-entity slots, read-only expandable (the ground truth compiled into the
+      {/* Entities — per-entity slots, editable expandable (the ground truth compiled into the
           image prompt; composer.ts's compileTemplate reads only this). */}
-      <section className="portrait-entities">
-        <h3>Entities</h3>
+      <details className="portrait-entities">
+        <summary className="portrait-entities-summary">
+          <h3>Entities</h3>
+          <span>{entities.length} {entities.length === 1 ? 'entity' : 'entities'}</span>
+        </summary>
         <div className="portrait-entity-list">
           {entities.map((entity) => (
             <article key={entity.entity_id} className="portrait-entity-row">
@@ -700,7 +742,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
                     rename
                   </button>
                 )}
-                <button type="button" onClick={() => setExpandedSlotsEntityId((cur) => (cur === entity.entity_id ? null : entity.entity_id))}>
+                <button type="button" onClick={() => openSlots(entity)}>
                   {expandedSlotsEntityId === entity.entity_id ? 'hide' : 'slots'}
                 </button>
                 <button type="button" className="portrait-wiki-delete" onClick={() => deleteEntity(entity)}>
@@ -740,24 +782,55 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
               {editingDetailsEntityId === entity.entity_id && detailsError && <div className="error-banner">{detailsError}</div>}
               {expandedSlotsEntityId === entity.entity_id && (
                 <div className="portrait-slots-view">
-                  {Object.keys(entity.slots).length === 0 ? (
-                    <div className="portrait-empty">No slots yet — generate a round or edit the layer's boundary to bootstrap some.</div>
+                  {slotsDraft.length === 0 ? (
+                    <div className="portrait-empty">No slots yet — add one below, or generate a round to bootstrap some.</div>
                   ) : (
-                    <dl className="portrait-slots-list">
-                      {Object.entries(entity.slots).map(([key, value]) => (
-                        <div key={key} className="portrait-slot-row">
-                          <dt>{key}</dt>
-                          <dd>{value}</dd>
+                    <div className="portrait-slots-list">
+                      {slotsDraft.map((row, i) => (
+                        <div key={i} className="portrait-slot-row">
+                          <input
+                            className="portrait-slot-key"
+                            value={row.key}
+                            placeholder="slot name"
+                            onChange={(e) =>
+                              setSlotsDraft((cur) => cur.map((r, j) => (j === i ? { ...r, key: e.target.value } : r)))
+                            }
+                          />
+                          <input
+                            className="portrait-slot-value"
+                            value={row.value}
+                            placeholder="value"
+                            onChange={(e) =>
+                              setSlotsDraft((cur) => cur.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))
+                            }
+                          />
+                          <button type="button" onClick={() => setSlotsDraft((cur) => cur.filter((_, j) => j !== i))}>
+                            remove
+                          </button>
                         </div>
                       ))}
-                    </dl>
+                    </div>
                   )}
+                  <div className="portrait-slot-row">
+                    <button type="button" onClick={() => setSlotsDraft((cur) => [...cur, { key: '', value: '' }])}>
+                      + add slot
+                    </button>
+                  </div>
+                  <div className="portrait-wiki-actions">
+                    <button type="button" onClick={() => saveSlots(entity)} disabled={slotsSaving}>
+                      {slotsSaving ? 'Saving…' : 'save'}
+                    </button>
+                    <button type="button" onClick={() => setExpandedSlotsEntityId(null)} disabled={slotsSaving}>
+                      cancel
+                    </button>
+                  </div>
+                  {slotsError && <div className="error-banner">{slotsError}</div>}
                 </div>
               )}
             </article>
           ))}
         </div>
-      </section>
+      </details>
 
       {/* Manage Layers — admin-gated (settings write). Subject locked; in-use layers unremovable. */}
       <section className="portrait-layers">
