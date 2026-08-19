@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/portraits/composer.ts
- * @stamp 2026-08-19
+ * @stamp 2026-08-19b
  * @architectural-role Pure Function — {{slot}} template compilation + overflow buckets + per-layer
  *   details prose (bi_principles.md §8), generalized over the active manifest's layer list
  * @description
@@ -27,12 +27,15 @@
  * - `{{<layerId>_overflow}}` for a known promptable layer → the layer's unplaced, non-empty
  *   slots formatted `"label: value, ..."`. Empty bucket → the token vanishes.
  * - `{{<layerId>_details}}` for a known promptable layer → the layer's authored prose, trimmed
- *   (`details[layerId]?.trim() ?? ''`); empty/absent → `''`, then the existing collapse() removes
- *   the resulting ragged comma exactly as it already does for an empty overflow bucket.
+ *   (`details[layerId]?.trim() ?? ''`); empty/absent → `''`.
  * - Any other token (unknown slot name, unknown layer, a typo) is left verbatim — the same
  *   diagnosable-not-dropped convention as synthesizeImagePrompt.ts's unknown macros.
- * - After substitution, comma runs (`, ,`, leading/trailing commas left by empty substitutions)
- *   collapse and whitespace trims.
+ * - Any token that resolves to `''` also consumes its own trailing `, ` (a literal comma +
+ *   whitespace immediately following the token in the template), so an empty field never leaves
+ *   an orphaned separator behind — "A portrait of {{subject_details}}, {{subject_overflow}}" with
+ *   empty details reads "A portrait of <overflow>", not "A portrait of , <overflow>".
+ * - After substitution, remaining comma runs (`, ,` left by two adjacent empty fields,
+ *   leading/trailing commas) collapse and whitespace trims.
  *
  * Pure by construction: identical inputs always produce identical output — no IO, no state, no
  * randomness — the property the generation round relies on to re-compose a candidate's prompt
@@ -60,7 +63,9 @@ export type SlotMap = Record<string, Record<string, string>>;
  *  tokens resolve to (composer.ts), loaded once per round from visual_entities.details. */
 export type DetailsMap = Record<string, string>;
 
-const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g;
+// Captures a token's own trailing separator (a literal comma + whitespace, if the template has
+// one right there) so an empty-valued token can drop it along with itself — see compileTemplate.
+const TOKEN_RE = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}(,\s*)?/g;
 
 /** All slot names the template places explicitly — used to decide what overflow may NOT contain
  *  (a placed slot never also lands in its layer's bucket). Overflow tokens
@@ -111,33 +116,31 @@ export function compileTemplate(template: string, slots: SlotMap, layers: LayerD
   const placed = collectPlacedSlots(template, layers);
   const promptableIds = new Set(layers.filter((l) => l.promptable).map((l) => l.id));
 
-  const compiled = template.replace(TOKEN_RE, (match, token: string) => {
-    // Details token for a known promptable layer → the layer's authored prose, trimmed;
-    // empty/absent → '', and the surrounding comma run collapses like an empty overflow bucket's.
+  const compiled = template.replace(TOKEN_RE, (match, token: string, sep: string | undefined) => {
+    let value: string | null; // null = unknown token — leave the whole match verbatim, comma included
     if (token.endsWith('_details')) {
       const layerId = token.slice(0, -'_details'.length);
-      if (promptableIds.has(layerId)) {
-        return details[layerId]?.trim() ?? '';
-      }
-      return match; // unknown layer's details token — leave verbatim
-    }
-    // Overflow token for a known promptable layer → this layer's unplaced slots.
-    if (token.endsWith('_overflow')) {
+      value = promptableIds.has(layerId) ? details[layerId]?.trim() ?? '' : null;
+    } else if (token.endsWith('_overflow')) {
       const layerId = token.slice(0, -'_overflow'.length);
-      if (promptableIds.has(layerId)) {
-        return overflowFor(slots[layerId] ?? {}, placed);
+      value = promptableIds.has(layerId) ? overflowFor(slots[layerId] ?? {}, placed) : null;
+    } else {
+      // Plain slot token → the value owned by whichever layer has this slot name.
+      value = null;
+      for (const layer of layers) {
+        const layerSlots = slots[layer.id];
+        if (layerSlots && token in layerSlots) {
+          const raw = layerSlots[token];
+          value = typeof raw === 'string' ? raw : '';
+          break;
+        }
       }
-      return match; // unknown layer's overflow token — leave verbatim
     }
-    // Plain slot token → the value owned by whichever layer has this slot name.
-    for (const layer of layers) {
-      const layerSlots = slots[layer.id];
-      if (layerSlots && token in layerSlots) {
-        const value = layerSlots[token];
-        return typeof value === 'string' ? value : '';
-      }
-    }
-    return match; // unknown slot name — leave verbatim (diagnosable, never silently dropped)
+    if (value === null) return match; // unknown slot/layer — leave verbatim (diagnosable, never silently dropped)
+    // A token that resolves empty takes its own trailing ", " down with it, so a skipped-first-of-
+    // two field ("A portrait of {{empty}}, {{overflow}}") doesn't leave an orphaned comma+space —
+    // collapse() below only catches doubled comma runs, not this single-orphan case.
+    return value === '' ? '' : value + (sep ?? '');
   });
 
   return collapse(compiled);

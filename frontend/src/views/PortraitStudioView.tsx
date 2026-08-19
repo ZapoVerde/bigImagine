@@ -58,6 +58,16 @@ interface CreateDraft {
 
 const EMPTY_CREATE: CreateDraft = { name: '', details: '', template: '' };
 const GOAL_STORAGE_KEY = 'bb_portrait_goal';
+const SELECTIONS_STORAGE_KEY = 'bb_portrait_selections';
+
+function loadStoredSelections(): Record<string, string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(SELECTIONS_STORAGE_KEY) ?? '{}');
+    return raw && typeof raw === 'object' ? raw : {};
+  } catch {
+    return {};
+  }
+}
 
 function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
@@ -184,9 +194,18 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         setManifest(m);
         setEntities(es);
         setWiki(ws);
+        // Restore the last-picked entity per layer (localStorage, per-device — same write-through
+        // pattern as `goal`) when it still exists on this layer; otherwise fall back to the first
+        // entity, same as a fresh load.
+        const stored = loadStoredSelections();
         const sel: Record<string, string> = {};
         for (const layer of m.layers) {
           if (!layer.promptable) continue;
+          const storedEntity = es.find((e) => e.entity_id === stored[layer.id] && e.layer_id === layer.id);
+          if (storedEntity) {
+            sel[layer.id] = storedEntity.entity_id;
+            continue;
+          }
           const first = es.find((e) => e.layer_id === layer.id);
           if (first) sel[layer.id] = first.entity_id;
         }
@@ -212,6 +231,16 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
     }, 250);
     return () => window.clearTimeout(t);
   }, [goal]);
+
+  // Write-through the per-layer picks to localStorage on change — same per-device survives-a-reload
+  // pattern as `goal`, undebounced since picks are discrete clicks, not keystrokes. Gated on
+  // `entities` (null until the initial load resolves) so the pre-load empty `selections` state
+  // doesn't race the load effect's own read of localStorage and wipe it out first.
+  useEffect(() => {
+    if (!entities) return;
+    if (Object.keys(selections).length > 0) localStorage.setItem(SELECTIONS_STORAGE_KEY, JSON.stringify(selections));
+    else localStorage.removeItem(SELECTIONS_STORAGE_KEY);
+  }, [selections, entities]);
 
   const promptableLayers = useMemo(() => manifest?.layers.filter((l) => l.promptable) ?? [], [manifest]);
   const inUseLayerIds = useMemo(() => new Set((entities ?? []).map((e) => e.layer_id)), [entities]);

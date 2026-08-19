@@ -32,18 +32,17 @@ const slots4 = {
   style: { style_style: 'VLZ hybrid' },
   expression: { expression_emotion: 'calm confidence' },
 };
-// With no details supplied, every _details token substitutes '' and — because the surrounding
-// overflow buckets are non-empty — the left-behind single commas survive collapse() verbatim
-// (the ragged-but-honest degrade: a stored template carrying _details tokens but an entity with
-// no authored prose still compiles, just with `, ` seams; only comma RUNS collapse).
+// With no details supplied, every _details token substitutes '' and takes its own trailing ", "
+// down with it — an entity with no authored prose degrades to a clean overflow-only line, no
+// orphaned comma+space seam left where the empty details field used to be.
 const out4 = compileTemplate(DEFAULT_LAYER_MANIFEST.template, slots4, layers4);
 assert(
   out4 ===
-    'A portrait of , subject_identity: Rin V2, age: 20,\n' +
-      'wearing , outfit_style: red coat, accessories: silver brooch,\n' +
-      'rendered in , style_style: VLZ hybrid,\n' +
-      'with , expression_emotion: calm confidence.\n' +
-      'Format: , .',
+    'A portrait of subject_identity: Rin V2, age: 20,\n' +
+      'wearing outfit_style: red coat, accessories: silver brooch,\n' +
+      'rendered in style_style: VLZ hybrid,\n' +
+      'with expression_emotion: calm confidence.\n' +
+      'Format: .',
   `composer: default-manifest overflow folding (details empty) -> "${out4}"`,
 );
 assert(!out4.includes('{{'), 'composer: 4-layer output leaves no unresolved tokens');
@@ -83,8 +82,9 @@ const outUnknownOverflow = compileTemplate('{{nope_overflow}}', slots4, layers4)
 assert(outUnknownOverflow === '{{nope_overflow}}', `composer: unknown-layer overflow token left verbatim -> "${outUnknownOverflow}"`);
 
 // --- <layerId>_details tokens: the human-owned prose (migration 0122). ---
-// Present details substitute trimmed; absent/empty details substitute '' — same comma-collapse
-// contract as overflow, so a details-less entity degrades gracefully inside a _details template.
+// Present details substitute trimmed; absent/empty details substitute '' — a details-less entity
+// degrades gracefully inside a _details template (no trailing comma here since the template's own
+// literal text after {{outfit_details}} is "." with no comma to consume).
 const outDetails = compileTemplate(
   'A portrait of {{subject_details}}, wearing {{outfit_details}}.',
   {},
@@ -94,6 +94,18 @@ const outDetails = compileTemplate(
 assert(
   outDetails === 'A portrait of an Italian woman in her 30s, wearing .',
   `composer: _details substitutes trimmed prose, empty details vanish -> "${outDetails}"`,
+);
+
+// --- An empty token followed by ", " drops the separator too — no orphaned comma+space seam. ---
+const outSkipSep = compileTemplate(
+  'A portrait of {{subject_details}}, {{subject_overflow}}.',
+  { subject: { subject_identity: 'Rin V2' } },
+  layers4,
+  { subject: '' },
+);
+assert(
+  outSkipSep === 'A portrait of subject_identity: Rin V2.',
+  `composer: empty details token consumes its own trailing ", " -> "${outSkipSep}"`,
 );
 
 // --- A _details token for a layer outside the manifest is left verbatim, never dropped. ---
@@ -163,10 +175,10 @@ assert(
 assert(
   out4d ===
     'A portrait of an Italian woman, subject_identity: Rin V2, age: 20,\n' +
-      'wearing , outfit_style: red coat, accessories: silver brooch,\n' +
+      'wearing outfit_style: red coat, accessories: silver brooch,\n' +
       'rendered in VLZ hybrid, style_style: VLZ hybrid,\n' +
-      'with , expression_emotion: calm confidence.\n' +
-      'Format: , .',
+      'with expression_emotion: calm confidence.\n' +
+      'Format: .',
   `composer: default-manifest folding with partial details -> "${out4d}"`,
 );
 
