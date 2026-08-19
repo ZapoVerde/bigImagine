@@ -42,10 +42,12 @@
   background: var(--color-surface, transparent);
 }
 
+/* Full render, never cropped — a forced square `aspect-ratio: 1` + `object-fit: cover` here used
+   to crop the top/bottom off every non-square candidate (renders default to a portrait aspect,
+   e.g. 832x1216), silently hiding real content. Natural aspect ratio only; cards vary in height. */
 .portrait-card-img {
   width: 100%;
-  aspect-ratio: 1;
-  object-fit: cover;
+  height: auto;
   border-radius: var(--radius-sm, 6px);
 }
 
