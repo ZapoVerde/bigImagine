@@ -29,8 +29,9 @@ import './PortraitStudioView.css';
 // Portrait Studio (docs/plans/completed/portrait-studio-plan.md §Frontend) — the training/authoring surface
 // for character portraits: per-layer entity pickers + create-new drive a Generate action; the
 // round's candidates land in PortraitCandidateGrid for winner-pick + 1-5 rating + note; feedback
-// runs the Reflection Investigation and surfaces an "Applied" banner (created vs amended,
-// distinguished); a Wiki panel lists/edits/deletes the reflection's lessons — the one guidance
+// runs the Reflection state machine (portraitFeedback.ts) and surfaces its truthful outcome:
+// 'concluded' bannered as a new lesson, 'insufficient_evidence'/'failed' left retryable via the
+// same failedEpisodeId path; a Wiki panel lists/edits/deletes the reflection's lessons — the one guidance
 // channel now (2026-08-17: dropped the separate, never-actually-prompt-facing standing_instructions
 // editor, migration 0114); per-entity slots (the ground truth compiled into the image prompt) are
 // shown read-only in an expandable section instead; Manage Layers (admin-gated — visual_layer_stack
@@ -87,7 +88,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [failedEpisodeId, setFailedEpisodeId] = useState<string | null>(null);
-  const [banner, setBanner] = useState<{ action: 'created' | 'amended'; entryId: string } | null>(null);
+  const [banner, setBanner] = useState<{ lessonId?: string } | null>(null);
   // Per-candidate retry (a failed render gets a placeholder + Retry in the grid rather than being
   // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -322,8 +323,8 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         setActiveRoundId(res.roundId);
         setTelemetryRefreshToken((t) => t + 1);
       }
-      if (res.reflection?.action === 'created' || res.reflection?.action === 'amended') {
-        setBanner({ action: res.reflection.action, entryId: res.reflection.entryId ?? '' });
+      if (res.reflection?.action === 'concluded') {
+        setBanner({ lessonId: res.reflection.lessonId });
         setFailedEpisodeId(null);
         setSubmitted(true);
       } else {
@@ -332,7 +333,9 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         setFeedbackError(
           res.reflection?.action === 'failed'
             ? `Reflection failed${res.reflection.reason ? `: ${res.reflection.reason}` : ''}. Adjust the Portrait Studio connection and try again.`
-            : 'Reflection did not turn this into a lesson yet. Adjust the rationale or winner feedback below and retry this same round.',
+            : res.reflection?.action === 'insufficient_evidence'
+              ? 'Reflection did not turn this into a lesson yet. Adjust the rationale or winner feedback below and retry this same round.'
+              : 'Feedback recorded, but no winner was selected — pick a winner to run Reflection.',
         );
       }
       void refreshEntities();
@@ -554,9 +557,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
       {submitting && <div className="portrait-submitting">Recording evaluation and running Reflection…</div>}
       {banner && (
         <div className="portrait-banner">
-          {banner.action === 'created'
-            ? `Reflection wrote a new wiki lesson${banner.entryId ? ` (${banner.entryId})` : ''}.`
-            : `Reflection amended a wiki lesson${banner.entryId ? ` (${banner.entryId})` : ''}.`}
+          {`Reflection concluded a new lesson${banner.lessonId ? ` (${banner.lessonId})` : ''}.`}
         </div>
       )}
 

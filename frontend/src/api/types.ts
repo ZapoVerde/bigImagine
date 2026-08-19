@@ -1546,10 +1546,13 @@ export interface PortraitFeedbackInput {
   roundId?: string;
 }
 
-/** The Reflection Investigation outcome returned with the feedback response. */
+/** The Reflection state machine's outcome, returned with the feedback response — mirrors
+ *  orchestrator/src/orchestrator/portraitFeedback.ts's ReflectionOutcome exactly. 'concluded'
+ *  is the only outcome with a lessonId; 'insufficient_evidence' and 'failed' both leave the
+ *  episode retryable; 'awaiting_feedback' means no winner was submitted (reflection never ran). */
 export interface PortraitReflectionOutcome {
-  action: 'created' | 'amended' | 'failed';
-  entryId?: string;
+  action: 'concluded' | 'insufficient_evidence' | 'failed' | 'awaiting_feedback';
+  lessonId?: string;
   reason?: string;
 }
 
