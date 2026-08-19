@@ -59,6 +59,11 @@ function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
 }
 
+function lessonSnippet(title: string): string {
+  const words = title.trim().split(/\s+/);
+  return words.length > 12 ? `${words.slice(0, 12).join(' ')}…` : title;
+}
+
 export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitStudioViewProps) {
   const [manifest, setManifest] = useState<PortraitLayerManifest | null>(null);
   const [entities, setEntities] = useState<PortraitEntityRow[] | null>(null);
@@ -88,7 +93,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
   const [failedEpisodeId, setFailedEpisodeId] = useState<string | null>(null);
-  const [banner, setBanner] = useState<{ lessonId?: string } | null>(null);
+  const [banner, setBanner] = useState<{ lessonTitle?: string } | null>(null);
   // Per-candidate retry (a failed render gets a placeholder + Retry in the grid rather than being
   // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
   const [retryingId, setRetryingId] = useState<string | null>(null);
@@ -324,7 +329,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         setTelemetryRefreshToken((t) => t + 1);
       }
       if (res.reflection?.action === 'concluded') {
-        setBanner({ lessonId: res.reflection.lessonId });
+        setBanner({ lessonTitle: res.reflection.lessonTitle });
         setFailedEpisodeId(null);
         setSubmitted(true);
       } else {
@@ -557,7 +562,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
       {submitting && <div className="portrait-submitting">Recording evaluation and running Reflection…</div>}
       {banner && (
         <div className="portrait-banner">
-          {`Reflection concluded a new lesson${banner.lessonId ? ` (${banner.lessonId})` : ''}.`}
+          {`Reflection concluded a new lesson${banner.lessonTitle ? `: ${lessonSnippet(banner.lessonTitle)}` : '.'}`}
         </div>
       )}
 

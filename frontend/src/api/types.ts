@@ -1553,6 +1553,7 @@ export interface PortraitFeedbackInput {
 export interface PortraitReflectionOutcome {
   action: 'concluded' | 'insufficient_evidence' | 'failed' | 'awaiting_feedback';
   lessonId?: string;
+  lessonTitle?: string;
   reason?: string;
 }
 

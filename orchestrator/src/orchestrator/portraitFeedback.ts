@@ -133,6 +133,8 @@ export interface ReflectionOutcome {
   action: 'concluded' | 'insufficient_evidence' | 'failed' | 'awaiting_feedback';
   /** The created lesson id, when a conclusion landed. */
   lessonId?: string;
+  /** The human-readable lesson title/statement for UI receipts; the id remains the durable key. */
+  lessonTitle?: string;
   /** Why the pass failed (LLM error, undecodable/ invalid conclusion) — always logged. */
   reason?: string;
 }
@@ -394,7 +396,8 @@ async function insertLesson(
   learningId: string,
   episodeEntityIds: Record<string, string>,
   output: LessonConclusion,
-): Promise<string> {
+): Promise<{ lessonId: string; lessonTitle: string }> {
+  const lessonTitle = `Provisional lesson: ${output.lesson.slice(0, 100)}`;
   const rows = await deps.db.withUserScope(userId, async (session) => {
     const lessonRows = await session.query<{ lesson_id: string }>(
       `insert into visual_lessons (user_id, source_episode_id, source_learning_id, statement, evidence, next_change, preserve, confidence, state)
@@ -416,14 +419,13 @@ async function insertLesson(
       ...(entityRows[0]?.name ? [slug(entityRows[0].name)] : []),
     ].filter(Boolean))];
     const subscriptions = [{ layerType, layerEntityId }];
-    const title = `Provisional lesson: ${output.lesson.slice(0, 100)}`;
     await session.query(
       `insert into visual_wiki_entries
          (user_id, title, body, tags, subscriptions, origin_episode_id)
        values ($1, $2, $3, $4::text[], $5::jsonb, $6)`,
       [
         userId,
-        title,
+        lessonTitle,
         `${output.lesson}\n\nEvidence: ${output.evidence}`,
         tags,
         JSON.stringify(subscriptions),
@@ -432,7 +434,7 @@ async function insertLesson(
     );
     return lessonRows;
   });
-  return rows[0].lesson_id;
+  return { lessonId: rows[0].lesson_id, lessonTitle };
 }
 
 /** The one bounded reflection call (plan §Reflection contract) — forced submit_lesson, no loop.
@@ -487,7 +489,7 @@ async function runReflectionCall(
     return { action: 'insufficient_evidence' };
   }
 
-  const lessonId = await insertLesson(deps, userId, ctx.episodeId, learningId, ctx.episodeEntityIds, output);
+  const lesson = await insertLesson(deps, userId, ctx.episodeId, learningId, ctx.episodeEntityIds, output);
   await deps.db.withUserScope(userId, (session) =>
     session.query(
       `insert into visual_episode_events (user_id, episode_id, event_type, payload)
@@ -497,7 +499,7 @@ async function runReflectionCall(
         ctx.episodeId,
         JSON.stringify({
           learningId,
-          lessonId,
+          lessonId: lesson.lessonId,
           statement: output.lesson,
           nextChange: output.nextChange,
           preserve: output.preserve ?? [],
@@ -507,8 +509,8 @@ async function runReflectionCall(
     ),
   );
   await setEpisodeStatus(deps, userId, ctx.episodeId, 'concluded');
-  log.info('portraitFeedback: reflection concluded a lesson', { episodeId: ctx.episodeId, attempt, lessonId });
-  return { action: 'concluded', lessonId };
+  log.info('portraitFeedback: reflection concluded a lesson', { episodeId: ctx.episodeId, attempt, lessonId: lesson.lessonId });
+  return { action: 'concluded', lessonId: lesson.lessonId, lessonTitle: lesson.lessonTitle };
 }
 
 /** The reflection pass: persist nothing about learning until the snapshot is built; mark
