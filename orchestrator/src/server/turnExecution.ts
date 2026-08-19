@@ -51,6 +51,7 @@ import { getHouseholdTimezone } from './adminServer.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
 import { toPreviewItem, type PromptPreviewItem } from './promptPreview.js';
 import { parseStoryHeader, scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
+import { settleTransientRecordsForMessage } from '../orchestrator/settleTransientRecords.js';
 import type { ChatDetail, ChatParams, StoredChatMessage } from '../io/chatSessions.js';
 import type { LlmMessage, LlmProvider } from '../io/llm/types.js';
 import type { HttpServerDeps } from './httpServer.js';
@@ -428,6 +429,11 @@ export async function regenerateSwipe(
         'replace',
       )
     : undefined;
+  // segway.md §2.5, run per-turn instead of deferred to chatMemorySync.ts's rolling sync tick
+  // (settleTransientRecords.ts) — the swipe recordSwipe just made active is exactly the signal
+  // that this swipe's timeline is the one that happened, so its transient rows settle now, not
+  // dozens of messages from now.
+  await settleTransientRecordsForMessage(db, userId, messageId);
   if (focusedNoteId !== undefined) {
     await chats.updateChat(userId, chatId, { canvasNoteId: focusedNoteId });
   }

@@ -512,6 +512,14 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       // FK path back to its chat, leaving promoted rows undeletable — the bug this migration
       // fixed). status is purely "settled vs. still in the live editing window" now; the link row
       // (and its chat_id) is what keeps the row chat-scoped regardless of status.
+      //
+      // Now a backstop, not the primary settling path: settleTransientRecords.ts runs this same
+      // promote/demote per-turn (handleChatCompletions.ts / turnExecution.ts's regenerateSwipe),
+      // right when a swipe becomes active, instead of waiting for a message to age out of the live
+      // window here. That used to mean a swiped-away character stayed visibly "eligible" for
+      // however long the chat kept growing before this tick got to it — sometimes never. This step
+      // stays for anything that reaches archival without having gone through that path (idempotent:
+      // the `status = 'transient'` guards make a re-run of an already-settled message a no-op).
       await step('settle_transient_records', async () => {
         let promotedLocations = 0;
         let promotedCharacters = 0;

@@ -47,6 +47,7 @@ import { runLiveCleanupHandoff } from '../orchestrator/liveCleanupHandoff.js';
 import { writeLorebookActivationLog } from '../io/lorebook/writeLorebookActivationLog.js';
 import { maybeEagerChunk } from '../orchestrator/eagerChunkSync.js';
 import { parseStoryHeader, scrapeTurnPresence } from '../orchestrator/locationAndPresenceScraper.js';
+import { settleTransientRecordsForMessage } from '../orchestrator/settleTransientRecords.js';
 import { ensureFirstTurnHeader } from '../orchestrator/ensureFirstTurnHeader.js';
 import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage } from '../util/attachmentContext.js';
 import { formatCurrentDateContext } from '../util/dateContext.js';
@@ -720,6 +721,10 @@ export async function handleChatCompletions(
               'extend',
             )
           : undefined;
+        // segway.md §2.5, run per-turn instead of deferred to chatMemorySync.ts's rolling sync
+        // tick (settleTransientRecords.ts) — see turnExecution.ts's regenerateSwipe for the same
+        // call on the swipe-regeneration path.
+        await settleTransientRecordsForMessage(db, userId, assistantMessage.messageId);
       }
       // First exchange in a still-untitled session names it, once — bigBrain never retitles a
       // chat again after this. Reuses the same llm/provider the turn itself just used (this is a
