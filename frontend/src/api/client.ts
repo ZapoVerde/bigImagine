@@ -1802,6 +1802,20 @@ export function submitPortraitFeedback(input: PortraitFeedbackInput, apiKey: str
   return jsonRequest<PortraitFeedbackResult>('/v1/portraits/feedback', apiKey, { method: 'POST', body: input });
 }
 
+/** POST /v1/portraits/episodes/:id/reflect — retry Reflection for an episode whose previous
+ * attempt failed or found insufficient evidence. The episode and winner remain server-side so
+ * changing the Portrait Studio connection does not lose the round. */
+export function retryPortraitFeedback(
+  episodeId: string,
+  input: { winnerId?: string; ratings?: Record<string, number>; rationale?: string },
+  apiKey: string | null,
+): Promise<PortraitFeedbackResult> {
+  return jsonRequest<PortraitFeedbackResult>(`/v1/portraits/episodes/${encodeURIComponent(episodeId)}/reflect`, apiKey, {
+    method: 'POST',
+    body: input,
+  });
+}
+
 /** POST /v1/portraits/candidates/:id/retry — re-render one candidate whose original image
  *  failed, without spending a new mutation call. imageUrl stays null (with `failed` set) on a
  *  repeat provider failure — that's still a 200, not a thrown ApiError. */

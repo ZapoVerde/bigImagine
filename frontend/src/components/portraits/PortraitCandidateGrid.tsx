@@ -3,9 +3,9 @@ import type { PortraitCandidate } from '../../api/types';
 import './PortraitCandidateGrid.css';
 
 // The Portrait Studio round's candidate grid (docs/plans/completed/portrait-studio-plan.md §Frontend): one
-// card per rendered candidate with a winner-pick action and a per-candidate 1-5 star + note field
-// (collapsible note, matching SettingsView's fieldset/textarea convention). The grid owns the
-// ratings/notes draft state and hands them up with the pick; the parent owns the feedback call.
+// card per rendered candidate with a winner-pick action and a per-candidate 1-5 star field. The
+// grid also owns the episode-level rationale draft and hands it up with the pick; the parent owns
+// the feedback call.
 // A candidate whose render failed gets a placeholder card (the error + a Retry button) instead of
 // an image — rating/note/pick are meaningless with nothing to look at, so those are withheld until
 // a retry succeeds (plan §Edge Cases: the row is still written, the failure is never silent).
@@ -15,8 +15,8 @@ interface PortraitCandidateGridProps {
   goal: string;
   /** True once feedback has been submitted — further picks are disabled. */
   submitted: boolean;
-  /** The human picked a winner: candidateId + the collected per-candidate ratings/notes. */
-  onPickWinner: (candidateId: string, ratings: Record<string, number>, notes: Record<string, string>) => void;
+  /** The human picked a winner: candidateId + ratings + the episode-level rationale. */
+  onPickWinner: (candidateId: string, ratings: Record<string, number>, rationale: string) => void;
   /** Re-render one failed candidate's stored chromosome — no new mutation call. */
   onRetry: (candidateId: string) => void;
   /** The candidateId currently mid-retry, if any — that card alone shows "Retrying…". */
@@ -27,7 +27,7 @@ const STARS = [1, 2, 3, 4, 5];
 
 export default function PortraitCandidateGrid({ candidates, goal, submitted, onPickWinner, onRetry, retryingId }: PortraitCandidateGridProps) {
   const [ratings, setRatings] = useState<Record<string, number>>({});
-  const [notes, setNotes] = useState<Record<string, string>>({});
+  const [rationale, setRationale] = useState('');
 
   return (
     <section className="portrait-grid-section">
@@ -80,21 +80,11 @@ export default function PortraitCandidateGrid({ candidates, goal, submitted, onP
                 ))}
                 {rating > 0 && <span className="portrait-rating-value">{rating}/5</span>}
               </div>
-              <details className="portrait-card-note">
-                <summary>Note</summary>
-                <textarea
-                  rows={2}
-                  value={notes[candidate.candidateId] ?? ''}
-                  onChange={(e) => setNotes((n) => ({ ...n, [candidate.candidateId]: e.target.value }))}
-                  disabled={submitted}
-                  placeholder="Optional note for this candidate"
-                />
-              </details>
               <button
                 type="button"
                 className="portrait-card-pick"
-                onClick={() => onPickWinner(candidate.candidateId, ratings, notes)}
-                disabled={submitted}
+                onClick={() => onPickWinner(candidate.candidateId, ratings, rationale)}
+                disabled={submitted || !rationale.trim()}
               >
                 {submitted ? 'Round recorded' : 'Pick as winner'}
               </button>
@@ -102,6 +92,16 @@ export default function PortraitCandidateGrid({ candidates, goal, submitted, onP
           );
         })}
       </div>
+      <label className="portrait-rationale">
+        <span>Why this winner? <em>(required)</em></span>
+        <textarea
+          rows={4}
+          value={rationale}
+          onChange={(e) => setRationale(e.target.value)}
+          disabled={submitted}
+          placeholder={'Optional template fields — fill in what applies:\n\nChose this candidate because…\nIt best meets the goal of…\nCompared with the others…\nThe main tradeoff is…'}
+        />
+      </label>
     </section>
   );
 }

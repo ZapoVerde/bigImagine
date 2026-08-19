@@ -112,6 +112,19 @@
   align-self: stretch;
 }
 
+.portrait-rationale {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 1rem;
+  color: var(--color-text-secondary);
+}
+
+.portrait-rationale textarea {
+  font-family: inherit;
+  resize: vertical;
+}
+
 .portrait-card-failed {
   border-color: var(--color-danger);
 }

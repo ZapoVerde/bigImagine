@@ -9,6 +9,7 @@ import {
   listPortraitEntities,
   listPortraitWikiEntries,
   retryPortraitCandidate,
+  retryPortraitFeedback,
   setPortraitLayerManifest,
   submitPortraitFeedback,
   updatePortraitEntity,
@@ -78,6 +79,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
+  const [failedEpisodeId, setFailedEpisodeId] = useState<string | null>(null);
   const [banner, setBanner] = useState<{ action: 'created' | 'amended'; entryId: string } | null>(null);
   // Per-candidate retry (a failed render gets a placeholder + Retry in the grid rather than being
   // silently dropped) — one at a time, tracked by candidateId so only that card shows "Retrying…".
@@ -281,27 +283,38 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     }
   }
 
-  async function pickWinner(candidateId: string, ratings: Record<string, number>, notes: Record<string, string>) {
+  async function pickWinner(candidateId: string, ratings: Record<string, number>, rationale: string) {
     if (!candidates || candidates.length === 0) return;
     setSubmitting(true);
     setFeedbackError(null);
     setBanner(null);
     try {
-      const res = await submitPortraitFeedback(
-        {
-          entityIds: selections,
-          goal: roundGoal,
-          candidateIds: candidates.map((c) => c.candidateId),
-          winnerId: candidateId,
-          ratings,
-          notes,
-        },
-        apiKey,
-      );
+      const res = failedEpisodeId
+        ? await retryPortraitFeedback(failedEpisodeId, { winnerId: candidateId, ratings, rationale }, apiKey)
+        : await submitPortraitFeedback(
+            {
+              entityIds: selections,
+              goal: roundGoal,
+              candidateIds: candidates.map((c) => c.candidateId),
+              winnerId: candidateId,
+              ratings,
+              rationale,
+            },
+            apiKey,
+          );
       if (res.reflection?.action === 'created' || res.reflection?.action === 'amended') {
         setBanner({ action: res.reflection.action, entryId: res.reflection.entryId ?? '' });
+        setFailedEpisodeId(null);
+        setSubmitted(true);
+      } else {
+        setFailedEpisodeId(res.episodeId);
+        setSubmitted(false);
+        setFeedbackError(
+          res.reflection?.action === 'failed'
+            ? `Reflection failed${res.reflection.reason ? `: ${res.reflection.reason}` : ''}. Adjust the Portrait Studio connection and try again.`
+            : 'Reflection found insufficient evidence for a reusable lesson. Add a clearer rationale or adjust the connection, then try again.',
+        );
       }
-      setSubmitted(true);
       void refreshEntities();
       void refreshWiki();
     } catch (err) {
@@ -432,6 +445,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         <h2>Portrait Studio</h2>
         <p className="portrait-studio-sub">Train and evaluate character portraits — the loop that writes the wiki future rounds read.</p>
       </header>
+      {feedbackError && <div className="portrait-feedback-toast error-banner" role="alert">{feedbackError}</div>}
 
       {/* Entity pickers per promptable layer, following ConnectionsView's select pattern. */}
       <section className="portrait-pickers">
@@ -517,7 +531,6 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         />
       )}
       {submitting && <div className="portrait-submitting">Recording evaluation and running Reflection…</div>}
-      {feedbackError && <div className="error-banner">{feedbackError}</div>}
       {banner && (
         <div className="portrait-banner">
           {banner.action === 'created'
@@ -528,10 +541,11 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
 
       {/* Wiki panel — list/edit/delete, same fieldset/textarea/Save convention as Settings. */}
       <section className="portrait-wiki">
-        <h3>Wiki</h3>
-        {wikiError && <div className="error-banner">{wikiError}</div>}
-        {wiki.length === 0 && <div className="portrait-empty">No lessons yet — the first round's Reflection writes the first entry.</div>}
-        {wiki.map((entry) => (
+        <details>
+          <summary className="portrait-wiki-summary"><h3>Wiki</h3><span>{wiki.length} entr{wiki.length === 1 ? 'y' : 'ies'}</span></summary>
+          {wikiError && <div className="error-banner">{wikiError}</div>}
+          {wiki.length === 0 && <div className="portrait-empty">No lessons yet — the first round's Reflection writes the first entry.</div>}
+          {wiki.map((entry) => (
           <article key={entry.entry_id} className="portrait-wiki-entry">
             {editingEntryId === entry.entry_id ? (
               <div className="portrait-wiki-edit">
@@ -576,7 +590,8 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
               </>
             )}
           </article>
-        ))}
+          ))}
+        </details>
       </section>
 
       {/* Entities — per-entity slots, read-only expandable (the ground truth compiled into the

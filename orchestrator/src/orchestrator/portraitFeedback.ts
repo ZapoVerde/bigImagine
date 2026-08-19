@@ -379,15 +379,46 @@ async function insertLesson(
   userId: string,
   episodeId: string,
   learningId: string,
+  episodeEntityIds: Record<string, string>,
   output: LessonConclusion,
 ): Promise<string> {
-  const rows = await deps.db.withUserScope(userId, (session) =>
-    session.query<{ lesson_id: string }>(
+  const rows = await deps.db.withUserScope(userId, async (session) => {
+    const lessonRows = await session.query<{ lesson_id: string }>(
       `insert into visual_lessons (user_id, source_episode_id, source_learning_id, statement, evidence, next_change, preserve, confidence, state)
        values ($1, $2, $3, $4, $5, $6::jsonb, $7::text[], $8, 'provisional') returning lesson_id`,
       [userId, episodeId, learningId, output.lesson, output.evidence, JSON.stringify(output.nextChange), output.preserve ?? [], output.confidence],
-    ),
-  );
+    );
+    const layerType = output.nextChange.layer;
+    const layerEntityId = episodeEntityIds[layerType] ?? null;
+    const entityRows = layerEntityId
+      ? await session.query<{ name: string }>(
+          `select name from visual_entities where entity_id = $1 and user_id = $2`,
+          [layerEntityId, userId],
+        )
+      : [];
+    const slug = (value: string): string => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    const tags = [...new Set([
+      'provisional',
+      slug(layerType),
+      ...(entityRows[0]?.name ? [slug(entityRows[0].name)] : []),
+    ].filter(Boolean))];
+    const subscriptions = [{ layerType, layerEntityId }];
+    const title = `Provisional lesson: ${output.lesson.slice(0, 100)}`;
+    await session.query(
+      `insert into visual_wiki_entries
+         (user_id, title, body, tags, subscriptions, origin_episode_id)
+       values ($1, $2, $3, $4::text[], $5::jsonb, $6)`,
+      [
+        userId,
+        title,
+        `${output.lesson}\n\nEvidence: ${output.evidence}`,
+        tags,
+        JSON.stringify(subscriptions),
+        episodeId,
+      ],
+    );
+    return lessonRows;
+  });
   return rows[0].lesson_id;
 }
 
@@ -439,7 +470,7 @@ async function runReflectionCall(
     return { action: 'insufficient_evidence' };
   }
 
-  const lessonId = await insertLesson(deps, userId, ctx.episodeId, learningId, output);
+  const lessonId = await insertLesson(deps, userId, ctx.episodeId, learningId, ctx.episodeEntityIds, output);
   await deps.db.withUserScope(userId, (session) =>
     session.query(
       `insert into visual_episode_events (user_id, episode_id, event_type, payload)
