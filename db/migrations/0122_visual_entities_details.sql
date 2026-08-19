@@ -1,0 +1,26 @@
+-- Reintroduces visual_entities.details: per-layer, human-authored prose compiled into the image
+-- prompt. Migration 0114 dropped standing_instructions (2026-08-17) because it never fed the
+-- compiled prompt — composer.ts's compileTemplate only ever read `slots` — and duplicated the
+-- wiki's guidance role. This column lands TOGETHER with the composer.ts change that makes it
+-- actually read into the prompt (the new {{<layerId>_details}} token family, resolved by
+-- compileTemplate's `details` argument, orchestrator/src/portraits/composer.ts). Applying 0122
+-- without that code change would repeat exactly the defect 0114 fixed: a persisted prose column
+-- that nothing composes.
+--
+-- The migration deliberately does NOT touch orchestrator_settings.visual_layer_stack. That value
+-- is Principle-13 runtime config — seeded once on first read and hand-editable afterward via
+-- Manage Layers — and this household's stored template has already drifted from the code default
+-- (it carries a colon the code's doesn't), proving it is genuinely operator-owned. A schema
+-- migration writing into a settings row is a category error, and "only touch it if it still
+-- matches the old default" is brittle detection. Instead, the new DEFAULT_LAYER_MANIFEST.template
+-- ships as the code default for fresh installs; for this already-provisioned household, add the
+-- five _details tokens to the stored template via Manage Layers (one line in the Prompt template
+-- field, e.g. replace "A portrait of: {{subject_overflow}}..." with
+-- "A portrait of {{subject_details}}, {{subject_overflow}},\nwearing {{outfit_details}}, {{outfit_overflow}},\nrendered in {{style_details}}, {{style_overflow}},\nwith {{expression_details}}, {{expression_overflow}}.\nFormat: {{format_details}}, {{format_overflow}}.").
+-- The feature degrades gracefully either way: details is persisted/editable from day one; it just
+-- does not reach the compiled prompt until the stored template references it.
+--
+-- Applied by hand against the dedicated BigImagine database, same as every post-0105 migration:
+--   docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0122_visual_entities_details.sql
+
+alter table visual_entities add column details text not null default '';

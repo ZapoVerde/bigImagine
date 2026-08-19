@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/portraitRoutes.ts
- * @stamp 2026-08-17
+ * @stamp 2026-08-19
  * @architectural-role IO Wrapper — the Portrait Studio's HTTP surface + the portraits
  *   subsystem's DB read/write seam (bi_principles.md §8), the file wiki.ts's preamble names as
  *   the wrapper that shapes visual_wiki_entries rows before the pure formatters see them
@@ -96,7 +96,9 @@ async function resolvePortraitLlm(deps: HttpServerDeps): Promise<LlmProvider> {
   return createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
 }
 
-/** One visual_entities row as the Studio sees it — full, no redaction (nothing secret here). */
+/** One visual_entities row as the Studio sees it — full, no redaction (nothing secret here).
+ *  `details` is the layer's human-authored prose ({{<layerId>_details}} tokens, migration 0122),
+ *  distinct from the LLM-owned `slots`. */
 export interface PortraitEntityRow {
   entity_id: string;
   layer_id: string;
@@ -104,6 +106,7 @@ export interface PortraitEntityRow {
   name: string;
   slots: Record<string, string>;
   template: string | null;
+  details: string;
   last_image_url: string | null;
   current_best_candidate_id: string | null;
   created_at: string;
@@ -144,30 +147,38 @@ export interface CreateEntityBody {
   name: string;
   slots: Record<string, string>;
   template: string | null;
+  details: string;
   seed: string | null;
 }
 
-/** POST /v1/portraits/entities — { layerId, name, slots?, template?, seed? }. `seed` is the
- *  optional free-text bootstrap context ("an Italian woman in her 30s") used only when `slots` is
- *  omitted/empty — the "type a name, get it filled in" default path
+/** POST /v1/portraits/entities — { layerId, name, slots?, template?, details?, seed? }. `seed` is
+ *  the optional free-text bootstrap context ("an Italian woman in her 30s") used only when `slots`
+ *  is omitted/empty — the "type a name, get it filled in" default path
  *  (portrait-studio-standalone-subjects-plan.md Part B). On the subject layer it is first expanded
  *  into a full appearance blurb by describeStudioSubject; on every other layer it is passed to
  *  describeStudioSlots verbatim. It is silently unused whenever `slots` is supplied explicitly
- *  (bi_principles.md §3 — explicit outranks inferred). Neither `seed` nor the intermediate blurb
- *  is ever persisted (2026-08-17, migration 0114 dropped standing_instructions). No characterId
- *  anywhere: entities are standalone and never linked. */
+ *  (bi_principles.md §3 — explicit outranks inferred), and it is never persisted.
+ *  `details` is the layer-specific authored prose (docs/plans/portrait-studio-layer-details-plan.md):
+ *  persisted and edited later like `name`, and compiled into the prompt via `{{<layerId>_details}}`
+ *  tokens. It also serves as the bootstrap `context` when `seed` isn't separately given and `slots`
+ *  is empty — the frontend collapses the create-time UI to one box that sends `details`, so that
+ *  is what a normal create flow uses; `seed` stays available for any caller wanting bootstrap
+ *  context distinct from the persisted prose. No characterId anywhere: entities are standalone and
+ *  never linked. */
 export function parseCreateEntityBody(raw: unknown): CreateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   if (typeof raw.layerId !== 'string' || !raw.layerId) return undefined;
   if (typeof raw.name !== 'string' || !raw.name.trim()) return undefined;
   if (raw.slots !== undefined && !isStringRecord(raw.slots)) return undefined;
   if (raw.template !== undefined && raw.template !== null && typeof raw.template !== 'string') return undefined;
+  if (raw.details !== undefined && typeof raw.details !== 'string') return undefined;
   if (raw.seed !== undefined && raw.seed !== null && typeof raw.seed !== 'string') return undefined;
   return {
     layerId: raw.layerId,
     name: raw.name.trim(),
     slots: raw.slots ?? {},
     template: typeof raw.template === 'string' ? raw.template : null,
+    details: typeof raw.details === 'string' ? raw.details.trim() : '',
     seed: typeof raw.seed === 'string' ? raw.seed.trim() : null,
   };
 }
@@ -176,11 +187,14 @@ export interface UpdateEntityBody {
   name?: string;
   slots?: Record<string, string>;
   template?: string | null;
+  details?: string;
 }
 
 /** PATCH /v1/portraits/entities/:id — every field optional; null clears template (not name/slots
- *  — an entity always has a name). A stray characterId in the body is ignored by this parser
- *  (unknown fields are already inert here), never written. */
+ *  — an entity always has a name). `details` present-and-string = update the prose (trimmed);
+ *  undefined = leave alone — the same shape as `name`, no null-clears convention needed for prose.
+ *  A stray characterId in the body is ignored by this parser (unknown fields are already inert
+ *  here), never written. */
 export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefined {
   if (!isRecord(raw)) return undefined;
   const out: UpdateEntityBody = {};
@@ -195,6 +209,10 @@ export function parseUpdateEntityBody(raw: unknown): UpdateEntityBody | undefine
   if (raw.template !== undefined) {
     if (raw.template !== null && typeof raw.template !== 'string') return undefined;
     out.template = typeof raw.template === 'string' ? raw.template : null;
+  }
+  if (raw.details !== undefined) {
+    if (typeof raw.details !== 'string') return undefined;
+    out.details = raw.details.trim();
   }
   return out;
 }
@@ -392,7 +410,7 @@ async function resolveManifest(deps: HttpServerDeps): Promise<ManifestValidation
 async function getEntity(db: PostgresClient, userId: string, entityId: string): Promise<PortraitEntityRow | undefined> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<PortraitEntityRow>(
-      `select entity_id, layer_id, character_id, name, slots, template,
+      `select entity_id, layer_id, character_id, name, slots, template, details,
               last_image_url, current_best_candidate_id, created_at, updated_at
        from visual_entities where entity_id = $1 and user_id = $2`,
       [entityId, userId],
@@ -500,7 +518,7 @@ export async function handlePortraitEntities(
     if (req.method === 'GET') {
       const rows = await deps.db.withUserScope(userId, (session) =>
         session.query<PortraitEntityRow>(
-          `select entity_id, layer_id, character_id, name, slots, template,
+          `select entity_id, layer_id, character_id, name, slots, template, details,
                   last_image_url, current_best_candidate_id, created_at, updated_at
            from visual_entities where user_id = $1 order by layer_id, name`,
           [userId],
@@ -533,21 +551,23 @@ export async function handlePortraitEntities(
       // The slot bootstrapper fires only on the "type a name, get it filled in" default path: an
       // entity created with slots: {} stays empty forever otherwise, since the mutation loop only
       // ever reuses slot names that already exist for a layer (describeStudioSlots.ts file header).
-      // An operator who hand-fills slots gets exactly those (bi_principles.md §3), and neither
-      // `seed` nor the bootstrap context ever gets written to the entity itself — both are
-      // ephemeral, this call's own scratch data (2026-08-17, migration 0114 dropped
-      // standing_instructions).
+      // An operator who hand-fills slots gets exactly those (bi_principles.md §3). The bootstrap
+      // context is `seed` when separately given, else the persisted `details` prose — the frontend
+      // collapses the create-time UI to one box that sends `details`, so that is the normal create
+      // flow; `seed` stays available for any caller wanting bootstrap context distinct from the
+      // persisted prose (2026-08-17, migration 0114 dropped standing_instructions; neither `seed`
+      // nor the intermediate blurb ever gets written to the entity).
       let slots = parsed.slots;
       if (Object.keys(slots).length === 0) {
         const layer = manifest.layers.find((l) => l.id === parsed.layerId)!;
-        // On the subject layer, expand the (possibly empty) seed into a full appearance blurb
-        // first — describeStudioSubject invents from the name alone when the seed is blank
-        // (fail-open: resolves to '' on any failure). Every other layer passes the seed straight
-        // through as context, since no expansion pass fits a bikini/expression/format the way it
-        // fits a physical subject.
-        let context = parsed.seed ?? '';
+        // On the subject layer, expand the (possibly empty) context into a full appearance blurb
+        // first — describeStudioSubject invents from the name alone when the context is blank
+        // (fail-open: resolves to '' on any failure). Every other layer passes the context straight
+        // through, since no expansion pass fits a bikini/expression/format the way it fits a
+        // physical subject.
+        let context = parsed.seed ?? parsed.details ?? '';
         if (parsed.layerId === 'subject') {
-          const described = await describeStudioSubject(deps.settings, llm, userId, { name: parsed.name, seed: parsed.seed ?? undefined });
+          const described = await describeStudioSubject(deps.settings, llm, userId, { name: parsed.name, seed: parsed.seed ?? parsed.details });
           if (described.trim() !== '') context = described;
         }
         const bootstrapped = await describeStudioSlots(deps.settings, llm, userId, {
@@ -561,9 +581,9 @@ export async function handlePortraitEntities(
       }
       const created = await deps.db.withUserScope(userId, (session) =>
         session.query<PortraitEntityRow>(
-          `insert into visual_entities (user_id, layer_id, character_id, name, slots, template)
-           values ($1, $2, null, $3, $4::jsonb, $5)
-           returning entity_id, layer_id, character_id, name, slots, template,
+          `insert into visual_entities (user_id, layer_id, character_id, name, slots, template, details)
+           values ($1, $2, null, $3, $4::jsonb, $5, $6)
+           returning entity_id, layer_id, character_id, name, slots, template, details,
                      last_image_url, current_best_candidate_id, created_at, updated_at`,
           [
             userId,
@@ -571,6 +591,7 @@ export async function handlePortraitEntities(
             parsed.name,
             JSON.stringify(slots),
             parsed.template,
+            parsed.details,
           ],
         ),
       );
@@ -621,6 +642,7 @@ export async function handlePortraitEntities(
       push('name', parsed.name);
       push('slots', parsed.slots !== undefined ? JSON.stringify(parsed.slots) : undefined, '::jsonb');
       push('template', parsed.template);
+      push('details', parsed.details);
       if (sets.length === 0) {
         sendJson(res, 200, existing);
         return;
@@ -630,7 +652,7 @@ export async function handlePortraitEntities(
         session.query<PortraitEntityRow>(
           `update visual_entities set ${sets.join(', ')}
            where entity_id = $1 and user_id = $2
-           returning entity_id, layer_id, character_id, name, slots, template,
+           returning entity_id, layer_id, character_id, name, slots, template, details,
                      last_image_url, current_best_candidate_id, created_at, updated_at`,
           params,
         ),
@@ -677,8 +699,10 @@ export async function handlePortraitEntities(
  *  `{}` this route used to insert — an entity with no slots never gets any from the mutation loop
  *  either (describeStudioSlots.ts file header), so skipping the bootstrap here would have quietly
  *  broken this path once standing_instructions (its old, never-actually-prompt-facing fallback)
- *  was dropped (migration 0114). Fail-open throughout (§11): a describer/bootstrapper failure
- *  still creates the entity, just with fewer or no starting slots. */
+ *  was dropped (migration 0114). The same seed text is also persisted as the entity's `details`
+ *  (migration 0122) — the subject's authored prose, consistent with the rest of the details
+ *  feature. Fail-open throughout (§11): a describer/bootstrapper failure still creates the entity,
+ *  just with fewer or no starting slots. */
 export async function handlePortraitEntityFromCastCharacter(
   req: IncomingMessage,
   res: ServerResponse,
@@ -727,11 +751,11 @@ export async function handlePortraitEntityFromCastCharacter(
   });
   const created = await deps.db.withUserScope(userId, (session) =>
     session.query<PortraitEntityRow>(
-      `insert into visual_entities (user_id, layer_id, character_id, name, slots, template)
-       values ($1, 'subject', null, $2, $3::jsonb, null)
-       returning entity_id, layer_id, character_id, name, slots, template,
+      `insert into visual_entities (user_id, layer_id, character_id, name, slots, template, details)
+       values ($1, 'subject', null, $2, $3::jsonb, null, $4)
+       returning entity_id, layer_id, character_id, name, slots, template, details,
                  last_image_url, current_best_candidate_id, created_at, updated_at`,
-      [userId, character.name, JSON.stringify(bootstrapped)],
+      [userId, character.name, JSON.stringify(bootstrapped), seedText],
     ),
   );
   const entity = created[0]!;

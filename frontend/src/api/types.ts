@@ -1395,10 +1395,12 @@ export interface PortraitLayerManifest {
   template: string;
 }
 
-/** One visual_entities row as the Studio sees it — full, nothing redacted. `slots` is the ground
- *  truth compiled into the image prompt (composer.ts's compileTemplate reads only this); there is
- *  no separate free-text field alongside it any more (2026-08-17, migration 0114 dropped
- *  standing_instructions — it never fed the prompt and duplicated the wiki's guidance role). */
+/** One visual_entities row as the Studio sees it — full, nothing redacted. `slots` is the
+ *  LLM-owned structured attributes compiled into the image prompt (composer.ts's compileTemplate);
+ *  `details` is the human-owned, per-layer authored prose the `{{<layerId>_details}}` template
+ *  tokens resolve to — reintroduced by migration 0122 alongside the composer.ts change that makes
+ *  it actually read into the prompt (the pre-0122 standing_instructions never did; migration 0114
+ *  dropped it for exactly that reason). */
 export interface PortraitEntityRow {
   entity_id: string;
   layer_id: string;
@@ -1406,6 +1408,7 @@ export interface PortraitEntityRow {
   name: string;
   slots: Record<string, string>;
   template: string | null;
+  details: string;
   last_image_url: string | null;
   current_best_candidate_id: string | null;
   created_at: string;
@@ -1413,22 +1416,28 @@ export interface PortraitEntityRow {
 }
 
 /** POST /v1/portraits/entities body (portrait-studio-standalone-subjects-plan.md) — every
- *  entity is standalone (never linked to a character); `seed` is a free-text bootstrap hint
- *  ("an Italian woman in her 30s") used only when `slots` is omitted/empty — never persisted. */
+ *  entity is standalone (never linked to a character). `details` is the persisted, human-owned
+ *  per-layer prose (`{{<layerId>_details}}` tokens in the manifest template), edited later like
+ *  `name`; `seed` is a separate, ephemeral free-text bootstrap hint ("an Italian woman in her
+ *  30s") used only when `slots` is omitted/empty — never persisted. When `seed` is absent and
+ *  `slots` is empty, `details` serves as the bootstrap context instead (the frontend collapses
+ *  the create-time UI to one box that sends `details`, so that is the normal create flow). */
 export interface CreatePortraitEntityInput {
   layerId: string;
   name: string;
   slots?: Record<string, string>;
   template?: string | null;
+  details?: string;
   seed?: string;
 }
 
 /** PATCH /v1/portraits/entities/:id body — every field optional; null clears template (not
- *  name/slots — an entity always has a name). */
+ *  name/slots — an entity always has a name). `details` present = update the prose. */
 export interface UpdatePortraitEntityInput {
   name?: string;
   slots?: Record<string, string>;
   template?: string | null;
+  details?: string;
 }
 
 /** POST /v1/portraits/entities/from-cast-character response

@@ -31,16 +31,18 @@ import './PortraitStudioView.css';
 // round's candidates land in PortraitCandidateGrid for winner-pick + 1-5 rating + note; feedback
 // runs the Reflection state machine (portraitFeedback.ts) and surfaces its truthful outcome:
 // 'concluded' bannered as a new lesson, 'insufficient_evidence'/'failed' left retryable via the
-// same failedEpisodeId path; a Wiki panel lists/edits/deletes the reflection's lessons — the one guidance
-// channel now (2026-08-17: dropped the separate, never-actually-prompt-facing standing_instructions
-// editor, migration 0114); per-entity slots (the ground truth compiled into the image prompt) are
-// shown read-only in an expandable section instead; Manage Layers (admin-gated — visual_layer_stack
-// is a settings write, per the plan's auth note) edits the manifest with the subject layer locked
-// and in-use layers unremovable. All portrait reads/writes are user-scoped (apiKey); only the
-// layers write takes the admin key. Per portrait-studio-standalone-subjects-plan.md, every entity
-// is standalone — never linked to a character — and a bare subject name created without hand-filled
-// slots gets them bootstrapped from the optional seed by the server's slot bootstrapper (and, on
-// the subject layer, portrait_subject_describer_prompt first — Settings tab).
+// same failedEpisodeId path; a Wiki panel lists/edits/deletes the reflection's lessons — the
+// durable cross-round guidance channel; per-entity content is split three ways
+// (docs/plans/portrait-studio-layer-details-plan.md): Details (human-owned, always-editable prose,
+// compiled into the prompt via {{<layerId>_details}} tokens), Slots (LLM-owned structured
+// attributes, shown read-only in an expandable section), Wiki (durable cross-round guidance);
+// Manage Layers (admin-gated — visual_layer_stack is a settings write, per the plan's auth note)
+// edits the manifest with the subject layer locked and in-use layers unremovable. All portrait
+// reads/writes are user-scoped (apiKey); only the layers write takes the admin key. Per
+// portrait-studio-standalone-subjects-plan.md, every entity is standalone — never linked to a
+// character — and a bare subject name created without hand-filled slots gets them bootstrapped
+// from the optional details/seed by the server's slot bootstrapper (and, on the subject layer,
+// portrait_subject_describer_prompt first — Settings tab).
 interface PortraitStudioViewProps {
   apiKey: string | null;
   onRoundChange?: (roundId: string | null, refreshToken: number) => void;
@@ -48,11 +50,11 @@ interface PortraitStudioViewProps {
 
 interface CreateDraft {
   name: string;
-  description: string;
+  details: string;
   template: string;
 }
 
-const EMPTY_CREATE: CreateDraft = { name: '', description: '', template: '' };
+const EMPTY_CREATE: CreateDraft = { name: '', details: '', template: '' };
 const GOAL_STORAGE_KEY = 'bb_portrait_goal';
 
 function errMessage(err: unknown, fallback: string): string {
@@ -107,6 +109,16 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
   const [renameDraft, setRenameDraft] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
+
+  // Per-entity Details editor (portrait-studio-layer-details-plan.md) — the human-owned, per-layer
+  // authored prose compiled into the prompt via {{<layerId>_details}} tokens. Mirrors the rename
+  // pattern (editingDetailsEntityId/detailsDraft/detailsSaving) but renders ALWAYS-VISIBLE as a
+  // compact labeled textarea rather than behind another expand/collapse toggle — Details is
+  // primary authored content, not a secondary advanced field like the read-only Slots dump.
+  const [editingDetailsEntityId, setEditingDetailsEntityId] = useState<string | null>(null);
+  const [detailsDraft, setDetailsDraft] = useState('');
+  const [detailsSaving, setDetailsSaving] = useState(false);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   // Wiki panel editor.
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
@@ -209,15 +221,17 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
     }
     setCreatingSaving(true);
     try {
-      const description = createDraft.description.trim();
+      const details = createDraft.details.trim();
       const created = await createPortraitEntity(
         {
           layerId: layer.id,
           name: createDraft.name.trim(),
-          // `seed` is ephemeral bootstrap context, never persisted: on the subject layer the
-          // server expands it into a full appearance blurb first (describeStudioSubject); every
-          // other layer passes it straight to the slot bootstrapper (describeStudioSlots).
-          ...(description ? { seed: description } : {}),
+          // `details` is the persisted, human-owned per-layer prose — it is also the server's
+          // bootstrap context (sent in place of the ephemeral `seed`) when no explicit slots were
+          // given: on the subject layer the server expands it into a full appearance blurb first
+          // (describeStudioSubject); every other layer passes it straight to the slot bootstrapper
+          // (describeStudioSlots).
+          ...(details ? { details } : {}),
           ...(layer.id === 'style' && createDraft.template.trim() ? { template: createDraft.template.trim() } : {}),
         },
         apiKey,
@@ -245,6 +259,7 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
         return next;
       });
       if (expandedSlotsEntityId === entity.entity_id) setExpandedSlotsEntityId(null);
+      if (editingDetailsEntityId === entity.entity_id) setEditingDetailsEntityId(null);
       await refreshEntities();
     } catch (err) {
       setGenerateError(errMessage(err, 'failed to delete entity'));
@@ -373,6 +388,27 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
       setRenameError(errMessage(err, 'failed to rename entity'));
     } finally {
       setRenameSaving(false);
+    }
+  }
+
+  function openDetailsEditor(entity: PortraitEntityRow) {
+    setEditingDetailsEntityId(entity.entity_id);
+    setDetailsDraft(entity.details);
+    setDetailsError(null);
+  }
+
+  async function saveDetails(entity: PortraitEntityRow) {
+    if (detailsSaving) return; // already in flight — a second click must not double-PATCH
+    setDetailsSaving(true);
+    setDetailsError(null);
+    try {
+      await updatePortraitEntity(entity.entity_id, { details: detailsDraft.trim() }, apiKey);
+      setEditingDetailsEntityId(null);
+      await refreshEntities();
+    } catch (err) {
+      setDetailsError(errMessage(err, 'failed to save details'));
+    } finally {
+      setDetailsSaving(false);
     }
   }
 
@@ -513,18 +549,21 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
               {creatingLayer === layer.id && (
                 <div className="portrait-create">
                   <input value={createDraft.name} onChange={(e) => setCreateDraft((d) => ({ ...d, name: e.target.value }))} placeholder={`New ${layer.label} name`} />
-                  <textarea
-                    rows={2}
-                    value={createDraft.description}
-                    onChange={(e) => setCreateDraft((d) => ({ ...d, description: e.target.value }))}
-                    placeholder={
-                      layer.id === 'subject'
-                        ? 'Seed (optional) — e.g. an Italian woman in her 30s'
-                        : `Seed (optional) — feeds the ${layer.label.toLowerCase()} slot bootstrapper`
-                    }
-                  />
+                  <label className="portrait-create-details">
+                    {`${layer.label} details`}
+                    <textarea
+                      rows={2}
+                      value={createDraft.details}
+                      onChange={(e) => setCreateDraft((d) => ({ ...d, details: e.target.value }))}
+                      placeholder={
+                        layer.id === 'subject'
+                          ? 'e.g. an Italian woman in her 30s'
+                          : `feeds the ${layer.label.toLowerCase()} slot bootstrapper`
+                      }
+                    />
+                  </label>
                   {layer.id === 'style' && (
-                    <textarea rows={2} value={createDraft.template} onChange={(e) => setCreateDraft((d) => ({ ...d, template: e.target.value }))} placeholder="Advanced: raw prompt-template override (optional, e.g. {{subject_overflow}} — {{style_overflow}}) — not the description above" />
+                    <textarea rows={2} value={createDraft.template} onChange={(e) => setCreateDraft((d) => ({ ...d, template: e.target.value }))} placeholder="Advanced: raw prompt-template override (optional, e.g. {{subject_overflow}} — {{style_overflow}}) — not the details above" />
                   )}
                   <button type="button" onClick={() => saveNewEntity(layer)} disabled={creatingSaving}>
                     {creatingSaving ? 'Creating…' : 'Create'}
@@ -669,6 +708,36 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
                 </button>
               </header>
               {renamingEntityId === entity.entity_id && renameError && <div className="error-banner">{renameError}</div>}
+              <label className="portrait-entity-details-label">
+                {`${manifest.layers.find((l) => l.id === entity.layer_id)?.label ?? entity.layer_id} details`}
+                <textarea
+                  rows={2}
+                  className="portrait-entity-details-input"
+                  value={editingDetailsEntityId === entity.entity_id ? detailsDraft : entity.details}
+                  onFocus={() => {
+                    if (editingDetailsEntityId !== entity.entity_id) {
+                      setEditingDetailsEntityId(entity.entity_id);
+                      setDetailsDraft(entity.details);
+                    }
+                  }}
+                  onChange={(e) => {
+                    if (editingDetailsEntityId !== entity.entity_id) openDetailsEditor(entity);
+                    setDetailsDraft(e.target.value);
+                  }}
+                  placeholder="Authored prose for this layer — compiled into the prompt via {{<layerId>_details}} tokens."
+                />
+              </label>
+              {editingDetailsEntityId === entity.entity_id && (
+                <div className="portrait-wiki-actions">
+                  <button type="button" onClick={() => saveDetails(entity)} disabled={detailsSaving}>
+                    {detailsSaving ? 'Saving…' : 'save'}
+                  </button>
+                  <button type="button" onClick={() => setEditingDetailsEntityId(null)} disabled={detailsSaving}>
+                    cancel
+                  </button>
+                </div>
+              )}
+              {editingDetailsEntityId === entity.entity_id && detailsError && <div className="error-banner">{detailsError}</div>}
               {expandedSlotsEntityId === entity.entity_id && (
                 <div className="portrait-slots-view">
                   {Object.keys(entity.slots).length === 0 ? (

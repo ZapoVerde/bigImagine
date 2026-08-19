@@ -28,7 +28,7 @@ const { DEFAULT_LAYER_MANIFEST } = await import('../dist/portraits/layerStack.js
 const { buildRoundTelemetry, computeRoundTotals, mergeRoundCalls } = await import('../dist/portraits/portraitTelemetry.js');
 const { createGatedLlmProvider } = await import('../dist/io/llm/llmGate.js');
 const { createPostgresClient } = await import('../dist/io/postgres.js');
-const { runPortraitGenerationRound } = await import('../dist/orchestrator/portraitGeneration.js');
+const { runPortraitGenerationRound, retryPortraitCandidateRender } = await import('../dist/orchestrator/portraitGeneration.js');
 const { submitPortraitFeedback } = await import('../dist/orchestrator/portraitFeedback.js');
 const { handlePortraitRoundTelemetry } = await import('../dist/server/portraitTelemetryRoutes.js');
 
@@ -272,13 +272,19 @@ function makeFakePool() {
       const rows = state.entities.filter((e) => e.user_id === params[0] && e.layer_id === params[1]).sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)).slice(0, 1);
       return { rows };
     }
+    // The retry path's batched current-details read (retryPortraitCandidateRender) — ALL of a
+    // candidate's entity_ids in one query, not just the style layer's template.
+    if (s.includes('select layer_id, details from visual_entities where entity_id = any')) {
+      const ids = params[0];
+      return { rows: state.entities.filter((e) => ids.includes(e.entity_id) && e.user_id === params[1]) };
+    }
     if (s.startsWith('select name from visual_entities')) {
       const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
       return { rows: row ? [{ name: row.name }] : [] };
     }
     if (s.startsWith('insert into visual_entities')) {
       state.counters.entity += 1;
-      const row = { entity_id: `ent-${state.counters.entity}`, user_id: params[0], layer_id: params[1], name: params[2], slots: {}, template: null, updated_at: 0 };
+      const row = { entity_id: `ent-${state.counters.entity}`, user_id: params[0], layer_id: params[1], name: params[2], slots: {}, template: null, details: '', updated_at: 0 };
       state.entities.push(row);
       return { rows: [row] };
     }
@@ -430,6 +436,11 @@ function makeFakePool() {
       const ids = params[1];
       return { rows: ids.map((id) => state.candidates.find((c) => c.candidate_id === id)).filter(Boolean) };
     }
+    // The retry path's single-candidate read (candidate_id = $1, NOT `= any`) — the original
+    // render's row, re-rendered in place.
+    if (s.includes('from visual_candidates') && s.includes('candidate_id = $1')) {
+      return { rows: state.candidates.filter((c) => c.candidate_id === params[0] && c.user_id === params[1]) };
+    }
     if (s.startsWith('insert into visual_episodes')) {
       state.counters.episode += 1;
       const row = {
@@ -450,6 +461,11 @@ function makeFakePool() {
       return { rows: [] };
     }
     if (s.includes('update visual_candidates set note')) {
+      return { rows: [] };
+    }
+    if (s.startsWith('update visual_candidates set image_url')) {
+      const row = state.candidates.find((c) => c.candidate_id === params[1] && c.user_id === params[2]);
+      if (row) row.image_url = params[0];
       return { rows: [] };
     }
     if (s.startsWith('update visual_entities set last_image_url')) {
@@ -512,10 +528,10 @@ function makeFakePool() {
 
 function seedEntities(state) {
   state.entities.push(
-    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', name: 'Rin', slots: { subject_identity: 'Rin V1' }, template: null, updated_at: 1 },
-    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', name: 'Coat', slots: { outfit_style: 'long coat' }, template: null, updated_at: 2 },
-    { entity_id: 'e-style', user_id: USER, layer_id: 'style', name: 'Style', slots: { style_style: 'VLZ hybrid' }, template: null, updated_at: 3 },
-    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', name: 'Expr', slots: { expression_emotion: 'calm' }, template: null, updated_at: 4 },
+    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', name: 'Rin', slots: { subject_identity: 'Rin V1' }, template: null, details: '', updated_at: 1 },
+    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', name: 'Coat', slots: { outfit_style: 'long coat' }, template: null, details: '', updated_at: 2 },
+    { entity_id: 'e-style', user_id: USER, layer_id: 'style', name: 'Style', slots: { style_style: 'VLZ hybrid' }, template: null, details: '', updated_at: 3 },
+    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', name: 'Expr', slots: { expression_emotion: 'calm' }, template: null, details: '', updated_at: 4 },
   );
 }
 
@@ -726,6 +742,108 @@ function conclusionTurn() {
     pool.state.llmCalls[0].reason === 'upstream API exploded: 429 too many requests',
     'generation: llm_calls.reason persists the exact provider message',
   );
+}
+
+// ============================================================================
+// The round's composed prompts carry each layer's authored details prose (migration
+// 0122, portrait-studio-layer-details-plan.md §7) + the retry path's current-state re-read
+// ============================================================================
+
+// --- End-to-end details round: one entity per layer with a DISTINCT details value, composed
+// through a manifest whose template carries _details tokens (seeded via the fake settings, so the
+// assertion never depends on any deployment's stored template). The candidate's composedPrompt
+// proves buildParentDetails + the threaded compileTemplate call work together, not just
+// compileTemplate in isolation. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({
+    visual_layer_stack: JSON.stringify({
+      ...DEFAULT_LAYER_MANIFEST,
+      template:
+        'Subject: {{subject_details}} | {{subject_overflow}}. ' +
+        'Outfit: {{outfit_details}} | {{outfit_overflow}}. ' +
+        'Style: {{style_details}} | {{style_overflow}}. ' +
+        'Expression: {{expression_details}} | {{expression_overflow}}.',
+    }),
+  });
+  const base = {
+    name: 'fake-details-base',
+    supportsVision: false,
+    async complete() {
+      // One mutation call, no wiki pull — the candidates map slots over the parent.
+      return candidateMarkdownTurn();
+    },
+  };
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+  seedEntities(pool.state);
+  pool.state.entities.find((e) => e.entity_id === 'e-sub').details = 'an Italian woman in her 30s';
+  pool.state.entities.find((e) => e.entity_id === 'e-out').details = 'a red knee-length coat';
+  pool.state.entities.find((e) => e.entity_id === 'e-style').details = 'moody rim light';
+  pool.state.entities.find((e) => e.entity_id === 'e-expr').details = 'quiet resolve';
+
+  const r = await runPortraitGenerationRound(
+    { db, settings, imageConnections },
+    gated,
+    USER,
+    { entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' }, goal: 'A calmer evening variant of Rin.' },
+  );
+  assert(r.ok === true, 'details round: a round over entities with authored details succeeds');
+  assert(r.candidates.length === 2, 'details round: two candidates as configured');
+  for (const c of r.candidates) {
+    assert(c.composedPrompt.includes('Subject: an Italian woman in her 30s'), 'details round: the subject\'s details land in the composed prompt');
+    assert(c.composedPrompt.includes('Outfit: a red knee-length coat'), 'details round: the outfit\'s details land in the composed prompt');
+    assert(c.composedPrompt.includes('Style: moody rim light'), 'details round: the style\'s details land in the composed prompt');
+    assert(c.composedPrompt.includes('Expression: quiet resolve'), 'details round: the expression\'s details land in the composed prompt');
+  }
+}
+
+// --- retryPortraitCandidateRender (plan §7 — previously zero coverage): recompiles against
+// CURRENT state — the batched details re-read spans ALL of a candidate's entity_ids (not just
+// the style layer's template), so a details edit made after the original render is reflected in
+// the retried candidate's composedPrompt, and the image_url updates in place. The pollinations
+// provider here is URL-only (no network), so the re-render is safe in the fake. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+  pool.state.candidates.push({
+    candidate_id: 'c-retry',
+    user_id: USER,
+    entity_ids: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' },
+    image_url: 'https://img/c-retry-old.png',
+    chromosome: {
+      slots: {
+        subject: { subject_identity: 'Rin V1' },
+        outfit: { outfit_style: 'long coat' },
+        style: { style_style: 'VLZ hybrid' },
+        expression: { expression_emotion: 'calm' },
+      },
+    },
+    parent_chromosome: {},
+    composed_prompt: 'PORTRAIT long coat / calm',
+    render_metadata: {},
+    wiki_revision_ids: [],
+    lesson_id: null,
+    rating: null,
+    note: null,
+  });
+  // Details edited AFTER the original render — the retry must re-read them.
+  pool.state.entities.find((e) => e.entity_id === 'e-sub').details = 'edited: a Venetian glassblower';
+  pool.state.entities.find((e) => e.entity_id === 'e-out').details = 'edited: a teal velvet coat';
+
+  const retry = await retryPortraitCandidateRender({ db, settings, imageConnections }, USER, 'c-retry');
+  assert(retry.ok === true && retry.imageUrl && retry.composedPrompt, 'retry: a candidate with current authored details re-renders ok');
+  assert(
+    retry.composedPrompt.includes('edited: a Venetian glassblower'),
+    'retry: the SUBJECT details edited after the original render are re-read and composed',
+  );
+  assert(
+    retry.composedPrompt.includes('edited: a teal velvet coat'),
+    'retry: the OUTFIT details edited after the original render are re-read and composed — the batched read spans all entity_ids, not just style',
+  );
+  assert(pool.state.candidates[0].image_url === retry.imageUrl, 'retry: the candidate row\'s image_url is updated in place');
 }
 
 // ============================================================================

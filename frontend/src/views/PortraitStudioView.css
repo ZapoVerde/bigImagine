@@ -88,6 +88,14 @@
   border-top: 1px solid var(--color-border-subtle);
 }
 
+.portrait-create-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
+}
+
 .portrait-generate {
   display: flex;
   flex-wrap: wrap;
@@ -277,6 +285,15 @@
   height: 2.2rem;
   object-fit: cover;
   border-radius: var(--radius-sm, 6px);
+}
+
+.portrait-entity-details-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin-top: 0.5rem;
+  font-size: var(--font-size-md);
+  color: var(--color-text-secondary);
 }
 
 .portrait-slots-view {

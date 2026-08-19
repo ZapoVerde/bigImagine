@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/portraitGeneration.ts
- * @stamp 2026-08-17
+ * @stamp 2026-08-19
  * @architectural-role Orchestrator — one Portrait Studio generation round
  *   (docs/plans/completed/portrait-studio-plan.md §Generation round)
  * @description
@@ -100,7 +100,7 @@ import type { ImageConnectionProfile, ImageConnectionStore } from '../io/imageCo
 import { createImageGenProvider } from '../io/imageGen/index.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
-import { compileTemplate, type SlotMap } from '../portraits/composer.js';
+import { compileTemplate, type DetailsMap, type SlotMap } from '../portraits/composer.js';
 import { buildMutationPrompt, parseCandidateResponse, parsePullWikiEntryId, PULL_WIKI_ENTRY_TOOL } from '../portraits/evoprompt.js';
 import { loadLayerManifest, getPromptableLayers, formatLayerDefinitions, type LayerDefinition } from '../portraits/layerStack.js';
 import { enforceSlotKeys, type CandidateChromosome } from '../portraits/reconcile.js';
@@ -158,6 +158,7 @@ interface EntityRow {
   layer_id: string;
   slots: Record<string, string>;
   template: string | null;
+  details: string;
 }
 
 /** The fallback entity created when a promptable layer has no entity yet (playground's
@@ -177,7 +178,7 @@ async function ensureEntityForLayer(
     // substituting a placeholder the round would then train on as if it were the named one.
     const rows = await db.withUserScope(userId, (session) =>
       session.query<EntityRow>(
-        `select entity_id, layer_id, slots, template
+        `select entity_id, layer_id, slots, template, details
          from visual_entities where entity_id = $1 and user_id = $2`,
         [namedId, userId],
       ),
@@ -191,7 +192,7 @@ async function ensureEntityForLayer(
   }
   const rows = await db.withUserScope(userId, (session) =>
     session.query<EntityRow>(
-      `select entity_id, layer_id, slots, template
+      `select entity_id, layer_id, slots, template, details
        from visual_entities where user_id = $1 and layer_id = $2 order by updated_at desc limit 1`,
       [userId, layer.id],
     ),
@@ -200,7 +201,7 @@ async function ensureEntityForLayer(
   const created = await db.withUserScope(userId, (session) =>
     session.query<EntityRow>(
       `insert into visual_entities (user_id, layer_id, name) values ($1, $2, $3)
-       returning entity_id, layer_id, slots, template`,
+       returning entity_id, layer_id, slots, template, details`,
       [userId, layer.id, layer.label],
     ),
   );
@@ -219,6 +220,19 @@ function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDe
     if (entity && entity.slots && typeof entity.slots === 'object') slots[layer.id] = entity.slots;
   }
   return { slots };
+}
+
+/** The round's authored per-layer prose (docs/plans/portrait-studio-layer-details-plan.md), keyed
+ *  by layer id — the text `{{<layerId>_details}}` template tokens resolve to. Computed once per
+ *  round alongside buildParentChromosome: details don't vary per-candidate (same as `name`), so
+ *  this is not part of the evoprompt mutation loop — every candidate compiles with the same map. */
+function buildParentDetails(entities: Map<string, EntityRow>, layers: LayerDefinition[]): DetailsMap {
+  const details: DetailsMap = {};
+  for (const layer of layers) {
+    const entity = entities.get(layer.id);
+    if (entity?.details) details[layer.id] = entity.details;
+  }
+  return details;
 }
 
 /** The round's whole wiki universe — every visual_wiki_entries row the user owns, same
@@ -508,6 +522,7 @@ export async function runPortraitGenerationRound(
     }
 
     const parent = buildParentChromosome(entities, layers);
+    const parentDetails = buildParentDetails(entities, layers);
 
     const [candidateCountRaw, mutationOverride] = await Promise.all([
       deps.settings.get('visual_mutation_candidate_count'),
@@ -605,7 +620,7 @@ export async function runPortraitGenerationRound(
     //    Cases).
     const dispatched = await Promise.all(
       reconciled.map(async (chromosome) => {
-        const composedPrompt = compileTemplate(template, chromosome.slots, manifest.layers);
+        const composedPrompt = compileTemplate(template, chromosome.slots, manifest.layers, parentDetails);
         const renderStartedAt = Date.now();
         let imageCallId: string | null = null;
         try {
@@ -784,10 +799,10 @@ interface CandidateRetryRow {
  *  action (plan §Edge Cases: a transient provider failure on 1-of-N candidates shouldn't cost a
  *  fresh round). The candidate_id is preserved on success (image_url updated in place), so a
  *  retried candidate becomes eligible for winner-pick under the same round it was born into.
- *  composedPrompt is recompiled against the *current* manifest/style template (the same
- *  resolution portraitFeedback.ts's reflection formatter uses) rather than reusing whatever was
- *  live at the original round, so a template fix made between attempts benefits a retry
- *  immediately. */
+ *  composedPrompt is recompiled against the *current* manifest/style template and the *current*
+ *  per-entity authored details (the same current-state guarantee the template resolution makes)
+ *  rather than reusing whatever was live at the original round, so a template fix or a details
+ *  edit made between attempts benefits a retry immediately. */
 export async function retryPortraitCandidateRender(
   deps: PortraitGenerationDeps,
   userId: string,
@@ -818,7 +833,22 @@ export async function retryPortraitCandidateRender(
       );
       if (styleRows[0]?.template) template = styleRows[0].template;
     }
-    const composedPrompt = compileTemplate(template, row.chromosome.slots ?? {}, manifest.layers);
+    // The retry has only the candidate's stored entity_ids, not the live entities Map — one
+    // batched query fetches every layer's current details, then the compile call below resolves
+    // the `_details` tokens against that map (same current-state recompile guarantee as the
+    // style template above).
+    const entityIdList = Object.values(row.entity_ids ?? {}).filter((id): id is string => typeof id === 'string');
+    let detailsByLayer: DetailsMap = {};
+    if (entityIdList.length > 0) {
+      const detailRows = await deps.db.withUserScope(userId, (session) =>
+        session.query<{ layer_id: string; details: string }>(
+          `select layer_id, details from visual_entities where entity_id = any($1::uuid[]) and user_id = $2`,
+          [entityIdList, userId],
+        ),
+      );
+      for (const r of detailRows) if (r.details) detailsByLayer[r.layer_id] = r.details;
+    }
+    const composedPrompt = compileTemplate(template, row.chromosome.slots ?? {}, manifest.layers, detailsByLayer);
 
     // A retry's image call joins the round the candidate was born into (plan §Image calls: a
     // retry is a new call row and the same round ID, never overwrite history). Best-effort —

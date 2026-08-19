@@ -79,6 +79,12 @@ function jsonReq(body) {
   };
 }
 
+function jsonReqWithMethod(method, body) {
+  const req = jsonReq(body);
+  req.method = method;
+  return req;
+}
+
 const USER = '11111111-1111-1111-1111-111111111111';
 const SUBJECT_CHAR = '22222222-2222-2222-2222-222222222222';
 const now = () => new Date().toISOString();
@@ -172,11 +178,13 @@ function makeDb() {
       return row ? [{ character_id: row.character_id, name: row.name, persona: row.persona, appearance: row.appearance }] : [];
     }
     if (s.startsWith('insert into visual_entities')) {
-      if (params.length === 3) {
-        // from-cast-character (Part C): [userId, name, slotsJson] — always unlinked, subject layer,
-        // slots already bootstrapped by the route (2026-08-17 — no more standing_instructions to
-        // fall back on, so this path bootstraps up front instead of inserting `{}`).
-        const [userId, name, slotsJson] = params;
+      if (params.length === 4) {
+        // from-cast-character (Part C): [userId, name, slotsJson, details] — always unlinked,
+        // subject layer, slots already bootstrapped by the route (2026-08-17 — no more
+        // standing_instructions to fall back on, so this path bootstraps up front instead of
+        // inserting `{}`); the same seedText is persisted as the entity's `details` (migration
+        // 0122 — the subject's authored prose, consistent with the rest of the details feature).
+        const [userId, name, slotsJson, details] = params;
         const row = {
           entity_id: randomUUID(),
           user_id: userId,
@@ -185,6 +193,7 @@ function makeDb() {
           name,
           slots: JSON.parse(slotsJson),
           template: null,
+          details,
           last_image_url: null,
           current_best_candidate_id: null,
           created_at: now(),
@@ -193,9 +202,9 @@ function makeDb() {
         state.entities.push(row);
         return [row];
       }
-      // Create-entity: [userId, layerId, name, slotsJson, template] — character_id is hardcoded
-      // null server-side, never a param.
-      const [userId, layerId, name, slotsJson, template] = params;
+      // Create-entity: [userId, layerId, name, slotsJson, template, details] — character_id is
+      // hardcoded null server-side, never a param.
+      const [userId, layerId, name, slotsJson, template, details] = params;
       const row = {
         entity_id: randomUUID(),
         user_id: userId,
@@ -204,12 +213,33 @@ function makeDb() {
         name,
         slots: JSON.parse(slotsJson),
         template,
+        details,
         last_image_url: null,
         current_best_candidate_id: null,
         created_at: now(),
         updated_at: now(),
       };
       state.entities.push(row);
+      return [row];
+    }
+    // PATCH /v1/portraits/entities/:id (details/name/template/slots in place) — checked AFTER
+    // the winner-promotion handler above, whose SQL also starts with `update visual_entities set`
+    // but is the more specific `... set last_image_url` shape this fake must not swallow.
+    // Column→placeholder pairs are parsed from the SQL itself because the route only pushes the
+    // columns actually present in the patch (a details-only PATCH sets `details = $3`, a name
+    // PATCH sets `name = $3`, etc.) — position alone can't tell which column an assignment is.
+    if (s.startsWith('update visual_entities set')) {
+      const [entityId, userId] = params;
+      const row = state.entities.find((e) => e.entity_id === entityId && e.user_id === userId);
+      if (!row) return [];
+      const assignBlock = s.slice(s.indexOf('set') + 3, s.indexOf(' where'));
+      for (const part of assignBlock.split(',')) {
+        const m = part.match(/\b([a-z_]+)\s*=\s*\$(\d+)/);
+        if (!m) continue;
+        const [, col, ph] = m;
+        row[col] = col === 'slots' ? JSON.parse(params[Number(ph) - 1]) : params[Number(ph) - 1];
+      }
+      row.updated_at = now();
       return [row];
     }
     if (s.includes('update visual_candidates set rating')) {
@@ -291,7 +321,7 @@ function makeDb() {
   };
 }
 
-function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImageUrl = null, slots = {} }) {
+function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImageUrl = null, slots = {}, details = '' }) {
   const row = {
     entity_id: entityId,
     user_id: USER,
@@ -300,6 +330,7 @@ function seedSubjectEntity(db, { entityId, characterId = SUBJECT_CHAR, lastImage
     name: 'Subject',
     slots,
     template: null,
+    details,
     last_image_url: lastImageUrl,
     current_best_candidate_id: null,
     created_at: now(),
@@ -471,6 +502,105 @@ function makeThrowingGate() {
 }
 
 // ============================================================================
+// The details column (migration 0122, portrait-studio-layer-details-plan.md)
+// ============================================================================
+
+// --- A subject created with `details` but no `seed`/`slots`: the details double as the
+// bootstrap context — the describer is seeded from them (the frontend collapses create-time UI
+// to one box that sends `details`, so this is the normal create flow) — and they are persisted
+// on the row, round-tripping through both the create response and GET /:id. ---
+{
+  const db = makeDb();
+  const gate = makeRoutingGate({
+    describerReply: 'Appearance: an Italian woman in her 30s, dark hair, sun-browned skin.',
+    bootstrapReply: 'body: sun-browned\neyes: dark',
+  });
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'subject', name: 'Elena', details: 'an Italian woman in her 30s' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'details: a subject create carrying details but no seed → 201');
+  assert(gate.calls.length === 2, 'details: the details-only subject still runs the full describer → bootstrapper sequence');
+  assert(
+    gate.calls[0][0].content.includes('an Italian woman in her 30s'),
+    'details: the describer is seeded from the details prose when no separate seed is given',
+  );
+  assert(
+    gate.calls[1][0].content.includes('an Italian woman in her 30s, dark hair, sun-browned skin.'),
+    'details: the slot bootstrapper\'s context is still the describer\'s blurb, not the raw details',
+  );
+  const created = db.state.entities.find((e) => e.name === 'Elena');
+  assert(created.details === 'an Italian woman in her 30s', 'details: the details prose is persisted on the created row');
+  assert(created.slots.body === 'sun-browned' && created.slots.eyes === 'dark', 'details: the details-only create still lands bootstrapped slots');
+  assert(res.responses[0].body.details === 'an Italian woman in her 30s', 'details: the create response round-trips the details field');
+
+  const getRes = fakeRes();
+  await handlePortraitEntities(
+    { method: 'GET' },
+    getRes,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL(`http://x/v1/portraits/entities/${created.entity_id}`),
+  );
+  assert(getRes.responses[0].status === 200, 'details: GET /:id → 200');
+  assert(
+    getRes.responses[0].body.details === 'an Italian woman in her 30s',
+    'details: GET /:id round-trips the persisted details field',
+  );
+}
+
+// --- A non-subject layer created with `details` but no `seed`: describeStudioSubject is
+// skipped (no expansion pass fits a style layer) and the details reach the slot bootstrapper
+// directly as context — still persisted on the row. ---
+{
+  const db = makeDb();
+  const gate = makeRoutingGate({ bootstrapReply: 'style_style: moody rim-lit hybrid look' });
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReq({ layerId: 'style', name: 'VLZ hybrid', details: 'a moody rim-lit hybrid look' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities'),
+  );
+
+  assert(res.responses[0].status === 201, 'details: a details-only create on a non-subject layer → 201');
+  assert(gate.calls.length === 1, 'details: a non-subject details-only create fires only the slot bootstrapper, never the describer');
+  assert(
+    gate.calls[0][0].content.includes('a moody rim-lit hybrid look'),
+    'details: the style layer\'s details reach the slot bootstrapper as context, unexpanded',
+  );
+  const created = db.state.entities.find((e) => e.name === 'VLZ hybrid');
+  assert(created.details === 'a moody rim-lit hybrid look', 'details: the non-subject details are persisted on the row');
+}
+
+// --- PATCH { details } updates the prose in place, leaving name/slots/template untouched. ---
+{
+  const db = makeDb();
+  const gate = makeRoutingGate();
+  const existing = seedSubjectEntity(db, { entityId: 'e-details', characterId: null, details: 'original prose', slots: { look: 'hand-typed' } });
+  const res = fakeRes();
+  await handlePortraitEntities(
+    jsonReqWithMethod('PATCH', { details: 'rewritten prose' }),
+    res,
+    { db, settings: makeSettings(), llm: gate },
+    USER,
+    new URL('http://x/v1/portraits/entities/e-details'),
+  );
+
+  assert(res.responses[0].status === 200, 'details: PATCH { details } → 200');
+  assert(res.responses[0].body.details === 'rewritten prose', 'details: the PATCH response carries the new details');
+  assert(existing.details === 'rewritten prose', 'details: the persisted row now carries the new details');
+  assert(existing.name === 'Subject' && existing.slots.look === 'hand-typed', 'details: a details PATCH leaves name and slots untouched');
+  assert(gate.calls.length === 0, 'details: a details PATCH never fires any LLM call');
+}
+
+// ============================================================================
 // from-cast-character (Part C)
 // ============================================================================
 
@@ -605,12 +735,12 @@ const LOSER = 'c-loser';
 
 function seedFeedbackRound(db, { avatarPath = null, characterId = SUBJECT_CHAR } = {}) {
   db.state.entities.push(
-    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', character_id: characterId, name: 'Rin', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Coat', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-style', user_id: USER, layer_id: 'style', character_id: null, name: 'Style', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
-    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', character_id: null, name: 'Expr', slots: {}, template: null, last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-sub', user_id: USER, layer_id: 'subject', character_id: characterId, name: 'Rin', slots: {}, template: null, details: '', last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Coat', slots: {}, template: null, details: '', last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-style', user_id: USER, layer_id: 'style', character_id: null, name: 'Style', slots: {}, template: null, details: '', last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
+    { entity_id: 'e-expr', user_id: USER, layer_id: 'expression', character_id: null, name: 'Expr', slots: {}, template: null, details: '', last_image_url: null, current_best_candidate_id: null, created_at: now(), updated_at: now() },
     // An entity only the losing candidate referenced — must come through untouched.
-    { entity_id: 'e-other-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Old coat', slots: { outfit_style: 'old wool' }, template: null, last_image_url: 'https://img/old.png', current_best_candidate_id: 'c-old', created_at: now(), updated_at: now() },
+    { entity_id: 'e-other-out', user_id: USER, layer_id: 'outfit', character_id: null, name: 'Old coat', slots: { outfit_style: 'old wool' }, template: null, details: '', last_image_url: 'https://img/old.png', current_best_candidate_id: 'c-old', created_at: now(), updated_at: now() },
   );
   db.state.characters.push({ character_id: characterId, user_id: USER, name: 'Rin', persona: 'x', avatar_path: avatarPath });
   db.state.candidates.push(

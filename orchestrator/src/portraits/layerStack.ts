@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/portraits/layerStack.ts
- * @stamp 2026-08-16
+ * @stamp 2026-08-19
  * @architectural-role IO Wrapper — read/seed/parse the Portrait Studio layer manifest; pure
  *   helpers over an already-loaded manifest (bi_principles.md §8)
  * @description
@@ -11,10 +11,12 @@
  * (`subject`, `outfit`, `style`, `expression`, `format` — the fifth added for composition/shot-type
  * framing, all `promptable: true`, each `boundary` a short
  * prose description of what belongs there and what explicitly doesn't) plus a default `template`
- * referencing each layer's overflow token. An operator can add/remove/relabel layers afterward
- * from Portrait Studio's "Manage Layers" panel — this is what makes the system genuinely
- * data-driven rather than hardcoded to four names; every consumer reads the layer list from the
- * manifest, never a literal `['subject','outfit','style','expression']` constant.
+ * referencing each layer's `_overflow` token (its unplaced slots) and `_details` token (its
+ * authored prose, visual_entities.details — docs/plans/portrait-studio-layer-details-plan.md). An
+ * operator can add/remove/relabel layers afterward from Portrait Studio's "Manage Layers" panel —
+ * this is what makes the system genuinely data-driven rather than hardcoded to four names; every
+ * consumer reads the layer list from the manifest, never a literal `['subject','outfit','style',
+ * 'expression']` constant.
  *
  * Two disclosed, deliberate exceptions to full genericity (plan §Layer manifest): `subject` is
  * the run's anchor — task-id attribution (`visual-<subjectEntityId>-<attempt>`) and episode
@@ -32,7 +34,7 @@
  * @api-declaration
  * LayerDefinition — one manifest layer: id, label, promptable, boundary
  * LayerManifest — { layers: LayerDefinition[], template }
- * DEFAULT_LAYER_MANIFEST — the built-in four-layer default (+ template)
+ * DEFAULT_LAYER_MANIFEST — the built-in five-layer default (+ template)
  * parseLayerManifest(raw) -> LayerManifest — pure; unset/''/corrupt JSON → DEFAULT_LAYER_MANIFEST
  * getPromptableLayers(manifest) -> LayerDefinition[] — pure; the layers candidate chromosomes
  *   may (and must) carry slots for
@@ -63,7 +65,7 @@ export interface LayerManifest {
   layers: LayerDefinition[];
   /** The image-prompt template for this manifest: `{{slot_name}}` tokens resolve against
    *  whichever layer owns that slot name; `{{<layerId>_overflow}}` folds a layer's unplaced
-   *  slots (composer.ts). */
+   *  slots and `{{<layerId>_details}}` places its authored prose (composer.ts). */
   template: string;
 }
 
@@ -113,7 +115,11 @@ export const DEFAULT_LAYER_MANIFEST: LayerManifest = {
     },
   ],
   template:
-    'A portrait of {{subject_overflow}}, wearing {{outfit_overflow}}, rendered in {{style_overflow}}, with {{expression_overflow}}. Format: {{format_overflow}}.',
+    'A portrait of {{subject_details}}, {{subject_overflow}},\n' +
+    'wearing {{outfit_details}}, {{outfit_overflow}},\n' +
+    'rendered in {{style_details}}, {{style_overflow}},\n' +
+    'with {{expression_details}}, {{expression_overflow}}.\n' +
+    'Format: {{format_details}}, {{format_overflow}}.',
 };
 
 /** Pure: unset/empty/corrupt input falls back to the built-in default — a seeded manifest is
