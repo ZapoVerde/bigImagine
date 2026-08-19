@@ -279,6 +279,10 @@ export interface FeedbackBody {
   winnerId?: string;
   /** The operator explicitly records "no acceptable candidate" → insufficient_evidence. */
   noAcceptableCandidate?: boolean;
+  /** Optional — the round this feedback closes (portrait-studio-telemetry-plan.md). The
+   *  frontend echoes the roundId its generate returned; a retry path omits it and the round is
+   *  resolved from the episode instead. */
+  roundId?: string;
   ratings?: Record<string, number>;
   notes?: Record<string, string>;
   rationale?: string;
@@ -286,14 +290,18 @@ export interface FeedbackBody {
 }
 
 /** POST /v1/portraits/feedback — either a fresh round ({ entityIds, goal, candidateIds,
- *  winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments? }) or an
- *  episode retry ({ episodeId, winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?,
- *  layerAssessments? }). ratings values are validated as 1-5 integers here so the route can 400
- *  before the orchestrator's skip-with-log fallback (the orchestrator still guards — §11). */
+ *  winnerId?, noAcceptableCandidate?, ratings?, notes?, rationale?, layerAssessments?, roundId? })
+ *  or an episode retry ({ episodeId, winnerId?, noAcceptableCandidate?, ratings?, notes?,
+ *  rationale?, layerAssessments? }). roundId (optional) is the generate-round id this feedback
+ *  closes, echoed by the frontend for its telemetry receipt; a retry omits it and the round is
+ *  resolved from the episode instead. ratings values are validated as 1-5 integers here so the
+ *  route can 400 before the orchestrator's skip-with-log fallback (the orchestrator still guards —
+ *  §11). */
 export function parseFeedbackBody(raw: unknown): FeedbackBody | undefined {
   if (!isRecord(raw)) return undefined;
   if (raw.episodeId !== undefined && (typeof raw.episodeId !== 'string' || !raw.episodeId)) return undefined;
   if (raw.winnerId !== undefined && (typeof raw.winnerId !== 'string' || !raw.winnerId)) return undefined;
+  if (raw.roundId !== undefined && (typeof raw.roundId !== 'string' || !raw.roundId)) return undefined;
   if (raw.noAcceptableCandidate !== undefined && typeof raw.noAcceptableCandidate !== 'boolean') return undefined;
   if (raw.rationale !== undefined && typeof raw.rationale !== 'string') return undefined;
   if (raw.ratings !== undefined) {
@@ -321,6 +329,7 @@ export function parseFeedbackBody(raw: unknown): FeedbackBody | undefined {
   return {
     ...(typeof raw.episodeId === 'string' && raw.episodeId !== '' ? { episodeId: raw.episodeId } : {}),
     ...(typeof raw.winnerId === 'string' && raw.winnerId !== '' ? { winnerId: raw.winnerId } : {}),
+    ...(typeof raw.roundId === 'string' && raw.roundId !== '' ? { roundId: raw.roundId } : {}),
     ...(raw.noAcceptableCandidate !== undefined ? { noAcceptableCandidate: raw.noAcceptableCandidate } : {}),
     ...(isRecord(raw.entityIds) ? { entityIds: raw.entityIds as Record<string, string> } : {}),
     ...(typeof raw.goal === 'string' && raw.goal !== '' ? { goal: raw.goal.trim() } : {}),
@@ -408,7 +417,7 @@ export async function readPortraitsEnabled(settings: HttpServerDeps['settings'])
  *  on 'false' answers 403 and returns false so the handler returns immediately. The layer-manifest
  *  pair is deliberately NOT gated (see httpServer.ts's route comment); scene-presence ordering is a
  *  general scene feature and is also unaffected. */
-async function requirePortraitsEnabled(deps: HttpServerDeps, res: ServerResponse): Promise<boolean> {
+export async function requirePortraitsEnabled(deps: HttpServerDeps, res: ServerResponse): Promise<boolean> {
   if (await readPortraitsEnabled(deps.settings)) return true;
   sendJson(res, 403, { error: 'portrait studio is disabled — enable it in Settings' });
   return false;
@@ -744,13 +753,43 @@ export async function handlePortraitWiki(
   const segments = rest.split('/').filter(Boolean);
 
   if (segments.length === 0 && req.method === 'GET') {
-    const rows = await deps.db.withUserScope(userId, (session) =>
-      session.query<PortraitWikiRow>(
+    const rows = await deps.db.withUserScope(userId, async (session) => {
+      await session.query(
+        `with missing_lessons as (
+           select l.lesson_id, l.source_episode_id, l.statement, l.evidence, l.created_at,
+                  (e.entity_ids ->> (l.next_change ->> 'layer'))::uuid as entity_id,
+                  l.next_change ->> 'layer' as layer_type,
+                  ent.name as entity_name
+           from visual_lessons l
+           left join visual_wiki_entries w on w.origin_episode_id = l.source_episode_id
+           left join visual_episodes e on e.episode_id = l.source_episode_id and e.user_id = l.user_id
+           left join visual_entities ent
+             on ent.entity_id = (e.entity_ids ->> (l.next_change ->> 'layer'))::uuid
+            and ent.user_id = l.user_id
+           where l.user_id = $1 and l.state = 'provisional' and w.entry_id is null
+         )
+         insert into visual_wiki_entries
+           (user_id, title, body, tags, subscriptions, origin_episode_id)
+         select $1,
+                'Provisional lesson: ' || left(statement, 100),
+                statement || E'\n\nEvidence: ' || evidence,
+                array[
+                  'provisional',
+                  regexp_replace(lower(layer_type), '[^a-z0-9]+', '-', 'g'),
+                  nullif(regexp_replace(lower(coalesce(entity_name, '')), '[^a-z0-9]+', '-', 'g'), '')
+                ]::text[],
+                jsonb_build_array(jsonb_build_object('layerType', layer_type, 'layerEntityId', entity_id)),
+                source_episode_id
+         from missing_lessons
+         on conflict do nothing`,
+        [userId],
+      );
+      return session.query<PortraitWikiRow>(
         `select entry_id, title, body, tags, subscriptions, origin_episode_id, created_at, updated_at
          from visual_wiki_entries where user_id = $1 order by created_at`,
         [userId],
-      ),
-    );
+      );
+    });
     sendJson(res, 200, { entries: rows });
     return;
   }
@@ -897,7 +936,7 @@ export async function handlePortraitGenerate(req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: result.error ?? 'generation failed' });
     return;
   }
-  sendJson(res, 200, { candidates: result.candidates, lesson: result.lesson });
+  sendJson(res, 200, { candidates: result.candidates, lesson: result.lesson, ...(result.roundId ? { roundId: result.roundId } : {}) });
 }
 
 /** POST /v1/portraits/candidates/:id/retry — re-render one candidate (typically one whose
@@ -916,7 +955,7 @@ export async function handlePortraitCandidateRetry(req: IncomingMessage, res: Se
     sendJson(res, 400, { error: result.error ?? 'retry failed' });
     return;
   }
-  sendJson(res, 200, { imageUrl: result.imageUrl, composedPrompt: result.composedPrompt, ...(result.failed !== undefined ? { failed: result.failed } : {}) });
+  sendJson(res, 200, { imageUrl: result.imageUrl, composedPrompt: result.composedPrompt, ...(result.failed !== undefined ? { failed: result.failed } : {}), ...(result.roundId ? { roundId: result.roundId } : {}) });
 }
 
 /** POST /v1/portraits/feedback — record the human evaluation for the calling user: a fresh round
@@ -946,7 +985,7 @@ export async function handlePortraitFeedback(req: IncomingMessage, res: ServerRe
     sendJson(res, 400, { error: result.error ?? 'feedback failed' });
     return;
   }
-  sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection });
+  sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection, ...(result.roundId ? { roundId: result.roundId } : {}) });
 }
 
 /** POST /v1/portraits/episodes/:id/reflect — retry reflection on one existing episode (plan §UI:
@@ -980,7 +1019,7 @@ export async function handlePortraitEpisodeReflect(req: IncomingMessage, res: Se
     sendJson(res, 400, { error: result.error ?? 'reflect failed' });
     return;
   }
-  sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection });
+  sendJson(res, 200, { episodeId: result.episodeId, reflection: result.reflection, ...(result.roundId ? { roundId: result.roundId } : {}) });
 }
 
 /** One episode's learning chain for GET /v1/portraits/history — episode → lesson → use → result

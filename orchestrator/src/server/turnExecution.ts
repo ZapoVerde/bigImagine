@@ -125,8 +125,8 @@ export async function resolveTurnLlm(
       // The override's own profile already carries the connection's prices — no second read.
       turnPrice = toTurnPrice(profile);
     } else {
-      log.error(
-        `chat_id ${chatId} names unknown connection "${sessionParams.profile}" — falling back to the active connection`,
+      throw new Error(
+        `chat_id ${chatId} names unknown connection "${sessionParams.profile}"; refusing to use another connection`,
       );
     }
   } else {

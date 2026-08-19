@@ -149,8 +149,10 @@ function makeDb({ seedWiki = true } = {}) {
     learning: [],
     lessons: [],
     lessonUses: [],
+    rounds: [],
+    imageCalls: [],
     events: [],
-    counters: { entity: 0, candidate: 0, episode: 0, learning: 0, lesson: 0, use: 0 },
+    counters: { entity: 0, candidate: 0, episode: 0, learning: 0, lesson: 0, use: 0, round: 0, imageCall: 0 },
     promoWrites: [],
     ratingWrites: [],
   };
@@ -193,6 +195,11 @@ function makeDb({ seedWiki = true } = {}) {
     if (s.includes('from visual_entities where entity_id = $1')) {
       return state.entities.filter((e) => e.entity_id === params[0] && e.user_id === params[1]);
     }
+    // insertLesson's entity-name lookup (feedback reflection lesson ledger, commit e8f0d3e).
+    if (s.startsWith('select name from visual_entities')) {
+      const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
+      return row ? [{ name: row.name }] : [];
+    }
     if (s.includes('from visual_entities where user_id = $1 and layer_id = $2')) {
       return state.entities.filter((e) => e.user_id === params[0] && e.layer_id === params[1]).sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1)).slice(0, 1);
     }
@@ -221,7 +228,8 @@ function makeDb({ seedWiki = true } = {}) {
     if (s.includes('from visual_episode_learning')) {
       return [{ n: String(state.learning.length) }];
     }
-    // Feedback: episode insert (the primary write — happens first).
+    // Feedback: episode insert (the primary write — happens first). params[7] is the round_id the
+    // feedback closes (portrait-studio-telemetry-plan.md) — null for historical/un-correlated rounds.
     if (s.startsWith('insert into visual_episodes')) {
       state.counters.episode += 1;
       const row = {
@@ -233,6 +241,7 @@ function makeDb({ seedWiki = true } = {}) {
         selected_candidate_id: params[4],
         candidate_ids: params[5],
         reflection_status: params[6],
+        round_id: params[7] ?? null,
       };
       state.episodes.push(row);
       return [{ episode_id: row.episode_id }];
@@ -297,6 +306,11 @@ function makeDb({ seedWiki = true } = {}) {
       state.lessons.push(row);
       return [{ lesson_id: row.lesson_id }];
     }
+    if (s.startsWith('insert into visual_wiki_entries')) {
+      // Provisional-lesson persistence (commit e8f0d3e): the conclusion also files the lesson as a
+      // wiki entry — nothing is consumed from the insert.
+      return [];
+    }
     if (s.startsWith('update visual_episodes set reflection_status')) {
       const row = state.episodes.find((e) => e.episode_id === params[0]);
       if (row) row.reflection_status = params[1];
@@ -333,6 +347,51 @@ function makeDb({ seedWiki = true } = {}) {
         applied_change: JSON.parse(params[3]),
         result_candidates: JSON.parse(params[4]),
       });
+      return [];
+    }
+    // Round telemetry (portrait-studio-telemetry-plan.md): visual_rounds create/terminal write and
+    // one visual_round_image_calls row per render (running → succeeded/failed, candidate_id
+    // backfilled after the candidate insert).
+    if (s.startsWith('insert into visual_rounds')) {
+      state.counters.round += 1;
+      const roundId = `round-${state.counters.round}`;
+      state.rounds.push({ round_id: roundId, user_id: params[0], goal: params[1], status: 'running', started_at: 0 });
+      return [{ round_id: roundId }];
+    }
+    if (s.startsWith('update visual_rounds set status')) {
+      const row = state.rounds.find((r) => r.round_id === params[0]);
+      if (row) {
+        row.status = params[1];
+        row.completed_at = 0;
+      }
+      return [];
+    }
+    if (s.startsWith('insert into visual_round_image_calls')) {
+      state.counters.imageCall += 1;
+      const callId = `img-${state.counters.imageCall}`;
+      state.imageCalls.push({
+        call_id: callId,
+        user_id: params[0],
+        round_id: params[1],
+        status: 'running',
+        provider_kind: params[2],
+        model: params[3],
+        candidate_id: null,
+      });
+      return [{ call_id: callId }];
+    }
+    if (s.startsWith('update visual_round_image_calls set status')) {
+      const row = state.imageCalls.find((c) => c.call_id === params[0]);
+      if (row) {
+        row.status = params[1];
+        row.duration_ms = params[2];
+        row.error_message = params[3];
+      }
+      return [];
+    }
+    if (s.startsWith('update visual_round_image_calls set candidate_id')) {
+      const row = state.imageCalls.find((c) => c.call_id === params[0]);
+      if (row) row.candidate_id = params[1];
       return [];
     }
     throw new Error(`fake pool got an unexpected query: ${s.slice(0, 120)}`);

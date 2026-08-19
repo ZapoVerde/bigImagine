@@ -275,6 +275,7 @@ import {
   handlePortraitsEnabledSet,
   handlePortraitWiki,
 } from './portraitRoutes.js';
+import { handlePortraitRoundTelemetry } from './portraitTelemetryRoutes.js';
 
 export interface HttpServerDeps {
   llm: LlmProvider;
@@ -675,6 +676,12 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/portraits/layers', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLayersSet(req, res, deps); }) },
   { method: 'POST', path: '/v1/portraits/generate', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitGenerate(req, res, deps, userId); }) },
   { method: 'POST', path: '/v1/portraits/feedback', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => { await handlePortraitFeedback(req, res, deps, userId); }) },
+  // portrait-studio-telemetry-plan.md — the durable per-round receipt. GET only, user-gated; the
+  // handler parses /v1/portraits/rounds/:roundId/telemetry and runs its own ownership check
+  // (visual_rounds is user-scoped) before touching the RLS-exempt llm_calls table.
+  { method: 'GET', family: '/v1/portraits/rounds', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handlePortraitRoundTelemetry(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
   { method: 'POST', family: '/v1/portraits/episodes', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       await handlePortraitEpisodeReflect(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
     }) },

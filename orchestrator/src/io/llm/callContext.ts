@@ -35,8 +35,13 @@
  *   with the label while anything outside fn keeps seeing the outer, unlabeled context. Additive
  *   to runWithCallContext, not a replacement — call sites that don't care about a finer label
  *   keep working unchanged.
- * getCallContext() — the current {taskId, kind, callLabel?}, or undefined outside any
+ * getCallContext() — the current {taskId, kind, callLabel?, roundId?}, or undefined outside any
  *   runWithCallContext
+ * withRoundId(roundId, fn) — narrows the currently active context to { ...active, roundId:
+ *   roundId } for the duration of fn (docs/plans/portrait-studio-telemetry-plan.md): the
+ *   Portrait Studio correlation id llmGate.ts logs onto llm_calls.round_id for a round's
+ *   mutation/wiki-pull/reflection calls. Mirror of withCallLabel — same nesting semantics,
+ *   same throw-if-no-context bug guard, additive rather than a replacement.
  *
  * @contract
  *   assertions:
@@ -63,8 +68,14 @@ export interface LlmCallContext {
    *  llmGate.ts logs it onto llm_calls.call_label. Set via withCallLabel() from inside an
    *  already-active runWithCallContext; null/absent on the outer context means "no finer label",
    *  which the Stats page's 'call-type' grouping falls back to `kind` for. The closed label
-   *  vocabulary lives in docs/plans/llm-call-label-breakdown-plan.md (cleanup:*, bg:*, sync:*). */
+*   vocabulary lives in docs/plans/llm-call-label-breakdown-plan.md (cleanup:*, bg:*, sync:*). */
   callLabel?: string;
+  /** Optional Portrait Studio round id (docs/plans/portrait-studio-telemetry-plan.md) —
+   *  llmGate.ts logs it onto llm_calls.round_id so the round's mutation/wiki-pull/reflection
+   *  calls correlate to their visual_rounds row while llm_calls stays the sole LLM accounting
+   *  ledger. Set via withRoundId() from inside an already-active runWithCallContext; absent on
+   *  any non-portrait call. */
+  roundId?: string | null;
 }
 
 const store = new AsyncLocalStorage<LlmCallContext>();
@@ -91,4 +102,21 @@ export function withCallLabel<T>(label: string, fn: () => T): T {
     );
   }
   return store.run({ ...active, callLabel: label }, fn);
+}
+
+/** Re-runs fn under a nested context identical to the currently active one except for roundId
+ *  (docs/plans/portrait-studio-telemetry-plan.md). Same ambient mechanism as withCallLabel — a
+ *  call made inside fn logs llm_calls.round_id; anything outside fn keeps the outer, unattributed
+ *  context. Null clears the attribution (a portrait LLM call made outside any round, e.g. a
+ *  feedback episode whose generation predates this plan). Throws if called outside any
+ *  runWithCallContext, the same "a call with nothing attached to it" bug llmGate.ts guards
+ *  against — unreachable in practice, every call site is already nested inside an outer context. */
+export function withRoundId<T>(roundId: string | null, fn: () => T): T {
+  const active = getCallContext();
+  if (!active) {
+    throw new Error(
+      'withRoundId: no call context set — every LLM call must run inside runWithCallContext (bb_principles.md §14)',
+    );
+  }
+  return store.run({ ...active, roundId }, fn);
 }

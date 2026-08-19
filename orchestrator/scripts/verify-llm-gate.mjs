@@ -12,7 +12,7 @@
 // 'error' rows, not just 'ok').
 
 import { createGatedLlmProvider } from '../dist/io/llm/llmGate.js';
-import { runWithCallContext, withCallLabel } from '../dist/io/llm/callContext.js';
+import { runWithCallContext, withCallLabel, withRoundId } from '../dist/io/llm/callContext.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 
 function assert(cond, message) {
@@ -53,11 +53,11 @@ function createFakePool(jobs) {
           if (sql.includes('insert into llm_calls')) {
             const [
               userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
-              providerKind, model, cacheReadTokens, costUsd, callLabel,
+              providerKind, model, cacheReadTokens, costUsd, callLabel, roundId,
             ] = params;
             llmCalls.push({
               userId, kind, taskId, jobId, outcome, promptTokens, completionTokens, totalTokens, durationMs, reason, requestId, attempt,
-              providerKind, model, cacheReadTokens, costUsd, callLabel,
+              providerKind, model, cacheReadTokens, costUsd, callLabel, roundId,
             });
             return { rows: [] };
           }
@@ -225,6 +225,52 @@ const PROFILE = createFakeProfile();
   }
   assert(threw, 'withCallLabel outside any runWithCallContext throws the same no-context bug error');
   assert(pool.llmCalls.length === 2, 'the out-of-context withCallLabel never reaches the provider');
+}
+
+// --- withRoundId (portrait-studio-telemetry-plan.md): mirrors withCallLabel — a call made inside
+// the scope logs the round_id; a call in the same outer context but outside it does not; both nest
+// (the portrait paths wrap withCallLabel(...) inside withRoundId(...)) ---
+{
+  const jobs = new Map();
+  const pool = createFakePool(jobs);
+  const db = createPostgresClient(pool);
+  const settings = createFakeSettings();
+  const base = createFakeBase([
+    { message: { role: 'assistant', content: 'in-round' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+    { message: { role: 'assistant', content: 'no-round' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+    { message: { role: 'assistant', content: 'labeled-in-round' }, toolCalls: [], usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } },
+  ]);
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+
+  await runWithCallContext({ taskId: 'round-1', kind: 'system', userId: 'u1' }, () =>
+    withRoundId('round-uuid-1', () => gated.complete([{ role: 'user', content: 'hi' }], [])),
+  );
+  assert(pool.llmCalls.length === 1 && pool.llmCalls[0].roundId === 'round-uuid-1', 'a call made inside withRoundId logs the round id');
+
+  await runWithCallContext({ taskId: 'round-1', kind: 'system', userId: 'u1' }, () =>
+    gated.complete([{ role: 'user', content: 'hi' }], []),
+  );
+  assert(
+    pool.llmCalls.length === 2 && pool.llmCalls[1].roundId === null,
+    'a call in the same outer context but outside the withRoundId scope carries no round id — the nesting is scoped, not a mutation of the outer context',
+  );
+
+  await runWithCallContext({ taskId: 'round-1', kind: 'system', userId: 'u1' }, () =>
+    withCallLabel('portrait:mutation', () => withRoundId('round-uuid-1', () => gated.complete([{ role: 'user', content: 'hi' }], []))),
+  );
+  assert(
+    pool.llmCalls.length === 3 && pool.llmCalls[2].callLabel === 'portrait:mutation' && pool.llmCalls[2].roundId === 'round-uuid-1',
+    'withCallLabel and withRoundId nest — the portrait paths log both label and round id on one row',
+  );
+
+  let threw = false;
+  try {
+    withRoundId('round-uuid-1', () => gated.complete([{ role: 'user', content: 'hi' }], []));
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'withRoundId outside any runWithCallContext throws the same no-context bug error');
+  assert(pool.llmCalls.length === 3, 'the out-of-context withRoundId never reaches the provider');
 }
 
 // --- kind: chat -- metered, never capped, even with agent_routines_enabled off ---

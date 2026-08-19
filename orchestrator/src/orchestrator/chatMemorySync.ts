@@ -236,9 +236,8 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettings> {
+async function resolveSyncSettings(deps: ChatMemorySyncDeps, userId: string | undefined, chatId?: string): Promise<SyncSettings> {
   const [
-    profileName,
     livePairsRaw,
     syncEveryPairsRaw,
     digestHorizonPairsRaw,
@@ -251,7 +250,6 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     peopleCuratorPrompt,
     personaName,
   ] = await Promise.all([
-    deps.settings.get('chat_memory_profile'),
     deps.settings.get('chat_memory_live_window_pairs'),
     deps.settings.get('chat_memory_sync_every_pairs'),
     deps.settings.get('chat_memory_digest_horizon_pairs'),
@@ -265,13 +263,28 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     deps.settings.get('persona_name'),
   ]);
 
+  const chatProfile = chatId && userId
+    ? await deps.db.withUserScope(userId, async (session) => {
+        const rows = await session.query<{ profile: string | null }>(
+          `select params->>'profile' as profile from chat_sessions where chat_id = $1`,
+          [chatId],
+        );
+        return rows[0]?.profile ?? undefined;
+      })
+    : undefined;
+  const requestedProfile = chatProfile;
   let llm = deps.llm;
-  if (profileName) {
-    const profile = await deps.llmConnections.resolveByName(profileName);
+  if (chatId && !requestedProfile) {
+    const active = await deps.llmConnections.resolveActive();
+    if (!active) throw new Error(`chat ${chatId} has no selected connection and no active connection exists`);
+    llm = createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
+  }
+  if (requestedProfile) {
+    const profile = await deps.llmConnections.resolveByName(requestedProfile);
     if (profile) {
       llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
     } else {
-      log.error(`chat-memory sync: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
+      throw new Error(`chat ${chatId} names unknown connection "${requestedProfile}"; sync refused to use another connection`);
     }
   }
 
@@ -858,12 +871,13 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
 }
 
 export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<void> {
-  const sync = await resolveSyncSettings(deps);
+  const defaults = await resolveSyncSettings(deps, undefined);
   const users = await deps.db.withSystemScope((session) => session.query<UserRow>('select user_id from users'));
   for (const { user_id: userId } of users) {
-    const due = await findDueChats(deps.db, userId, sync.syncEveryMessages, sync.liveWindowMessages);
+    const due = await findDueChats(deps.db, userId, defaults.syncEveryMessages, defaults.liveWindowMessages);
     for (const chatId of due) {
       try {
+        const sync = await resolveSyncSettings(deps, userId, chatId);
         const result = await runOneChatSync(deps, sync, userId, chatId);
         await recordSyncStatus(deps.db, userId, chatId, result);
       } catch (err) {
@@ -891,7 +905,7 @@ export function startChatMemorySyncLoop(deps: ChatMemorySyncDeps): void {
  * once, on an explicit signal, never inferred from idle time (bb_principles.md §3).
  */
 export async function archiveChatMemory(deps: ChatMemorySyncDeps, userId: string, chatId: string, chatTitle: string): Promise<void> {
-  const sync = await resolveSyncSettings(deps);
+  const sync = await resolveSyncSettings(deps, userId, chatId);
   await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
     deps.db.withUserScope(userId, async (session) => {
       const entries = await session.query<ExistingEntryRow>(

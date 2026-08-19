@@ -65,7 +65,7 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel, withRoundId } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -100,6 +100,11 @@ export interface PortraitFeedbackInput {
    *  immutable visual_episode_learning row). When set, entityIds/goal/candidateIds are not needed;
    *  the episode provides them. */
   episodeId?: string;
+  /** The generation round this feedback evaluates (docs/plans/portrait-studio-telemetry-plan.md).
+   *  Stored on the episode and used to correlate Reflection (+ retries) to the round's llm_calls.
+   *  Optional for a fresh round (a historical generation has no round); always null for a retry —
+   *  the episode's own round_id governs. */
+  roundId?: string;
   /** The round's entity map — the episode's entity_ids record. Required for a fresh round. */
   entityIds?: Record<string, string>;
   /** The round's goal. Required for a fresh round. */
@@ -135,6 +140,9 @@ export interface ReflectionOutcome {
 export interface PortraitFeedbackResult {
   ok: boolean;
   episodeId?: string;
+  /** The round this episode evaluates, when it has one — echoes what the reflection calls rode
+   *  on so the Studio can fetch the round's telemetry after feedback lands. */
+  roundId?: string;
   reflection?: ReflectionOutcome;
   error?: string;
 }
@@ -147,6 +155,7 @@ interface EpisodeRow {
   selected_candidate_id: string | null;
   candidate_ids: string[];
   reflection_status: string;
+  round_id: string | null;
 }
 
 interface CandidateRow {
@@ -175,6 +184,10 @@ interface ReflectionPassContext {
   ratings: Record<string, number>;
   notes: Record<string, string>;
   layerAssessments: LayerAssessmentInput[];
+  /** The generation round this reflection belongs to — rides withRoundId onto the call's
+   *  llm_calls.round_id. Null on a historical episode with no linked round (plan: "do not invent
+   *  telemetry"). */
+  roundId: string | null;
 }
 
 // ---- DB seams ------------------------------------------------------------------
@@ -182,7 +195,7 @@ interface ReflectionPassContext {
 async function loadEpisode(db: PostgresClient, userId: string, episodeId: string): Promise<EpisodeRow | undefined> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<EpisodeRow>(
-      `select episode_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status
+      `select episode_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status, round_id
        from visual_episodes where episode_id = $1 and user_id = $2`,
       [episodeId, userId],
     ),
@@ -440,16 +453,20 @@ async function runReflectionCall(
     { role: 'system', content: system },
     { role: 'user', content: buildReflectionUserPrompt(snapshot) },
   ];
+  const runCall = () => llm.complete(messages, [SUBMIT_LESSON_TOOL], { forceTool: 'submit_lesson' });
   const turn: LlmTurn = await runWithCallContext(
     { taskId: `visual-${ctx.subjectEntityId}-reflection`, kind: 'system', userId },
-    () => withCallLabel('portrait:reflection', () => llm.complete(messages, [SUBMIT_LESSON_TOOL], { forceTool: 'submit_lesson' })),
+    // The reflection call (and every retry) rides the episode's round_id so it correlates to the
+    // round's llm_calls on round_id (plan §Round lifecycle). A historical episode with no round
+    // makes the plain, un-correlated call — nothing invented.
+    () => withCallLabel('portrait:reflection', () => (ctx.roundId ? withRoundId(ctx.roundId, runCall) : runCall())),
   );
 
-  const call = turn.toolCalls.find((c) => c.name === 'submit_lesson');
-  if (!call) {
+  const submitLesson = turn.toolCalls.find((c) => c.name === 'submit_lesson');
+  if (!submitLesson) {
     return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error('no submit_lesson tool call in reply'), connection);
   }
-  const validated = validateLessonCall(call);
+  const validated = validateLessonCall(submitLesson);
   if (!validated.ok) {
     return persistFailedAttempt(deps, userId, ctx.episodeId, attempt, snapshot, new Error(validated.reason), connection);
   }
@@ -585,11 +602,12 @@ async function submitFreshRound(
   }
 
   const status = input.winnerId || input.noAcceptableCandidate ? 'reflecting' : 'awaiting_feedback';
+  const roundId = input.roundId ?? null;
   const episode = await deps.db.withUserScope(userId, (session) =>
     session.query<EpisodeRow>(
-      `insert into visual_episodes (user_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status)
-       values ($1, $2::jsonb, $3, $4, $5, $6::uuid[], $7) returning episode_id`,
-      [userId, JSON.stringify(entityIds), goal, input.rationale?.trim() ?? null, input.winnerId ?? null, candidateIds, status],
+      `insert into visual_episodes (user_id, entity_ids, goal, rationale, selected_candidate_id, candidate_ids, reflection_status, round_id)
+       values ($1, $2::jsonb, $3, $4, $5, $6::uuid[], $7, $8) returning episode_id`,
+      [userId, JSON.stringify(entityIds), goal, input.rationale?.trim() ?? null, input.winnerId ?? null, candidateIds, status, roundId],
     ),
   );
   const episodeId = episode[0].episode_id;
@@ -607,22 +625,23 @@ async function submitFreshRound(
     ratings: input.ratings ?? {},
     notes: input.notes ?? {},
     layerAssessments: input.layerAssessments ?? [],
+    roundId,
   };
 
   if (input.winnerId) {
     const winner = candidates.find((c) => c.candidate_id === input.winnerId)!;
     await applyWinner(deps, userId, episodeId, winner);
     const reflection = await runReflectionPass(deps, llm, userId, ctx);
-    return { ok: true, episodeId, reflection };
+    return { ok: true, episodeId, ...(roundId ? { roundId } : {}), reflection };
   }
 
   if (input.noAcceptableCandidate) {
     const reflection = await recordNoAcceptableCandidate(deps, userId, ctx);
-    return { ok: true, episodeId, reflection };
+    return { ok: true, episodeId, ...(roundId ? { roundId } : {}), reflection };
   }
 
   log.info('portraitFeedback: episode recorded awaiting_feedback', { episodeId });
-  return { ok: true, episodeId, reflection: { action: 'awaiting_feedback' } };
+  return { ok: true, episodeId, ...(roundId ? { roundId } : {}), reflection: { action: 'awaiting_feedback' } };
 }
 
 /** Retry/complete an existing episode (plan §UI — failed reflection offers retry instead of
@@ -649,6 +668,7 @@ async function submitEpisodeRetry(
   }
 
   const winnerId = input.winnerId ?? episode.selected_candidate_id;
+  const roundId = episode.round_id;
   const ctx: ReflectionPassContext = {
     subjectEntityId: episode.entity_ids['subject'] ?? '',
     episodeId: episode.episode_id,
@@ -660,6 +680,7 @@ async function submitEpisodeRetry(
     ratings: input.ratings ?? {},
     notes: input.notes ?? {},
     layerAssessments: input.layerAssessments ?? [],
+    roundId,
   };
 
   if (winnerId) {
@@ -673,16 +694,16 @@ async function submitEpisodeRetry(
       await applyWinner(deps, userId, episode.episode_id, winner);
     }
     const reflection = await runReflectionPass(deps, llm, userId, ctx);
-    return { ok: true, episodeId: episode.episode_id, reflection };
+    return { ok: true, episodeId: episode.episode_id, ...(roundId ? { roundId } : {}), reflection };
   }
 
   if (input.noAcceptableCandidate) {
     const reflection = await recordNoAcceptableCandidate(deps, userId, ctx);
-    return { ok: true, episodeId: episode.episode_id, reflection };
+    return { ok: true, episodeId: episode.episode_id, ...(roundId ? { roundId } : {}), reflection };
   }
 
   log.info('portraitFeedback: episode still awaiting_feedback', { episodeId: episode.episode_id });
-  return { ok: true, episodeId: episode.episode_id, reflection: { action: 'awaiting_feedback' } };
+  return { ok: true, episodeId: episode.episode_id, ...(roundId ? { roundId } : {}), reflection: { action: 'awaiting_feedback' } };
 }
 
 export async function submitPortraitFeedback(

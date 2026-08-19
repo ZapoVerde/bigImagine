@@ -102,6 +102,21 @@ function createFakePool() {
             return { rows: sess ? [{ kind: sess.kind ?? 'chat' }] : [] };
           }
 
+          // resolveSyncSettings's per-chat connection read (chatMemorySync.ts): which connection
+          // this chat is locked to (chat_sessions.params->>'profile'). null/undefined means "no
+          // override" → the sync falls back to the active connection, never another chat's.
+          if (sql.includes("params->>'profile'") && sql.includes('from chat_sessions')) {
+            const sess = chatSessions.get(params[0]);
+            return { rows: [{ profile: sess?.params?.profile ?? null }] };
+          }
+
+          // The connection-backed sync llm is a gated openai-compatible provider, which meters
+          // every complete() into llm_calls (io/llm/llmGate.ts) — swallowed here; the sync path
+          // itself is what these tests are about, not the meter.
+          if (sql.includes('insert into llm_calls')) {
+            return { rows: [] };
+          }
+
           // runOneChatSync's own full-transcript read (now carrying active_swipe_id for the
           // transient settle step — matched loosely so both column lists hit the same handler)
           if (sql.includes('select message_id, role, content')) {
@@ -421,88 +436,103 @@ function createFakePool() {
   };
 }
 
-// --- Fake LlmProvider: dispatches on options.forceTool, records every call so tests can inspect
-// exactly what prompt each forced-schema call was built with. ---
-function createFakeLlm() {
-  const calls = [];
+// --- The sync's llm now rides the chat's OWN connection (chatMemorySync.ts's resolveSyncSettings
+// builds a gated openai-compatible provider over the connection profile and calls it over HTTP) —
+// so the fake LLM seam moves into a mocked global fetch. The mock dispatches on the request's
+// forced tool_choice, records each request as the same { messages, options } shape the old fake
+// recorded (every llm.calls-based helper below is untouched), and returns the same turns. Two
+// distinct fake endpoints exist so the lock can be proven: the active connection and the named one
+// a chat is locked to. ---
+const ACTIVE_FAKE_BASE = 'https://sync-active-fake.example';
+const NAMED_FAKE_BASE = 'https://sync-named-fake.example';
+
+function fakeSyncProfile(baseUrl, model) {
   return {
-    calls,
-    name: 'fake-llm',
+    kind: 'openai-compatible',
+    model,
+    apiKey: 'test-key',
+    baseUrl,
     supportsVision: false,
-    async complete(messages, _tools, options = {}) {
-      calls.push({ messages, options });
-      if (options.forceTool === 'summarize_chat_chunk') {
-        const content = messages.find((m) => m.role === 'user').content;
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [{ id: randomUUID(), name: 'summarize_chat_chunk', arguments: { summary: `Summary[${content}]` } }],
-        };
-      }
-      if (options.forceTool === 'distill_chat_memory') {
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [
-            { id: randomUUID(), name: 'distill_chat_memory', arguments: { entries: [{ topic_key: 'thread', content: `Entry #${calls.length}` }] } },
-          ],
-        };
-      }
-      if (options.forceTool === 'classify_household_memory') {
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [{ id: randomUUID(), name: 'classify_household_memory', arguments: { memories: ['A durable fact worth remembering.'] } }],
-        };
-      }
-      if (options.forceTool === 'bridge_chat_memory') {
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [
-            {
-              id: randomUUID(),
-              name: 'bridge_chat_memory',
-              arguments: {
-                events: '| When | What | Who |\n|------|------|-----|',
-                scene: 'SCENE: A quiet square at dusk.',
-                plot_entries: [{ name: 'The Ashford Siege Breaks Open', content: 'The siege wall breached.', arc_tag: 'siege_break' }],
+    priceInputPerMillion: 1,
+    priceOutputPerMillion: 2,
+    priceCacheHitPerMillion: 0.5,
+    pricePeakInputPerMillion: 1,
+    pricePeakOutputPerMillion: 2,
+    pricePeakCacheHitPerMillion: 0.5,
+  };
+}
+
+const llmConnections = {
+  async resolveActive() {
+    return fakeSyncProfile(ACTIVE_FAKE_BASE, 'sync-active-model');
+  },
+  async resolveByName(name) {
+    return name === 'sync-profile' ? fakeSyncProfile(NAMED_FAKE_BASE, 'sync-named-model') : undefined;
+  },
+};
+
+function createFakeHttpBackend() {
+  return { calls: [], gateHook: null, curatePeopleOverride: null };
+}
+
+function oaiToolResponse(name, args) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [
+        {
+          message: { content: null, tool_calls: [{ id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    text: async () => '',
+  };
+}
+
+function installSyncFetchMock(backend) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u === `${ACTIVE_FAKE_BASE}/chat/completions` || u === `${NAMED_FAKE_BASE}/chat/completions`) {
+      const body = JSON.parse(init.body);
+      const forceTool = body.tool_choice?.function?.name;
+      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
+      if (backend.gateHook) await backend.gateHook(forceTool);
+      switch (forceTool) {
+        case 'summarize_chat_chunk': {
+          const content = body.messages.find((m) => m.role === 'user').content;
+          return oaiToolResponse('summarize_chat_chunk', { summary: `Summary[${content}]` });
+        }
+        case 'distill_chat_memory':
+          return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
+        case 'classify_household_memory':
+          return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
+        case 'bridge_chat_memory':
+          return oaiToolResponse('bridge_chat_memory', {
+            events: '| When | What | Who |\n|------|------|-----|',
+            scene: 'SCENE: A quiet square at dusk.',
+            plot_entries: [{ name: 'The Ashford Siege Breaks Open', content: 'The siege wall breached.', arc_tag: 'siege_break' }],
+          });
+        case 'curate_lorebook':
+          return oaiToolResponse('curate_lorebook', { entries: [{ action: 'new', name: 'The Pavilion', category: 'place', content: 'A weathered pavilion.' }] });
+        case 'curate_people':
+          return oaiToolResponse('curate_people', backend.curatePeopleOverride ?? {
+            entries: [
+              {
+                action: 'new',
+                name: 'Elena Ashford',
+                content: '**Personality:** resolute.\n**Goals:** hold the gate.',
+                appearance: 'Tall, with a lantern jaw and steel-grey eyes.',
               },
-            },
-          ],
-        };
+            ],
+          });
       }
-      if (options.forceTool === 'curate_lorebook') {
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [
-            {
-              id: randomUUID(),
-              name: 'curate_lorebook',
-              arguments: { entries: [{ action: 'new', name: 'The Pavilion', category: 'place', content: 'A weathered pavilion.' }] },
-            },
-          ],
-        };
-      }
-      if (options.forceTool === 'curate_people') {
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [
-            {
-              id: randomUUID(),
-              name: 'curate_people',
-              arguments: {
-                entries: [
-                  {
-                    action: 'new',
-                    name: 'Elena Ashford',
-                    content: '**Personality:** resolute.\n**Goals:** hold the gate.',
-                    appearance: 'Tall, with a lantern jaw and steel-grey eyes.',
-                  },
-                ],
-              },
-            },
-          ],
-        };
-      }
-      throw new Error(`fake llm got an unexpected forceTool: ${options.forceTool}`);
-    },
+      throw new Error(`fake sync HTTP backend got an unexpected forceTool: ${forceTool}`);
+    }
+    return originalFetch(url, init);
   };
 }
 
@@ -538,7 +568,12 @@ pool.chatSessions.set(CHAT_ID, { user_id: USER, archived_at: null });
 pool.chatSessions.set(NOT_DUE_CHAT_ID, { user_id: USER, archived_at: null });
 
 const db = createPostgresClient(pool);
-const llm = createFakeLlm();
+const backend = createFakeHttpBackend();
+installSyncFetchMock(backend);
+// deps.llm is now unused for real sync work — resolveSyncSettings swaps in a connection-backed
+// gated provider whenever a chat_id is involved. Kept as a shim so the llm.calls helpers below
+// read the HTTP backend's recorded requests unchanged.
+const llm = { calls: backend.calls, name: 'fake-llm', supportsVision: false, complete: async () => { throw new Error('unused — sync llm comes from the connection provider'); } };
 const embeddings = createFakeEmbeddings();
 // live window 2 pairs (4 msgs), sync-every 2 pairs (4 msgs) -> due once 8 unsynced messages pile
 // up; digest horizon 8 pairs -> ceil(8 / 2 pairs-per-chunk) = 4 chunks re-read every sync.
@@ -547,7 +582,6 @@ const settings = createFakeSettingsStore({
   chat_memory_sync_every_pairs: '2',
   chat_memory_digest_horizon_pairs: '8',
 });
-const llmConnections = { async resolveByName() { return undefined; } };
 const deps = { db, llm, embeddings, settings, llmConnections };
 
 function seedMessages(chatId, tag, count) {
@@ -826,21 +860,19 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   pool.chatSessions.set(CONCUR_CHAT_ID, { user_id: USER, archived_at: null });
   seedMessages(CONCUR_CHAT_ID, 'CONCUR', 12); // clears the due threshold
 
-  // Gate the fake LLM's summarize calls so pass A is provably parked mid-pipeline (before it can
-  // commit its sync point) when pass B runs. aInside flips before the gate await — the record of
-  // the call being entered is what the poller below waits on.
-  const realComplete = llm.complete;
+  // Gate the fake HTTP backend's summarize calls so pass A is provably parked mid-pipeline (before
+  // it can commit its sync point) when pass B runs. aInside flips before the gate await — the
+  // record of the call being entered is what the poller below waits on.
   let releaseGate;
   let aInside = false;
   const gate = new Promise((resolve) => {
     releaseGate = resolve;
   });
-  llm.complete = async (messages, tools, options) => {
-    if (options.forceTool === 'summarize_chat_chunk') {
+  backend.gateHook = async (forceTool) => {
+    if (forceTool === 'summarize_chat_chunk') {
       aInside = true;
       await gate;
     }
-    return realComplete.call(llm, messages, tools, options);
   };
 
   try {
@@ -881,7 +913,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
       "the winning pass's commit overwrites the transient 'skipped' with ok",
     );
   } finally {
-    llm.complete = realComplete;
+    backend.gateHook = null;
   }
 }
 
@@ -964,32 +996,17 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     { character_id: randomUUID(), user_id: USER, name: 'Garrick Stone', appearance: 'A heavyset old soldier.', status: 'transient' },
   );
 
-  const realComplete = llm.complete.bind(llm);
-  llm.complete = async (messages, tools, options = {}) => {
-    if (options.forceTool === 'curate_people') {
-      return {
-        message: { role: 'assistant', content: '' },
-        toolCalls: [
-          {
-            id: randomUUID(),
-            name: 'curate_people',
-            arguments: {
-              entries: [
-                { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, with ash-blonde hair.' },
-                { action: 'new', name: 'Unknown Stranger', content: '**Personality:** elusive.', appearance: 'A hooded figure.' },
-                { action: 'new', name: 'Garrick Stone', content: '**Personality:** gruff.', appearance: 'Fresh description that must NOT land.' },
-              ],
-            },
-          },
-        ],
-      };
-    }
-    return realComplete(messages, tools, options);
+  backend.curatePeopleOverride = {
+    entries: [
+      { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, with ash-blonde hair.' },
+      { action: 'new', name: 'Unknown Stranger', content: '**Personality:** elusive.', appearance: 'A hooded figure.' },
+      { action: 'new', name: 'Garrick Stone', content: '**Personality:** gruff.', appearance: 'Fresh description that must NOT land.' },
+    ],
   };
 
   const peopleFactsBefore = pool.canonFacts.filter((f) => f.chat_id === APPEAR_CHAT_ID && f.category === 'person').length;
   await runChatMemorySyncTick(deps);
-  llm.complete = realComplete;
+  backend.curatePeopleOverride = null;
 
   const mira = pool.characters.find((c) => c.name === 'Mira Vale');
   assert(mira?.appearance === 'Slender, with ash-blonde hair.', 'an exact name match writes appearance onto the blank characters row');
@@ -1101,6 +1118,43 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     topupChunks[1].content.includes('TOPUP-user-5') && topupChunks[1].content.includes('TOPUP-assistant-8') && !topupChunks[1].content.includes('TOPUP-user-1'),
     'the top-up chunk covers only the not-yet-chunked messages — no re-chunking, no overlapping content',
   );
+}
+
+// --- The connection lock (chatMemorySync.ts's resolveSyncSettings): a chat's own connection rides
+// onto its sync — a chat locked to "sync-profile" syncs THROUGH that connection's endpoint, never
+// the active one. ---
+{
+  const LOCK_CHAT_ID = randomUUID();
+  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'sync-profile' } });
+  seedMessages(LOCK_CHAT_ID, 'LOCK', 12);
+
+  const activeBaseCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  await runChatMemorySyncTick(deps);
+
+  const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
+  const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  assert(namedCalls.length > 0, 'a chat locked to a named connection syncs THROUGH that connection');
+  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the locked sync never touches the active connection — chat and sync ride the same connection');
+  assert(pool.chatMemorySyncStatus.get(LOCK_CHAT_ID)?.last_status === 'ok', 'the named-connection sync still completes');
+}
+
+// --- The refusal: a chat locked to a connection that no longer exists must never silently sync on
+// another connection — that is the divergence this design forbids. The tick records the error and
+// leaves the backlog for the moment the chat's connection is restored. ---
+{
+  const REFUSE_CHAT_ID = randomUUID();
+  pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'ghost-connection' } });
+  seedMessages(REFUSE_CHAT_ID, 'REFUSE', 12);
+
+  const callsBefore = backend.calls.length;
+  const chunksBefore = pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length;
+  await runChatMemorySyncTick(deps);
+
+  const status = pool.chatMemorySyncStatus.get(REFUSE_CHAT_ID);
+  assert(status?.last_status === 'error', 'a chat locked to an unknown connection records a sync error — no silent fallback to another connection');
+  assert(status?.last_error?.includes('ghost-connection') && status?.last_error?.includes('refused'), 'the status row names the unknown connection and the refusal');
+  assert(backend.calls.length === callsBefore, 'the refused sync makes ZERO LLM calls — no other connection is ever used');
+  assert(pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length === chunksBefore, 'the refused sync persists no chunks');
 }
 
 if (process.exitCode) {

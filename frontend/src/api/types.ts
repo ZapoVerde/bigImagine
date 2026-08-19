@@ -1531,7 +1531,10 @@ export interface PortraitGenerateInput {
   pendingFeedback?: string;
 }
 
-/** POST /v1/portraits/feedback body — ratings are 1-5 integers (server 400s otherwise). */
+/** POST /v1/portraits/feedback body — ratings are 1-5 integers (server 400s otherwise). roundId
+ *  (optional) is echoed from the round's generate so the server correlates this feedback's
+ *  reflection calls to the same round (portrait-studio-telemetry-plan.md); a retry omits it and
+ *  the round is resolved from the episode. */
 export interface PortraitFeedbackInput {
   entityIds: Record<string, string>;
   goal: string;
@@ -1540,6 +1543,7 @@ export interface PortraitFeedbackInput {
   ratings?: Record<string, number>;
   notes?: Record<string, string>;
   rationale?: string;
+  roundId?: string;
 }
 
 /** The Reflection Investigation outcome returned with the feedback response. */
@@ -1549,8 +1553,79 @@ export interface PortraitReflectionOutcome {
   reason?: string;
 }
 
-/** POST /v1/portraits/feedback response. */
+/** POST /v1/portraits/feedback response. roundId (portrait-studio-telemetry-plan.md) is the
+ *  round this feedback closed — echoed from the round's generate when known, resolved from the
+ *  episode on a retry path; the telemetry panel uses it to refresh its receipt. */
 export interface PortraitFeedbackResult {
   episodeId: string;
   reflection: PortraitReflectionOutcome;
+  roundId?: string;
+}
+
+/** POST /v1/portraits/generate response — the round's candidates, the lesson that drove the
+ *  round (null = explicitly exploratory), and the round's correlation id (echoed to feedback and
+ *  polled by the telemetry panel). */
+export interface PortraitGenerateResult {
+  candidates: PortraitCandidate[];
+  lesson: { lessonId: string; statement: string } | null;
+  roundId?: string;
+}
+
+/** POST /v1/portraits/candidates/:id/retry response — roundId is set when the retried
+ *  candidate's round was found (the retry's image call joins that round, never overwriting
+ *  history), so the telemetry panel can refresh its receipt after a retry. */
+export interface PortraitCandidateRetryResult {
+  imageUrl: string | null;
+  composedPrompt: string;
+  failed?: string;
+  roundId?: string;
+}
+
+export type PortraitRoundStatus = 'running' | 'succeeded' | 'failed' | 'partial';
+export type PortraitCallPhase = 'mutation' | 'wiki_pull' | 'image_render' | 'reflection';
+export type PortraitCallStatus = 'running' | 'succeeded' | 'failed';
+
+/** One call in a round's telemetry receipt (portrait-studio-telemetry-plan.md) — an LLM call
+ *  (phase mutation/wiki_pull/reflection, labeled 'portrait:*') or an image render (phase
+ *  image_render, with candidateId). Unavailable fields are OMITTED, never zeroed — a provider
+ *  that reported no usage yields a call row with timing/status only. */
+export interface PortraitCallTelemetry {
+  callId: string;
+  phase: PortraitCallPhase;
+  label: string;
+  status: PortraitCallStatus;
+  providerKind?: string;
+  model?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  cacheReadTokens?: number;
+  durationMs?: number;
+  errorCode?: string;
+  errorMessage?: string;
+  candidateId?: string;
+  createdAt: string;
+}
+
+/** The round's totals (plan §Totals) — token sums over non-null values from the round's LLM
+ *  calls, duration sums (failed calls included), wall-clock = completed_at − started_at (never
+ *  the sum of parallel image calls). cacheReadTokens appears only when a call reported cache
+ *  accounting. */
+export interface PortraitRoundTotals {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  llmDurationMs: number;
+  imageDurationMs: number;
+  wallClockDurationMs: number;
+}
+
+/** GET /v1/portraits/rounds/:roundId/telemetry response — the durable per-round receipt: every
+ *  call (chronological) and the round's totals. */
+export interface PortraitRoundTelemetry {
+  roundId: string;
+  status: PortraitRoundStatus;
+  calls: PortraitCallTelemetry[];
+  totals: PortraitRoundTotals;
 }

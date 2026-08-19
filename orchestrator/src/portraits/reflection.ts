@@ -125,10 +125,14 @@ export const DEFAULT_REFLECTION_SYSTEM_PROMPT =
   'next mutation), the unchanged layers to preserve, the supporting evidence, a confidence of ' +
   'low/medium/high, and a short reusable lesson statement.\n' +
   '- status "insufficient_evidence": when the rationale, ratings, notes, and diffs do not clearly ' +
-  'support one actionable change.\n\n' +
+  'support one actionable change. A clear, specific human instruction tied to the goal or observed ' +
+  'result is sufficient evidence for a provisional low-confidence conclusion, even when the images ' +
+  'do not prove the mechanism.\n\n' +
   'Rules: use only supplied evidence; exactly one next_change; a layer may not appear in both ' +
-  'next_change and preserve; prefer insufficient_evidence over a forced or vague conclusion; a ' +
-  'rating without an explanation is preference data, not a completed lesson.';
+  'next_change and preserve; prefer insufficient_evidence only when the feedback is empty, ' +
+  'contradictory, or cannot identify one actionable layer change; a rating without an explanation ' +
+  'is preference data, not a completed lesson. When the human gives a specific actionable ' +
+  'instruction, preserve it as a provisional lesson and use confidence low if necessary.';
 
 interface DecodedLessonArgs {
   status?: unknown;

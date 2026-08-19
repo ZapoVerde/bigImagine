@@ -24,6 +24,7 @@ import type {
 } from '../api/types';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import PortraitCandidateGrid from '../components/portraits/PortraitCandidateGrid';
+import PortraitTelemetryPanel from '../components/portraits/PortraitTelemetryPanel';
 import './PortraitStudioView.css';
 
 // Portrait Studio (docs/plans/completed/portrait-studio-plan.md §Frontend) — the training/authoring surface
@@ -76,6 +77,11 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   const [generateError, setGenerateError] = useState<string | null>(null);
   const [candidates, setCandidates] = useState<PortraitCandidate[] | null>(null);
   const [roundGoal, setRoundGoal] = useState('');
+  // Round telemetry (portrait-studio-telemetry-plan.md): the active round id echoed back from
+  // generate/feedback/retry, and a token bumped on each round action so the panel re-fetches
+  // immediately (the panel then polls while the round is running).
+  const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
+  const [telemetryRefreshToken, setTelemetryRefreshToken] = useState(0);
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
@@ -255,9 +261,13 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
     setBanner(null);
     setFeedbackError(null);
     try {
-      const cs = await generatePortraitCandidates({ entityIds: selections, goal: goal.trim() }, apiKey);
-      setCandidates(cs); // a failed render still gets a card — a placeholder with Retry, not silently dropped
+      const res = await generatePortraitCandidates({ entityIds: selections, goal: goal.trim() }, apiKey);
+      setCandidates(res.candidates); // a failed render still gets a card — a placeholder with Retry, not silently dropped
       setRoundGoal(goal.trim());
+      if (res.roundId) {
+        setActiveRoundId(res.roundId);
+        setTelemetryRefreshToken((t) => t + 1);
+      }
     } catch (err) {
       setGenerateError(errMessage(err, 'generation failed'));
     } finally {
@@ -276,6 +286,10 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
             : c,
         ),
       );
+      if (res.roundId) {
+        setActiveRoundId(res.roundId);
+        setTelemetryRefreshToken((t) => t + 1);
+      }
     } catch (err) {
       setGenerateError(errMessage(err, 'retry failed'));
     } finally {
@@ -299,9 +313,14 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
               winnerId: candidateId,
               ratings,
               rationale,
+              roundId: activeRoundId ?? undefined,
             },
             apiKey,
           );
+      if (res.roundId) {
+        setActiveRoundId(res.roundId);
+        setTelemetryRefreshToken((t) => t + 1);
+      }
       if (res.reflection?.action === 'created' || res.reflection?.action === 'amended') {
         setBanner({ action: res.reflection.action, entryId: res.reflection.entryId ?? '' });
         setFailedEpisodeId(null);
@@ -312,7 +331,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
         setFeedbackError(
           res.reflection?.action === 'failed'
             ? `Reflection failed${res.reflection.reason ? `: ${res.reflection.reason}` : ''}. Adjust the Portrait Studio connection and try again.`
-            : 'Reflection found insufficient evidence for a reusable lesson. Add a clearer rationale or adjust the connection, then try again.',
+            : 'Reflection did not turn this into a lesson yet. Adjust the rationale or winner feedback below and retry this same round.',
         );
       }
       void refreshEntities();
@@ -447,6 +466,13 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
       </header>
       {feedbackError && <div className="portrait-feedback-toast error-banner" role="alert">{feedbackError}</div>}
 
+      {/* Left-side round telemetry receipt (portrait-studio-telemetry-plan.md) beside the main
+          Studio column — the Studio's own panel, not the application sidebar. */}
+      <div className="portrait-studio-body">
+        <div className="portrait-studio-telemetry">
+          <PortraitTelemetryPanel apiKey={apiKey} roundId={activeRoundId} refreshToken={telemetryRefreshToken} />
+        </div>
+        <div className="portrait-studio-main">
       {/* Entity pickers per promptable layer, following ConnectionsView's select pattern. */}
       <section className="portrait-pickers">
         {promptableLayers.map((layer) => {
@@ -546,7 +572,11 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
           {wikiError && <div className="error-banner">{wikiError}</div>}
           {wiki.length === 0 && <div className="portrait-empty">No lessons yet — the first round's Reflection writes the first entry.</div>}
           {wiki.map((entry) => (
-          <article key={entry.entry_id} className="portrait-wiki-entry">
+          <details key={entry.entry_id} className="portrait-wiki-entry">
+            <summary className="portrait-wiki-entry-header">
+              <span className="portrait-wiki-title">{entry.title}</span>
+              <span className="portrait-wiki-tags">{entry.tags.map((t) => `#${t}`).join(' ')}</span>
+            </summary>
             {editingEntryId === entry.entry_id ? (
               <div className="portrait-wiki-edit">
                 <input value={wikiDraft.title} onChange={(e) => setWikiDraft((d) => ({ ...d, title: e.target.value }))} placeholder="Title" />
@@ -563,9 +593,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
               </div>
             ) : (
               <>
-                <header className="portrait-wiki-entry-header">
-                  <span className="portrait-wiki-title">{entry.title}</span>
-                  <span className="portrait-wiki-tags">{entry.tags.map((t) => `#${t}`).join(' ')}</span>
+                <header className="portrait-wiki-entry-actions">
                   <div className="portrait-wiki-actions">
                     <button type="button" onClick={() => openWikiEditor(entry)}>
                       Edit
@@ -589,7 +617,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
                 </footer>
               </>
             )}
-          </article>
+          </details>
           ))}
         </details>
       </section>
@@ -732,6 +760,8 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
           </div>
         )}
       </section>
+        </div>
+      </div>
     </div>
   );
 }

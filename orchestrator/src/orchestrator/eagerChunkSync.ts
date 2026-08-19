@@ -71,26 +71,37 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
  *  chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md
  *  — fallback DEFAULT_CHUNK_PAIRS = today's 4-message chunk, so a changed size is a no-op until a
  *  value is saved). */
-async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
+async function resolveEagerLlm(deps: EagerChunkDeps, userId: string, chatId: string): Promise<{
   llm: LlmProvider;
   chunkSummaryPrompt: string | undefined;
   liveWindowPairs: number;
   pairsPerChunk: number;
 }> {
-  const [profileName, livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
-    deps.settings.get('chat_memory_profile'),
+  const [chatProfile, livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
+    deps.db.withUserScope(userId, async (session) => {
+      const rows = await session.query<{ profile: string | null }>(
+        `select params->>'profile' as profile from chat_sessions where chat_id = $1`,
+        [chatId],
+      );
+      return rows[0]?.profile ?? undefined;
+    }),
     deps.settings.get('chat_memory_live_window_pairs'),
     deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
   ]);
 
   let llm = deps.llm;
-  if (profileName) {
-    const profile = await deps.llmConnections.resolveByName(profileName);
+  if (!chatProfile) {
+    const active = await deps.llmConnections.resolveActive();
+    if (!active) throw new Error(`chat ${chatId} has no selected connection and no active connection exists`);
+    llm = createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
+  }
+  if (chatProfile) {
+    const profile = await deps.llmConnections.resolveByName(chatProfile);
     if (profile) {
       llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
     } else {
-      log.error(`eager chunk: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
+      throw new Error(`chat ${chatId} names unknown connection "${chatProfile}"; eager sync refused to use another connection`);
     }
   }
 
@@ -116,7 +127,7 @@ async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
  */
 export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chatId: string): Promise<EagerChunkResult> {
   try {
-    const { llm, chunkSummaryPrompt, liveWindowPairs, pairsPerChunk } = await resolveEagerLlm(deps);
+    const { llm, chunkSummaryPrompt, liveWindowPairs, pairsPerChunk } = await resolveEagerLlm(deps, userId, chatId);
 
     // Phase 1 — unlocked, cheap pre-check. floor(messageCount / 2) is the turn-count estimate:
     // exact in every today-case (each turn is one user + one assistant message; a seeded

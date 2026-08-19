@@ -2637,10 +2637,12 @@ server.close();
       headers: { ...auth3, 'content-type': 'application/json' },
       body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], chat_id: unknownProfileChat.chatId }),
     });
-    assert(unknownProfileRes.status === 200, 'a chat_id naming an unknown profile still succeeds (falls back, does not fail the turn)');
+    // 2026-08-19: the lock — a chat's own profile is the connection the turn rides; an unknown
+    // name is a hard refusal (turnExecution.ts), never a silent fallback to another connection.
+    assert(unknownProfileRes.status === 500, 'a chat_id naming an unknown connection is refused — the turn fails, it does not fall back');
     assert(
-      capturedCalls.length === capturedCallsBefore + 1 && capturedProfileCalls.length === 1,
-      'an unknown profile override falls back to the boot-time llm rather than throwing or hitting any provider',
+      capturedCalls.length === capturedCallsBefore && capturedProfileCalls.length === 1,
+      'the refused turn never hits any provider — neither the unknown connection nor the boot-time llm',
     );
   } finally {
     globalThis.fetch = originalFetch3;

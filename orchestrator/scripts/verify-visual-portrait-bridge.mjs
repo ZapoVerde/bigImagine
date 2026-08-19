@@ -162,6 +162,11 @@ function makeDb() {
       const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
       return row ? [row] : [];
     }
+    // insertLesson's entity-name lookup (feedback reflection lesson ledger, commit e8f0d3e).
+    if (s.startsWith('select name from visual_entities')) {
+      const row = state.entities.find((e) => e.entity_id === params[0] && e.user_id === params[1]);
+      return row ? [{ name: row.name }] : [];
+    }
     if (s.startsWith('select character_id, name, persona, appearance from characters')) {
       const row = state.characters.find((c) => c.character_id === params[0] && c.user_id === params[1]);
       return row ? [{ character_id: row.character_id, name: row.name, persona: row.persona, appearance: row.appearance }] : [];

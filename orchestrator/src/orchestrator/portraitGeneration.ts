@@ -94,9 +94,9 @@
  */
 
 import { log } from '../io/logger.js';
-import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
+import { runWithCallContext, withCallLabel, withRoundId } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
-import type { ImageConnectionStore } from '../io/imageConnections.js';
+import type { ImageConnectionProfile, ImageConnectionStore } from '../io/imageConnections.js';
 import { createImageGenProvider } from '../io/imageGen/index.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
@@ -146,6 +146,10 @@ export interface PortraitGenerationRoundResult {
   /** The concluded lesson this round was driven by, when one was supplied and usable — lets the
    *  Studio mark the round lesson-driven (null = exploratory). */
   lesson?: { lessonId: string; statement: string } | null;
+  /** The round's correlation id (docs/plans/portrait-studio-telemetry-plan.md) — set whenever
+   *  the round reached the mutation phase (the visual_rounds row exists); undefined on
+   *  pre-mutation failures like a missing connection or entity. */
+  roundId?: string;
   error?: string;
 }
 
@@ -341,12 +345,98 @@ class EntityResolutionError extends Error {
   }
 }
 
+// ---- Round telemetry seams (docs/plans/portrait-studio-telemetry-plan.md) ----------------
+// visual_rounds / visual_round_image_calls (migration 0119) are the Portrait round's correlation
+// ledger: the visual_rounds row is created before the first mutation call and reaches a terminal
+// status exactly once; visual_round_image_calls rows are written around every
+// createImageGenProvider(...).generate() call. Every write here is best-effort by design — a
+// telemetry write failure must never make generation fail (plan §Edge Cases), so call sites
+// swallow/log failures rather than propagating them.
+
+type VisualRoundStatus = 'running' | 'succeeded' | 'failed' | 'partial';
+
+async function createRound(db: PostgresClient, userId: string, goal: string): Promise<string> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<{ round_id: string }>(
+      `insert into visual_rounds (user_id, goal) values ($1, $2) returning round_id`,
+      [userId, goal],
+    ),
+  );
+  return rows[0].round_id;
+}
+
+/** Terminal write only — status moves running → succeeded/failed/partial exactly once, with
+ *  completed_at set at the same instant (the plan's "never append or rewrite the round"). */
+async function setRoundStatus(db: PostgresClient, userId: string, roundId: string, status: Exclude<VisualRoundStatus, 'running'>): Promise<void> {
+  await db.withUserScope(userId, (session) =>
+    session.query(
+      `update visual_rounds set status = $2, completed_at = now() where round_id = $1 and user_id = $3`,
+      [roundId, status, userId],
+    ),
+  );
+}
+
+async function beginImageCall(db: PostgresClient, userId: string, roundId: string, profile: ImageConnectionProfile): Promise<string> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<{ call_id: string }>(
+      `insert into visual_round_image_calls (user_id, round_id, status, provider_kind, model, started_at)
+       values ($1, $2, 'running', $3, $4, now()) returning call_id`,
+      [userId, roundId, profile.kind, profile.model],
+    ),
+  );
+  return rows[0].call_id;
+}
+
+async function finishImageCall(
+  db: PostgresClient,
+  userId: string,
+  callId: string,
+  fields: { status: 'succeeded' | 'failed'; durationMs: number; errorMessage?: string },
+): Promise<void> {
+  await db.withUserScope(userId, (session) =>
+    session.query(
+      `update visual_round_image_calls
+       set status = $2, duration_ms = $3, error_message = $4, completed_at = now()
+       where call_id = $1 and user_id = $5`,
+      [callId, fields.status, fields.durationMs, fields.errorMessage ?? null, userId],
+    ),
+  );
+}
+
+/** Backfills candidate_id once the visual_candidates row exists — null at render time (plan
+ *  §Image calls). */
+async function linkImageCallToCandidate(db: PostgresClient, userId: string, callId: string, candidateId: string): Promise<void> {
+  await db.withUserScope(userId, (session) =>
+    session.query(
+      `update visual_round_image_calls set candidate_id = $2 where call_id = $1 and user_id = $3`,
+      [callId, candidateId, userId],
+    ),
+  );
+}
+
+/** The round a candidate was born into, via its original render's image-call row — used by
+ *  retryPortraitCandidateRender so a retry's image call joins the same round (plan §Image calls:
+ *  "a retry is a new call row and the same round ID; never overwrite history"). */
+async function roundIdForCandidate(db: PostgresClient, userId: string, candidateId: string): Promise<string | null> {
+  const rows = await db.withUserScope(userId, (session) =>
+    session.query<{ round_id: string }>(
+      `select round_id from visual_round_image_calls where candidate_id = $1 and user_id = $2 limit 1`,
+      [candidateId, userId],
+    ),
+  );
+  return rows[0]?.round_id ?? null;
+}
+
 export async function runPortraitGenerationRound(
   deps: PortraitGenerationDeps,
   llm: LlmProvider,
   userId: string,
   input: PortraitGenerationInput,
 ): Promise<PortraitGenerationRoundResult> {
+  // The round's correlation ledger row is created just before the first mutation call (plan
+  // §Round lifecycle); the variable is hoisted out of the try so the top-level catch can mark
+  // the round failed too.
+  let roundId: string | null = null;
   try {
     // 1. Active manifest — seeds the default on first read; a corrupt stored value degrades to
     //    the built-in default (layerStack.ts), never an error.
@@ -449,6 +539,11 @@ export async function runPortraitGenerationRound(
       mutationOverride,
     );
     const attempt = await nextAttempt(deps.db, userId, subjectEntityId);
+    // The round's correlation ledger row, created before the first mutation call
+    // (portrait-studio-telemetry-plan.md §Round lifecycle). A telemetry create failure is not a
+    // generation failure (plan §Edge Cases), but at this point nothing has been spent yet, so
+    // failing the round loudly is the honest call rather than running un-correlated.
+    roundId = await createRound(deps.db, userId, input.goal);
     let chromosomes: CandidateChromosome[];
     try {
       const MAX_WIKI_PULLS = 2;
@@ -457,8 +552,13 @@ export async function runPortraitGenerationRound(
       let turn: LlmTurn;
       for (;;) {
         const offerPullTool = unsubscribedWikiTagIndex.trim() !== '' && pulls < MAX_WIKI_PULLS;
+        // The first mutation call of the round is 'portrait:mutation'; every call after a
+        // pull_wiki_entry round-trip is 'portrait:wiki-pull' — the plan's one real behavior
+        // change to this loop (today every round-trip shares one label). Both ride withRoundId
+        // so the round correlates its calls on llm_calls.round_id.
+        const label = pulls === 0 ? 'portrait:mutation' : 'portrait:wiki-pull';
         turn = await runWithCallContext({ taskId: `visual-${subjectEntityId}-${attempt}`, kind: 'system', userId }, () =>
-          withCallLabel('portrait:mutation', () => llm.complete(conversation, offerPullTool ? [PULL_WIKI_ENTRY_TOOL] : [])),
+          withCallLabel(label, () => withRoundId(roundId, () => llm.complete(conversation, offerPullTool ? [PULL_WIKI_ENTRY_TOOL] : []))),
         );
         conversation.push({ role: 'assistant', content: turn.message.content, toolCalls: turn.toolCalls });
         const pullCall = turn.toolCalls.find((c) => c.name === 'pull_wiki_entry');
@@ -474,6 +574,9 @@ export async function runPortraitGenerationRound(
       }
       chromosomes = parseCandidateResponse(turn);
     } catch (err) {
+      await setRoundStatus(deps.db, userId, roundId, 'failed').catch((w) =>
+        log.warn('portraitGeneration: failed to mark mutation-failed round terminal', { roundId, err: w }),
+      );
       log.error('portraitGeneration: mutation call failed, aborting round', { subjectEntityId, attempt, err });
       return { ok: false, error: `mutation_failed: ${err instanceof Error ? err.message : String(err)}` };
     }
@@ -487,11 +590,21 @@ export async function runPortraitGenerationRound(
     const template = entities.get('style')?.template ?? manifest.template;
 
     // 6. Parallel per-candidate dispatch. One candidate's failure is logged and that candidate
-    //    comes back imageUrl null — the round continues with whatever succeeded (§11).
+    //    comes back imageUrl null — the round continues with whatever succeeded (§11). Each
+    //    render also records its own visual_round_image_calls row (running → succeeded/failed,
+    //    candidate_id backfilled in step 7). Image telemetry is best-effort: a write failure is
+    //    logged and the render proceeds — telemetry must never make generation fail (plan §Edge
+    //    Cases).
     const dispatched = await Promise.all(
       reconciled.map(async (chromosome) => {
         const composedPrompt = compileTemplate(template, chromosome.slots, manifest.layers);
+        const renderStartedAt = Date.now();
+        let imageCallId: string | null = null;
         try {
+          imageCallId = await beginImageCall(deps.db, userId, roundId!, profile).catch((w) => {
+            log.warn('portraitGeneration: failed to begin image telemetry', { error: w });
+            return null;
+          });
           const imageUrl = await createImageGenProvider(profile).generate({
             prompt: composedPrompt,
             negativePrompt: [profile.masterNegativePrompt ?? '', chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
@@ -506,14 +619,28 @@ export async function runPortraitGenerationRound(
             samplerName: profile.samplerName,
             workflowParameters: profile.workflowParameters,
           });
-          return { chromosome, composedPrompt, imageUrl: imageUrl as string, failed: undefined };
+          if (imageCallId) {
+            await finishImageCall(deps.db, userId, imageCallId, {
+              status: 'succeeded',
+              durationMs: Date.now() - renderStartedAt,
+            }).catch((w) => log.warn('portraitGeneration: failed to record image telemetry', { error: w }));
+          }
+          return { chromosome, composedPrompt, imageUrl: imageUrl as string, failed: undefined, imageCallId };
         } catch (err) {
+          const failed = err instanceof Error ? err.message : String(err);
           log.warn('portraitGeneration: candidate render failed, omitting from grid', {
             subjectEntityId,
             attempt,
-            error: err instanceof Error ? err.message : String(err),
+            error: failed,
           });
-          return { chromosome, composedPrompt, imageUrl: null, failed: err instanceof Error ? err.message : String(err) };
+          if (imageCallId) {
+            await finishImageCall(deps.db, userId, imageCallId, {
+              status: 'failed',
+              durationMs: Date.now() - renderStartedAt,
+              errorMessage: failed,
+            }).catch((w) => log.warn('portraitGeneration: failed to record failed image telemetry', { error: w }));
+          }
+          return { chromosome, composedPrompt, imageUrl: null, failed, imageCallId };
         }
       }),
     );
@@ -563,7 +690,23 @@ export async function runPortraitGenerationRound(
         imageUrl: result.imageUrl,
         ...(result.failed !== undefined ? { failed: result.failed } : {}),
       });
+      // The render's image-call row predates the candidate row — backfill the candidate_id now
+      // that it exists (plan §Image calls). Best-effort like every other telemetry write.
+      if (result.imageCallId) {
+        await linkImageCallToCandidate(deps.db, userId, result.imageCallId, rows[0].candidate_id).catch((w) =>
+          log.warn('portraitGeneration: failed to link image telemetry to candidate', { error: w }),
+        );
+      }
     }
+
+    // The round reaches its terminal status exactly once (plan §Round lifecycle) — the same
+    // three-way outcome this orchestrator's own result already distinguishes: all candidates
+    // rendered → succeeded; some rendered → partial; none rendered → failed.
+    const renderedCount = candidates.filter((c) => c.imageUrl).length;
+    const terminalStatus = renderedCount === candidates.length ? 'succeeded' : renderedCount === 0 ? 'failed' : 'partial';
+    await setRoundStatus(deps.db, userId, roundId, terminalStatus).catch((w) =>
+      log.warn('portraitGeneration: failed to mark round terminal', { roundId, status: terminalStatus, err: w }),
+    );
 
     // The lesson-use record: a lesson-driven round is explicitly attributable; without a lesson
     // the round is exploratory and writes nothing here. The episode_id fills in when the round's
@@ -588,15 +731,21 @@ export async function runPortraitGenerationRound(
     log.info('portraitGeneration: round complete', {
       subjectEntityId,
       attempt,
+      roundId,
       goal: input.goal,
       candidates: candidates.length,
-      rendered: candidates.filter((c) => c.imageUrl).length,
+      rendered: renderedCount,
       lessonDriven: usedLesson?.lesson_id ?? null,
     });
-    return { ok: true, candidates, lesson: usedLesson ? { lessonId: usedLesson.lesson_id, statement: usedLesson.statement } : null };
+    return { ok: true, candidates, roundId, lesson: usedLesson ? { lessonId: usedLesson.lesson_id, statement: usedLesson.statement } : null };
   } catch (err) {
     // bi_principles.md §11: log the seam. A failed round is a missing grid, never a broken
     // orchestrator — the operator retries from the Studio.
+    if (roundId) {
+      await setRoundStatus(deps.db, userId, roundId, 'failed').catch((w) =>
+        log.warn('portraitGeneration: failed to mark errored round terminal', { roundId, err: w }),
+      );
+    }
     log.error('portraitGeneration: round failed', { userId, goal: input.goal, err });
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
@@ -606,6 +755,10 @@ export interface PortraitCandidateRetryResult {
   ok: boolean;
   imageUrl?: string | null;
   composedPrompt?: string;
+  /** The round the retried candidate was born into (plan §Image calls — the retry's call row
+   *  joins that same round). Set when the round is found; the telemetry panel uses it to refresh
+   *  its receipt. */
+  roundId?: string;
   /** The provider error message on a repeat failure — same meaning as
    *  PortraitCandidateResult.failed, distinct from `error` (a retry-itself failure: candidate
    *  not found, no active connection). */
@@ -659,6 +812,19 @@ export async function retryPortraitCandidateRender(
     }
     const composedPrompt = compileTemplate(template, row.chromosome.slots ?? {}, manifest.layers);
 
+    // A retry's image call joins the round the candidate was born into (plan §Image calls: a
+    // retry is a new call row and the same round ID, never overwrite history). Best-effort —
+    // a round lookup or telemetry write failure must not block the re-render itself.
+    const roundId = await roundIdForCandidate(deps.db, userId, candidateId);
+    let imageCallId: string | null = null;
+    if (roundId) {
+      imageCallId = await beginImageCall(deps.db, userId, roundId, profile).catch((w) => {
+        log.warn('portraitGeneration: failed to begin retry image telemetry', { candidateId, error: w });
+        return null;
+      });
+    }
+    const renderStartedAt = Date.now();
+
     try {
       const imageUrl = await createImageGenProvider(profile).generate({
         prompt: composedPrompt,
@@ -677,12 +843,22 @@ export async function retryPortraitCandidateRender(
       await deps.db.withUserScope(userId, (session) =>
         session.query(`update visual_candidates set image_url = $1 where candidate_id = $2 and user_id = $3`, [imageUrl, candidateId, userId]),
       );
+      if (imageCallId) {
+        await finishImageCall(deps.db, userId, imageCallId, { status: 'succeeded', durationMs: Date.now() - renderStartedAt }).catch((w) =>
+          log.warn('portraitGeneration: failed to record retry image telemetry', { candidateId, error: w }),
+        );
+      }
       log.info('portraitGeneration: candidate retry succeeded', { candidateId });
-      return { ok: true, imageUrl: imageUrl as string, composedPrompt };
+      return { ok: true, imageUrl: imageUrl as string, composedPrompt, ...(roundId ? { roundId } : {}) };
     } catch (err) {
       const failed = err instanceof Error ? err.message : String(err);
+      if (imageCallId) {
+        await finishImageCall(deps.db, userId, imageCallId, { status: 'failed', durationMs: Date.now() - renderStartedAt, errorMessage: failed }).catch((w) =>
+          log.warn('portraitGeneration: failed to record failed retry image telemetry', { candidateId, error: w }),
+        );
+      }
       log.warn('portraitGeneration: candidate retry failed', { candidateId, error: failed });
-      return { ok: true, imageUrl: null, composedPrompt, failed };
+      return { ok: true, imageUrl: null, composedPrompt, failed, ...(roundId ? { roundId } : {}) };
     }
   } catch (err) {
     log.error('portraitGeneration: candidate retry errored', { userId, candidateId, err });

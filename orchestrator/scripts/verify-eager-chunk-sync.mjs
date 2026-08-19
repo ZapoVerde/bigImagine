@@ -29,6 +29,7 @@ function createFakePool() {
   const chatMessages = []; // { message_id, chat_id, user_id, role, content, created_at }
   const chatSyncPoints = []; // { sync_id, chat_id, user_id, ordinal, last_message_id, closed_at }
   const chatChunks = []; // { chat_id, sync_id, user_id, ordinal, content, summary, vector_embed }
+  const chatSessions = new Map(); // chat_id -> { user_id, params } (resolveEagerLlm's connection read)
   let lockQueries = 0;
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
@@ -37,6 +38,7 @@ function createFakePool() {
     chatMessages,
     chatSyncPoints,
     chatChunks,
+    chatSessions,
     lockQueries: () => lockQueries,
     now,
     async connect() {
@@ -46,6 +48,19 @@ function createFakePool() {
           if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
           if (sql.includes('set_config')) {
             scopedUserId = params[0];
+            return { rows: [] };
+          }
+
+          // resolveEagerLlm's per-chat connection read (eagerChunkSync.ts): which connection this
+          // chat is locked to. null/undefined means "no override" → the active connection.
+          if (sql.includes("params->>'profile'") && sql.includes('from chat_sessions')) {
+            const sess = chatSessions.get(params[0]);
+            return { rows: [{ profile: sess?.params?.profile ?? null }] };
+          }
+
+          // The connection-backed eager llm is a gated openai-compatible provider, which meters
+          // every complete() into llm_calls (io/llm/llmGate.ts) — swallowed here.
+          if (sql.includes('insert into llm_calls')) {
             return { rows: [] };
           }
 
@@ -138,23 +153,76 @@ function createFakePool() {
   };
 }
 
-function createFakeLlm() {
-  const calls = [];
+// --- The eager llm rides the chat's OWN connection (eagerChunkSync.ts's resolveEagerLlm builds a
+// gated openai-compatible provider over the connection profile and calls it over HTTP) — so the
+// fake LLM seam moves into a mocked global fetch. The mock dispatches on the request's forced
+// tool_choice, records each request as the same { messages, options } shape the old fake recorded,
+// and returns the same summarize_chat_chunk turn. Two distinct endpoints prove the lock: the
+// active connection and the named one a chat is locked to. ---
+const ACTIVE_FAKE_BASE = 'https://eager-active-fake.example';
+const NAMED_FAKE_BASE = 'https://eager-named-fake.example';
+
+function fakeEagerProfile(baseUrl, model) {
   return {
-    calls,
-    name: 'fake-llm',
+    kind: 'openai-compatible',
+    model,
+    apiKey: 'test-key',
+    baseUrl,
     supportsVision: false,
-    async complete(messages, _tools, options = {}) {
-      calls.push({ messages, options });
-      if (options.forceTool === 'summarize_chat_chunk') {
-        const content = messages.find((m) => m.role === 'user').content;
-        return {
-          message: { role: 'assistant', content: '' },
-          toolCalls: [{ id: randomUUID(), name: 'summarize_chat_chunk', arguments: { summary: `Summary[${content}]` } }],
-        };
+    priceInputPerMillion: 1,
+    priceOutputPerMillion: 2,
+    priceCacheHitPerMillion: 0.5,
+    pricePeakInputPerMillion: 1,
+    pricePeakOutputPerMillion: 2,
+    pricePeakCacheHitPerMillion: 0.5,
+  };
+}
+
+const llmConnections = {
+  async resolveActive() {
+    return fakeEagerProfile(ACTIVE_FAKE_BASE, 'eager-active-model');
+  },
+  async resolveByName(name) {
+    return name === 'eager-profile' ? fakeEagerProfile(NAMED_FAKE_BASE, 'eager-named-model') : undefined;
+  },
+};
+
+function createFakeHttpBackend() {
+  return { calls: [] };
+}
+
+function oaiToolResponse(name, args) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [
+        {
+          message: { content: null, tool_calls: [{ id: randomUUID(), type: 'function', function: { name, arguments: JSON.stringify(args) } }] },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    text: async () => '',
+  };
+}
+
+function installEagerFetchMock(backend) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const u = String(url);
+    if (u === `${ACTIVE_FAKE_BASE}/chat/completions` || u === `${NAMED_FAKE_BASE}/chat/completions`) {
+      const body = JSON.parse(init.body);
+      const forceTool = body.tool_choice?.function?.name;
+      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
+      if (forceTool === 'summarize_chat_chunk') {
+        const content = body.messages.find((m) => m.role === 'user').content;
+        return oaiToolResponse('summarize_chat_chunk', { summary: `Summary[${content}]` });
       }
-      throw new Error(`fake llm got an unexpected forceTool: ${options.forceTool}`);
-    },
+      throw new Error(`fake eager HTTP backend got an unexpected forceTool: ${forceTool}`);
+    }
+    return originalFetch(url, init);
   };
 }
 
@@ -184,11 +252,15 @@ const USER = randomUUID();
 
 const pool = createFakePool();
 const db = createPostgresClient(pool);
-const llm = createFakeLlm();
+const backend = createFakeHttpBackend();
+installEagerFetchMock(backend);
+// deps.llm is unused for real eager work — resolveEagerLlm swaps in a connection-backed gated
+// provider whenever a chat_id is involved. Kept as a shim so summarizeCalls() reads the HTTP
+// backend's recorded requests unchanged.
+const llm = { calls: backend.calls, name: 'fake-llm', supportsVision: false, complete: async () => { throw new Error('unused — eager llm comes from the connection provider'); } };
 const embeddings = createFakeEmbeddings();
 // live window 2 pairs (4 messages) — one whole 2-pair chunk needs 2 eligible pairs, i.e. 4 turns.
 const settings = createFakeSettingsStore({ chat_memory_live_window_pairs: '2' });
-const llmConnections = { async resolveByName() { return undefined; } };
 const deps = { db, llm, embeddings, settings, llmConnections };
 
 function seedMessages(chatId, tag, count) {
@@ -369,6 +441,41 @@ let ONE_CHAT_ID;
   assert(result.status === 'noop' && result.chunksAdded === 0, 'eligibility never goes negative after a truncate — max(0, ...) floors it to a noop');
   assert(pool.chatChunks.filter((c) => c.chat_id === TRUNC_CHAT_ID).length === 2, 'a truncate no-op leaves the surviving chunks untouched');
   assert(pool.lockQueries() === locksBefore, 'the truncated no-op is caught by the cheap pre-check — no lock taken');
+}
+
+// --- The connection lock (eagerChunkSync.ts's resolveEagerLlm): a chat's own connection rides
+// onto its eager chunking — a chat locked to "eager-profile" summarizes through THAT connection's
+// endpoint, never the active one. ---
+{
+  const LOCK_CHAT_ID = randomUUID();
+  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, params: { profile: 'eager-profile' } });
+  seedMessages(LOCK_CHAT_ID, 'ELOCK', 8);
+
+  const activeBaseCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  const result = await maybeEagerChunk(deps, USER, LOCK_CHAT_ID);
+
+  const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
+  const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  assert(result.status === 'ok' && result.chunksAdded === 1, 'a chat locked to a named connection still chunks normally');
+  assert(namedCalls.length === 1, 'the locked chat summarizes through its own connection');
+  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the locked eager pass never touches the active connection');
+}
+
+// --- The refusal: a chat locked to a connection that no longer exists must never silently fall
+// back to another connection — the divergence this design forbids. resolveEagerLlm refuses before
+// any chunk work, and maybeEagerChunk resolves it as a noop, leaving the backlog to the tick. ---
+{
+  const REFUSE_CHAT_ID = randomUUID();
+  pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, params: { profile: 'ghost-connection' } });
+  seedMessages(REFUSE_CHAT_ID, 'EREFUSE', 8);
+
+  const callsBefore = backend.calls.length;
+  const chunksBefore = pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length;
+  const result = await maybeEagerChunk(deps, USER, REFUSE_CHAT_ID);
+
+  assert(result.status === 'noop' && result.chunksAdded === 0, 'a chat locked to an unknown connection is a noop — never silently chunked via another connection');
+  assert(backend.calls.length === callsBefore, 'the refused eager pass makes ZERO LLM calls');
+  assert(pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length === chunksBefore, 'the refused eager pass writes no chunks');
 }
 
 if (process.exitCode) {

@@ -1,0 +1,184 @@
+/* Portrait Studio round telemetry (docs/plans/portrait-studio-telemetry-plan.md §Left-panel
+   presentation) — the left-side receipt panel: independently collapsible, its collapsed summary
+   keeps round status visible, expanded content renders the totals block and one row per call.
+   Mobile-first: rows wrap; the panel itself is the left column of .portrait-studio-body and
+   stacks above the main column at the shared 768px breakpoint. */
+
+.portrait-telemetry-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.7rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  background: var(--color-bg, #fff);
+}
+
+.portrait-telemetry-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.portrait-telemetry-title {
+  font-weight: 600;
+}
+
+.portrait-telemetry-header-actions {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.portrait-telemetry-header-actions button {
+  padding: 0.1rem 0.45rem;
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.portrait-telemetry-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.portrait-telemetry-empty,
+.portrait-telemetry-loading {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm, 0.85rem);
+  margin: 0;
+}
+
+.portrait-telemetry-error {
+  color: var(--color-text-error, #b00020);
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.portrait-telemetry-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.portrait-telemetry-status {
+  font-size: var(--font-size-sm, 0.85rem);
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: var(--radius-sm, 6px);
+  text-transform: capitalize;
+}
+
+.portrait-telemetry-status-running {
+  background: var(--color-border-subtle, #eee);
+  color: var(--color-text-secondary);
+}
+
+.portrait-telemetry-status-succeeded {
+  background: rgba(40, 167, 69, 0.12);
+  color: #1e7e34;
+}
+
+.portrait-telemetry-status-partial {
+  background: rgba(255, 193, 7, 0.18);
+  color: #8a6d00;
+}
+
+.portrait-telemetry-status-failed {
+  background: rgba(220, 53, 69, 0.12);
+  color: #b00020;
+}
+
+.portrait-telemetry-totals {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.45rem 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.portrait-telemetry-totals-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: var(--font-size-sm, 0.85rem);
+  flex-wrap: wrap;
+}
+
+.portrait-telemetry-totals-label {
+  color: var(--color-text-secondary);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.portrait-telemetry-totals-value {
+  text-align: right;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.portrait-telemetry-totals-cache,
+.portrait-telemetry-call-cache {
+  color: var(--color-text-secondary);
+}
+
+.portrait-telemetry-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.portrait-telemetry-call {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 0.35rem 0.5rem;
+}
+
+.portrait-telemetry-call summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+}
+
+.portrait-telemetry-call summary::-webkit-details-marker {
+  display: none;
+}
+
+.portrait-telemetry-call-title {
+  font-weight: 600;
+  font-size: var(--font-size-sm, 0.85rem);
+}
+
+.portrait-telemetry-call-status {
+  font-size: var(--font-size-sm, 0.85rem);
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.portrait-telemetry-call-meta {
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm, 0.85rem);
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  word-break: break-word;
+}
+
+.portrait-telemetry-call-parts {
+  white-space: nowrap;
+}
+
+.portrait-telemetry-call.failed {
+  border-left: 3px solid #b00020;
+}
+
+.portrait-telemetry-call-error {
+  margin: 0.4rem 0 0;
+  font-size: var(--font-size-sm, 0.85rem);
+  color: #b00020;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

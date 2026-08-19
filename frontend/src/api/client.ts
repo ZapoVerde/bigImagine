@@ -44,13 +44,15 @@ import type {
   ModelProvidersResult,
   NotificationSettings,
   PersonaSettings,
-  PortraitCandidate,
+  PortraitBackgroundPromptsSettings,
+  PortraitCandidateRetryResult,
   PortraitEntityRow,
   PortraitFeedbackInput,
-  PortraitBackgroundPromptsSettings,
   PortraitFeedbackResult,
   PortraitGenerateInput,
+  PortraitGenerateResult,
   PortraitLayerManifest,
+  PortraitRoundTelemetry,
   PortraitWikiEntry,
   CreatePortraitEntityInput,
   SendCastCharacterToStudioResult,
@@ -1790,10 +1792,11 @@ export async function setPortraitLayerManifest(manifest: PortraitLayerManifest, 
 }
 
 /** POST /v1/portraits/generate — run one generation round; returns the round's candidates in
- *  grid order (imageUrl null = that candidate's render failed and it is omitted from the grid). */
-export async function generatePortraitCandidates(input: PortraitGenerateInput, apiKey: string | null): Promise<PortraitCandidate[]> {
-  const body = await jsonRequest<{ candidates: PortraitCandidate[] }>('/v1/portraits/generate', apiKey, { method: 'POST', body: input });
-  return body.candidates;
+ *  grid order (imageUrl null = that candidate's render failed and it is omitted from the grid),
+ *  the lesson that drove the round (null = exploratory), and the round's correlation id
+ *  (portrait-studio-telemetry-plan.md — echoed to feedback and polled by the telemetry panel). */
+export async function generatePortraitCandidates(input: PortraitGenerateInput, apiKey: string | null): Promise<PortraitGenerateResult> {
+  return jsonRequest<PortraitGenerateResult>('/v1/portraits/generate', apiKey, { method: 'POST', body: input });
 }
 
 /** POST /v1/portraits/feedback — record the round's evaluation and run the Reflection
@@ -1818,14 +1821,22 @@ export function retryPortraitFeedback(
 
 /** POST /v1/portraits/candidates/:id/retry — re-render one candidate whose original image
  *  failed, without spending a new mutation call. imageUrl stays null (with `failed` set) on a
- *  repeat provider failure — that's still a 200, not a thrown ApiError. */
+ *  repeat provider failure — that's still a 200, not a thrown ApiError. roundId is set when the
+ *  retried candidate's round was found (the retry's image call joins that round). */
 export function retryPortraitCandidate(
   candidateId: string,
   apiKey: string | null,
-): Promise<{ imageUrl: string | null; composedPrompt: string; failed?: string }> {
-  return jsonRequest<{ imageUrl: string | null; composedPrompt: string; failed?: string }>(
+): Promise<PortraitCandidateRetryResult> {
+  return jsonRequest<PortraitCandidateRetryResult>(
     `/v1/portraits/candidates/${candidateId}/retry`,
     apiKey,
     { method: 'POST', body: {} },
   );
+}
+
+/** GET /v1/portraits/rounds/:roundId/telemetry (portrait-studio-telemetry-plan.md) — the
+ *  durable per-round receipt: every call (chronological) and the round's totals. User-scoped;
+ *  a 404 means the round isn't yours or doesn't exist. */
+export function fetchPortraitRoundTelemetry(roundId: string, apiKey: string | null): Promise<PortraitRoundTelemetry> {
+  return jsonRequest<PortraitRoundTelemetry>(`/v1/portraits/rounds/${encodeURIComponent(roundId)}/telemetry`, apiKey, { method: 'GET' });
 }
