@@ -577,6 +577,56 @@ function conclusionTurn() {
   assert(new Set(pool.state.imageCalls.map((c) => c.candidate_id)).size === 2, 'generation: the two image calls link to two distinct candidates');
 }
 
+// --- Parallel pull_wiki_entry calls in ONE turn (some providers batch tool calls) each get their
+// own tool response. Production regression: resolving only the first call and leaving a second
+// tool_call_id dangling in the next request caused a real 400 ("No tool output found for function
+// call <id>") from an OpenAI-compatible/Azure backend. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  let call = 0;
+  let secondCallMessages = null;
+  const base = {
+    name: 'fake-parallel-pull',
+    supportsVision: false,
+    async complete(messages) {
+      call += 1;
+      if (call === 1) {
+        return {
+          message: { role: 'assistant', content: '' },
+          toolCalls: [
+            { id: 'pull-a', name: 'pull_wiki_entry', arguments: { id: 'w2' } },
+            { id: 'pull-b', name: 'pull_wiki_entry', arguments: { id: 'w2' } },
+          ],
+        };
+      }
+      if (call === 2) {
+        secondCallMessages = messages;
+        return candidateMarkdownTurn();
+      }
+      throw new Error(`fake base called ${call} times`);
+    },
+  };
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+  seedEntities(pool.state);
+
+  const r = await runPortraitGenerationRound(
+    { db, settings, imageConnections },
+    gated,
+    USER,
+    { entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' }, goal: 'A calmer evening variant of Rin.' },
+  );
+  assert(r.ok === true, 'parallel pulls: the round still succeeds when a turn returns two pull_wiki_entry calls at once');
+  const toolResponses = secondCallMessages.filter((m) => m.role === 'tool');
+  assert(toolResponses.length === 2, 'parallel pulls: every tool_call_id from the turn gets its own tool response before the next call');
+  assert(
+    new Set(toolResponses.map((m) => m.toolCallId)).size === 2 &&
+      toolResponses.every((m) => m.toolCallId === 'pull-a' || m.toolCallId === 'pull-b'),
+    'parallel pulls: the tool responses match the exact call ids the assistant turn declared, not just the first',
+  );
+}
+
 // --- A provider failure on the mutation call persists its exact message in llm_calls.reason and
 // marks the round failed (plan verify 5). ---
 {

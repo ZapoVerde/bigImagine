@@ -561,16 +561,24 @@ export async function runPortraitGenerationRound(
           withCallLabel(label, () => withRoundId(roundId, () => llm.complete(conversation, offerPullTool ? [PULL_WIKI_ENTRY_TOOL] : []))),
         );
         conversation.push({ role: 'assistant', content: turn.message.content, toolCalls: turn.toolCalls });
-        const pullCall = turn.toolCalls.find((c) => c.name === 'pull_wiki_entry');
-        if (!pullCall) break;
+        // A provider may return several pull_wiki_entry calls in one turn (parallel tool calling —
+        // GPT/Azure-class models do this routinely). Every tool_call_id the assistant message just
+        // declared needs its own 'tool' response before the next complete() call, or the provider
+        // 400s with "No tool output found for function call <id>" — resolving only the first call
+        // and leaving the rest unanswered caused exactly that in production. pulls still counts one
+        // round-trip, not one entry, preserving MAX_WIKI_PULLS as a bound on extra LLM calls.
+        const pullCalls = turn.toolCalls.filter((c) => c.name === 'pull_wiki_entry');
+        if (pullCalls.length === 0) break;
         pulls++;
-        const entryId = parsePullWikiEntryId(pullCall);
-        const entry = entryId ? allWikiEntries.find((e) => e.entry_id === entryId) : undefined;
-        conversation.push({
-          role: 'tool',
-          toolCallId: pullCall.id,
-          content: entry ? `## ${entry.title}\n${entry.body}` : `No wiki entry with id ${entryId ?? '(missing id)'} — proceed without it.`,
-        });
+        for (const pullCall of pullCalls) {
+          const entryId = parsePullWikiEntryId(pullCall);
+          const entry = entryId ? allWikiEntries.find((e) => e.entry_id === entryId) : undefined;
+          conversation.push({
+            role: 'tool',
+            toolCallId: pullCall.id,
+            content: entry ? `## ${entry.title}\n${entry.body}` : `No wiki entry with id ${entryId ?? '(missing id)'} — proceed without it.`,
+          });
+        }
       }
       chromosomes = parseCandidateResponse(turn);
     } catch (err) {
