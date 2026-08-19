@@ -312,7 +312,7 @@ async function loadExistingLessonsIndexRows(db: PostgresClient, userId: string):
       `select l.lesson_id, l.statement, l.next_change ->> 'layer' as layer, l.state, w.subscriptions
        from visual_lessons l
        join visual_wiki_entries w on w.lesson_id = l.lesson_id and w.user_id = l.user_id
-       where l.user_id = $1 and l.state in ('provisional', 'supported')`,
+       where l.user_id = $1 and l.state in ('provisional', 'supported') and l.wiki_dismissed_at is null`,
       [userId],
     ),
   );

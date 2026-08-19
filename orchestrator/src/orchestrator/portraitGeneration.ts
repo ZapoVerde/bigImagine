@@ -325,13 +325,14 @@ interface LessonRow {
   state: string;
 }
 
-/** Load a concluded lesson for use by a mutation round. Only provisional/supported lessons are
- *  usable — rejected and superseded ones come back undefined (the round stays exploratory). */
+/** Load a concluded lesson for use by a mutation round. Only provisional/supported, non-dismissed
+ *  lessons are usable — rejected, superseded, and Wiki-dismissed lessons never reach Studio
+ *  models (the round stays exploratory). */
 async function loadLessonForUse(db: PostgresClient, userId: string, lessonId: string): Promise<LessonRow | undefined> {
   const rows = await db.withUserScope(userId, (session) =>
     session.query<LessonRow>(
       `select lesson_id, statement, evidence, next_change, preserve, confidence, state
-       from visual_lessons where lesson_id = $1 and user_id = $2`,
+       from visual_lessons where lesson_id = $1 and user_id = $2 and wiki_dismissed_at is null`,
       [lessonId, userId],
     ),
   );

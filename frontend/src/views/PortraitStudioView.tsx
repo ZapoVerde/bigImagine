@@ -480,14 +480,14 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
     }
   }
 
-  async function deleteWikiEntry(entry: PortraitWikiEntry) {
-    if (!window.confirm(`Delete wiki entry "${entry.title}"? This can't be undone.`)) return;
+  async function dismissWikiEntry(entry: PortraitWikiEntry) {
+    if (!window.confirm(`Dismiss "${entry.title}" from the Wiki? The underlying lesson stays on record but stops being used.`)) return;
     try {
       await deletePortraitWikiEntry(entry.entry_id, apiKey);
       if (editingEntryId === entry.entry_id) setEditingEntryId(null);
       await refreshWiki();
     } catch (err) {
-      setWikiError(errMessage(err, 'failed to delete wiki entry'));
+      setWikiError(errMessage(err, 'failed to dismiss wiki entry'));
     }
   }
 
@@ -677,8 +677,8 @@ export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitSt
                     <button type="button" onClick={() => openWikiEditor(entry)}>
                       Edit
                     </button>
-                    <button type="button" className="portrait-wiki-delete" onClick={() => deleteWikiEntry(entry)}>
-                      Delete
+                    <button type="button" className="portrait-wiki-delete" onClick={() => dismissWikiEntry(entry)}>
+                      Dismiss lesson
                     </button>
                   </div>
                 </header>

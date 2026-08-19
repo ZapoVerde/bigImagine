@@ -790,10 +790,10 @@ export async function handlePortraitWiki(
            left join visual_entities ent
              on ent.entity_id = (e.entity_ids ->> (l.next_change ->> 'layer'))::uuid
             and ent.user_id = l.user_id
-           where l.user_id = $1 and l.state = 'provisional' and w.entry_id is null
+           where l.user_id = $1 and l.state = 'provisional' and l.wiki_dismissed_at is null and w.entry_id is null
          )
          insert into visual_wiki_entries
-           (user_id, title, body, tags, subscriptions, origin_episode_id)
+           (user_id, title, body, tags, subscriptions, origin_episode_id, lesson_id)
          select $1,
                 left(statement, 100),
                 statement || E'\n\nEvidence: ' || evidence,
@@ -802,7 +802,8 @@ export async function handlePortraitWiki(
                   nullif(regexp_replace(lower(coalesce(entity_name, '')), '[^a-z0-9]+', '-', 'g'), '')
                 ]::text[], null::text),
                 jsonb_build_array(jsonb_build_object('layerType', layer_type, 'layerEntityId', entity_id)),
-                source_episode_id
+                source_episode_id,
+                lesson_id
          from missing_lessons
          on conflict do nothing`,
         [userId],
@@ -867,7 +868,20 @@ export async function handlePortraitWiki(
     if (req.method === 'DELETE') {
       const rows = await deps.db.withUserScope(userId, (session) =>
         session.query<{ entry_id: string }>(
-          'delete from visual_wiki_entries where entry_id = $1 and user_id = $2 returning entry_id',
+          `with deleted as (
+             delete from visual_wiki_entries where entry_id = $1 and user_id = $2
+             returning entry_id, lesson_id, origin_episode_id
+           ), dismissed as (
+             update visual_lessons lesson set wiki_dismissed_at = now()
+             from deleted
+             where lesson.user_id = $2
+               and (
+                 lesson.lesson_id = deleted.lesson_id
+                 or (deleted.lesson_id is null and lesson.source_episode_id = deleted.origin_episode_id)
+               )
+             returning lesson.lesson_id
+           )
+           select entry_id from deleted`,
           [id, userId],
         ),
       );
