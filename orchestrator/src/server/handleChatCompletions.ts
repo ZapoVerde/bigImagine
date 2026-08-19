@@ -56,6 +56,7 @@ import { assembleSessionTurnContext } from './promptAssembly.js';
 import { toPreviewItem, type PromptPreviewItem } from './promptPreview.js';
 import { fireLocationImageGeneration } from './locationImages.js';
 import { fireCharacterDescription } from './characterDescription.js';
+import { fireCharacterVisualState } from './characterVisualState.js';
 import { resolveTurnLlm } from './turnExecution.js';
 import { buildChatCompletion, buildChatCompletionChunk, isChatCompletionRequestBody } from './openai.js';
 import {
@@ -74,16 +75,28 @@ import type { HttpServerDeps } from './httpServer.js';
  *  infrastructure-plan.md A3): fires the location-image generation pass for the scraped
  *  location AND the fire-and-forget character describer for every resolved `Present:`
  *  character. Both are no-op safe to call for already-described rows (their own skip rules),
- *  so re-firing on every turn costs nothing for a settled cast. */
+ *  so re-firing on every turn costs nothing for a settled cast. Also fires the character
+ *  visual-state pipeline (character-visual-state-plan.md) for the persisted reply — gated on
+ *  the header having parsed (scrapedPresence defined), so a headerless reply is left to the
+ *  cleanup path's deferred hook (finalizeCleanupResult's onVisualStateChanged) rather than
+ *  double-firing from both call sites. Its mints resolve their own LLM (portrait_llm_connection,
+ *  via resolvePortraitLlm inside fireCharacterVisualState) — turnLlm is not threaded there,
+ *  unlike the location/character describers, which deliberately do use the story's own connection. */
 function fireScrapedPresenceTriggers(
   deps: HttpServerDeps,
   userId: string,
   chatId: string | undefined,
   presence: { locationId: string; characterIds: string[] },
   turnLlm: LlmProvider,
+  visualStateMessageId: string | undefined,
+  reply: string,
 ): void {
   fireLocationImageGeneration(deps, userId, chatId, presence.locationId, turnLlm);
   presence.characterIds.forEach((characterId) => fireCharacterDescription(deps, userId, chatId, characterId, turnLlm));
+  const msgId = visualStateMessageId;
+  if (msgId && chatId) {
+    fireCharacterVisualState(deps, userId, chatId, msgId, reply);
+  }
 }
 
 const ALLOWED_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
@@ -127,6 +140,11 @@ export async function handleChatCompletions(
   // describer fan-out can fire after the reply is sent (see the SSE and sendJson tails of this
   // handler).
   let scrapedPresence: { locationId: string; characterIds: string[] } | undefined;
+  // The persisted assistant message id the visual-state pipeline parses/diffs against
+  // (character-visual-state-plan.md) — hoisted alongside scrapedPresence because the finish-event
+  // tails below (outside the chat_id block's scope) read it. Only ever set for persisted turns
+  // whose header parsed; a headerless reply is left to the cleanup path's deferred hook.
+  let visualStateMessageId: string | undefined;
 
   const messages: LlmMessage[] = body.messages
     .filter((m) => ALLOWED_ROLES.has(m.role))
@@ -383,6 +401,11 @@ export async function handleChatCompletions(
       // lands a `Present:` roster, so each newly-established character gets its describer fire.
       onCharactersScraped: (u, c, characterIds) =>
         characterIds.forEach((characterId) => fireCharacterDescription(deps, u, c, characterId)),
+      // character-visual-state-plan.md: the live-path deferred hook — a live header/footer repair
+      // lands the final composed text, so the visual-state pipeline converges on this turn the
+      // same way it does for a turn whose reply went out with its header already intact (the
+      // finish tails' fireCharacterVisualState). Same household gated provider as the poll tick's.
+      onVisualStateChanged: (u, c, messageId, text) => fireCharacterVisualState(deps, u, c, messageId, text),
     };
     const onCleanupEvent: ((event: CleanupLiveEvent) => void) | undefined = liveCleanupActive
       ? (event) => {
@@ -628,6 +651,9 @@ export async function handleChatCompletions(
           { role: 'assistant', content: reply, messageId: assistantMessageId, reasoning: turnReasoning?.text },
         ]);
         assistantMessage = insertedAssistant;
+        // character-visual-state-plan.md — the persisted assistant message id for the visual-state
+        // pipeline's guarded upsert (the finish tails fire fireCharacterVisualState with it).
+        visualStateMessageId = assistantMessage?.messageId;
         // Live cleanup persistence handoff (in-stream-cleanup-plan.md, decoupled by
         // cleanup-pass-blocks-turn-slot-plan.md): finishStream's end-of-stream repairs (tail body,
         // footer, deferred 'llm' pass) and finalizeCleanupResult's swipe writeback now run in a
@@ -786,7 +812,7 @@ export async function handleChatCompletions(
         // connection this very turn ran on — the describers use it too (the same "the room's
         // description is written by the story's own voice" default VLZ uses).
         res.once('finish', () =>
-          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm, visualStateMessageId, reply),
         );
       }
       return;
@@ -807,7 +833,7 @@ export async function handleChatCompletions(
         // connection this very turn ran on — the describers use it too (the same "the room's
         // description is written by the story's own voice" default VLZ uses).
         res.once('finish', () =>
-          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+          fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm, visualStateMessageId, reply),
         );
       }
       return;
@@ -819,7 +845,7 @@ export async function handleChatCompletions(
       // passes start in the background like chatMemorySync.ts's tick. Same turnLlm threading as
       // the streaming branch above.
       res.once('finish', () =>
-        fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm),
+        fireScrapedPresenceTriggers(deps, userId, body.chat_id, scrapedPresence!, turnLlm, visualStateMessageId, reply),
       );
     }
   } finally {

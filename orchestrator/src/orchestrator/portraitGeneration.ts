@@ -156,7 +156,7 @@ export interface PortraitGenerationRoundResult {
   error?: string;
 }
 
-interface EntityRow {
+export interface EntityRow {
   entity_id: string;
   layer_id: string;
   slots: Record<string, string>;
@@ -169,7 +169,7 @@ interface EntityRow {
  *  layer's content from the goal; the empty parent means reconcile has nothing to backfill, so
  *  every slot key the model proposes survives — exactly the bootstrap semantics a fresh entity
  *  needs. */
-async function ensureEntityForLayer(
+export async function ensureEntityForLayer(
   db: PostgresClient,
   userId: string,
   layer: LayerDefinition,
@@ -216,7 +216,7 @@ async function ensureEntityForLayer(
  *  one it does — parentSlots is the entities' own slots unioned per layer, which is exactly what
  *  the prompt shows as "Current candidate", so reconcile's parent and the prompt's parent are
  *  the same object (plan step 5). */
-function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDefinition[]): CandidateChromosome {
+export function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDefinition[]): CandidateChromosome {
   const slots: SlotMap = {};
   for (const layer of layers) {
     const entity = entities.get(layer.id);
@@ -229,7 +229,7 @@ function buildParentChromosome(entities: Map<string, EntityRow>, layers: LayerDe
  *  by layer id — the text `{{<layerId>_details}}` template tokens resolve to. Computed once per
  *  round alongside buildParentChromosome: details don't vary per-candidate (same as `name`), so
  *  this is not part of the evoprompt mutation loop — every candidate compiles with the same map. */
-function buildParentDetails(entities: Map<string, EntityRow>, layers: LayerDefinition[]): DetailsMap {
+export function buildParentDetails(entities: Map<string, EntityRow>, layers: LayerDefinition[]): DetailsMap {
   const details: DetailsMap = {};
   for (const layer of layers) {
     const entity = entities.get(layer.id);

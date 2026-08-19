@@ -45,6 +45,7 @@ import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import { runLiveCleanupHandoff } from '../orchestrator/liveCleanupHandoff.js';
 import { fireLocationImageGeneration } from './locationImages.js';
 import { fireCharacterDescription } from './characterDescription.js';
+import { fireCharacterVisualState } from './characterVisualState.js';
 import { createToolRegistry, filterToolRegistry } from '../orchestrator/toolRegistry.js';
 import { getHouseholdTimezone } from './adminServer.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
@@ -245,6 +246,13 @@ export async function regenerateSwipe(
     // lands a `Present:` roster fires each character's describer on the deferred scrape path.
     onCharactersScraped: (u, c, characterIds) =>
       characterIds.forEach((characterId) => fireCharacterDescription(deps, u, c, characterId)),
+    // character-visual-state-plan.md: the deferred visual-state hook — the cleanup path's
+    // finalizeCleanupResult calls this with the final composed text once it lands a header/footer
+    // change, so a swipe whose reply went out headerless still gets its visual states parsed
+    // (gated on the header having parsed inside the hook's own fire-and-forget body). Only the
+    // household gated provider is threaded here — the turn's own turnLlm stays with the streaming
+    // path's inline fire, and the poll tick's repairs use deps.llm too.
+    onVisualStateChanged: (u, c, messageId, text) => fireCharacterVisualState(deps, u, c, messageId, text),
   };
   let cleanupHandoff: RunStreamingRpTurnResult['cleanup'] | undefined;
   let cleanupAbortController: AbortController | undefined;

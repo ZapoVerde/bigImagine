@@ -1501,6 +1501,15 @@ export interface PortraitsEnabled {
   enabled: boolean;
 }
 
+/** GET/POST /v1/admin/character-visual-state-enabled (character-visual-state-plan.md) — the
+ *  character visual-state feature's own kill switch: footer parsing, snapshot/event persistence,
+ *  and the autofire portrait render all no-op while this is off. Stored as text 'true'/'false';
+ *  unset behaves as 'false' — the inverse default of PortraitsEnabled, since this feature is new
+ *  and opt-in rather than an already-in-use feature getting an opt-out valve. */
+export interface CharacterVisualStateEnabled {
+  enabled: boolean;
+}
+
 /** One wiki subscription — entity-specific when layerEntityId is set, whole-layer-type when
  *  null (reaches every entity of that layer type). */
 export interface PortraitWikiSubscription {

@@ -59,6 +59,7 @@ import type {
   CreatePortraitEntityInput,
   SendCastCharacterToStudioResult,
   PortraitLlmConnectionSetting,
+  CharacterVisualStateEnabled,
   PortraitsEnabled,
   PortraitSubjectDescriberSettings,
   UpdatePortraitEntityInput,
@@ -1047,6 +1048,19 @@ export function adminSetPortraitLlmConnection(connectionName: string, adminKey: 
   return jsonRequest<PortraitLlmConnectionSetting>('/v1/admin/portrait-llm-connection', adminKey, {
     method: 'POST',
     body: { connectionName },
+  });
+}
+
+/** GET/POST /v1/admin/character-visual-state-enabled (character-visual-state-plan.md) — the
+ *  feature's own kill switch, default off. Same shape as adminGet/SetPortraitsEnabled. */
+export function adminGetCharacterVisualStateEnabled(adminKey: string | null): Promise<CharacterVisualStateEnabled> {
+  return jsonRequest<CharacterVisualStateEnabled>('/v1/admin/character-visual-state-enabled', adminKey);
+}
+
+export function adminSetCharacterVisualStateEnabled(enabled: boolean, adminKey: string | null): Promise<CharacterVisualStateEnabled> {
+  return jsonRequest<CharacterVisualStateEnabled>('/v1/admin/character-visual-state-enabled', adminKey, {
+    method: 'POST',
+    body: { enabled },
   });
 }
 

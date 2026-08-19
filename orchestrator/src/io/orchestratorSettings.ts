@@ -400,6 +400,7 @@ export const SETTING_NAMES = [
   'portrait_subject_describer_prompt',
   'portrait_llm_connection',
   'portrait_slot_bootstrap_prompt',
+  'character_visual_state_enabled',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

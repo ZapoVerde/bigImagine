@@ -359,7 +359,22 @@ function addSlopRule(pool, { pattern, action = 'remove', flags = 'i', replacemen
 }
 
 const VALID_HEADER = '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n';
-const VALID_FOOTER = '\n<details><summary>▸</summary>\ninner text\n</details>';
+// The canonical inner-thoughts footer (character-visual-state-plan.md) — a conforming single-block
+// footer, the only shape the structure-aware footer regex accepts.
+const VALID_FOOTER =
+  '\n<details><summary>▸</summary>\n' +
+  '<Mair>\n' +
+  'Inner thoughts: What Mair is feeling beneath what she is showing.\n' +
+  'Expression: calm\n' +
+  'Outfit:\n' +
+  '- Outerwear: none\n' +
+  '- Top: blouse\n' +
+  '- Bottom: skirt\n' +
+  '- Underwear top: none\n' +
+  '- Underwear bottom: none\n' +
+  '- Accessory: none\n' +
+  '</Mair>\n' +
+  '</details>';
 const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VALID_FOOTER}`;
 
 // ---------------------------------------------------------------------------

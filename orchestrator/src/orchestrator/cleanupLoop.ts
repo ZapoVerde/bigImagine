@@ -95,7 +95,7 @@ import {
   type SlopAction,
   type SlopRule,
 } from './cleanupHeuristics.js';
-import { loadLocationBlock, scrapeTurnPresence } from './locationAndPresenceScraper.js';
+import { loadLocationBlock, parseStoryHeader, scrapeTurnPresence } from './locationAndPresenceScraper.js';
 import { getCleanupLiveStatus } from './cleanupLiveStatus.js';
 
 const POLL_INTERVAL_MS = 5_000; // the pill/user watches for the rewrite — snappy, unlike the 30s chat-memory digest
@@ -159,6 +159,15 @@ export interface CleanupLoopDeps {
    *  direct imports so cleanupLoop never depends on the HTTP layer. Fire-and-forget: the
    *  callback must never throw into the tick (fail-open, location.md §1.3). */
   onCharactersScraped?: (userId: string, chatId: string, characterIds: string[]) => void;
+  /** character-visual-state-plan.md — fired after a header/footer repair rewrote the message and
+   *  the composed text was durably written back: hands the composed swipe's text to the
+   *  fire-and-forget visual-state pipeline (server/characterVisualState.ts), so a cleaned footer
+   *  that the call-site path couldn't parse (it was malformed then) is still extracted once the
+   *  repair has made it conforming. Wired at the composition root (index.ts) to httpServer's
+   *  fireCharacterVisualState — kept out of this module's direct imports so cleanupLoop never
+   *  depends on the HTTP layer. Fire-and-forget: the callback must never throw into the tick
+   *  (fail-open, same contract as onLocationScraped). */
+  onVisualStateChanged?: (userId: string, chatId: string, messageId: string, text: string) => void;
 }
 
 interface UserRow {
@@ -460,6 +469,10 @@ async function processDueMessage(
       history,
       userName: config.userName,
       knownLocations: locationBlock.block,
+      // character-visual-state-plan.md — the {{roster}} footer-repair token: the message's own
+      // parsed Present: roster (comma-separated, header order), '' when the header is missing or
+      // unparsable (the footer repair then names no characters rather than leaking the token).
+      roster: parseStoryHeader(message.content)?.present.join(', ') ?? '',
     });
     const steps = plan.steps;
 
@@ -639,6 +652,22 @@ export async function finalizeCleanupResult(
         }
       })();
     }
+  }
+
+  // character-visual-state-plan.md — the deferred visual-state extraction: a header/footer repair
+  // rewrote the message (the raw reply's bad header/footer made the call-site path skip it), and
+  // the composed text is durably written back now — hand it to the fire-and-forget visual-state
+  // pipeline so the now-conforming footer is parsed, diffed, and autofired exactly once. The
+  // stage-3 apply itself is the dedupe (identical snapshot → provenance-only), so this can never
+  // double-autofire a combination the call-site path already fired. Fire-and-forget, fail-open.
+  if (regionOutcomes.some((o) => (o.region === 'header' || o.region === 'footer') && o.changed)) {
+    void (async () => {
+      try {
+        deps.onVisualStateChanged?.(userId, chatId, messageId, composedContent);
+      } catch (err) {
+        log.warn(`cleanup: visual-state extraction failed for message ${messageId} (fail-open)`, { chatId, err });
+      }
+    })();
   }
 }
 

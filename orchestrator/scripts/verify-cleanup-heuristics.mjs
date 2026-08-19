@@ -37,11 +37,32 @@ function assert(cond, message) {
   }
 }
 
-// --- Fixtures: canonical shapes (locationAndPresenceScraper.ts + migration 0066) ---------------
+// --- Fixtures: canonical shapes (locationAndPresenceScraper.ts + character-visual-state-plan.md) --
 const CANONICAL_HEADER = `[ Early Morning | 🗓️ Tuesday, August 7, 2026 AD | 📍 The Keep - Main Hall ]
 Present: Kael, Mira
 The fire crackled in the hearth.`;
+// The canonical inner-thoughts footer (character-visual-state-plan.md §Canonical footer format):
+// <details><summary>▸</summary> + one <Name> block per roster character, each carrying
+// Inner thoughts:/Expression:/Outfit: in order and the six canonical `- Slot:` lines in canonical
+// order, closed by </details>. This is the ONLY shape the structure-aware footer regex accepts.
 const CANONICAL_FOOTER = `Kael turned the cup in his hands.
+
+<details><summary>▸</summary>
+<Kael>
+Inner thoughts: Nervous about the gathering.
+Expression: calm
+Outfit:
+- Outerwear: none
+- Top: shirt
+- Bottom: trousers
+- Underwear top: none
+- Underwear bottom: none
+- Accessory: none
+</Kael>
+</details>`;
+// The legacy 0066 inner-thoughts block (no field markers) — deliberately NOT conforming under the
+// structure-aware footer check: it lands as 'malformed' and gets repaired into the canonical shape.
+const LEGACY_FOOTER = `Kael turned the cup in his hands.
 
 <details><summary>▸</summary>
 <inner thoughts>
@@ -163,6 +184,7 @@ const SLOP = [
 // --- inspectFooter -----------------------------------------------------------------------------
 {
   assert(inspectFooter(CANONICAL_FOOTER, FOOTER_CFG).status === 'ok', 'footer: canonical details block is ok');
+  assert(inspectFooter(LEGACY_FOOTER, FOOTER_CFG).status === 'malformed', 'footer: the legacy 0066 <inner thoughts> block (no field markers) is malformed under the structure-aware check (character-visual-state-plan.md)');
   assert(inspectFooter(CANONICAL_FOOTER.replace('<details>', '<DETAILS>').replace('</details>', '</DETAILS>'), FOOTER_CFG).status === 'ok', 'footer: matching is case-insensitive');
   assert(inspectFooter('Kael smiled.\n\n<details><summary>▸</summary>\n<inner thoughts>\nTrailing, unclosed.', FOOTER_CFG).status === 'malformed', 'footer: an unclosed details block is malformed');
   assert(inspectFooter('Kael smiled.\n\n*She hesitated, her heart racing.*', FOOTER_CFG).status === 'suspected', 'footer: whole-line italic narration is suspected (stray inner thoughts)');

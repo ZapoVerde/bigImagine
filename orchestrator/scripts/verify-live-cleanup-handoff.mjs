@@ -116,8 +116,25 @@ function createStubLlm() {
 // A body whose header is already perfect and whose single final paragraph needs no repair: the
 // header check judges it 'ok' (no dispatch), the tail pass finds no slop, the footer check finds
 // the footer present — so finishStream makes no LLM call and leaves composed === baseText, which
-// drives finalizeCleanupResult down its no-change path (recordJobsForActiveSwipe).
-const COMPOSED = '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n\nA clean opening paragraph that needs no repair.\n\n<details><summary>▸</summary>\nFine.\n</details>\n';
+// drives finalizeCleanupResult down its no-change path (recordJobsForActiveSwipe). The footer is
+// the canonical inner-thoughts block (character-visual-state-plan.md) — the only shape the
+// structure-aware footer regex accepts.
+const COMPOSED =
+  '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n\n' +
+  'A clean opening paragraph that needs no repair.\n\n' +
+  '<details><summary>▸</summary>\n' +
+  '<Mair>\n' +
+  'Inner thoughts: What Mair is feeling beneath what she is showing.\n' +
+  'Expression: calm\n' +
+  'Outfit:\n' +
+  '- Outerwear: none\n' +
+  '- Top: blouse\n' +
+  '- Bottom: skirt\n' +
+  '- Underwear top: none\n' +
+  '- Underwear bottom: none\n' +
+  '- Accessory: none\n' +
+  '</Mair>\n' +
+  '</details>\n';
 
 // ---------------------------------------------------------------------------
 // A: clean no-change handoff — never rejects, runs the writeback's no-change path,

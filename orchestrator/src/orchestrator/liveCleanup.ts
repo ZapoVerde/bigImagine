@@ -80,7 +80,7 @@ import {
   type CleanupRegionState,
 } from './cleanupLoop.js';
 import { updateCleanupLiveRegion } from './cleanupLiveStatus.js';
-import { loadLocationBlock } from './locationAndPresenceScraper.js';
+import { loadLocationBlock, parseStoryHeader } from './locationAndPresenceScraper.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -671,6 +671,10 @@ async function runFooterCheck(
       history: ctx.history,
       userName: ctx.userName,
       knownLocations: ctx.knownLocations,
+      // character-visual-state-plan.md — the {{roster}} footer-repair token from the composed
+      // text's own parsed header ('' when the header is missing or unparsable — the footer repair
+      // then names no characters rather than leaking the token).
+      roster: parseStoryHeader(ctx.composed)?.present.join(', ') ?? '',
     }),
   };
   const output = await dispatchStep(deps, userId, chatId, step, signal);

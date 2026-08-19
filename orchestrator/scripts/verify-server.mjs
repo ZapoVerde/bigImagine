@@ -4140,7 +4140,8 @@ function reasoningFrameDelta(payload) {
   // The scripted replies (stub LLM serves them in order across completeStream AND complete):
   // rawA/rawB are non-first-turn replies with a malformed header (a bracket line that fails the
   // canonical `[... | ... | ...]` + Present: shape) and no footer, so the live path repairs both;
-  // conforming needs no repair at all.
+  // conforming needs no repair at all. Its footer is the canonical inner-thoughts block
+  // (character-visual-state-plan.md) — the only shape the structure-aware footer regex accepts.
   const headerA = '[Late Evening | 🗓️ Saturday, August 15, 2026 | 📍 The Manor - Hallway]\nPresent: Mara';
   const headerB = '[Late Evening | 🗓️ Saturday, August 15, 2026 | 📍 The Manor - Study]\nPresent: Kai';
   const footerBlock = '<details><summary>▸</summary>\ninner thoughts\n</details>';
@@ -4149,7 +4150,30 @@ function reasoningFrameDelta(payload) {
   const conforming =
     '[Early Morning | 🗓️ Sunday, August 16, 2026 | 📍 The Manor - Kitchen]\nPresent: Mara, Kai\n\n' +
     'Mara poured the tea.\nKai reached for the cup.\n\n' +
-    '<details><summary>▸</summary>\ncalm inner thoughts\n</details>';
+    '<details><summary>▸</summary>\n' +
+    '<Mara>\n' +
+    'Inner thoughts: calm inner thoughts.\n' +
+    'Expression: calm\n' +
+    'Outfit:\n' +
+    '- Outerwear: none\n' +
+    '- Top: blouse\n' +
+    '- Bottom: skirt\n' +
+    '- Underwear top: none\n' +
+    '- Underwear bottom: none\n' +
+    '- Accessory: none\n' +
+    '</Mara>\n' +
+    '<Kai>\n' +
+    'Inner thoughts: calm inner thoughts.\n' +
+    'Expression: calm\n' +
+    'Outfit:\n' +
+    '- Outerwear: none\n' +
+    '- Top: shirt\n' +
+    '- Bottom: trousers\n' +
+    '- Underwear top: none\n' +
+    '- Underwear bottom: none\n' +
+    '- Accessory: none\n' +
+    '</Kai>\n' +
+    '</details>';
   const cleanupLlm = createStubLlmProvider([
     { message: { role: 'assistant', content: rawA }, toolCalls: [] }, // fixture A: turn (malformed header)
     { message: { role: 'assistant', content: headerA }, toolCalls: [] }, // fixture A: header repair

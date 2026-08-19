@@ -277,6 +277,7 @@ import {
   handlePortraitWiki,
 } from './portraitRoutes.js';
 import { handlePortraitRoundTelemetry } from './portraitTelemetryRoutes.js';
+import { handleCharacterVisualStateEnabledGet, handleCharacterVisualStateEnabledSet } from './characterVisualState.js';
 
 export interface HttpServerDeps {
   llm: LlmProvider;
@@ -703,6 +704,10 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/admin/portraits-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitsEnabledSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/portrait-llm-connection', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLlmConnectionGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/portrait-llm-connection', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handlePortraitLlmConnectionSet(req, res, deps); }) },
+  // character-visual-state-plan.md's kill switch (opt-in, default off) — same admin-gated
+  // GET/POST pair shape as portrait-llm-connection above.
+  { method: 'GET', path: '/v1/admin/character-visual-state-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterVisualStateEnabledGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/character-visual-state-enabled', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCharacterVisualStateEnabledSet(req, res, deps); }) },
 ];
 
 async function handleRequest(

@@ -87,7 +87,7 @@ import type { HttpServerDeps } from './httpServer.js';
 // default is or later becomes. Same resolution shape as chat_memory_profile
 // (orchestrator/chatMemorySync.ts) and a chat's own params.profile (server/turnExecution.ts):
 // empty/unknown name falls back to deps.llm, never throws.
-async function resolvePortraitLlm(deps: HttpServerDeps): Promise<LlmProvider> {
+export async function resolvePortraitLlm(deps: HttpServerDeps): Promise<LlmProvider> {
   const connectionName = await deps.settings.get('portrait_llm_connection');
   if (!connectionName) return deps.llm;
   const profile = await deps.llmConnections.resolveByName(connectionName);

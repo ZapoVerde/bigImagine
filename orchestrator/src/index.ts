@@ -71,6 +71,7 @@ import { loadPlugins } from './orchestrator/pluginLoader.js';
 import { createApiKeyStore } from './server/apiKeyStore.js';
 import { fireLocationImageGeneration } from './server/locationImages.js';
 import { fireCharacterDescription } from './server/characterDescription.js';
+import { fireCharacterVisualState } from './server/characterVisualState.js';
 import { startHttpServer } from './server/httpServer.js';
 
 function requireEnv(name: string): string {
@@ -258,6 +259,12 @@ async function main(): Promise<void> {
     onLocationScraped: (userId, chatId, locationId) => fireLocationImageGeneration(httpDeps, userId, chatId, locationId, llm),
     onCharactersScraped: (userId, chatId, characterIds) =>
       characterIds.forEach((characterId) => fireCharacterDescription(httpDeps, userId, chatId, characterId, llm)),
+    // character-visual-state-plan.md: the poll tick's deferred visual-state hook — finalizeCleanupResult
+    // fires this with the final composed text once a repair lands a header/footer change, so a
+    // turn (send or swipe) whose reply went out headerless still converges its character visuals
+    // on the deferred path, exactly like the location/character describers above. Same household
+    // gated provider as every other decoupled pass here.
+    onVisualStateChanged: (userId, chatId, messageId, text) => fireCharacterVisualState(httpDeps, userId, chatId, messageId, text),
   });
 
   startHttpServer(httpDeps);

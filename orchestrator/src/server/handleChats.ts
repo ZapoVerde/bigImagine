@@ -58,6 +58,7 @@ import {
   resolveChatLocationImage,
 } from './locationImages.js';
 import { fireCharacterDescription } from './characterDescription.js';
+import { fireCharacterVisualState } from './characterVisualState.js';
 import { regenerateSwipe } from './turnExecution.js';
 import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import type { HttpServerDeps } from './httpServer.js';
@@ -65,15 +66,21 @@ import type { HttpServerDeps } from './httpServer.js';
 /** The decoupled post-regeneration trigger shared by both finish-event sites (rp-cast-
  *  infrastructure-plan.md A3): fires the location-image generation pass for the scraped
  *  location AND the fire-and-forget character describer for every resolved `Present:` character.
- *  Both are no-op safe for already-described rows (their own skip rules). */
+ *  Both are no-op safe for already-described rows (their own skip rules). Also fires the
+ *  character visual-state pipeline (character-visual-state-plan.md) for the regenerated swipe —
+ *  gated on the header having parsed (result.locationId or characterIds set), so a headerless
+ *  swipe is left to the cleanup path's deferred hook rather than double-firing from both call
+ *  sites. The visual-state fire uses the household gated provider (deps.llm) like the rest of the
+ *  swipe path's decoupled passes — only the in-stream turn passes its own turnLlm. */
 function fireSwipedPresenceTriggers(
   deps: HttpServerDeps,
   userId: string,
   chatId: string,
-  result: { locationId?: string; characterIds?: string[] },
+  result: { message: { messageId: string; content: string }; locationId?: string; characterIds?: string[] },
 ): void {
   if (result.locationId) fireLocationImageGeneration(deps, userId, chatId, result.locationId);
   result.characterIds?.forEach((characterId) => fireCharacterDescription(deps, userId, chatId, characterId));
+  fireCharacterVisualState(deps, userId, chatId, result.message.messageId, result.message.content);
 }
 
 export function isChatPatchBody(value: unknown): value is {

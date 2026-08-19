@@ -147,6 +147,10 @@ export interface RepairVars {
    *  in here — buildRepairPrompt stays pure/sync (bi_principles.md §8). Empty when unset, so a
    *  template carrying the token still resolves (never leaks the literal token). */
   knownLocations?: string;
+  /** {{roster}} — the comma-separated Present: roster (character-visual-state-plan.md), loaded
+   *  by the async callers from the reply's parsed header and passed in here. '' when unset, so a
+   *  template carrying the token still resolves — the footer repair then names no characters. */
+  roster?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +385,11 @@ export function buildRepairPrompt(template: string, vars: RepairVars): string {
       // from leaking verbatim into the prompt when the caller has none (turn 1, disabled).
       return vars.knownLocations ?? '';
     }
+    if (name === 'roster') {
+      // Loaded by the async caller from the reply's parsed header (parseStoryHeader().present);
+      // '' here keeps the token from leaking verbatim when the caller has no parsed header.
+      return vars.roster ?? '';
+    }
     return undefined;
   });
 }
@@ -424,10 +433,10 @@ export function planCleanup(
   rules: SlopRule[],
   header: RegionConfig,
   footer: RegionConfig,
-  opts: { history?: LlmMessage[]; historyPairs?: number; userName?: string; knownLocations?: string } = {},
+  opts: { history?: LlmMessage[]; historyPairs?: number; userName?: string; knownLocations?: string; roster?: string } = {},
 ): CleanupPlan {
   const slop = evaluateSlopRules(text, rules);
-  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs, userName: opts.userName, knownLocations: opts.knownLocations };
+  const vars: RepairVars = { message: slop.text, history: opts.history, historyPairs: opts.historyPairs, userName: opts.userName, knownLocations: opts.knownLocations, roster: opts.roster };
   const h = inspectHeader(slop.text, header);
   const f = inspectFooter(slop.text, footer);
 
@@ -529,25 +538,69 @@ export const DEFAULT_CLEANUP_CONFIG = {
     'Reply to fix:\n' +
     '{{message}}\n\n' +
     'Output ONLY the two header lines, nothing else.',
-  /** Canonical footer shape (0066, gate reversed 2026-08-11): the hidden inner-thoughts details block. */
-  footerRegex: '<details><summary>\\s*▸\\s*</summary>[\\s\\S]*?</details>',
+  /** Canonical footer shape (character-visual-state-plan.md): the hidden inner-thoughts details
+   *  block, structure-aware — the <details><summary>▸</summary> wrapper plus one or more
+   *  <Name>…</Name> blocks, each carrying Inner thoughts:/Expression:/Outfit: in order and the
+   *  six canonical `- Slot:` lines in canonical order, closed by </details>. The legacy generic
+   *  <inner thoughts> block (0066's shape) FAILS this pattern — it lacks the field markers — so
+   *  it lands as 'malformed' and gets repaired into the canonical shape. */
+  footerRegex:
+    '<details\\s*[^>]*>\\s*<summary\\s*[^>]*>\\s*▸\\s*</summary>\\s*' +
+    '(?:<[A-Za-z][A-Za-z0-9 _-]*>\\s*' +
+    'Inner\\s*thoughts:[^\\n]*' +
+    '(?:\\n(?!\\s*(?:Expression|Outfit):)[^\\n]*)*' +
+    '\\n?\\s*Expression:[^\\n]*' +
+    '\\n?\\s*Outfit:[^\\n]*' +
+    '\\n?\\s*-\\s*Outerwear:[^\\n]*' +
+    '\\n?\\s*-\\s*Top:[^\\n]*' +
+    '\\n?\\s*-\\s*Bottom:[^\\n]*' +
+    '\\n?\\s*-\\s*Underwear top:[^\\n]*' +
+    '\\n?\\s*-\\s*Underwear bottom:[^\\n]*' +
+    '\\n?\\s*-\\s*Accessory:[^\\n]*' +
+    '\\s*</[A-Za-z][A-Za-z0-9 _-]*>\\s*' +
+    ')+' +
+    '</details>',
   footerFlags: 'i',
   footerPrompt:
-    'The character\'s reply below is missing its hidden inner-thoughts footer, or has stray or ' +
-    'malformed inner thoughts loose in the text. Produce the standard hidden footer block, exactly ' +
-    'this shape, appended after the reply:\n\n' +
+    'The character\'s reply below is missing its hidden inner-thoughts footer, or the footer is ' +
+    'malformed. Produce the standard hidden footer block, exactly this shape, appended after the ' +
+    'reply with nothing before or after it:\n\n' +
     '<details><summary>▸</summary>\n' +
-    '<inner thoughts>\n' +
-    '[Character Name]:\n' +
-    'What they are feeling beneath what they are showing.\n' +
-    '</inner thoughts>\n' +
+    '<Ava>\n' +
+    'Inner thoughts: What Ava is feeling beneath what she is showing.\n' +
+    'Expression: pleased\n' +
+    'Outfit:\n' +
+    '- Outerwear: leather jacket\n' +
+    '- Top: white blouse\n' +
+    '- Bottom: jeans\n' +
+    '- Underwear top: none\n' +
+    '- Underwear bottom: none\n' +
+    '- Accessory: silver pendant\n' +
+    '</Ava>\n' +
+    '<Brian>\n' +
+    'Inner thoughts: What Brian is feeling beneath what he is showing.\n' +
+    'Expression: calm\n' +
+    'Outfit:\n' +
+    '- Outerwear: none\n' +
+    '- Top: t-shirt\n' +
+    '- Bottom: trousers\n' +
+    '- Underwear top: none\n' +
+    '- Underwear bottom: none\n' +
+    '- Accessory: none\n' +
+    '</Brian>\n' +
     '</details>\n\n' +
-    '- If the reply already contains stray or malformed inner thoughts, move them into this shape ' +
-    'rather than inventing new ones.\n' +
-    '- If the reply has no inner thoughts at all, infer them from the reply\'s tone, actions, and ' +
-    'subtext — what the character is feeling beneath what they are showing.\n' +
-    '- Only include characters actually present in the reply.\n' +
+    '- One block per character in the roster, in roster order: {{roster}}\n' +
+    '- Inner thoughts: keep the reply\'s existing inner thoughts if any; otherwise infer them from ' +
+    'the reply\'s tone, actions, and subtext — what the character is feeling beneath what they are ' +
+    'showing. Free-form, a few sentences at most.\n' +
+    '- Expression: exactly ONE word (e.g. pleased, calm, angry) — never a phrase.\n' +
+    '- Outfit: exactly six lines in this order, each with the character\'s currently worn item in ' +
+    'that slot, or \'none\' when nothing is worn there.\n' +
+    '- Never invent characters — only the roster\'s characters, never characters absent from the ' +
+    'reply.\n' +
     '- Output ONLY the footer block, nothing else — never repeat the reply text.\n\n' +
+    'Recent conversation:\n' +
+    '{{history, 2}}\n\n' +
     'Reply:\n' +
     '{{message}}',
 } as const;

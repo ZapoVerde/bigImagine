@@ -80,6 +80,10 @@ export async function ensureFirstTurnHeader(
       history,
       userName: config.userName,
       knownLocations: '',
+      // character-visual-state-plan.md — turn 1 has no parsed Present: roster to name footer
+      // characters from (the header is exactly what this pass is (re)building), so '' keeps the
+      // {{roster}} token from leaking verbatim if the footer repair edge case ever fires here.
+      roster: '',
     });
     const headerStep = plan.steps.find((s) => s.kind === 'repair-header');
     if (!headerStep) {
