@@ -303,6 +303,10 @@ export interface ImageConnectionSummary {
   /** migration 0105: 'background' (the Vistalyze location renders) or 'portrait' (the Portrait
    *  Studio's candidate renders) — the active row is enforced per purpose, one each. */
   purpose: 'background' | 'portrait';
+  /** migration 0123: fixed generation seed forwarded on every render through this connection;
+   *  null (default) leaves the provider's own random seed untouched. Portrait Studio's two render
+   *  call sites read this; location renders use their own separate fixed-seed mechanism. */
+  seed: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts parseCreateImageConnectionBody's expected shape
@@ -323,6 +327,8 @@ export interface CreateImageConnectionInput {
   workflowParameters?: Record<string, unknown>;
   /** Defaults to 'background' when omitted. */
   purpose?: 'background' | 'portrait';
+  /** Omit for random (the default). */
+  seed?: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts parseUpdateImageConnectionBody's expected shape
@@ -345,6 +351,8 @@ export interface UpdateImageConnectionInput {
   workflowParameters?: Record<string, unknown> | null;
   /** Omit to leave the connection's purpose unchanged. */
   purpose?: 'background' | 'portrait';
+  /** Omit to leave the stored seed unchanged; null explicitly clears it back to random. */
+  seed?: number | null;
 }
 
 // orchestrator/src/server/adminServer.ts ImageConnectionTestResult — endpoint.md §3.3's diagnostic

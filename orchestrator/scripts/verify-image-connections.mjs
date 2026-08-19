@@ -84,17 +84,24 @@ function createFakePool() {
               .filter((c) => (whereId ? c.id === params[0] : true))
               .filter((c) => (wherePurpose ? c.purpose === params[0] : true))
               .sort((a, b) => a.name.localeCompare(b.name));
-            // node-postgres returns `numeric` (cfg_scale) and `bigint` (locations.seed) columns as
-            // STRINGS — mimic that at this boundary so the store's Number() coercion is what's
-            // under test (the real-pg behavior that stringified seed/CFGScale onto the runware wire).
-            return { rows: rows.map((c) => ({ ...c, cfg_scale: c.cfg_scale == null ? null : String(c.cfg_scale) })) };
+            // node-postgres returns `numeric` (cfg_scale) and `bigint` (locations.seed,
+            // image_connections.seed) columns as STRINGS — mimic that at this boundary so the
+            // store's Number() coercion is what's under test (the real-pg behavior that
+            // stringified seed/CFGScale onto the runware wire).
+            return {
+              rows: rows.map((c) => ({
+                ...c,
+                cfg_scale: c.cfg_scale == null ? null : String(c.cfg_scale),
+                seed: c.seed == null ? null : String(c.seed),
+              })),
+            };
           }
           if (sql.includes('select api_key_ciphertext from image_connections')) {
             const row = imageConnections.find((c) => c.id === params[0]);
             return { rows: row ? [{ api_key_ciphertext: row.api_key_ciphertext }] : [] };
           }
           if (sql.startsWith('insert into image_connections')) {
-            const [name, kind, model, apiKeyCiphertext, baseUrl, width, height, samplingSteps, cfgScale, samplerName, prefix, negative, workflow, purpose] = params;
+            const [name, kind, model, apiKeyCiphertext, baseUrl, width, height, samplingSteps, cfgScale, samplerName, prefix, negative, workflow, purpose, seed] = params;
             const row = {
               id: `img-conn-${++connCounter}`,
               name,
@@ -113,6 +120,7 @@ function createFakePool() {
               is_active: false,
               updated_at: now(),
               purpose: purpose ?? 'background',
+              seed: seed ?? null,
             };
             imageConnections.push(row);
             return { rows: [{ ...row }] };
@@ -254,6 +262,7 @@ assert(
   'the stored api_key_ciphertext is encrypted, not the plaintext key',
 );
 assert(withKey.width === 1344 && withKey.height === 768, 'create without width/height falls back to the 1344×768 default');
+assert(withKey.seed === null, 'create without a seed defaults to null (random) — migration 0123');
 
 const keyless = await imageConnections.create({ name: 'local-comfyui', kind: 'comfyui', model: 'anything', baseUrl: 'http://127.0.0.1:8188' });
 assert(keyless.hasApiKey === false, 'a keyless connection (a local comfyui endpoint) is created without a key');
@@ -301,6 +310,17 @@ assert(
   pool.imageConnections.filter((c) => c.purpose === 'portrait' && c.is_active).length === 1,
   'exactly one active portrait row after the switch',
 );
+
+// --- seed (migration 0123): stored/round-tripped as a number despite the bigint-as-string
+// boundary, null clears it back to random, and a patch omitting it leaves the value untouched. ---
+const seeded = await imageConnections.create({ name: 'seeded-conn', kind: 'pollinations', model: 'flux', apiKey: 'sk-seed', seed: 424242 });
+assert(seeded.seed === 424242 && typeof seeded.seed === 'number', 'create with a seed stores and returns it as a number (bigint-as-string coerced)');
+const seededProfile = await imageConnections.resolveById(seeded.id);
+assert(seededProfile?.seed === 424242, 'resolveById coerces the stored seed back to a number for the profile too');
+const seedUntouched = await imageConnections.update(seeded.id, { name: 'seeded-conn-renamed' });
+assert(seedUntouched?.seed === 424242, 'a patch omitting seed leaves the stored value untouched');
+const seedCleared = await imageConnections.update(seeded.id, { seed: null });
+assert(seedCleared?.seed === null, 'a patch with seed: null explicitly clears it back to random');
 
 // update() can move a connection between purposes.
 const moved = await imageConnections.update(ptB.id, { purpose: 'background' });

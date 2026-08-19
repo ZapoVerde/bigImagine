@@ -636,7 +636,11 @@ export async function runPortraitGenerationRound(
             baseUrl: profile.baseUrl,
             width: profile.width,
             height: profile.height,
-            seed: null, // candidate variety comes from the chromosome; provider-chosen seed
+            // candidate variety comes from the chromosome; a null connection seed leaves the
+            // provider's own random seed in place (the long-standing default). A non-null
+            // connection.seed (migration 0123) pins every candidate in the round to the same
+            // seed instead — an admin's deliberate opt-in, not this round's own choice.
+            seed: profile.seed,
             steps: profile.samplingSteps,
             cfgScale: profile.cfgScale,
             samplerName: profile.samplerName,
@@ -872,7 +876,7 @@ export async function retryPortraitCandidateRender(
         baseUrl: profile.baseUrl,
         width: profile.width,
         height: profile.height,
-        seed: null,
+        seed: profile.seed, // same connection-level seed the original render used (migration 0123)
         steps: profile.samplingSteps,
         cfgScale: profile.cfgScale,
         samplerName: profile.samplerName,

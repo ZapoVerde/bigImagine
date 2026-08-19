@@ -31,6 +31,9 @@ interface Draft {
   masterPositiveStylePrefix: string;
   masterNegativePrompt: string;
   workflowParameters: string;
+  /** '' means random (the stored value is null) — same empty-string-as-unset shape as
+   *  samplerName above, not a separate checkbox. */
+  seed: string;
 }
 
 function emptyDraft(): Draft {
@@ -49,6 +52,7 @@ function emptyDraft(): Draft {
     masterPositiveStylePrefix: '',
     masterNegativePrompt: '',
     workflowParameters: '',
+    seed: '',
   };
 }
 
@@ -68,6 +72,7 @@ function draftFromConnection(c: ImageConnectionSummary): Draft {
     masterPositiveStylePrefix: c.masterPositiveStylePrefix ?? '',
     masterNegativePrompt: c.masterNegativePrompt ?? '',
     workflowParameters: c.workflowParameters ? JSON.stringify(c.workflowParameters, null, 2) : '',
+    seed: c.seed == null ? '' : String(c.seed),
   };
 }
 
@@ -86,8 +91,18 @@ function draftEqualsConnection(draft: Draft, c: ImageConnectionSummary): boolean
     draft.samplerName === (c.samplerName ?? '') &&
     draft.masterPositiveStylePrefix === (c.masterPositiveStylePrefix ?? '') &&
     draft.masterNegativePrompt === (c.masterNegativePrompt ?? '') &&
-    draft.workflowParameters === (c.workflowParameters ? JSON.stringify(c.workflowParameters, null, 2) : '')
+    draft.workflowParameters === (c.workflowParameters ? JSON.stringify(c.workflowParameters, null, 2) : '') &&
+    draft.seed === (c.seed == null ? '' : String(c.seed))
   );
+}
+
+/** '' -> null (random); otherwise a validated integer. Throws on anything else (e.g. "abc", "3.5")
+ *  so a typo surfaces as a save-time error rather than silently landing on random. */
+function parseSeed(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!/^-?\d+$/.test(trimmed)) throw new Error('Seed must be a whole number, or blank for random.');
+  return Number(trimmed);
 }
 
 function parseWorkflowParameters(raw: string): Record<string, unknown> | undefined {
@@ -148,8 +163,10 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
       return;
     }
     let workflowParameters: Record<string, unknown> | undefined;
+    let seed: number | null;
     try {
       workflowParameters = parseWorkflowParameters(draft.workflowParameters);
+      seed = parseSeed(draft.seed);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'workflowParameters is not valid JSON');
       return;
@@ -174,6 +191,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             masterPositiveStylePrefix: draft.masterPositiveStylePrefix.trim() || undefined,
             masterNegativePrompt: draft.masterNegativePrompt.trim() || undefined,
             workflowParameters,
+            seed,
           },
           adminKey,
         );
@@ -196,6 +214,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             masterPositiveStylePrefix: draft.masterPositiveStylePrefix.trim() || null,
             masterNegativePrompt: draft.masterNegativePrompt.trim() || null,
             workflowParameters: workflowParameters ?? null,
+            seed,
           },
           adminKey,
         );
@@ -393,6 +412,15 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               value={draft.samplerName}
               onChange={(e) => setDraft((d) => ({ ...d, samplerName: e.target.value }))}
               placeholder="e.g. euler (optional)"
+            />
+          </label>
+
+          <label>
+            Seed
+            <input
+              value={draft.seed}
+              onChange={(e) => setDraft((d) => ({ ...d, seed: e.target.value }))}
+              placeholder="blank = random (default)"
             />
           </label>
 

@@ -81,6 +81,10 @@ export interface ImageConnectionRow {
   isActive: boolean;
   updatedAt: string;
   purpose: ImageConnectionPurpose;
+  /** Fixed generation seed forwarded to the provider on every render through this connection;
+   *  null (the default) leaves the provider's own random seed untouched. Not consulted by every
+   *  caller — see the field's doc comment on ImageConnectionProfile below. */
+  seed: number | null;
 }
 
 /** The decrypted shape handed to io/imageGen/index.ts — plaintext key exists only here. */
@@ -98,6 +102,12 @@ export interface ImageConnectionProfile {
   masterNegativePrompt: string | null;
   workflowParameters: Record<string, unknown> | null;
   purpose: ImageConnectionPurpose;
+  /** Migration 0123. Null = the provider's own random seed (the long-standing default for every
+   *  connection). A caller building an ImageGenRequest decides whether to read this — Portrait
+   *  Studio's two render call sites (portraitGeneration.ts) do; generateLocationImage.ts does not,
+   *  since locations already have their own fixed-seed mechanism (locations.seed,
+   *  util/synthesizeImagePrompt.ts's toImageGenSeed) predating this column. */
+  seed: number | null;
 }
 
 /** The closed vocabulary of implemented provider adapters (endpoint.md §3.2) — a row's kind names
@@ -123,6 +133,8 @@ export interface ImageConnectionInit {
   /** Optional — defaults to 'background'; 'portrait' marks the connection for the Portrait
    *  Studio's candidate renders (migration 0105's purpose split). */
   purpose?: ImageConnectionPurpose;
+  /** Optional — omitted/undefined means null (random), same as every other optional Init field. */
+  seed?: number | null;
 }
 
 export interface ImageConnectionPatch {
@@ -141,6 +153,8 @@ export interface ImageConnectionPatch {
   masterNegativePrompt?: string | null;
   workflowParameters?: Record<string, unknown> | null;
   purpose?: ImageConnectionPurpose;
+  /** Undefined leaves the stored seed untouched; null explicitly clears it back to random. */
+  seed?: number | null;
 }
 
 export interface ImageConnectionStore {
@@ -171,11 +185,14 @@ interface ImageConnectionDbRow {
   is_active: boolean;
   updated_at: string;
   purpose: ImageConnectionPurpose;
+  /** bigint — node-postgres hands this back as a string, same as locations.seed; coerced in
+   *  toRow/toProfile below (the same Number() boundary pattern cfg_scale already uses). */
+  seed: string | number | null;
 }
 
 const ROW_COLUMNS = `id, name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps,
   cfg_scale, sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters,
-  is_active, updated_at, purpose`;
+  is_active, updated_at, purpose, seed`;
 
 function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
   return {
@@ -200,6 +217,7 @@ function toRow(row: ImageConnectionDbRow): ImageConnectionRow {
     isActive: row.is_active,
     updatedAt: row.updated_at,
     purpose: row.purpose,
+    seed: row.seed == null ? null : Number(row.seed),
   };
 }
 
@@ -218,6 +236,7 @@ function toProfile(row: ImageConnectionDbRow, cipher: FieldCipher): ImageConnect
     masterNegativePrompt: row.master_negative_prompt,
     workflowParameters: row.workflow_parameters,
     purpose: row.purpose,
+    seed: row.seed == null ? null : Number(row.seed),
   };
 }
 
@@ -235,8 +254,8 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
         session.query<ImageConnectionDbRow>(
           `insert into image_connections
              (name, kind, model, api_key_ciphertext, base_url, width, height, sampling_steps, cfg_scale,
-              sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters, purpose)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+              sampler_name, master_positive_style_prefix, master_negative_prompt, workflow_parameters, purpose, seed)
+           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            returning ${ROW_COLUMNS}`,
           [
             init.name,
@@ -253,6 +272,7 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
             init.masterNegativePrompt ?? null,
             init.workflowParameters ? JSON.stringify(init.workflowParameters) : null,
             init.purpose ?? 'background',
+            init.seed ?? null,
           ],
         ),
       );
@@ -282,6 +302,7 @@ export function createImageConnectionStore(db: PostgresClient, cipher: FieldCiph
         set('workflow_parameters', patch.workflowParameters ? JSON.stringify(patch.workflowParameters) : null);
       }
       if (patch.purpose !== undefined) set('purpose', patch.purpose);
+      if (patch.seed !== undefined) set('seed', patch.seed);
       if (sets.length === 0) {
         const rows = await db.withSystemScope((session) =>
           session.query<ImageConnectionDbRow>(`select ${ROW_COLUMNS} from image_connections where id = $1`, [id]),

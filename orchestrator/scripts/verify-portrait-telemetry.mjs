@@ -204,6 +204,7 @@ function makeFakeProfile() {
     cfgScale: 1,
     samplerName: null,
     workflowParameters: null,
+    seed: null, // migration 0123 default — random; overridden per-test below where relevant
     priceInputPerMillion: 1,
     priceOutputPerMillion: 2,
     priceCacheHitPerMillion: 0.5,
@@ -795,6 +796,7 @@ function conclusionTurn() {
     assert(c.composedPrompt.includes('Outfit: a red knee-length coat'), 'details round: the outfit\'s details land in the composed prompt');
     assert(c.composedPrompt.includes('Style: moody rim light'), 'details round: the style\'s details land in the composed prompt');
     assert(c.composedPrompt.includes('Expression: quiet resolve'), 'details round: the expression\'s details land in the composed prompt');
+    assert(!c.imageUrl?.includes('seed='), 'details round: PROFILE.seed null (the default) puts no seed param on the URL — provider stays random');
   }
 }
 
@@ -844,6 +846,57 @@ function conclusionTurn() {
     'retry: the OUTFIT details edited after the original render are re-read and composed — the batched read spans all entity_ids, not just style',
   );
   assert(pool.state.candidates[0].image_url === retry.imageUrl, 'retry: the candidate row\'s image_url is updated in place');
+}
+
+// --- Connection-level seed (migration 0123, db/migrations/0123_image_connections_seed.sql):
+// PROFILE.seed defaults to null (random) above — every prior assertion in this file already
+// covers that default implicitly. This block proves the opt-in: a connection with a non-null
+// seed puts it on every candidate's pollinations URL (no network — the URL IS the request), and
+// a retry re-reads the same connection-level seed rather than inventing its own. ---
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  const seededProfile = { ...PROFILE, seed: 20260819 };
+  const imageConnectionsSeeded = { resolveActive: async (purpose) => (purpose === 'portrait' ? seededProfile : null) };
+  const base = {
+    name: 'fake-seed-base',
+    supportsVision: false,
+    async complete() {
+      return candidateMarkdownTurn();
+    },
+  };
+  const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+  seedEntities(pool.state);
+
+  const r = await runPortraitGenerationRound(
+    { db, settings, imageConnections: imageConnectionsSeeded },
+    gated,
+    USER,
+    { entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' }, goal: 'A seeded round.' },
+  );
+  assert(r.ok === true, 'seeded round: succeeds with a connection-level seed set');
+  for (const c of r.candidates) {
+    assert(c.imageUrl?.includes('seed=20260819'), `seeded round: the connection's seed lands on the pollinations URL -> "${c.imageUrl}"`);
+  }
+
+  pool.state.candidates.push({
+    candidate_id: 'c-retry-seed',
+    user_id: USER,
+    entity_ids: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' },
+    image_url: 'https://img/c-retry-seed-old.png',
+    chromosome: { slots: { subject: { subject_identity: 'Rin V1' }, outfit: {}, style: {}, expression: {} } },
+    parent_chromosome: {},
+    composed_prompt: 'PORTRAIT seeded retry',
+    render_metadata: {},
+    wiki_revision_ids: [],
+    lesson_id: null,
+    rating: null,
+    note: null,
+  });
+  const retrySeeded = await retryPortraitCandidateRender({ db, settings, imageConnections: imageConnectionsSeeded }, USER, 'c-retry-seed');
+  assert(retrySeeded.ok === true, 'seeded retry: succeeds with a connection-level seed set');
+  assert(retrySeeded.imageUrl?.includes('seed=20260819'), `seeded retry: the retry re-reads the connection's seed too -> "${retrySeeded.imageUrl}"`);
 }
 
 // ============================================================================

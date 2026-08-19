@@ -504,6 +504,7 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     masterNegativePrompt,
     workflowParameters,
     purpose,
+    seed,
   } = raw as Record<string, unknown>;
   if (typeof name !== 'string' || !name.trim()) return undefined;
   if (!isImageKind(kind)) return undefined;
@@ -511,6 +512,7 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
   if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
+  if (seed !== undefined && seed !== null && (typeof seed !== 'number' || !Number.isInteger(seed))) return undefined;
   if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 64 || width > 8192)) {
     return undefined;
   }
@@ -540,6 +542,7 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
     masterPositiveStylePrefix: typeof masterPositiveStylePrefix === 'string' ? masterPositiveStylePrefix : undefined,
     masterNegativePrompt: typeof masterNegativePrompt === 'string' ? masterNegativePrompt : undefined,
     workflowParameters: isJsonObject(workflowParameters) ? workflowParameters : undefined,
+    seed: typeof seed === 'number' ? seed : null,
   };
 }
 
@@ -563,11 +566,13 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
     masterNegativePrompt,
     workflowParameters,
     purpose,
+    seed,
   } = raw as Record<string, unknown>;
   if (name !== undefined && (typeof name !== 'string' || !name.trim())) return undefined;
   if (kind !== undefined && !isImageKind(kind)) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
   if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
+  if (seed !== undefined && seed !== null && (typeof seed !== 'number' || !Number.isInteger(seed))) return undefined;
   // apiKey undefined leaves the stored key untouched; empty string is rejected (there's no
   // "clear the key" — keyless connections are created without one, not rotated to nothing).
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
@@ -606,6 +611,7 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   if (masterPositiveStylePrefix !== undefined) patch.masterPositiveStylePrefix = masterPositiveStylePrefix as string | null;
   if (masterNegativePrompt !== undefined) patch.masterNegativePrompt = masterNegativePrompt as string | null;
   if (workflowParameters !== undefined) patch.workflowParameters = workflowParameters as Record<string, unknown> | null;
+  if (seed !== undefined) patch.seed = seed as number | null;
   return patch;
 }
 
