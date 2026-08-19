@@ -35,21 +35,6 @@
   border-radius: var(--radius-md);
 }
 
-/* Two-column body (portrait-studio-telemetry-plan.md): the round telemetry receipt on the left,
-   the Studio's main column on the right. Stacks to a single column at the mobile breakpoint. */
-.portrait-studio-body {
-  display: flex;
-  gap: 1.2rem;
-  align-items: flex-start;
-}
-
-.portrait-studio-telemetry {
-  flex: 0 0 300px;
-  min-width: 0;
-  position: sticky;
-  top: 1.2rem;
-}
-
 .portrait-studio-main {
   flex: 1;
   min-width: 0;
@@ -374,16 +359,6 @@
 @media (max-width: 768px) {
   .portrait-studio-view {
     padding: 1rem;
-  }
-
-  .portrait-studio-body {
-    flex-direction: column;
-  }
-
-  .portrait-studio-telemetry {
-    flex: none;
-    width: 100%;
-    position: static;
   }
 
   .portrait-pickers {

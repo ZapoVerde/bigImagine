@@ -8,6 +8,7 @@ import PortraitConnectionPanel from './PortraitConnectionPanel';
 import PortraitPromptsPanel from './PortraitPromptsPanel';
 import PromptInspectorPanel from '../promptInspector/PromptInspectorPanel';
 import TurnDrawerSection from '../timeline/TurnDrawerSection';
+import PortraitTelemetryPanel from '../portraits/PortraitTelemetryPanel';
 import './Sidebar.css';
 
 interface SidebarProps {
@@ -38,6 +39,8 @@ interface SidebarProps {
   onSelectNote: (id: string) => void;
   onDeselectNote: () => void;
   notesRefreshKey: number;
+  portraitRoundId: string | null;
+  portraitTelemetryRefreshToken: number;
 }
 
 const TITLES: Partial<Record<TabType, string>> = {
@@ -101,6 +104,7 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
         <div className="sidebar-portraits-sections">
           <PortraitConnectionPanel />
           <PortraitPromptsPanel />
+          <PortraitTelemetryPanel apiKey={props.apiKey} roundId={props.portraitRoundId} refreshToken={props.portraitTelemetryRefreshToken} />
         </div>
       );
       break;

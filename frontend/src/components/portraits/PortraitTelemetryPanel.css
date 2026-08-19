@@ -1,8 +1,7 @@
 /* Portrait Studio round telemetry (docs/plans/portrait-studio-telemetry-plan.md §Left-panel
    presentation) — the left-side receipt panel: independently collapsible, its collapsed summary
    keeps round status visible, expanded content renders the totals block and one row per call.
-   Mobile-first: rows wrap; the panel itself is the left column of .portrait-studio-body and
-   stacks above the main column at the shared 768px breakpoint. */
+   Mobile-first: rows wrap inside the existing application sidebar drawer. */
 
 .portrait-telemetry-panel {
   border: 1px solid var(--color-border);
@@ -11,7 +10,8 @@
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
-  background: var(--color-bg, #fff);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
 }
 
 .portrait-telemetry-header {
@@ -50,7 +50,7 @@
 }
 
 .portrait-telemetry-error {
-  color: var(--color-text-error, #b00020);
+  color: var(--color-text-error);
   font-size: var(--font-size-sm, 0.85rem);
 }
 
@@ -75,17 +75,17 @@
 
 .portrait-telemetry-status-succeeded {
   background: rgba(40, 167, 69, 0.12);
-  color: #1e7e34;
+  color: var(--color-text-success, var(--color-text-primary));
 }
 
 .portrait-telemetry-status-partial {
   background: rgba(255, 193, 7, 0.18);
-  color: #8a6d00;
+  color: var(--color-text-warning, var(--color-text-primary));
 }
 
 .portrait-telemetry-status-failed {
   background: rgba(220, 53, 69, 0.12);
-  color: #b00020;
+  color: var(--color-text-error);
 }
 
 .portrait-telemetry-totals {
@@ -172,13 +172,13 @@
 }
 
 .portrait-telemetry-call.failed {
-  border-left: 3px solid #b00020;
+  border-left: 3px solid var(--color-text-error);
 }
 
 .portrait-telemetry-call-error {
   margin: 0.4rem 0 0;
   font-size: var(--font-size-sm, 0.85rem);
-  color: #b00020;
+  color: var(--color-text-error);
   white-space: pre-wrap;
   word-break: break-word;
 }

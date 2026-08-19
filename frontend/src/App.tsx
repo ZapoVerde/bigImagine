@@ -85,6 +85,8 @@ export default function App() {
   // because App owns activeChatId — the Cast section needs both, and they must come from the
   // same chat.
   const [activeSceneId, setActiveSceneId] = useState<string | null>(null);
+  const [portraitRoundId, setPortraitRoundId] = useState<string | null>(null);
+  const [portraitTelemetryRefreshToken, setPortraitTelemetryRefreshToken] = useState(0);
 
   // The Portrait Studio household kill switch (portrait-chain-hardening-plan.md), fetched once
   // auth resolves — null until the first fetch lands, then the live boolean. Unset behaves as
@@ -248,6 +250,8 @@ export default function App() {
           promptRefreshToken={promptRefreshToken}
           chatsRefreshKey={chatsRefreshKey}
           turnSnapshot={turnSnapshot}
+          portraitRoundId={portraitRoundId}
+          portraitTelemetryRefreshToken={portraitTelemetryRefreshToken}
         />
         {/* Mobile-only edge-grip opener for the left rail (App.css, .edge-grip) — the desktop
             rail's own header arrow is the control wide-screen. A 6px strip pinned to the left
@@ -341,7 +345,13 @@ export default function App() {
                   <div className="disabled-pane-note">Portrait Studio is disabled — enable it in Settings.</div>
                 </div>
               ) : (
-                <PortraitStudioView apiKey={apiKey} />
+                <PortraitStudioView
+                  apiKey={apiKey}
+                  onRoundChange={(roundId, refreshToken) => {
+                    setPortraitRoundId(roundId);
+                    setPortraitTelemetryRefreshToken(refreshToken);
+                  }}
+                />
               ))}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}

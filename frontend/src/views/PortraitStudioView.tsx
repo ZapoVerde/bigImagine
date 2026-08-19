@@ -24,7 +24,6 @@ import type {
 } from '../api/types';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
 import PortraitCandidateGrid from '../components/portraits/PortraitCandidateGrid';
-import PortraitTelemetryPanel from '../components/portraits/PortraitTelemetryPanel';
 import './PortraitStudioView.css';
 
 // Portrait Studio (docs/plans/completed/portrait-studio-plan.md §Frontend) — the training/authoring surface
@@ -43,6 +42,7 @@ import './PortraitStudioView.css';
 // the subject layer, portrait_subject_describer_prompt first — Settings tab).
 interface PortraitStudioViewProps {
   apiKey: string | null;
+  onRoundChange?: (roundId: string | null, refreshToken: number) => void;
 }
 
 interface CreateDraft {
@@ -58,7 +58,7 @@ function errMessage(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.message : fallback;
 }
 
-export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) {
+export default function PortraitStudioView({ apiKey, onRoundChange }: PortraitStudioViewProps) {
   const [manifest, setManifest] = useState<PortraitLayerManifest | null>(null);
   const [entities, setEntities] = useState<PortraitEntityRow[] | null>(null);
   const [wiki, setWiki] = useState<PortraitWikiEntry[] | null>(null);
@@ -82,6 +82,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
   // immediately (the panel then polls while the round is running).
   const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
   const [telemetryRefreshToken, setTelemetryRefreshToken] = useState(0);
+  useEffect(() => onRoundChange?.(activeRoundId, telemetryRefreshToken), [activeRoundId, onRoundChange, telemetryRefreshToken]);
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [feedbackError, setFeedbackError] = useState<string | null>(null);
@@ -466,13 +467,7 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
       </header>
       {feedbackError && <div className="portrait-feedback-toast error-banner" role="alert">{feedbackError}</div>}
 
-      {/* Left-side round telemetry receipt (portrait-studio-telemetry-plan.md) beside the main
-          Studio column — the Studio's own panel, not the application sidebar. */}
-      <div className="portrait-studio-body">
-        <div className="portrait-studio-telemetry">
-          <PortraitTelemetryPanel apiKey={apiKey} roundId={activeRoundId} refreshToken={telemetryRefreshToken} />
-        </div>
-        <div className="portrait-studio-main">
+      <div className="portrait-studio-main">
       {/* Entity pickers per promptable layer, following ConnectionsView's select pattern. */}
       <section className="portrait-pickers">
         {promptableLayers.map((layer) => {
@@ -760,7 +755,6 @@ export default function PortraitStudioView({ apiKey }: PortraitStudioViewProps) 
           </div>
         )}
       </section>
-        </div>
       </div>
     </div>
   );
