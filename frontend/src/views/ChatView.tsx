@@ -59,7 +59,7 @@ import LegibilityMenu from '../components/chat/LegibilityMenu';
 import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import ChatMessageRow from '../components/chat/ChatMessageRow';
 import ChatComposer, { type ChatComposerHandle } from '../components/chat/ChatComposer';
-import { useBottomThirdSwipe } from '../hooks/useBottomThirdSwipe';
+import { useEdgeSwipe } from '../hooks/useEdgeSwipe';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
@@ -116,8 +116,8 @@ interface ChatViewProps {
   /** Ask the app to collapse (true) or restore (false) the top bars. */
   onTopBarsHiddenChange: (hidden: boolean) => void;
   /** Whether this tab is the one currently displayed — hidden tabs stay mounted (App.tsx toggles
-   *  them with a CSS class), so the mobile bottom-third navigation listener below is attached
-   *  only for the visible chat, and no hidden tab navigates on a stray swipe. */
+   *  them with a CSS class), so the mobile edge-swipe listener below is attached only for the
+   *  visible chat, and no hidden tab opens a drawer on a stray swipe. */
   active: boolean;
   /** RP chats only: fired once per completed turn (when this chat's message count changes) so the
    *  app can bump its promptRefreshToken — the Prompt Inspector now lives in the left sidebar
@@ -590,49 +590,10 @@ export default function ChatView({
   // folders is the sidebar's ChatBrowser's job now.
   const [folders, setFolders] = useState<Folder[]>([]);
 
-  // Mobile bottom-third navigation swipes (hooks/useBottomThirdSwipe.ts): a horizontal drag
-  // STARTING in the bottom third of the screen browses the last reply's variants — finger-left
-  // -> next, finger-right -> prev, the same direction convention SillyTavern's gesture swipes
-  // use (st-source/public/scripts/RossAscends-mods.js). The settings rail has no swipe summon
-  // at all: grabbing its .edge-grip-right strip is the only opener, and the middle of the
-  // screen is deliberately a dead zone (only the bottom third claims horizontal drags, so a
-  // drawer pull can never be triggered by accident). enabled=false while this tab isn't the
-  // active one (hidden tabs stay mounted); canSwipe keeps the browser's native back-edge
-  // gesture alive whenever the last reply has no stored variants to browse.
-  const swipeTarget = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role === 'assistant' && m.messageId) {
-        // The LAST reply is the swipe surface, exactly like SillyTavern's .last_mes. It only
-        // claims bottom-third drags when it actually has stored variants to browse between
-        // (>1); a single-variant last reply leaves the whole bottom third to the browser.
-        if (!m.swipes || m.swipes.count <= 1) return null;
-        return { messageId: m.messageId, swipes: m.swipes, isOpeningGreeting: i === 0 };
-      }
-    }
-    return null;
-  }, [messages]);
-  useBottomThirdSwipe(
-    (direction) => {
-      const t = swipeTarget;
-      if (!t) return;
-      const hasMoreSwipesAhead = t.swipes.index < t.swipes.count - 1;
-      if (direction === 'next') {
-        // Mirror the ‹/› buttons: never run past the last stored variant on an opening
-        // greeting (the server's swipe route stops there too); everywhere else 'next' past
-        // the newest stored variant becomes a Rerun, exactly like the arrow does.
-        if (t.isOpeningGreeting && !hasMoreSwipesAhead) return;
-        void swipe(t.messageId, 'next');
-      } else {
-        if (t.swipes.index === 0) return;
-        void swipe(t.messageId, 'prev');
-      }
-    },
-    {
-      enabled: active,
-      canSwipe: () => !!swipeTarget && !selectionMode,
-    },
-  );
+  useEdgeSwipe('right', () => setSettingsCollapsed(false), {
+    enabled: active,
+    canOpen: () => settingsCollapsed && !branchMapOpen && !mobileShowCanvas && !restartOpen && !syncStatusOpen && !chatMenuOpen,
+  });
 
   const historyRef = useRef<HTMLDivElement | null>(null);
   // The rollout's boundary marker element (docs/plans/rp-sync-boundary-rollout-plan.md): observed
@@ -2610,12 +2571,7 @@ export default function ChatView({
         )}
       </div>
 
-      {/* Mobile-only edge-grip opener for the settings rail (App.css, .edge-grip) — the
-          chat-header ⚙ it replaces collapsed away with the top bars on scroll, this strip
-          doesn't. Same summon as the old .side-fab-right, just 6px and pinned to the screen
-          edge. Grabbing this strip is the ONLY summon — no edge swipe (drawers open by
-          handle, per the mobile gesture plan; swipes in the bottom third of the screen
-          browse the last reply's variants instead). */}
+      {/* Mobile edge-grip fallback for the settings rail. The edge swipe is the primary opener. */}
       <button
         type="button"
         className="edge-grip edge-grip-right mobile-only"

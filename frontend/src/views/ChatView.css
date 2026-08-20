@@ -111,7 +111,7 @@
    height, so the fade always covers exactly the stack. The overlay itself is fully transparent
    (no tint, no blur, no edge), so the background behind the controls stays untouched. Its
    whole footprint swallows pointer/touch events, so a bubble that has scrolled underneath
-   can't be tapped (message actions) or swiped (variant browsing); only the controls
+   can't be tapped (message actions); only the controls
    themselves are interactive. The history's live bottom padding (ChatView's ResizeObserver on
    this element) parks the newest message just above the line at full scroll. */
 .chat-main > .chat-bottom-overlay {
@@ -345,8 +345,8 @@
 }
 
 /* Mobile: same overlay-drawer treatment as the left Sidebar (Sidebar.css) — collapsed means gone
-   entirely (the edge grip, App.css/.edge-grip-right, is the summon control now — grab only, no
-   swipe), and expanded floats above the conversation from the right instead
+   entirely, with the edge grip as a compact tap fallback for the inward edge swipe, and expanded
+   floats above the conversation from the right instead
    of squeezing it. */
 @media (max-width: 768px) {
   .chat-settings-rail {

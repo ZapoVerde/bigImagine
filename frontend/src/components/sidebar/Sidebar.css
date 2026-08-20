@@ -22,9 +22,8 @@
 }
 
 /* Mobile: the rail is an overlay drawer, not a permanent column. Collapsed means gone entirely —
-   no 2.6rem sliver — since the summon control is now a grab on the edge grip
-   (App.css, .edge-grip-left) instead of taking up its own strip of
-   screen. Expanded, it floats above the view rather than pushing it over (position: fixed
+   no 2.6rem sliver — and it opens by inward edge swipe or the edge-grip tap fallback.
+   Expanded, it floats above the view rather than pushing it over (position: fixed
    takes it out of the .app flex flow, so .app-main always gets full width on mobile regardless
    of this state). */
 @media (max-width: 768px) {

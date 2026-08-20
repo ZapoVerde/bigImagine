@@ -12,6 +12,7 @@ import TimerStrip from './components/temporal/TimerStrip';
 import TypePicker from './components/TypePicker';
 import UnlockGate from './components/UnlockGate';
 import { useTabs, type TabType } from './hooks/useTabs';
+import { useEdgeSwipe } from './hooks/useEdgeSwipe';
 import { useTheme } from './hooks/useTheme';
 import type { TurnSnapshot } from './lib/turnTimelineReport';
 import BrowseChubView from './views/BrowseChubView';
@@ -35,10 +36,8 @@ import StatsView from './views/StatsView';
 
 const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 
-// Tabs whose sidebar actually renders content (Sidebar.tsx's switch): the chat/RP history
-// browsers, the RP prompt inspector, and the notes name picker. Every other tab type gets an
-// empty drawer, so the mobile rail opener (grip grab) is hidden there rather than
-// summoning nothing.
+// Tabs whose sidebar actually renders content (Sidebar.tsx's switch). Every other tab gets an
+// empty drawer, so neither the grip nor the edge swipe is offered there.
 const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'characters', 'notes', 'portraits']);
 
 type AuthState =
@@ -57,6 +56,7 @@ export default function App() {
   // permanently silenced by one click — see BackupWarningModal's own note on why.
   const [showBackupWarning, setShowBackupWarning] = useState(false);
   const { tabs, activeTabId, openBlank, summon, openChat, openRp, updateTab, close, focus, closeChats } = useTabs();
+  const activeTab = tabs.find((t) => t.id === activeTabId);
   const { theme, toggle: toggleTheme } = useTheme();
 
   // Lifted out of Sidebar so the mobile edge grip (App.css, .edge-grip-left) can toggle the
@@ -123,6 +123,12 @@ export default function App() {
   // App-wide navigation drawer behind the tab-bar hamburger (AppNavDrawer) — owns the specialist
   // views that used to be the empty-chat landing pills.
   const [navOpen, setNavOpen] = useState(false);
+
+  const hasSidebarContent = activeTab?.type != null && SIDEBAR_CONTENT_TABS.has(activeTab.type);
+  useEdgeSwipe('left', () => setSidebarCollapsed(false), {
+    enabled: hasSidebarContent,
+    canOpen: () => hasSidebarContent && sidebarCollapsed && !navOpen,
+  });
 
   // A character was deleted — its RP chats are gone server-side (delete_character returns the
   // ids). Close any open tabs for them and bump chatsRefreshKey so the history browsers drop
@@ -194,8 +200,6 @@ export default function App() {
   }
 
   const apiKey = auth.mode === 'key' ? auth.apiKey : null;
-  const activeTab = tabs.find((t) => t.id === activeTabId);
-
   return (
     <div className={topBarsHidden ? 'app top-bars-hidden' : 'app'}>
       <ScreenLockOverlay apiKey={apiKey} />
@@ -253,14 +257,8 @@ export default function App() {
           portraitRoundId={portraitRoundId}
           portraitTelemetryRefreshToken={portraitTelemetryRefreshToken}
         />
-        {/* Mobile-only edge-grip opener for the left rail (App.css, .edge-grip) — the desktop
-            rail's own header arrow is the control wide-screen. A 6px strip pinned to the left
-            screen edge rather than a slot in TabStrip: the top bars collapse on scroll, and the
-            opener has to survive that. Rendered only where the sidebar has content — on the
-            empty-drawer tabs (settings, connections, …) there'd be nothing to summon. Grabbing
-            this strip is the ONLY summon — no edge swipe (drawers open by handle, per the
-            mobile gesture plan). */}
-        {activeTab?.type != null && SIDEBAR_CONTENT_TABS.has(activeTab.type) && (
+        {/* Mobile edge-grip fallback for the left rail. The edge swipe is the primary opener. */}
+        {hasSidebarContent && (
           <button
             type="button"
             className="edge-grip edge-grip-left mobile-only"
