@@ -432,10 +432,11 @@ async function findDueChats(
            select count(*) from chat_messages m
            where m.chat_id = cs.chat_id and (anchor.created_at is null or m.created_at > anchor.created_at)
          ) >= $1
-         and not (
+         and not coalesce(
            st.last_status = 'error' and st.last_error_kind = 'permanent'
            and st.failure_signature = $2
-           and now() - st.last_attempt_at < make_interval(secs => $3)
+           and now() - st.last_attempt_at < make_interval(secs => $3),
+           false
          )`,
       [syncEveryMessages + liveWindowMessages, profileSignature, PERMANENT_FAILURE_RETRY_MS / 1000],
     );

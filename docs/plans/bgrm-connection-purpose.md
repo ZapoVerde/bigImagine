@@ -1,12 +1,17 @@
 # Exposing Playground's Background Removal (BGRM) as an Image Connection Purpose
 
-*Created 2026-08-18. Governed by `bi_principles.md`. Plan only — **not yet implemented** at time of
-writing. Written as the design write-up of an investigation into `/config/workspace/playground`'s
-background-removal implementation (`playground/sandbox/providers/runware.js`, `sandbox/runner.js`,
-`orchestrator.js` step 6a, `docs/spec.md` §18.4) and how to port it to BigImagine as a
-`purpose = 'bgrm'` image connection. Related existing plans:
-`docs/plans/completed/portrait-studio-plan.md` (§Image connection purpose split) and
-`docs/plans/vistalyze_integration/endpoint.md` (§3 image connections, §5 location render).*
+*Created 2026-08-18, reviewed for drift 2026-08-20. Governed by `bi_principles.md`. Plan only —
+**not yet implemented** at time of writing (confirmed: no `bgrm`/`removeBackground` reference
+anywhere in `orchestrator/src`). Written as the design write-up of an investigation into
+`/config/workspace/playground`'s background-removal implementation
+(`playground/sandbox/providers/runware.js`, `sandbox/runner.js`, `orchestrator.js` step 6a,
+`docs/spec.md` §18.4) and how to port it to BigImagine as a `purpose = 'bgrm'` image connection.
+The two "related existing plans" originally cited here — `docs/plans/completed/portrait-studio-plan.md`
+and `docs/plans/vistalyze_integration/endpoint.md` — were deliberately deleted in commit `40a1ff4`
+(2026-08-20, "clears out docs/plans/completed/ — the stale plan docs were poisoning context for
+coding agents"); `docs/plans/completed/` no longer exists at all. Their content is gone, not moved —
+don't go looking for a new path. The design points they established (purpose split, connection
+resolution) are re-derived directly from current source below instead.*
 
 ---
 
@@ -130,9 +135,16 @@ New:
 Edited:
 
 - `orchestrator/src/io/imageConnections.ts` — `ImageConnectionPurpose` type gains `'bgrm'` (line
-  64); no store logic change (list/create/update/activate/remove/resolveById/resolveActive all
-  already treat `purpose` opaquely).
-- `orchestrator/src/server/adminServer.ts` — `isImagePurpose` (line ~456) accepts `'bgrm'`.
+  64, confirmed current: `export type ImageConnectionPurpose = 'background' | 'portrait';`); no
+  store logic change (list/create/update/activate/remove/resolveById/resolveActive all already
+  treat `purpose` opaquely).
+- `orchestrator/src/server/admin/imageConnections.ts` — `isImagePurpose` (line 76) accepts `'bgrm'`.
+  **Path correction**: this used to live in `adminServer.ts` at the time this plan was written, but
+  a same-day split (commit stamped 2026-08-20, done as this review was happening) broke
+  `adminServer.ts` into `server/admin/*.ts` domain modules; `adminServer.ts` is now a 157-line
+  re-export façade only. `isImagePurpose`, `parseCreateImageConnectionBody`, and
+  `parseUpdateImageConnectionBody` all live in `server/admin/imageConnections.ts` now — edit there,
+  not in `adminServer.ts`.
 - `orchestrator/src/orchestrator/generateLocationImage.ts` — optional BGRM post-process on the
   rendered URL when the purpose `'bgrm'` connection's toggle is on for that chat.
 - `orchestrator/src/orchestrator/portraitGeneration.ts` — optional BGRM post-process on each
@@ -141,7 +153,10 @@ Edited:
   on the existing `portrait_llm_connection` route.
 - `frontend/src/components/connections/ImageConnectionEditor.tsx` — Purpose `<select>` gains a
   `bgrm` option; provider fields gated for a `bgrm`-purpose row.
-- `frontend/src/views/ConnectionsView.tsx` — active-row badge gains a `(bgrm)` case.
+- `frontend/src/views/ConnectionsView.tsx` — active-row badge gains a `bgrm` case. **Correction**:
+  the existing convention (confirmed current, line ~246) is a terse 3-letter parenthesized code —
+  `(prt)` for portrait, `(bg)` for background — not the full purpose name; follow that pattern
+  (e.g. `(brm)`), not literal `(bgrm)`.
 - `frontend/src/components/sidebar/` — new (or extended `PortraitConnectionPanel`) Studio BGRM
   default toggle (Portrait Studio is a *left* sidebar; "Studio side panel" = the
   `Sidebar.tsx` `case 'portraits'` drawer `PortraitConnectionPanel`/`PortraitPromptsPanel`).
@@ -258,7 +273,7 @@ the exact precedence is the first-open item in §Design Decisions.
   (per-purpose — a `bgrm` activation must not demote the active background or portrait row, and vice
   versa; the existing per-purpose `activate` already guarantees this), `resolveActive('bgrm')`.
 
-**`orchestrator/src/server/adminServer.ts`**
+**`orchestrator/src/server/admin/imageConnections.ts`** (not `adminServer.ts` — see §Files)
 - `isImagePurpose` returns true for `'bgrm'`; create/update bodies accept it.
 - Connections list/badges: a `bgrm` row is listed with every other connection and carries a
   `(bgrm)` active badge, per the Connections tab's combined-list convention.
@@ -322,12 +337,23 @@ Open items to lock before coding (call using the existing `ask`/decision convent
 fork exists):
 
 1. **Toggle layering & storage.** One global household default (`bgrm` connection = on/off) plus a
-   Surface default + per-chat override → what storage backs each (new `orchestrator_settings` keys
-   vs a `chat.params` boolean vs a `chat` column). Recommended: household active `bgrm` connection
-   governs availability; `portrait_bgrm_enabled` settings key for the Studio default; a
-   `chat` column or `params` flag for the per-chat RP override, with unset → household default.
+   Surface default + per-chat override → what storage backs each. **Correction**: `chat_sessions`
+   has no jsonb `params` blob to hang a boolean off — checked current migrations (0009's base table
+   through 0128, which just dropped `archived_at`), and every chat-scoped setting added over time
+   (`scene_id`, `previous_scene_id`, the 0072 cleanup-heuristic columns, etc.) is its own typed
+   column, never a generic bag. Drop the "`chat.params` boolean" option; the per-chat override
+   needs a dedicated `chat_sessions` column (e.g. `bgrm_enabled boolean`, nullable, unset = defer to
+   household/surface default) to match the table's established shape. Recommended: household active
+   `bgrm` connection governs availability; `portrait_bgrm_enabled` settings key for the Studio
+   default; a new nullable `chat_sessions` column for the per-chat RP override.
 2. **Where the shared batch helper lives.** Own file (`util/removeBackgroundBatch.ts`) vs folded
-   into each orchestrator, to honor the 300-line file budget and four-kinds split.
+   into each orchestrator, to honor the 300-line file budget and four-kinds split. **Worth noting**:
+   `portraitGeneration.ts` (993 lines) and `portraitRoutes.ts` (1326 lines) are already several
+   times over that budget before this plan touches them — `adminServer.ts` just went through
+   exactly this split (into `server/admin/*.ts`, same-day as this review) for the same reason.
+   Adding BGRM logic as a new file that these two import from, rather than growing either further
+   inline, avoids repeating that cleanup later; it does not, on its own, obligate splitting either
+   file as part of this plan.
 3. **Output format.** Accept PNG from BGRM and store/serve it, or re-encode to JPG for consistency
    with current background/portrait expectations.
 4. **`renderInputHash` inputs.** Confirm `bgrm`-on (and its model) joins the hash input set. (This
