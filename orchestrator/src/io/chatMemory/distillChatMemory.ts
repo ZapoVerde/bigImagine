@@ -1,7 +1,7 @@
 /**
  * @file orchestrator/src/io/chatMemory/distillChatMemory.ts
- * @stamp 2026-07-28
- * @architectural-role IO Wrapper — forced-schema LLM call
+ * @stamp 2026-08-20
+ * @architectural-role IO Wrapper — plain-text LLM call with local parsing
  * @description
  * Maintains the per-chat "key ideas" digest (chat_memory_entries — see
  * db/migrations/0038_chat_memory_entries.sql). Given the chat's current entries and the newly
@@ -15,9 +15,20 @@
  * round"), not treated as a failure — distinct from summarizeChatChunk, which always has
  * something to summarize.
  *
+ * Transport follows the same migration every sibling caller (bridgeChatMemory.ts,
+ * curateWorldMemory.ts, curatePeople.ts) already landed (chat-memory-structured-output-plan.md):
+ * the forced `distill_chat_memory` tool call is gone, replaced by an ordinary text completion
+ * whose OUTPUT FORMAT is a sequence of `[topic_key]` blocks plus the exact `NO CHANGES NEEDED`
+ * sentinel, parsed locally by parseDistillMemoryOutput.ts back into the same ChatMemoryEntryDraft
+ * shape — so nothing downstream (chatMemorySync.ts's upsert_entries step) changes. The behavioral
+ * contract that used to live partly in the tool schema (only new/changed entries, reuse keys
+ * exactly, 1-3 sentences, empty result valid) now lives entirely in the default prompt.
+ *
  * @api-declaration
- * distillChatMemory(llm, existingEntries, newChunkSummaries) — throws only on a malformed
- *   top-level response; returns [] when nothing needs to change
+ * DEFAULT_DISTILL_CHAT_MEMORY_PROMPT
+ * ChatMemoryEntryDraft
+ * distillChatMemory(llm, existingEntries, newChunkSummaries, promptOverride?) — throws only on a
+ *   malformed response; returns [] when nothing needs to change
  *
  * @contract
  *   assertions:
@@ -26,64 +37,44 @@
  *     external_io:     [LLM, via the LlmProvider passed in]
  */
 
-import type { LlmProvider, ToolDefinition } from '../llm/types.js';
+import type { LlmProvider } from '../llm/types.js';
+import { parseDistillMemoryOutput } from './parseDistillMemoryOutput.js';
 
-export const DEFAULT_DISTILL_CHAT_MEMORY_PROMPT =
-  'You maintain a short running digest of key ideas for one ongoing conversation, so its important context ' +
-  'survives even after the raw messages it came from are no longer sent to you. Always answer by calling ' +
-  'distill_chat_memory, with an empty entries array if nothing needs to change.';
+export const DEFAULT_DISTILL_CHAT_MEMORY_PROMPT = `**[SYSTEM: TASK — CHAT MEMORY DISTILLER]**
+You maintain the persistent key-idea digest for one ongoing conversation.
+
+You will receive:
+- CURRENT ENTRIES: the key ideas already stored for this conversation
+- NEWLY ARCHIVED MEMORY: summaries of the latest conversation chunks
+
+Your job is to return only the entries that are new or whose current state has meaningfully changed.
+
+Rules:
+- Reuse an existing topic key exactly when the new material continues or changes the same underlying idea.
+- Create a new topic key only when the new material introduces a genuinely distinct idea worth retaining.
+- Do not restate entries that remain accurate and unchanged.
+- Do not delete or retire entries. Anything you omit remains stored unchanged.
+- Each entry should describe the current state of that idea, not narrate the sequence of turns that produced it.
+- Preserve concrete names, decisions, commitments, constraints, corrections, preferences, and unresolved matters that will matter later.
+- Exclude conversational filler, transient phrasing, repeated information, and details with no likely future value.
+- Write each entry in 1–3 concise sentences.
+- Topic keys must be short, stable, lowercase snake_case identifiers.
+
+OUTPUT FORMAT — follow exactly:
+
+[topic_key]
+Current state of this idea in 1–3 sentences.
+
+[another_topic_key]
+Current state of this idea in 1–3 sentences.
+
+If nothing is new or meaningfully changed, output exactly:
+
+NO CHANGES NEEDED`;
 
 export interface ChatMemoryEntryDraft {
   topicKey: string;
   content: string;
-}
-
-const distillChatMemoryTool: ToolDefinition = {
-  name: 'distill_chat_memory',
-  description:
-    'Propose new or updated key-idea entries for this chat, based on what just happened. Only include entries that ' +
-    'are genuinely new or need a change — omit anything already covered and unaffected.',
-  parameters: {
-    type: 'object',
-    properties: {
-      entries: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            topic_key: {
-              type: 'string',
-              description:
-                'A short, stable snake_case key. Reuse an existing one exactly when this is a continuation of the ' +
-                'same idea; invent a new one only for a genuinely new topic.',
-            },
-            content: { type: 'string', description: '1-3 sentences capturing the current state of this idea.' },
-          },
-          required: ['topic_key', 'content'],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ['entries'],
-    additionalProperties: false,
-  },
-};
-
-interface DistillResponse {
-  entries: { topic_key: string; content: string }[];
-}
-
-function isDistillResponse(value: unknown): value is DistillResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const entries = (value as Record<string, unknown>).entries;
-  if (!Array.isArray(entries)) return false;
-  return entries.every(
-    (e) =>
-      typeof e === 'object' &&
-      e !== null &&
-      typeof (e as Record<string, unknown>).topic_key === 'string' &&
-      typeof (e as Record<string, unknown>).content === 'string',
-  );
 }
 
 export async function distillChatMemory(
@@ -99,22 +90,14 @@ export async function distillChatMemory(
 
   const turn = await llm.complete(
     [
+      { role: 'system', content: promptOverride || DEFAULT_DISTILL_CHAT_MEMORY_PROMPT },
       {
-        role: 'system',
-        content: `${promptOverride || DEFAULT_DISTILL_CHAT_MEMORY_PROMPT}\n\nCurrent entries:\n${existingList}`,
+        role: 'user',
+        content: `CURRENT ENTRIES:\n${existingList}\n\nNEWLY ARCHIVED MEMORY:\n${newList}`,
       },
-      { role: 'user', content: `What just happened (newly archived, in order):\n${newList}` },
     ],
-    [distillChatMemoryTool],
-    { forceTool: 'distill_chat_memory' },
+    [],
   );
 
-  const call = turn.toolCalls.find((c) => c.name === 'distill_chat_memory');
-  if (!call) {
-    throw new Error('distillChatMemory: model did not call distill_chat_memory despite forceTool');
-  }
-  if (!isDistillResponse(call.arguments)) {
-    throw new Error(`distillChatMemory: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
-  }
-  return call.arguments.entries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
+  return parseDistillMemoryOutput(turn.message.content);
 }

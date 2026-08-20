@@ -8,6 +8,7 @@
 import { parseBridgeOutput } from '../dist/io/chatMemory/parseBridgeOutput.js';
 import { parseWorldMemoryOutput } from '../dist/io/chatMemory/parseWorldMemoryOutput.js';
 import { parsePeopleMemoryOutput } from '../dist/io/chatMemory/parsePeopleMemoryOutput.js';
+import { parseDistillMemoryOutput } from '../dist/io/chatMemory/parseDistillMemoryOutput.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -899,6 +900,185 @@ peopleParseFails(
     typeof news.appearance === 'string' && typeof news.content === 'string' && typeof duplicate.duplicateOf === 'string',
     'entry fields are plain strings',
   );
+}
+
+// =============================================================================
+// Distill parser (chat-memory-distill-plan.md): parseDistillMemoryOutput turns the
+// digest distiller's plain-text OUTPUT FORMAT (`[topic_key]` blocks + the exact
+// NO CHANGES NEEDED sentinel) back into the ChatMemoryEntryDraft shape the old forced
+// distill_chat_memory tool call produced. Topic keys are a hard gate — they become the
+// stable SQL identity for the digest row.
+// =============================================================================
+
+function distillOutput(entries) {
+  const blocks = [];
+  for (const e of entries) {
+    blocks.push(`[${e.topicKey}]`, e.content);
+  }
+  return blocks.join('\n\n');
+}
+
+function distillParseOk(raw) {
+  try {
+    return parseDistillMemoryOutput(raw);
+  } catch (e) {
+    throw new Error(`expected parseDistillMemoryOutput to succeed but it threw: ${e.message}\n--- raw ---\n${raw}`);
+  }
+}
+
+function distillParseFails(raw, label) {
+  let threw = false;
+  try {
+    parseDistillMemoryOutput(raw);
+  } catch {
+    threw = true;
+  }
+  assert(threw, label);
+}
+
+// --- 77. exact NO CHANGES NEEDED -> [] ---------------------------------------
+
+{
+  const r = distillParseOk('NO CHANGES NEEDED');
+  assert(Array.isArray(r) && r.length === 0, 'the exact NO CHANGES NEEDED sentinel parses to an empty array');
+  assert(distillParseOk('no changes needed').length === 0, 'the sentinel is case-insensitive-tolerant (but still the exact sentinel, not prose)');
+}
+
+// --- 78. one valid entry -----------------------------------------------------
+
+{
+  const r = distillParseOk('[server_upgrade]\nThe home server upgrade remained blocked on selecting storage.');
+  assert(r.length === 1 && r[0].topicKey === 'server_upgrade', 'one [topic_key] block -> one entry');
+  assert(r[0].content === 'The home server upgrade remained blocked on selecting storage.', 'the body under the key becomes the content');
+}
+
+// --- 79. multiple valid entries ----------------------------------------------
+
+{
+  const r = distillParseOk(
+    distillOutput([
+      { topicKey: 'house_move', content: 'The family had decided to move to Fremantle.' },
+      { topicKey: 'server_upgrade', content: 'The server upgrade remained blocked on storage selection.' },
+    ]),
+  );
+  assert(r.length === 2, 'two blocks -> two entries');
+  assert(r[0].topicKey === 'house_move' && r[1].topicKey === 'server_upgrade', 'each block keeps its own key, in order');
+}
+
+// --- 80. existing-looking key parses unchanged --------------------------------
+
+{
+  const r = distillParseOk(distillOutput([{ topicKey: 'topic_a', content: 'Household prefers oat milk.' }]));
+  assert(r.length === 1 && r[0].topicKey === 'topic_a' && r[0].content === 'Household prefers oat milk.', 'an existing-style topic key parses unchanged');
+}
+
+// --- 81. CRLF -> valid -------------------------------------------------------
+
+{
+  const r = distillParseOk('[server_upgrade]\r\nUpgraded.\r\n\r\n[backup_strategy]\r\nPlanned.\r\n');
+  assert(r.length === 2 && r[1].topicKey === 'backup_strategy', 'CRLF line endings parse the same as LF');
+}
+
+// --- 82. enclosing markdown fence -> valid ------------------------------------
+
+{
+  const r = distillParseOk('```\n[server_upgrade]\nUpgraded.\n```');
+  assert(r.length === 1 && r[0].topicKey === 'server_upgrade', 'one enclosing markdown fence is tolerated and stripped');
+}
+
+// --- 83. surrounding whitespace -> valid --------------------------------------
+
+{
+  const r = distillParseOk('\n\n  [server_upgrade]\nUpgraded.\n\t  ');
+  assert(r.length === 1 && r[0].content === 'Upgraded.', 'leading/trailing whitespace is normalized away');
+}
+
+// --- 84. multiline content -> valid -------------------------------------------
+
+{
+  const r = distillParseOk('[house_move]\nLine one.\nLine two.');
+  assert(r[0].content === 'Line one.\nLine two.', 'multi-line content with no blank line between blocks is preserved');
+}
+
+// --- 84b. stray prose between/after blocks -> fail -----------------------------
+// The same failure mode parseWorldMemoryOutput.ts's splitParagraphs guards against: a second
+// paragraph inside a block's body must fail the whole response, not silently merge into content.
+
+distillParseFails(
+  '[server_upgrade]\nUpgraded after storage was picked.\n\nLet me know if you need anything else!',
+  'trailing prose after the last block (a second paragraph) throws instead of merging into its content',
+);
+distillParseFails(
+  '[a]\nContent A.\n\nSome stray commentary here.\n\n[b]\nContent B.',
+  'stray prose between two valid blocks throws instead of merging into the preceding entry',
+);
+
+// --- 85. empty key -> fail ----------------------------------------------------
+
+distillParseFails('[]\nContent.', 'an empty key throws');
+distillParseFails('[ ]\nContent.', 'a whitespace-only key throws');
+
+// --- 86. key containing spaces -> fail ----------------------------------------
+
+distillParseFails('[School Choice]\nContent.', 'a key with spaces throws');
+distillParseFails('[school choice]\nContent.', 'a lowercase key with spaces throws');
+
+// --- 87. hyphenated key -> fail -----------------------------------------------
+
+distillParseFails('[school-choice]\nContent.', 'a hyphenated key throws');
+
+// --- 88. uppercase key -> fail ------------------------------------------------
+
+distillParseFails('[SchoolChoice]\nContent.', 'an uppercase key throws');
+
+// --- 89. leading/trailing underscore -> fail ----------------------------------
+
+distillParseFails('[_school]\nContent.', 'a leading underscore throws');
+distillParseFails('[school_]\nContent.', 'a trailing underscore throws');
+
+// --- 90. missing content -> fail ----------------------------------------------
+
+distillParseFails('[server_upgrade]', 'a block with no content body throws');
+distillParseFails('[server_upgrade]\n   \n', 'a block with whitespace-only content throws');
+
+// --- 91. duplicate topic key -> fail ------------------------------------------
+
+distillParseFails(
+  '[server_upgrade]\nFirst.\n\n[server_upgrade]\nSecond.',
+  'a response that repeats a topic key throws — no last-one-wins',
+);
+
+// --- 92. arbitrary prose before first block -> fail ----------------------------
+
+distillParseFails(
+  'Here are the digest entries:\n\n[server_upgrade]\nUpgraded.',
+  'prose before the first [topic_key] block throws — the format is exact, no preamble allowed',
+);
+
+// --- 93. one malformed block fails the whole response --------------------------
+
+distillParseFails(
+  distillOutput([{ topicKey: 'server_upgrade', content: 'Good content.' }]) +
+    '\n\n[Bad Key]\nBad content.',
+  'a single malformed block among valid blocks fails the entire response (whole-response failure)',
+);
+distillParseFails(
+  distillOutput([
+    { topicKey: 'server_upgrade', content: 'Good content.' },
+    { topicKey: 'backup_strategy', content: '' },
+  ]),
+  'a single empty-content block among valid blocks fails the entire response',
+);
+
+// --- 94. parsed object matches the existing ChatMemoryEntryDraft shape ----------
+
+{
+  const r = distillParseOk(distillOutput([{ topicKey: 'server_upgrade', content: 'Upgraded.' }]));
+  assert(
+    Object.keys(r[0]).sort().join(',') === 'content,topicKey',
+    'an entry is exactly { topicKey, content } — the ChatMemoryEntryDraft shape chatMemorySync.ts consumes',
+  );
+  assert(typeof r[0].topicKey === 'string' && typeof r[0].content === 'string', 'entry fields are plain strings');
 }
 
 console.log(`\nverify-chat-memory-text-parsers: ${process.exitCode ? 'FAILED' : 'all assertions passed'}`);

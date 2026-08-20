@@ -503,7 +503,7 @@ const llmConnections = {
 };
 
 function createFakeHttpBackend() {
-  return { calls: [], gateHook: null, curatePeopleOverride: null, worldCuratorOverride: null };
+  return { calls: [], gateHook: null, curatePeopleOverride: null, worldCuratorOverride: null, distillOverride: null };
 }
 
 function oaiToolResponse(name, args) {
@@ -561,13 +561,14 @@ function installSyncFetchMock(backend) {
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
       if (backend.gateHook) await backend.gateHook(forceTool);
       // Plain-text completions (chat-memory-structured-output-plan + chat-memory-world-curator-
-      // plan + chat-memory-people-curator-plan: no forced tool — raw text out, parsed locally).
-      // FOUR tool-free callers now share the same connection within one tick — the chunk
-      // classifier, the rp bridge, the rp world curator, and the rp people curator — so the backend
-      // routes on a distinguishing string in the system prompt (the bridge's chronicler header, the
-      // world curator's lorebook-curator header, the people curator's people-curator header) rather
-      // than on tool_choice's absence alone; routing on absence would silently serve the
-      // classifier's canned summary to the others and surface as a confusing parser failure.
+      // plan + chat-memory-people-curator-plan + chat-memory-distill-plan: no forced tool — raw text
+      // out, parsed locally). FIVE tool-free callers now share the same connection within one tick —
+      // the chunk classifier, the rp bridge, the rp world curator, the rp people curator, and the
+      // household distill — so the backend routes on a distinguishing string in the system prompt
+      // (the bridge's chronicler header, the world curator's lorebook-curator header, the people
+      // curator's people-curator header, the distiller's CHAT MEMORY DISTILLER header) rather than
+      // on tool_choice's absence alone; routing on absence would silently serve the classifier's
+      // canned summary to the others and surface as a confusing parser failure.
       if (!forceTool) {
         const sys = body.messages.find((m) => m.role === 'system')?.content ?? '';
         const content = body.messages.find((m) => m.role === 'user').content;
@@ -650,11 +651,16 @@ Minor: Secure the supply road.
 Minor: Find her brother.`,
           );
         }
+        if (sys.includes('CHAT MEMORY DISTILLER')) {
+          return oaiTextResponse(
+            backend.distillOverride ??
+              `[server_upgrade]
+The server upgrade moved forward after replacement storage was selected.`,
+          );
+        }
         return oaiTextResponse(`Summary[${content}]`);
       }
       switch (forceTool) {
-        case 'distill_chat_memory':
-          return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
         case 'classify_household_memory':
           return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
       }
@@ -733,7 +739,7 @@ function seedMessages(chatId, tag, count) {
 }
 
 function distillCalls() {
-  return llm.calls.filter((c) => c.options.forceTool === 'distill_chat_memory');
+  return llm.calls.filter(isDistillCall);
 }
 
 // The rp bridge is a tool-free completion too (chat-memory-structured-output-plan Chunk 2), so it
@@ -768,6 +774,17 @@ function isPeopleCuratorCall(c) {
   );
 }
 
+// The household distill is a fifth tool-free completion (chat-memory-distill-plan.md), keyed on
+// its own CHAT MEMORY DISTILLER header — the same header the fake backend routes on. Every
+// forceTool-absence filter that means "the fallback/summarizer call only" must exclude it too,
+// exactly as they already exclude bridge/world/people.
+function isDistillCall(c) {
+  return (
+    c.options.forceTool === undefined &&
+    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('CHAT MEMORY DISTILLER')
+  );
+}
+
 function bridgeCalls() {
   return llm.calls.filter(isBridgeCall);
 }
@@ -782,7 +799,12 @@ function peopleCuratorCalls() {
 
 function summarizeCalls() {
   return llm.calls.filter(
-    (c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c),
+    (c) =>
+      c.options.forceTool === undefined &&
+      !isBridgeCall(c) &&
+      !isWorldCuratorCall(c) &&
+      !isPeopleCuratorCall(c) &&
+      !isDistillCall(c),
   );
 }
 
@@ -800,7 +822,7 @@ assert(pool.chatChunks.length === 2, 'tick 1 archives exactly 2 chunks (8 of 12 
     'tick 1 links its batch via parent_chunk_id: the first chunk is the chain head (null parent), the second links to the first (migration 0100)',
   );
 }
-assert(distillCalls().length === 1, 'tick 1 calls distill_chat_memory exactly once for the one due chat');
+assert(distillCalls().length === 1, 'tick 1 runs the distill lane exactly once for the one due chat');
 {
   const prompt = distillCalls()[0].messages.find((m) => m.role === 'user').content;
   assert(prompt.includes('T1-user-1'), "tick 1's distill prompt includes the chunk it just summarized");
@@ -832,7 +854,7 @@ assert(pool.chatChunks.length === 4, 'tick 2 archives 2 more chunks (4 total)');
     "tick 2's batch links to tick 1's last chunk — the whole 4-chunk chain is contiguous via parent_chunk_id (no gaps, one head)",
   );
 }
-assert(distillCalls().length === 2, 'distill_chat_memory has now been called once per tick, not once total');
+assert(distillCalls().length === 2, 'the distill lane has now run once per tick, not once total');
 {
   const tick2Prompt = distillCalls()[1].messages.find((m) => m.role === 'user').content;
   const itemCount = (tick2Prompt.match(/^\d+\. /gm) || []).length;
@@ -850,7 +872,7 @@ const chunksBeforeTick3 = pool.chatChunks.length;
 const distillCallsBeforeTick3 = distillCalls().length;
 await runChatMemorySyncTick(deps);
 assert(pool.chatChunks.length === chunksBeforeTick3, 'a chat below the due threshold gets no new chunks');
-assert(distillCalls().length === distillCallsBeforeTick3, 'a chat below the due threshold triggers no distill_chat_memory call');
+assert(distillCalls().length === distillCallsBeforeTick3, 'a chat below the due threshold triggers no distill run');
 // NOT_DUE_CHAT_ID never even reaches runOneChatSync — findDueChats' own rough SQL filter already
 // excludes it, so it gets no status row at all (nothing was attempted, there's nothing to record).
 assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat findDueChats never selects isn't attempted, so it gets no status row");
@@ -1579,7 +1601,7 @@ Duplicate of: Mira Vale`,
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   assert(
-    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c)).length === 2,
+    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c) && !isDistillCall(c)).length === 2,
     'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
   );
   assert(
@@ -1595,7 +1617,7 @@ Duplicate of: Mira Vale`,
     'the people curator also rides the chat_memory_profile connection, alongside the bridge and world curator',
   );
   assert(
-    !namedCalls.some((c) => c.options.forceTool === 'distill_chat_memory'),
+    !namedCalls.some(isDistillCall),
     'an rp chat never runs the household distill lane',
   );
   assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the chat_memory_profile sync never touches the active connection');
@@ -1934,6 +1956,122 @@ Duplicate of: Mira Vale`,
     tfSummarizeCalls.every((c) => c.tools === undefined && c.options.forceTool === undefined),
     'each summarize request carries no tools array and no forceTool — plain completion transport, not a forced tool call',
   );
+}
+
+// --- chat-memory-distill-plan.md: the digest lane now rides an ordinary text completion. The
+// fake distill response exercises both update-like and new behavior using SQL semantics — an
+// existing topic key upserts the same row, a new key creates a new row, and omitted existing
+// topics remain untouched. The request itself carries no tools and no forceTool, and both the
+// existing entries and the newly archived summaries ride in the user message. ---
+{
+  const chatEntryCount = (chatId) => [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === chatId).length;
+
+  const DISTILL_CHAT_ID = randomUUID();
+  pool.chatSessions.set(DISTILL_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(DISTILL_CHAT_ID, 'DISTILL', 12);
+
+  // Seed an existing digest (what an earlier sync would have stored) plus an omitted topic that
+  // must survive the pass untouched.
+  pool.chatMemoryEntries.set(`${DISTILL_CHAT_ID}::server_upgrade`, {
+    chat_id: DISTILL_CHAT_ID,
+    topic_key: 'server_upgrade',
+    content: 'The server upgrade was awaiting hardware selection.',
+    updated_at: pool.now(),
+  });
+  pool.chatMemoryEntries.set(`${DISTILL_CHAT_ID}::house_move`, {
+    chat_id: DISTILL_CHAT_ID,
+    topic_key: 'house_move',
+    content: 'The family had decided to move to Fremantle.',
+    updated_at: pool.now(),
+  });
+
+  backend.distillOverride = `[server_upgrade]
+The server upgrade had moved forward after replacement storage was selected.
+
+[backup_strategy]
+A new backup strategy was being planned around off-site replication.`;
+  await runChatMemorySyncTick(deps);
+  backend.distillOverride = null;
+
+  const serverRow = pool.chatMemoryEntries.get(`${DISTILL_CHAT_ID}::server_upgrade`);
+  assert(
+    serverRow?.content === 'The server upgrade had moved forward after replacement storage was selected.',
+    'an existing topic key upserts the same row with the new current-state content — not a duplicate',
+  );
+  const backupRow = pool.chatMemoryEntries.get(`${DISTILL_CHAT_ID}::backup_strategy`);
+  assert(backupRow?.content === 'A new backup strategy was being planned around off-site replication.', 'a new topic key creates a new row');
+  const houseRow = pool.chatMemoryEntries.get(`${DISTILL_CHAT_ID}::house_move`);
+  assert(houseRow?.content === 'The family had decided to move to Fremantle.', 'omitted existing topics remain unchanged');
+  assert(
+    chatEntryCount(DISTILL_CHAT_ID) === 3,
+    'the digest holds exactly the three rows — updated, new, and untouched — no duplicates',
+  );
+
+  const distillCall = distillCalls().find((c) => c.messages.some((m) => m.role === 'user' && m.content.includes('DISTILL-user-1')));
+  assert(distillCall !== undefined, 'the distill call was routed on its own CHAT MEMORY DISTILLER header, not the summarize fallback');
+  assert(
+    distillCall.tools === undefined && distillCall.options.forceTool === undefined,
+    'the distill request carries no tools array and no forceTool — ordinary completion transport',
+  );
+  const distillUser = distillCall.messages.find((m) => m.role === 'user').content;
+  assert(
+    distillUser.includes('[server_upgrade]') && distillUser.includes('[house_move]'),
+    "the existing entries are present in the model's user message, not the system message",
+  );
+  const firstNumbered = distillUser.indexOf('1. ');
+  const secondNumbered = distillUser.indexOf('2. ');
+  assert(
+    distillUser.includes('NEWLY ARCHIVED MEMORY:') && firstNumbered !== -1 && secondNumbered > firstNumbered,
+    'the newly archived summaries are present in the user message, numbered and in order',
+  );
+  const distillSys = distillCall.messages.find((m) => m.role === 'system')?.content;
+  assert(distillSys?.includes('CHAT MEMORY DISTILLER'), 'the distill system message is the new standalone distiller prompt with the routing header');
+
+  // --- NO CHANGES NEEDED: no digest writes, but the sync still succeeds ---
+  const NOOP_CHAT_ID = randomUUID();
+  pool.chatSessions.set(NOOP_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(NOOP_CHAT_ID, 'NOOP', 12);
+  pool.chatMemoryEntries.set(`${NOOP_CHAT_ID}::server_upgrade`, {
+    chat_id: NOOP_CHAT_ID,
+    topic_key: 'server_upgrade',
+    content: 'The server upgrade was awaiting hardware selection.',
+    updated_at: pool.now(),
+  });
+  backend.distillOverride = 'NO CHANGES NEEDED';
+  await runChatMemorySyncTick(deps);
+  backend.distillOverride = null;
+  assert(
+    chatEntryCount(NOOP_CHAT_ID) === 1 && pool.chatMemoryEntries.get(`${NOOP_CHAT_ID}::server_upgrade`)?.content === 'The server upgrade was awaiting hardware selection.',
+    'NO CHANGES NEEDED produces no digest writes — the existing row is untouched',
+  );
+  assert(pool.chatMemorySyncStatus.get(NOOP_CHAT_ID)?.last_status === 'ok', 'NO CHANGES NEEDED still lets the sync succeed');
+
+  // --- malformed distill text: whole-stage failure, no partial writes, no advanced boundary ---
+  const BAD_DISTILL_CHAT_ID = randomUUID();
+  pool.chatSessions.set(BAD_DISTILL_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(BAD_DISTILL_CHAT_ID, 'BADDIST', 12);
+  pool.chatMemoryEntries.set(`${BAD_DISTILL_CHAT_ID}::server_upgrade`, {
+    chat_id: BAD_DISTILL_CHAT_ID,
+    topic_key: 'server_upgrade',
+    content: 'The server upgrade was awaiting hardware selection.',
+    updated_at: pool.now(),
+  });
+  backend.distillOverride = `[server_upgrade]
+The server upgrade had moved forward.
+
+[Bad Key]
+A malformed key.`;
+  await runChatMemorySyncTick(deps);
+  backend.distillOverride = null;
+  assert(
+    chatEntryCount(BAD_DISTILL_CHAT_ID) === 1 &&
+      pool.chatMemoryEntries.get(`${BAD_DISTILL_CHAT_ID}::server_upgrade`)?.content === 'The server upgrade was awaiting hardware selection.',
+    'malformed distill text produces no partial chat_memory_entries writes — the seeded row is untouched, not even the well-formed block before the bad one',
+  );
+  const badStatus = pool.chatMemorySyncStatus.get(BAD_DISTILL_CHAT_ID);
+  assert(badStatus?.last_status === 'error', 'malformed distill text records the sync as error');
+  assert(badStatus?.last_step === 'distill', 'the status row names distill as the exact failing step');
+  assert(badStatus?.last_success_at == null, 'the failing tick never advanced the closed sync boundary — no successful commit was recorded');
 }
 
 if (process.exitCode) {
