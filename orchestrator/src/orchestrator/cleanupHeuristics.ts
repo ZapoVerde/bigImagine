@@ -567,7 +567,7 @@ export const DEFAULT_CLEANUP_CONFIG = {
     'reply with nothing before or after it:\n\n' +
     '<details><summary>▸</summary>\n' +
     '<Ava>\n' +
-    'Inner thoughts: What Ava is feeling beneath what she is showing.\n' +
+    'Inner thoughts: What Ava is feeling beneath what she is showing. What Ava wants from {{user}} right now.\n' +
     'Expression: pleased\n' +
     'Outfit:\n' +
     '- Outerwear: leather jacket\n' +
@@ -578,7 +578,7 @@ export const DEFAULT_CLEANUP_CONFIG = {
     '- Accessory: silver pendant\n' +
     '</Ava>\n' +
     '<Brian>\n' +
-    'Inner thoughts: What Brian is feeling beneath what he is showing.\n' +
+    'Inner thoughts: What Brian is feeling beneath what he is showing. What Brian wants from {{user}} right now.\n' +
     'Expression: calm\n' +
     'Outfit:\n' +
     '- Outerwear: none\n' +
@@ -591,8 +591,8 @@ export const DEFAULT_CLEANUP_CONFIG = {
     '</details>\n\n' +
     '- One block per character in the roster, in roster order: {{roster}}\n' +
     '- Inner thoughts: keep the reply\'s existing inner thoughts if any; otherwise infer them from ' +
-    'the reply\'s tone, actions, and subtext — what the character is feeling beneath what they are ' +
-    'showing. Free-form, a few sentences at most.\n' +
+    'the reply\'s tone, actions, and subtext. Two parts: what the character is feeling beneath what ' +
+    'they are showing, and what they want from {{user}} right now. Free-form, a few sentences at most.\n' +
     '- Expression: exactly ONE word (e.g. pleased, calm, angry) — never a phrase.\n' +
     '- Outfit: exactly six lines in this order, each with the character\'s currently worn item in ' +
     'that slot, or \'none\' when nothing is worn there.\n' +
