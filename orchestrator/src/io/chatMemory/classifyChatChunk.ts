@@ -31,6 +31,7 @@
  */
 
 import type { LlmProvider } from '../llm/types.js';
+import { withParseErrorContext } from './llmOutputParseError.js';
 
 export const DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT = `You are a precise conversation memory classifier.
 
@@ -82,5 +83,7 @@ export async function summarizeChatChunk(llm: LlmProvider, content: string, prom
     ],
     [],
   );
-  return parseSummary(turn.message.content);
+  return withParseErrorContext('chat_memory_chunk_summary_prompt', turn.message.content, () =>
+    parseSummary(turn.message.content),
+  );
 }

@@ -45,6 +45,7 @@
 
 import type { LlmProvider } from '../llm/types.js';
 import { parseWorldMemoryOutput } from './parseWorldMemoryOutput.js';
+import { withParseErrorContext } from './llmOutputParseError.js';
 
 export const DEFAULT_WORLD_MEMORY_CURATOR_PROMPT = `**[SYSTEM: TASK — LOREBOOK CURATOR]**
 You are reviewing a session transcript and the current lorebook entries for a character.
@@ -139,5 +140,7 @@ export async function curateWorldMemory(
     [],
   );
 
-  return parseWorldMemoryOutput(turn.message.content);
+  return withParseErrorContext('chat_memory_world_curator_prompt', turn.message.content, () =>
+    parseWorldMemoryOutput(turn.message.content),
+  );
 }

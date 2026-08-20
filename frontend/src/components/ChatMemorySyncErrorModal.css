@@ -1,0 +1,100 @@
+.sync-error-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1.5rem;
+}
+
+.sync-error-modal {
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  max-width: 40rem;
+  width: 100%;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.3);
+}
+
+.sync-error-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.sync-error-modal-header h2 {
+  margin: 0 0 0.75rem;
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-secondary);
+}
+
+.sync-error-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sync-error-modal-close:hover {
+  color: var(--color-text);
+}
+
+.sync-error-modal-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.25rem 0.75rem;
+  margin: 0 0 1rem;
+  font-size: var(--font-size-sm);
+}
+
+.sync-error-modal-meta dt {
+  color: var(--color-text-faint);
+}
+
+.sync-error-modal-meta dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.sync-error-modal-meta code {
+  font-size: 0.9em;
+}
+
+.sync-error-modal-message {
+  white-space: pre-wrap;
+  color: var(--color-danger);
+  background: var(--color-danger-bg);
+  border-radius: var(--radius-sm);
+  padding: 0.6rem 0.75rem;
+  font-size: var(--font-size-sm);
+}
+
+.sync-error-modal h3 {
+  margin: 1.25rem 0 0.5rem;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.sync-error-modal-reply {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.75rem;
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family-mono, monospace);
+  color: var(--color-text);
+  margin: 0;
+}

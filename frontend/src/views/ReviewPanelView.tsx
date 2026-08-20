@@ -3,6 +3,7 @@ import { ApiError, adminGetChatMemorySyncStatus } from '../api/client';
 import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import { useChatMemorySyncStatus } from '../hooks/useChatMemorySyncStatus';
 import type { ChatMemorySyncStatusRow } from '../api/types';
+import ChatMemorySyncErrorModal from '../components/ChatMemorySyncErrorModal';
 import './ReviewPanelView.css';
 
 // The actual point of a "review panel," per the user: confirmation that each background pipeline
@@ -17,7 +18,7 @@ export default function ReviewPanelView() {
   const [checking, setChecking] = useState(true);
   const [unlocked, setUnlocked] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [expandedChatId, setExpandedChatId] = useState<string | null>(null);
+  const [detailChatId, setDetailChatId] = useState<string | null>(null);
 
   const { rows, refresh } = useChatMemorySyncStatus(adminKey, unlocked);
 
@@ -125,55 +126,38 @@ export default function ReviewPanelView() {
           </thead>
           <tbody>
             {rows.map((r) => (
-              <ReviewRow
-                key={r.chatId}
-                row={r}
-                expanded={expandedChatId === r.chatId}
-                onToggle={() => setExpandedChatId((id) => (id === r.chatId ? null : r.chatId))}
-              />
+              <ReviewRow key={r.chatId} row={r} onOpenDetail={() => setDetailChatId(r.chatId)} />
             ))}
           </tbody>
         </table>
       )}
+      {detailChatId &&
+        (() => {
+          const detailRow = rows.find((r) => r.chatId === detailChatId);
+          return detailRow ? <ChatMemorySyncErrorModal row={detailRow} onClose={() => setDetailChatId(null)} /> : null;
+        })()}
     </div>
   );
 }
 
-function ReviewRow({
-  row,
-  expanded,
-  onToggle,
-}: {
-  row: ChatMemorySyncStatusRow;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+function ReviewRow({ row, onOpenDetail }: { row: ChatMemorySyncStatusRow; onOpenDetail: () => void }) {
   const badgeClass =
     row.lastStatus === 'ok' ? 'review-badge-ok' : row.lastStatus === 'error' ? 'review-badge-error' : 'review-badge-skipped';
   return (
-    <>
-      <tr className={row.lastStatus === 'error' ? 'review-row-error' : undefined} onClick={row.lastError ? onToggle : undefined}>
-        <td>{row.chatTitle}</td>
-        <td>
-          <span className={badgeClass}>{row.lastStatus}</span>
-          {row.consecutiveErrors > 1 && <span className="review-consecutive"> ×{row.consecutiveErrors}</span>}
-        </td>
-        <td>{new Date(row.lastAttemptAt).toLocaleString()}</td>
-        <td>{row.lastSuccessAt ? new Date(row.lastSuccessAt).toLocaleString() : '—'}</td>
-        <td>
-          {row.lastChunksAdded ?? '—'} / {row.lastEntriesUpdated ?? '—'}
-        </td>
-        <td>
-          {row.canonProposedCount} proposed / {row.canonApprovedCount} approved
-        </td>
-      </tr>
-      {expanded && row.lastError && (
-        <tr className="review-row-detail">
-          <td colSpan={6}>
-            <strong>{row.lastStep ?? 'unknown step'}:</strong> {row.lastError}
-          </td>
-        </tr>
-      )}
-    </>
+    <tr className={row.lastStatus === 'error' ? 'review-row-error' : undefined} onClick={row.lastError ? onOpenDetail : undefined}>
+      <td>{row.chatTitle}</td>
+      <td>
+        <span className={badgeClass}>{row.lastStatus}</span>
+        {row.consecutiveErrors > 1 && <span className="review-consecutive"> ×{row.consecutiveErrors}</span>}
+      </td>
+      <td>{new Date(row.lastAttemptAt).toLocaleString()}</td>
+      <td>{row.lastSuccessAt ? new Date(row.lastSuccessAt).toLocaleString() : '—'}</td>
+      <td>
+        {row.lastChunksAdded ?? '—'} / {row.lastEntriesUpdated ?? '—'}
+      </td>
+      <td>
+        {row.canonProposedCount} proposed / {row.canonApprovedCount} approved
+      </td>
+    </tr>
   );
 }

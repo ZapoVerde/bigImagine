@@ -56,6 +56,13 @@ export interface ChatMemorySyncStatusRow {
   lastStatus: 'ok' | 'skipped' | 'error';
   lastStep: string | null;
   lastError: string | null;
+  /** The Settings-tab prompt key the failing prompt is edited under (migration 0130) — set only
+   *  when the failure was a malformed-output parse (LlmOutputParseError), null for every other
+   *  failure kind. */
+  lastErrorPromptName: string | null;
+  /** The model's raw completion text that failed to parse (migration 0130), untouched — null for
+   *  every non-parse failure kind (nothing to show for an HTTP/transport error). */
+  lastErrorLlmReply: string | null;
   lastSuccessAt: string | null;
   lastChunksAdded: number | null;
   lastEntriesUpdated: number | null;
@@ -72,6 +79,8 @@ interface ChatMemorySyncStatusQueryRow {
   last_status: 'ok' | 'skipped' | 'error';
   last_step: string | null;
   last_error: string | null;
+  last_error_prompt_name: string | null;
+  last_error_llm_reply: string | null;
   last_success_at: string | null;
   last_chunks_added: number | null;
   last_entries_updated: number | null;
@@ -89,6 +98,7 @@ export async function getChatMemorySyncStatus(db: PostgresClient): Promise<ChatM
       session.query<ChatMemorySyncStatusQueryRow>(
         `select
            s.chat_id, cs.title as chat_title, s.last_attempt_at, s.last_status, s.last_step, s.last_error,
+           s.last_error_prompt_name, s.last_error_llm_reply,
            s.last_success_at, s.last_chunks_added, s.last_entries_updated, s.consecutive_errors,
            coalesce(cf.proposed_count, 0)::text as canon_proposed_count,
            coalesce(cf.approved_count, 0)::text as canon_approved_count,
@@ -115,6 +125,8 @@ export async function getChatMemorySyncStatus(db: PostgresClient): Promise<ChatM
         lastStatus: r.last_status,
         lastStep: r.last_step,
         lastError: r.last_error,
+        lastErrorPromptName: r.last_error_prompt_name,
+        lastErrorLlmReply: r.last_error_llm_reply,
         lastSuccessAt: r.last_success_at,
         lastChunksAdded: r.last_chunks_added,
         lastEntriesUpdated: r.last_entries_updated,

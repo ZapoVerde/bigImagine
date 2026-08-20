@@ -51,6 +51,7 @@ import type { LlmProvider } from '../llm/types.js';
 import { interpolateMacros } from '../../util/interpolateMacros.js';
 import { APPEARANCE_SECTION_RULE } from '../../orchestrator/personCuratorAppearance.js';
 import { parsePeopleMemoryOutput } from './parsePeopleMemoryOutput.js';
+import { withParseErrorContext } from './llmOutputParseError.js';
 
 export const DEFAULT_PEOPLE_CURATOR_PROMPT = `**[SYSTEM: TASK — PEOPLE CURATOR]**
 You will receive a transcript of recent story events and the current person entries for this story. The primary character is {{user}}.
@@ -236,5 +237,7 @@ export async function curatePeople(
     [],
   );
 
-  return parsePeopleMemoryOutput(turn.message.content);
+  return withParseErrorContext('chat_memory_people_curator_prompt', turn.message.content, () =>
+    parsePeopleMemoryOutput(turn.message.content),
+  );
 }

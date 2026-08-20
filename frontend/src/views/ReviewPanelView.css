@@ -53,12 +53,6 @@
   background: var(--color-hover-surface);
 }
 
-.review-row-detail td {
-  white-space: pre-wrap;
-  color: var(--color-text-secondary);
-  background: var(--color-danger-bg);
-}
-
 .review-badge-ok {
   color: var(--color-success);
 }

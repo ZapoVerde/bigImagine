@@ -147,6 +147,7 @@ import { distillChatMemory, type ChatMemoryEntryDraft } from '../io/chatMemory/d
 import { bridgeChatMemory } from '../io/chatMemory/bridgeChatMemory.js';
 import { curateWorldMemory } from '../io/chatMemory/curateWorldMemory.js';
 import { curatePeople } from '../io/chatMemory/curatePeople.js';
+import { LlmOutputParseError } from '../io/chatMemory/llmOutputParseError.js';
 
 const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation urgency — minutes-scale is fine
 export const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
@@ -207,6 +208,11 @@ interface SyncErrorResult {
   error: string;
   kind: 'permanent' | 'transient';
   signature: string;
+  /** Set only when the failure was an LlmOutputParseError (migration 0130): the Settings-tab
+   *  prompt key and the model's raw completion text, surfaced verbatim to the review panel's
+   *  error-detail modal so a malformed-output failure is diagnosable from the row itself. */
+  promptName: string | null;
+  llmReply: string | null;
 }
 
 // Written through deps.db directly (a fresh transaction), never the `session` runOneChatSync ran
@@ -221,14 +227,16 @@ async function recordSyncStatus(
     if (outcome.status === 'error') {
       return session.query(
         `insert into chat_memory_sync_status
-           (chat_id, user_id, last_attempt_at, last_status, last_step, last_error, last_error_kind, failure_signature, consecutive_errors)
-         values ($1, $2, now(), 'error', $3, $4, $5, $6, 1)
+           (chat_id, user_id, last_attempt_at, last_status, last_step, last_error, last_error_kind, failure_signature,
+            last_error_prompt_name, last_error_llm_reply, consecutive_errors)
+         values ($1, $2, now(), 'error', $3, $4, $5, $6, $7, $8, 1)
          on conflict (chat_id) do update set
            last_attempt_at = excluded.last_attempt_at, last_status = 'error',
            last_step = excluded.last_step, last_error = excluded.last_error,
            last_error_kind = excluded.last_error_kind, failure_signature = excluded.failure_signature,
+           last_error_prompt_name = excluded.last_error_prompt_name, last_error_llm_reply = excluded.last_error_llm_reply,
            consecutive_errors = chat_memory_sync_status.consecutive_errors + 1`,
-        [chatId, userId, outcome.step, outcome.error, outcome.kind, outcome.signature],
+        [chatId, userId, outcome.step, outcome.error, outcome.kind, outcome.signature, outcome.promptName, outcome.llmReply],
       );
     }
     if (outcome.status === 'skipped') {
@@ -237,7 +245,8 @@ async function recordSyncStatus(
          values ($1, $2, now(), 'skipped')
          on conflict (chat_id) do update set
            last_attempt_at = excluded.last_attempt_at, last_status = 'skipped',
-           last_step = null, last_error = null, last_error_kind = null, failure_signature = null`,
+           last_step = null, last_error = null, last_error_kind = null, failure_signature = null,
+           last_error_prompt_name = null, last_error_llm_reply = null`,
         [chatId, userId],
       );
     }
@@ -247,7 +256,7 @@ async function recordSyncStatus(
        values ($1, $2, now(), 'ok', now(), $3, $4, 0)
        on conflict (chat_id) do update set
          last_attempt_at = excluded.last_attempt_at, last_status = 'ok', last_step = null, last_error = null,
-         last_error_kind = null, failure_signature = null,
+         last_error_kind = null, failure_signature = null, last_error_prompt_name = null, last_error_llm_reply = null,
          last_success_at = excluded.last_success_at, last_chunks_added = excluded.last_chunks_added,
          last_entries_updated = excluded.last_entries_updated, consecutive_errors = 0`,
       [chatId, userId, outcome.chunksAdded, outcome.entriesUpdated],
@@ -1111,12 +1120,21 @@ export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<v
         const step = err instanceof SyncStepError ? err.step : 'unknown';
         const message = err instanceof Error ? err.message : String(err);
         const kind = classifyLlmFailure(err);
+        // SyncStepError.cause carries whatever step() actually threw — when that's a
+        // LlmOutputParseError (a bridge/distill/curator/chunk-summary parse failure), thread its
+        // prompt name and the model's raw reply through onto the status row unchanged, so the
+        // review panel's error-detail modal can show exactly what the model said.
+        const cause = err instanceof SyncStepError ? err.cause : err;
+        const promptName = cause instanceof LlmOutputParseError ? cause.promptName : null;
+        const llmReply = cause instanceof LlmOutputParseError ? cause.rawReply : null;
         await recordSyncStatus(deps.db, userId, chatId, {
           status: 'error',
           step,
           error: message,
           kind,
           signature: defaults.profileSignature,
+          promptName,
+          llmReply,
         });
       }
     }

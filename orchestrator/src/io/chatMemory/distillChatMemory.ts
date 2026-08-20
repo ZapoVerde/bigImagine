@@ -39,6 +39,7 @@
 
 import type { LlmProvider } from '../llm/types.js';
 import { parseDistillMemoryOutput } from './parseDistillMemoryOutput.js';
+import { withParseErrorContext } from './llmOutputParseError.js';
 
 export const DEFAULT_DISTILL_CHAT_MEMORY_PROMPT = `**[SYSTEM: TASK — CHAT MEMORY DISTILLER]**
 You maintain the persistent key-idea digest for one ongoing conversation.
@@ -99,5 +100,7 @@ export async function distillChatMemory(
     [],
   );
 
-  return parseDistillMemoryOutput(turn.message.content);
+  return withParseErrorContext('chat_memory_distill_prompt', turn.message.content, () =>
+    parseDistillMemoryOutput(turn.message.content),
+  );
 }

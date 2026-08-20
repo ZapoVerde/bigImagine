@@ -48,6 +48,17 @@ export interface PostgresClient {
 export interface PoolClient {
   query(sql: string, params?: unknown[]): Promise<{ rows: unknown[] }>;
   release(): void;
+  /** Real pg.PoolClient is an EventEmitter; a checked-out client's own connection errors (the
+   *  server killing it server-side — e.g. idle_in_transaction_session_timeout firing while fn()
+   *  awaits an LLM call with no query in flight) surface here, not through any pending query
+   *  promise. Optional so every existing fake pool in the verify-*.mjs suites (none of which wire
+   *  this up) still satisfies the shape untouched. */
+  on?(event: 'error', listener: (err: Error) => void): void;
+  /** Pairs with `on` above — pg's Pool hands back the same underlying Client across checkouts once
+   *  it's released and reconnected, so a listener added in inTransaction and never removed
+   *  accumulates one per checkout on that same object forever (observed as Node's own
+   *  MaxListenersExceededWarning within the first few ticks of a real deploy, 2026-08-20). */
+  off?(event: 'error', listener: (err: Error) => void): void;
 }
 
 export interface Pool {
@@ -61,6 +72,18 @@ async function inTransaction<T>(
   fn: (session: DbSession) => Promise<T>,
 ): Promise<T> {
   const client = await pool.connect();
+  // Without this listener, a connection the server terminates while checked out (idle_in_transaction
+  // timeout mid-LLM-call is the observed case, 2026-08-20 — 3 orchestrator crashes in 48h) throws an
+  // uncaught exception and kills the whole process: node-postgres emits 'error' on the client itself
+  // for a dead connection with no in-flight query to reject, and an EventEmitter with no 'error'
+  // listener throws synchronously. Recording it here instead lets the client's next query (COMMIT,
+  // or a query setupScope/fn already had in flight) fail normally and fall into the catch below.
+  let connectionError: Error | null = null;
+  const onConnectionError = (err: Error): void => {
+    connectionError = err;
+    log.error(`${scopeLabel}: connection error while checked out`, err);
+  };
+  client.on?.('error', onConnectionError);
   try {
     await client.query('BEGIN');
     await setupScope(client);
@@ -73,6 +96,7 @@ async function inTransaction<T>(
     };
 
     const value = await fn(session);
+    if (connectionError) throw connectionError as Error;
     await client.query('COMMIT');
     return value;
   } catch (err) {
@@ -82,6 +106,7 @@ async function inTransaction<T>(
     log.error(`${scopeLabel} failed`, err);
     throw err;
   } finally {
+    client.off?.('error', onConnectionError);
     client.release();
   }
 }

@@ -51,6 +51,7 @@
 import type { LlmProvider } from '../llm/types.js';
 import { interpolateMacros } from '../../util/interpolateMacros.js';
 import { parseBridgeOutput } from './parseBridgeOutput.js';
+import { withParseErrorContext } from './llmOutputParseError.js';
 
 export const DEFAULT_BRIDGE_PROMPT = `**[SYSTEM: TASK — NARRATIVE CHRONICLER]**
 
@@ -169,7 +170,9 @@ SCENE:
     [],
   );
 
-  const parsed = parseBridgeOutput(turn.message.content);
+  const parsed = withParseErrorContext('chat_memory_bridge_prompt', turn.message.content, () =>
+    parseBridgeOutput(turn.message.content),
+  );
   return {
     events: parsed.events,
     scene: parsed.scene,

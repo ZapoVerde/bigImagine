@@ -720,6 +720,12 @@ export interface ChatMemorySyncStatusRow {
   lastStatus: 'ok' | 'skipped' | 'error';
   lastStep: string | null;
   lastError: string | null;
+  /** The Settings-tab prompt key the failing prompt is edited under — set only when the failure
+   *  was a malformed model-output parse, null for every other failure kind. */
+  lastErrorPromptName: string | null;
+  /** The model's raw completion text that failed to parse, untouched — null for every non-parse
+   *  failure kind (nothing to show for an HTTP/transport error). */
+  lastErrorLlmReply: string | null;
   lastSuccessAt: string | null;
   lastChunksAdded: number | null;
   lastEntriesUpdated: number | null;
