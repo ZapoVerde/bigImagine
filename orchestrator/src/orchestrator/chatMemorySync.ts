@@ -240,13 +240,17 @@ async function recordSyncStatus(
       );
     }
     if (outcome.status === 'skipped') {
+      // consecutive_errors resets here too, not just on 'ok': skipping means this tick found
+      // nothing eligible to archive, which is unrelated to (and clears) any prior error streak —
+      // otherwise a chat that errored a few times and then goes quiet keeps showing a stale
+      // "skipped ×N in a row" badge forever (2026-08-20).
       return session.query(
-        `insert into chat_memory_sync_status (chat_id, user_id, last_attempt_at, last_status)
-         values ($1, $2, now(), 'skipped')
+        `insert into chat_memory_sync_status (chat_id, user_id, last_attempt_at, last_status, consecutive_errors)
+         values ($1, $2, now(), 'skipped', 0)
          on conflict (chat_id) do update set
            last_attempt_at = excluded.last_attempt_at, last_status = 'skipped',
            last_step = null, last_error = null, last_error_kind = null, failure_signature = null,
-           last_error_prompt_name = null, last_error_llm_reply = null`,
+           last_error_prompt_name = null, last_error_llm_reply = null, consecutive_errors = 0`,
         [chatId, userId],
       );
     }
