@@ -503,7 +503,14 @@ const llmConnections = {
 };
 
 function createFakeHttpBackend() {
-  return { calls: [], gateHook: null, curatePeopleOverride: null, worldCuratorOverride: null, distillOverride: null };
+  return {
+    calls: [],
+    gateHook: null,
+    curatePeopleOverride: null,
+    worldCuratorOverride: null,
+    distillOverride: null,
+    householdMemoryOverride: null,
+  };
 }
 
 function oaiToolResponse(name, args) {
@@ -562,9 +569,10 @@ function installSyncFetchMock(backend) {
       if (backend.gateHook) await backend.gateHook(forceTool);
       // Plain-text completions (chat-memory-structured-output-plan + chat-memory-world-curator-
       // plan + chat-memory-people-curator-plan + chat-memory-distill-plan: no forced tool — raw text
-      // out, parsed locally). FIVE tool-free callers now share the same connection within one tick —
-      // the chunk classifier, the rp bridge, the rp world curator, the rp people curator, and the
-      // household distill — so the backend routes on a distinguishing string in the system prompt
+      // out, parsed locally). SIX tool-free callers now share the same connection within one tick —
+      // the chunk classifier, the rp bridge, the rp world curator, the rp people curator, the
+      // household distill, and the archive-only household classifier — so the backend routes on a
+      // distinguishing string in the system prompt
       // (the bridge's chronicler header, the world curator's lorebook-curator header, the people
       // curator's people-curator header, the distiller's CHAT MEMORY DISTILLER header) rather than
       // on tool_choice's absence alone; routing on absence would silently serve the classifier's
@@ -658,11 +666,10 @@ Minor: Find her brother.`,
 The server upgrade moved forward after replacement storage was selected.`,
           );
         }
+        if (sys.includes('HOUSEHOLD MEMORY CLASSIFIER')) {
+          return oaiTextResponse(backend.householdMemoryOverride ?? '- A durable fact worth remembering.');
+        }
         return oaiTextResponse(`Summary[${content}]`);
-      }
-      switch (forceTool) {
-        case 'classify_household_memory':
-          return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
       }
       throw new Error(`fake sync HTTP backend got an unexpected forceTool: ${forceTool}`);
     }
@@ -785,6 +792,13 @@ function isDistillCall(c) {
   );
 }
 
+function isHouseholdMemoryCall(c) {
+  return (
+    c.options.forceTool === undefined &&
+    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('HOUSEHOLD MEMORY CLASSIFIER')
+  );
+}
+
 function bridgeCalls() {
   return llm.calls.filter(isBridgeCall);
 }
@@ -804,7 +818,8 @@ function summarizeCalls() {
       !isBridgeCall(c) &&
       !isWorldCuratorCall(c) &&
       !isPeopleCuratorCall(c) &&
-      !isDistillCall(c),
+      !isDistillCall(c) &&
+      !isHouseholdMemoryCall(c),
   );
 }
 
@@ -974,6 +989,8 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // --- archiveChatMemory: the one-shot end-of-chat long-term-memory extraction ---
 {
   const archiveChatId = randomUUID();
+  backend.householdMemoryOverride =
+    '- The household prefers compact technical answers over long explanations.\n- The home server runs Proxmox.';
   pool.chatMemoryEntries.set(`${archiveChatId}::topic_a`, {
     chat_id: archiveChatId,
     topic_key: 'topic_a',
@@ -991,15 +1008,35 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 
   await archiveChatMemory(deps, USER, archiveChatId, 'Grocery run planning');
 
-  const householdRow = pool.householdMemory.find((h) => h.source_chat_id === archiveChatId);
-  assert(householdRow !== undefined, 'archiveChatMemory writes a household_memory row from the fake LLM response');
-  assert(householdRow?.content === 'A durable fact worth remembering.', 'the row carries the memory text the LLM returned');
-  assert(householdRow?.source === 'inferred', "archiveChatMemory always stamps source 'inferred', never 'user'");
+  const householdRows = pool.householdMemory.filter((h) => h.source_chat_id === archiveChatId);
+  assert(householdRows.length === 2, 'archiveChatMemory writes exactly the parsed household memories');
+  assert(
+    householdRows.map((h) => h.content).join('|') ===
+      'The household prefers compact technical answers over long explanations.|The home server runs Proxmox.',
+    'archive rows carry the exact memory text the LLM returned',
+  );
+  assert(householdRows.every((h) => h.source === 'inferred' && h.user_id === USER), 'archive rows preserve inferred source and user linkage');
 
   const call = llm.calls[llm.calls.length - 1];
   const digest = call.messages.find((m) => m.role === 'user').content;
-  assert(digest.includes('Grocery run planning'), "the digest sent to classify_household_memory includes the chat's title");
+  assert(digest.includes('Grocery run planning'), "the digest sent to the household classifier includes the chat's title");
   assert(digest.includes('Household prefers oat milk.'), 'the digest includes the existing key-ideas entries');
+
+  const emptyArchiveChatId = randomUUID();
+  backend.householdMemoryOverride = 'NO MEMORIES';
+  await archiveChatMemory(deps, USER, emptyArchiveChatId, 'Nothing durable');
+  assert(pool.householdMemory.filter((h) => h.source_chat_id === emptyArchiveChatId).length === 0, 'NO MEMORIES succeeds without inserting rows');
+
+  const malformedArchiveChatId = randomUUID();
+  backend.householdMemoryOverride = '- Valid durable memory\nThis line is malformed.';
+  let malformedFailed = false;
+  try {
+    await archiveChatMemory(deps, USER, malformedArchiveChatId, 'Malformed classifier response');
+  } catch {
+    malformedFailed = true;
+  }
+  assert(malformedFailed, 'malformed household classification fails archive');
+  assert(pool.householdMemory.filter((h) => h.source_chat_id === malformedArchiveChatId).length === 0, 'malformed classification inserts no partial household rows');
 }
 
 // --- segway.md §2.5: the transient settle step promotes the active swipe's rows and demotes the
@@ -1200,7 +1237,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     const classified = toolFree.filter((c) => !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c));
     assert(
       bridged.length + worlded.length + people.length + classified.length === toolFree.length,
-      'the four tool-free callers partition every tool-free request with no overlap (bridge / world curator / people curator / classifier)',
+      'the four rp tick tool-free callers partition every tick request with no overlap (bridge / world curator / people curator / classifier)',
     );
   }
 
