@@ -8,11 +8,13 @@
  * The fire-and-forget trigger for the character visual-state pipeline: invoked from the
  * response 'finish' event and the deferred cleanup-path hook so the reply the user is waiting on
  * is already sent before any text-LLM mint or image-provider round-trip starts. Runs Stage 3
- * (applyCharacterVisualState — parse, resolve roster ids, guarded diff/upsert, event append)
- * against the final reply text, then for every fired visible-change trigger hands the character's
- * normalized outfit + expression to the autofire pipeline
+ * (applyCharacterVisualState — locate the footer region, parse, resolve roster ids, guarded
+ * diff/upsert, event append) against the final reply text, then for every fired visible-change
+ * trigger hands the character's normalized outfit + expression to the autofire pipeline
  * (renderCharacterVisualCombination) — the only place the image provider is ever touched for
- * this feature.
+ * this feature. The footer's location is resolved live through the same resolveCleanupConfig
+ * (cleanupLoop.ts) the Cleaner itself uses — the operator's cleanup_footer_regex is the single
+ * authority, so this path and the cleanup loop can never disagree over where the footer is.
  *
  * The mints (describeStudioSlots for subject/expression) are Portrait Studio calls, not chat
  * calls — they go through the same portrait_llm_connection resolution every other
@@ -54,6 +56,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { HttpServerDeps } from './httpServer.js';
 import { applyCharacterVisualState } from '../orchestrator/characterVisualState.js';
 import { renderCharacterVisualCombination } from '../orchestrator/characterVisualAutofire.js';
+import { resolveCleanupConfig } from '../orchestrator/cleanupLoop.js';
 import { resolvePortraitLlm } from './portraitRoutes.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
 
@@ -98,7 +101,8 @@ export function fireCharacterVisualState(
 ): void {
   void (async () => {
     if (!(await readCharacterVisualStateEnabled(deps.settings))) return;
-    const result = await applyCharacterVisualState({ db: deps.db }, userId, chatId, messageId, text);
+    const cleanupConfig = await resolveCleanupConfig(deps.settings);
+    const result = await applyCharacterVisualState({ db: deps.db }, userId, chatId, messageId, text, cleanupConfig.footer);
     if (result.fired.length === 0) return;
     const llm = await resolvePortraitLlm(deps);
     for (const fired of result.fired) {

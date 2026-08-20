@@ -143,8 +143,9 @@ function addSlopRule(pool, { pattern, action = 'remove', flags = 'i', replacemen
 
 const VALID_HEADER = '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n';
 const MALFORMED_HEADER_LINE1 = '[ Bad | Header | X';
-// The canonical inner-thoughts footer (character-visual-state-plan.md) — the only shape the
-// structure-aware footer regex accepts (a legacy generic block would be malformed and re-fire).
+// The canonical inner-thoughts footer (character-visual-state-plan.md) — a conforming footer
+// under the structure-aware footer regex (the <summary>▸</summary> header and the outfit slots
+// are optional; a legacy generic block would be malformed and re-fire).
 const VALID_FOOTER =
   '\n<details><summary>▸</summary>\n' +
   '<Mair>\n' +

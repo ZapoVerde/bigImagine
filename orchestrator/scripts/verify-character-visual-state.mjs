@@ -20,7 +20,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
-import { DEFAULT_CLEANUP_CONFIG } from '../dist/orchestrator/cleanupHeuristics.js';
+import { DEFAULT_CLEANUP_CONFIG, extractRegion } from '../dist/orchestrator/cleanupHeuristics.js';
 import { buildRepairPrompt } from '../dist/orchestrator/cleanupHeuristics.js';
 import { parseStoryHeader } from '../dist/orchestrator/locationAndPresenceScraper.js';
 import {
@@ -91,6 +91,61 @@ Outfit:
 </Kai>
 </details>`;
 const CANONICAL_TURN = `${HEADER}\n\nShe folded her hands.\n\n${AVA_BLOCK}`;
+
+// The Cleaner's resolved footer region config (what fireCharacterVisualState passes in): the
+// editable footer regex/flags/prompt, resolved live from orchestrator_settings.
+const FOOTER_CFG = {
+  regex: DEFAULT_CLEANUP_CONFIG.footerRegex,
+  flags: DEFAULT_CLEANUP_CONFIG.footerFlags,
+  prompt: DEFAULT_CLEANUP_CONFIG.footerPrompt,
+};
+
+// A no-summary footer with a PARTIAL outfit (plan §Partial outfit state): two slots declared,
+// the rest omitted — valid, and the omitted slots carry no information.
+const PARTIAL_FOOTER = `<details>
+<Ava>
+Inner thoughts: She is watching the door, waiting for him.
+Expression: composed
+Outfit:
+- Top: white blouse
+- Accessory: silver pendant
+</Ava>
+</details>`;
+const PARTIAL_TURN = `${HEADER}\n\nShe folded her hands.\n\n${PARTIAL_FOOTER}`;
+
+// A partial footer that changes exactly one previously-set slot (merge override).
+const PARTIAL_CHANGE_FOOTER = `<details>
+<Ava>
+Inner thoughts: She is watching the door, waiting for him.
+Expression: composed
+Outfit:
+- Top: black blouse
+</Ava>
+</details>`;
+const PARTIAL_CHANGE_TURN = `${HEADER}\n\nShe folded her hands.\n\n${PARTIAL_CHANGE_FOOTER}`;
+
+// A partial footer that declares only `- Top: none` — explicitly topless (a visible change from a
+// concrete prior value, not an "unknown").
+const TOPLESS_FOOTER = `<details>
+<Ava>
+Inner thoughts: She pulled the blouse over her head.
+Expression: defiant
+Outfit:
+- Top: none
+</Ava>
+</details>`;
+const TOPLESS_TURN = `${HEADER}\n\nShe folded her hands.\n\n${TOPLESS_FOOTER}`;
+
+// A footer that changes ONLY inner thoughts — no outfit slots at all (omission alone must never
+// autofire: the merged snapshot is identical in every visible field).
+const OMISSION_ONLY_FOOTER = `<details>
+<Ava>
+Inner thoughts: A different thought entirely.
+Expression: composed
+Outfit:
+</Ava>
+</details>`;
+const OMISSION_ONLY_TURN = `${HEADER}\n\nShe folded her hands.\n\n${OMISSION_ONLY_FOOTER}`;
 
 // ---------------------------------------------------------------------------
 // Fake pool: in-memory chat_messages / characters / character_chat_links /
@@ -381,14 +436,43 @@ function seedKai(pool) {
 // ---------------------------------------------------------------------------
 {
   const header = parseStoryHeader(HEADER);
-  const parsed = parseCharacterVisualStateFooter(CANONICAL_TURN, header);
-  assert(parsed.ok === true, 'parser: the canonical turn parses');
+  const parsed = parseCharacterVisualStateFooter(AVA_BLOCK, header);
+  assert(parsed.ok === true, 'parser: the canonical footer region parses');
   const rec = parsed.records[0];
   assert(rec.name === 'Ava', 'parser: the record carries the block tag name');
   assert(rec.innerThoughts === 'She is watching the door, waiting for him.', 'parser: inner thoughts capture the full line');
   assert(rec.expression === 'composed', 'parser: the one-word expression is captured');
   assert(rec.outfit.outerwear === 'leather jacket' && rec.outfit.top === 'white blouse' && rec.outfit.bottom === 'jeans', 'parser: the outfit slots capture their values');
   assert(rec.outfit.underwear_top === 'none' && rec.outfit.underwear_bottom === 'none' && rec.outfit.accessory === 'silver pendant', "parser: 'none' slots and remaining slots capture verbatim");
+
+  // Wrapper tolerance: the parser does not hardcode <details>/<summary> — a bare character block
+  // (no wrapper at all) and the full wrapped turn both parse.
+  const bare = parseCharacterVisualStateFooter(
+    '<Ava>\nInner thoughts: x.\nExpression: calm\nOutfit:\n- Top: shirt\n</Ava>',
+    header,
+  );
+  assert(bare.ok === true && bare.records.length === 1 && bare.records[0].name === 'Ava', 'parser: a bare character block (no <details> wrapper) parses');
+  const wrapped = parseCharacterVisualStateFooter(CANONICAL_TURN, header);
+  assert(wrapped.ok === true && wrapped.records.length === 1, 'parser: the full turn parses via wrapper tolerance (the region regex is the only footer authority)');
+}
+
+{
+  // Partial outfit: zero or more slots in canonical relative order — omitted slots carry no
+  // information, but the slots that ARE present must still follow the fixed slot sequence.
+  const header = parseStoryHeader(HEADER);
+  const partial = parseCharacterVisualStateFooter(PARTIAL_FOOTER, header);
+  assert(partial.ok === true && partial.records.length === 1, 'parser: a partial-outfit footer (no summary, two slots) parses');
+  const rec = partial.records[0];
+  assert(rec.outfit.top === 'white blouse' && rec.outfit.accessory === 'silver pendant', 'parser: declared partial slots capture their values');
+  assert(rec.outfit.outerwear === undefined && rec.outfit.underwear_top === undefined, 'parser: omitted slots are simply absent from the partial record');
+  assert(rec.outfit.top === 'white blouse', 'parser: a partial outfit with a gap (Top then Accessory, skipping Bottom/Underwear) is still canonical order and parses');
+  const topless = parseCharacterVisualStateFooter(TOPLESS_FOOTER, header);
+  assert(topless.ok === true && topless.records[0].outfit.top === 'none', "parser: '- Slot: none' is an ordinary explicit value, never a rejection");
+  const outOfOrder = parseCharacterVisualStateFooter(
+    '<details>\n<Ava>\nInner thoughts: x.\nExpression: calm\nOutfit:\n- Accessory: ring\n- Top: shirt\n</Ava>\n</details>',
+    header,
+  );
+  assert(outOfOrder.ok === false && outOfOrder.reason.includes('outfit-slots-out-of-order'), 'parser: partial slots out of canonical relative order (Accessory before Top) reject');
 }
 
 {
@@ -407,29 +491,32 @@ function seedKai(pool) {
   const emptyRoster = parseCharacterVisualStateFooter(CANONICAL_TURN, parseStoryHeader('[ Late Evening | 🗓️ Wednesday, June 15, 2026 AD | 📍 The Kraken ]\nPresent:'));
   assert(emptyRoster.ok === false && emptyRoster.reason === 'no-present', 'parser: an empty Present: roster rejects with no-present');
 
-  // No footer block → structured failure, never a partial parse.
-  const noFooter = parseCharacterVisualStateFooter(`${HEADER}\n\nShe folded her hands.`, parseStoryHeader(HEADER));
-  assert(noFooter.ok === false && noFooter.reason === 'no-footer', 'parser: a turn without the details block rejects with no-footer');
+  // No footer region → extraction locates nothing (the Cleaner's config is the authority).
+  const noFooter = extractRegion(`${HEADER}\n\nShe folded her hands.`, FOOTER_CFG);
+  assert(noFooter === null, 'extraction: a turn without a footer region yields null');
+  const emptyText = parseCharacterVisualStateFooter('', parseStoryHeader(HEADER));
+  assert(emptyText.ok === false && emptyText.reason === 'no-footer', 'parser: empty footer text rejects with no-footer');
 
   // Roster mismatch: a footer tag never invents identity.
   const stranger = parseCharacterVisualStateFooter(
-    `${HEADER}\n\nShe folded her hands.\n\n<details><summary>▸</summary>\n<Zara>\nInner thoughts: x.\nExpression: calm\nOutfit:\n- Outerwear: none\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none\n</Zara>\n</details>`,
+    `<details><summary>▸</summary>\n<Zara>\nInner thoughts: x.\nExpression: calm\nOutfit:\n- Outerwear: none\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none\n</Zara>\n</details>`,
     parseStoryHeader(HEADER),
   );
   assert(stranger.ok === false && stranger.reason.includes('character-not-in-present'), 'parser: an unknown block tag rejects the whole extraction');
 
   // A roster name with no block → structured failure.
   const missingHeader = parseStoryHeader('[ Late Evening | 🗓️ Wednesday, June 15, 2026 AD | 📍 The Drunken Kraken - Main Hall ]\nPresent: Ava, Kai');
-  const missing = parseCharacterVisualStateFooter(`${missingHeader}\n\nShe folded her hands.\n\n${AVA_BLOCK}`, missingHeader);
+  const missing = parseCharacterVisualStateFooter(AVA_BLOCK, missingHeader);
   assert(missing.ok === false && missing.reason.includes('missing-character-block'), 'parser: a roster name with no block rejects (missing-character-block)');
 }
 
 {
-  // Field/order/slot structural failures inside one block.
+  // Field/slot structural failures inside one block. The region text is the parser's input —
+  // the wrapper (if any) is tolerated by rescanning.
   const block = (inner) =>
     `<details><summary>▸</summary>\n<Ava>\n${inner}\n</Ava>\n</details>`;
   const header = parseStoryHeader(HEADER);
-  const run = (text) => parseCharacterVisualStateFooter(`${HEADER}\n\nx\n\n${text}`, header);
+  const run = (text) => parseCharacterVisualStateFooter(text, header);
 
   let r = run(block('Expression: composed\nOutfit:\n- Outerwear: none\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none'));
   assert(r.ok === false && r.reason.includes('missing-field-in-block'), 'parser: missing Inner thoughts rejects');
@@ -438,9 +525,11 @@ function seedKai(pool) {
   r = run(block('Inner thoughts: x\nExpression: quite composed\nOutfit:\n- Outerwear: none\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none'));
   assert(r.ok === false && r.reason.includes('expression-not-one-word'), 'parser: a multi-word expression rejects');
   r = run(block('Inner thoughts: x\nExpression: composed\nOutfit:\n- Outerwear: none\n- Top: a\n- Bottom: b'));
-  assert(r.ok === false && r.reason.includes('missing-outfit-slot'), 'parser: a missing outfit slot rejects');
+  assert(r.ok === true && Object.keys(r.records[0].outfit).length === 3, 'parser: a partial outfit (3 of 6 slots) is valid — omitted slots are optional');
+  r = run(block('Inner thoughts: x\nExpression: composed\nOutfit:\n- Top: '));
+  assert(r.ok === false && r.reason.includes('empty-outfit-slot-value'), 'parser: an empty slot value rejects (ambiguous between unknown and none)');
   r = run(block('Inner thoughts: x\nExpression: composed\nOutfit:\n- Top: a\n- Outerwear: none\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none'));
-  assert(r.ok === false && r.reason.includes('outfit-slots-out-of-order'), 'parser: outfit slots are order-enforced');
+  assert(r.ok === false && r.reason.includes('outfit-slots-out-of-order'), 'parser: full slots out of canonical order reject (Outerwear must precede Top)');
   r = run(block('Inner thoughts: x\nExpression: composed\nOutfit:\n- Outerwear: none\n- Hat: a\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none'));
   assert(r.ok === false && r.reason.includes('unknown-outfit-slot'), 'parser: an unknown slot label rejects');
   r = run(block('Inner thoughts: x\nExpression: composed\nOutfit:\n- Outerwear: none\n- Outerwear: coat\n- Top: a\n- Bottom: b\n- Underwear top: none\n- Underwear bottom: none\n- Accessory: none'));
@@ -454,6 +543,12 @@ function seedKai(pool) {
   const outfit = { outerwear: 'Leather Jacket', top: 'white blouse', bottom: 'jeans', underwear_top: 'none', underwear_bottom: 'none', accessory: 'silver pendant' };
   const key = normalizeOutfitKey(outfit);
   assert(key === 'leather jacket\u0001white blouse\u0001jeans\u0001none\u0001none\u0001silver pendant', 'normalization: the outfit key joins the six fields in canonical order');
+  // Three-state semantics: '' (unknown), 'none' (explicitly not worn) and a concrete item are
+  // three DISTINCT cache keys — the merge never converts between them.
+  const allNone = { outerwear: 'none', top: 'none', bottom: 'none', underwear_top: 'none', underwear_bottom: 'none', accessory: 'none' };
+  const allEmpty = { outerwear: '', top: '', bottom: '', underwear_top: '', underwear_bottom: '', accessory: '' };
+  assert(normalizeOutfitKey(allNone) !== normalizeOutfitKey(allEmpty), 'normalization: an all-none outfit and an all-unknown outfit are distinct cache keys');
+  assert(normalizeOutfitKey(allNone) !== normalizeOutfitKey(outfit), 'normalization: a concrete outfit and an all-none outfit are distinct cache keys');
   const before = { innerThoughts: 'x', expression: 'composed', outfit };
   const after = { innerThoughts: 'completely different', expression: 'composed', outfit: { ...outfit, top: 'black blouse' } };
   const changed = diffVisibleFields(before, after);
@@ -473,12 +568,32 @@ function seedKai(pool) {
   const legacy = '<details><summary>▸</summary>\n<inner thoughts>\nAva:\nWatching the door.\n</inner thoughts>\n</details>';
   assert(!re.test(legacy), 'cleaner: the legacy 0066 <inner thoughts> block fails the structure-aware footerRegex (malformed → repaired)');
   assert(!re.test('<details><summary>▸</summary>\nplain text\n</details>'), 'cleaner: a footer with no field markers fails');
+  // The canonical format is no longer locked to <summary>▸</summary> + all six slots (plan §Partial
+  // outfit state): a summary-less footer with a partial outfit is valid.
+  assert(re.test(PARTIAL_TURN), 'cleaner: a no-summary partial-outfit footer matches');
+  assert(re.test(TOPLESS_TURN), "cleaner: a footer declaring only '- Top: none' matches");
+  assert(!re.test('<details>\n<Ava>\nOutfit:\n- Top: a\n</Ava>\n</details>'), 'cleaner: a block without Inner thoughts/Expression still fails (field markers are mandatory)');
+
+  // The revised footer prompt must not be able to recreate the obsolete format.
   assert(footerPrompt.includes('{{roster}}'), 'cleaner: the footer repair prompt carries the {{roster}} token');
   assert(/in roster order[^:]*:/.test(footerPrompt), 'cleaner: the footer repair prompt demands roster order');
-  assert(footerPrompt.includes('- Outerwear:'), 'cleaner: the footer repair prompt shows all six canonical slot lines');
+  assert(footerPrompt.includes('- Top:'), 'cleaner: the footer repair prompt shows a slot line');
+  assert(!footerPrompt.includes('- Outerwear:'), 'cleaner: the footer repair prompt no longer demands all six slot lines');
+  assert(!footerPrompt.includes('<summary>▸'), 'cleaner: the footer repair prompt no longer emits the summary arrow');
+  assert(!footerPrompt.includes('Underwear top: none'), "cleaner: the footer repair prompt no longer fills unspecified slots with 'none'");
+  assert(footerPrompt.includes('{{history, 1}}'), 'cleaner: the footer repair prompt uses one history pair, not two');
   const withRoster = buildRepairPrompt('Block order: {{roster}}', { message: 'x', roster: 'Ava, Kai' });
   assert(withRoster === 'Block order: Ava, Kai', 'cleaner: {{roster}} resolves through buildRepairPrompt');
   assert(buildRepairPrompt('{{roster}}', { message: 'x' }) === '', 'cleaner: unset roster renders empty, never an error');
+}
+
+{
+  // extractRegion: the single region authority, shared with inspectFooter (same compilation).
+  const canonical = extractRegion(CANONICAL_TURN, FOOTER_CFG);
+  assert(canonical !== null && canonical.text.startsWith('<details>') && canonical.text.endsWith('</details>'), 'extraction: the canonical footer region is the matched <details> block');
+  assert(extractRegion(PARTIAL_TURN, FOOTER_CFG) !== null, 'extraction: a no-summary partial footer region matches');
+  const invalid = extractRegion(CANONICAL_TURN, { regex: '([', flags: '', prompt: '' });
+  assert(invalid === null, 'extraction: an unparseable footer regex yields null (fail-open, no throw)');
 }
 
 // ---------------------------------------------------------------------------
@@ -487,22 +602,29 @@ function seedKai(pool) {
 {
   // No header → applied false, zero DB work (the fail-open header gate).
   const pool = poolWithTurn(createFakePool(), 'She folded her hands.');
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, 'She folded her hands.');
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, 'She folded her hands.', FOOTER_CFG);
   assert(result.applied === false && result.fired.length === 0, 'stage3: a headerless turn is skipped entirely (applied false, nothing fired)');
   assert(pool.states.length === 0 && pool.events.length === 0, 'stage3: a headerless turn writes nothing');
 
   // Header + no footer → parse gate rejects (fail-open).
   const pool2 = poolWithTurn(createFakePool(), `${HEADER}\n\nShe folded her hands.`);
-  const result2 = await applyCharacterVisualState({ db: createPostgresClient(pool2) }, USER, CHAT, MSG, `${HEADER}\n\nShe folded her hands.`);
+  const result2 = await applyCharacterVisualState({ db: createPostgresClient(pool2) }, USER, CHAT, MSG, `${HEADER}\n\nShe folded her hands.`, FOOTER_CFG);
   assert(result2.applied === false && result2.fired.length === 0, 'stage3: a header with no footer is skipped (parse gate, fail-open)');
   assert(pool2.states.length === 0 && pool2.events.length === 0, 'stage3: a rejected parse writes nothing');
+
+  // An unparseable footer regex config degrades to no-region (fail-open, never throws).
+  const pool3 = poolWithTurn(seedAva(createFakePool()));
+  const badCfg = { regex: '([', flags: '', prompt: '' };
+  const result3 = await applyCharacterVisualState({ db: createPostgresClient(pool3) }, USER, CHAT, MSG, CANONICAL_TURN, badCfg);
+  assert(result3.applied === false && result3.fired.length === 0, 'stage3: an unparseable footer regex skips extraction (fail-open)');
+  assert(pool3.states.length === 0 && pool3.events.length === 0, 'stage3: an unparseable footer regex writes nothing');
 }
 
 {
   // First visit: insert the snapshot + one 'initialized' event, no autofire.
   const pool = poolWithTurn(seedAva(createFakePool()));
   const db = createPostgresClient(pool);
-  const result = await applyCharacterVisualState({ db }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === true && result.fired.length === 0, 'stage3: a new snapshot applies with no autofire trigger');
   assert(pool.states.length === 1, 'stage3: exactly one state row is written');
   const s = pool.states[0];
@@ -533,7 +655,7 @@ function seedKai(pool) {
     underwear_bottom: 'none',
     accessory: 'none',
   });
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === true && result.fired.length === 1, 'stage3: a visible change fires exactly one autofire trigger');
   const fired = result.fired[0];
   assert(fired.characterId === AVA_ID && fired.expression === 'composed' && fired.outfit.top === 'white blouse', 'stage3: the trigger carries the normalized (character, outfit, expression)');
@@ -563,7 +685,7 @@ function seedKai(pool) {
     underwear_bottom: 'none',
     accessory: 'silver pendant',
   });
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === true && result.fired.length === 0, 'stage3: an inner-thoughts-only change never autofires');
   assert(pool.states[0].inner_thoughts === 'She is watching the door, waiting for him.', 'stage3: the inner-thoughts-only change persisted');
   assert(pool.events.length === 0, 'stage3: an inner-thoughts-only change records no event');
@@ -587,10 +709,100 @@ function seedKai(pool) {
     underwear_bottom: 'none',
     accessory: 'silver pendant',
   });
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === true && result.fired.length === 0, 'stage3: an identical snapshot never autofires');
   assert(pool.states[0].message_id === MSG && pool.states[0].swipe_id === SWIPE, 'stage3: an identical snapshot refreshes provenance to the active turn');
   assert(pool.events.length === 0, 'stage3: an identical snapshot records no event');
+}
+
+{
+  // Partial outfit on a fresh state: declared slots normalize, omitted slots stay '' (unknown) —
+  // never filled with 'none'.
+  const pool = poolWithTurn(seedAva(createFakePool()), PARTIAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, PARTIAL_TURN, FOOTER_CFG);
+  assert(result.applied === true && result.fired.length === 0, 'stage3 (partial): a fresh partial snapshot applies with no autofire (initialized)');
+  const s = pool.states[0];
+  assert(s.top === 'white blouse' && s.accessory === 'silver pendant', 'stage3 (partial): declared slots are stored normalized');
+  assert(s.outerwear === '' && s.bottom === '' && s.underwear_top === '' && s.underwear_bottom === '', "stage3 (partial): omitted slots on a fresh state are stored '' (unknown), not 'none'");
+  assert(s.expression === 'composed', 'stage3 (partial): the expression is stored as usual');
+}
+
+{
+  // Partial-outfit merge against a prior state: a parsed slot overrides; an omitted slot keeps
+  // its prior value; the change autofires.
+  const pool = poolWithTurn(seedAva(createFakePool()), PARTIAL_CHANGE_TURN);
+  pool.states.push({
+    user_id: USER,
+    chat_id: CHAT,
+    character_id: AVA_ID,
+    message_id: 'old-msg',
+    swipe_id: 'old-swipe',
+    inner_thoughts: 'old',
+    expression: 'composed',
+    outerwear: 'leather jacket',
+    top: 'white blouse',
+    bottom: 'jeans',
+    underwear_top: 'none',
+    underwear_bottom: 'none',
+    accessory: 'silver pendant',
+  });
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, PARTIAL_CHANGE_TURN, FOOTER_CFG);
+  assert(result.applied === true && result.fired.length === 1, 'stage3 (merge): a declared slot change fires one autofire trigger');
+  assert(pool.states[0].top === 'black blouse', 'stage3 (merge): the parsed slot overrides the prior value');
+  assert(pool.states[0].outerwear === 'leather jacket' && pool.states[0].accessory === 'silver pendant' && pool.states[0].underwear_top === 'none', 'stage3 (merge): omitted slots keep their prior values');
+  const changedFields = JSON.parse(pool.events[0].changed_fields);
+  assert(changedFields.length === 1 && changedFields[0] === 'top', 'stage3 (merge): the visible_change event lists only the actually-changed slot');
+}
+
+{
+  // 'Top: shirt' → 'Top: none' = topless: an explicit transition that fires, and the stored 'none'
+  // stays distinct from the '' it would have been as an omission.
+  const pool = poolWithTurn(seedAva(createFakePool()), TOPLESS_TURN);
+  pool.states.push({
+    user_id: USER,
+    chat_id: CHAT,
+    character_id: AVA_ID,
+    message_id: 'old-msg',
+    swipe_id: 'old-swipe',
+    inner_thoughts: 'old',
+    expression: 'composed',
+    outerwear: 'none',
+    top: 'white blouse',
+    bottom: 'jeans',
+    underwear_top: 'none',
+    underwear_bottom: 'none',
+    accessory: 'none',
+  });
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, TOPLESS_TURN, FOOTER_CFG);
+  assert(result.applied === true && result.fired.length === 1, "stage3: a concrete → 'none' transition is a visible change that fires");
+  assert(pool.states[0].top === 'none', "stage3: the stored snapshot carries 'none' (explicitly not worn)");
+  assert(pool.states[0].expression === 'defiant', 'stage3: the co-changed expression persisted too');
+}
+
+{
+  // Omission alone never autofires: only inner thoughts changed, every slot omitted → the merged
+  // snapshot is visible-identical, so it is an inner-only persist (no event, no autofire).
+  const pool = poolWithTurn(seedAva(createFakePool()), OMISSION_ONLY_TURN);
+  pool.states.push({
+    user_id: USER,
+    chat_id: CHAT,
+    character_id: AVA_ID,
+    message_id: 'old-msg',
+    swipe_id: 'old-swipe',
+    inner_thoughts: 'old',
+    expression: 'composed',
+    outerwear: 'leather jacket',
+    top: 'white blouse',
+    bottom: 'jeans',
+    underwear_top: 'none',
+    underwear_bottom: 'none',
+    accessory: 'silver pendant',
+  });
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, OMISSION_ONLY_TURN, FOOTER_CFG);
+  assert(result.applied === true && result.fired.length === 0, 'stage3 (omission): a footer declaring no slots never autofires');
+  assert(pool.events.length === 0, 'stage3 (omission): a no-slot footer records no visible_change event');
+  assert(pool.states[0].top === 'white blouse' && pool.states[0].outerwear === 'leather jacket', 'stage3 (omission): the prior outfit is fully preserved');
+  assert(pool.states[0].inner_thoughts === 'A different thought entirely.', 'stage3 (omission): the inner-thoughts change still persists');
 }
 
 {
@@ -613,7 +825,7 @@ function seedKai(pool) {
     accessory: 'none',
   });
   // The stored message content differs from the text we parsed (a regeneration/cycle swapped it).
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === false && result.fired.length === 0, 'stage3: a stale swipe (content mismatch under the row lock) drops the extraction');
   assert(pool.states[0].expression === 'angry', 'stage3: the stale-swipe drop leaves the existing snapshot untouched');
   assert(pool.events.length === 0, 'stage3: a stale swipe records no event');
@@ -622,14 +834,14 @@ function seedKai(pool) {
 {
   // Roster resolution: an unknown name (0 eligible matches) rejects the ENTIRE extraction.
   const pool = poolWithTurn(createFakePool()); // no Ava character row at all
-  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result = await applyCharacterVisualState({ db: createPostgresClient(pool) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result.applied === false && result.fired.length === 0, 'stage3: an unresolvable roster name rejects the whole extraction (fail-open)');
   assert(pool.states.length === 0 && pool.events.length === 0, 'stage3: a rejected roster writes nothing');
 
   // Ambiguous: two eligible same-named rows → the exact-one rule rejects.
   const pool2 = poolWithTurn(seedAva(createFakePool()));
   pool2.characters.push({ character_id: randomUUID(), user_id: USER, name: 'Ava', appearance: 'a twin', status: null });
-  const result2 = await applyCharacterVisualState({ db: createPostgresClient(pool2) }, USER, CHAT, MSG, CANONICAL_TURN);
+  const result2 = await applyCharacterVisualState({ db: createPostgresClient(pool2) }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
   assert(result2.applied === false && result2.fired.length === 0, 'stage3: an ambiguous roster name (2 eligible matches) rejects the whole extraction');
 }
 
@@ -642,7 +854,7 @@ function seedKai(pool) {
   };
   let threw = false;
   try {
-    const result = await applyCharacterVisualState({ db }, USER, CHAT, MSG, CANONICAL_TURN);
+    const result = await applyCharacterVisualState({ db }, USER, CHAT, MSG, CANONICAL_TURN, FOOTER_CFG);
     assert(result.applied === false && result.fired.length === 0, 'stage3: a DB failure resolves to applied false');
   } catch {
     threw = true;

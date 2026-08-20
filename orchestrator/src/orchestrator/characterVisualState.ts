@@ -1,16 +1,24 @@
 /**
  * @file orchestrator/src/orchestrator/characterVisualState.ts
- * @stamp 2026-08-19
+ * @stamp 2026-08-20
  * @architectural-role Orchestrator — post-Cleaner state extraction, diff, and event sequence
  * @description
- * docs/plans/character-visual-state-plan.md Pipeline §3: after the turn's text is final, parse the
- * footer deterministically (orchestrator/characterVisualStateParser.ts), resolve each parsed
- * record to exactly one eligible roster character, and compare the structured fields against the
- * existing character_visual_states row inside one user-scoped transaction — guarded against a
- * stale swipe the same way cleanupLoop.ts guards its own writeback (`for update` row lock on the
- * message, then compare its current `content` against the text we parsed; drop the write if the
- * swipe has moved on). `chat_messages.active_swipe_id` is also read under the same lock and
- * carried onto the state/event rows as `swipe_id` provenance.
+ * docs/plans/character-visual-state-plan.md Pipeline §3: after the turn's text is final, locate the
+ * footer region through the Cleaner's own configuration (extractRegion + the resolved
+ * cleanup_footer_regex — the single authority on where the footer is), parse it deterministically
+ * (orchestrator/characterVisualStateParser.ts), resolve each parsed record to exactly one eligible
+ * roster character, and compare the structured fields against the existing character_visual_states
+ * row inside one user-scoped transaction — guarded against a stale swipe the same way cleanupLoop.ts
+ * guards its own writeback (`for update` row lock on the message, then compare its current
+ * `content` against the text we parsed; drop the write if the swipe has moved on).
+ * `chat_messages.active_swipe_id` is also read under the same lock and carried onto the
+ * state/event rows as `swipe_id` provenance.
+ *
+ * Outfit slots are a partial update (plan §Partial outfit state): the parsed footer may declare
+ * zero or more slots, and each is merged against the prior state — a parsed slot overrides, an
+ * omitted slot keeps the prior value, a slot with no prior value stays '' (unknown). The stored
+ * snapshot is always a complete six-slot OutfitFields; `''` (unknown) and `none` (explicitly not
+ * worn) are distinct values that are never converted into each other.
  *
  * Per character the sequence is:
  *   - no row yet → insert the snapshot, record an 'initialized' event, no autofire;
@@ -20,16 +28,16 @@
  *     affected character/turn, and return it in `fired` so the caller fires the autofire
  *     fire-and-forget AFTER the transaction commits — never inline, never awaited (plan §3).
  *
- * Fail-open end to end (bi_principles.md §11): no valid header, a rejected footer parse, a name
- * that isn't uniquely resolvable, or any DB failure logs and returns `{ applied: false }` —
- * existing visual state stays unchanged and nothing fires. Identity comes only from the trusted
- * header roster (plan §4); a footer tag never creates or selects a character.
+ * Fail-open end to end (bi_principles.md §11): no valid header, no footer region, a rejected footer
+ * parse, a name that isn't uniquely resolvable, or any DB failure logs and returns
+ * `{ applied: false }` — existing visual state stays unchanged and nothing fires. Identity comes
+ * only from the trusted header roster (plan §4); a footer tag never creates or selects a character.
  *
  * @api-declaration
- * applyCharacterVisualState(deps, userId, chatId, messageId, text) ->
- *   Promise<CharacterVisualStateResult> — fail-open; parse → guarded upsert → diff/events, returns
- *   { applied, fired: VisualStateAutofireTrigger[] } where fired lists every (character, outfit,
- *   expression) that visibly changed this turn and needs an autofire render
+ * applyCharacterVisualState(deps, userId, chatId, messageId, text, footerCfg) ->
+ *   Promise<CharacterVisualStateResult> — fail-open; locate region → parse → guarded upsert →
+ *   diff/events, returns { applied, fired: VisualStateAutofireTrigger[] } where fired lists every
+ *   (character, outfit, expression) that visibly changed this turn and needs an autofire render
  * VisualStateAutofireTrigger — { characterId, outfit, expression } in normalized form, the exact
  *   arguments the autofire pipeline consumes
  *
@@ -44,6 +52,7 @@
 
 import type { PostgresClient, DbSession } from '../io/postgres.js';
 import { log } from '../io/logger.js';
+import { extractRegion, type RegionConfig } from './cleanupHeuristics.js';
 import { parseStoryHeader } from './locationAndPresenceScraper.js';
 import {
   OUTFIT_SLOT_KEYS,
@@ -55,6 +64,7 @@ import {
   type CharacterVisualRecord,
   type CharacterVisualSnapshot,
   type OutfitFields,
+  type OutfitUpdate,
   type VisibleFieldKey,
 } from './characterVisualStateParser.js';
 
@@ -104,21 +114,29 @@ const ELIGIBLE_CHARACTER_SQL = `select character_id from characters
   order by (status is null) desc, (status = 'permanent') desc, character_id`;
 
 /** The single entry point. Parse the header first (no valid header → skip entirely — the footer
- *  never decides scene membership), then the footer records against that roster, then the guarded
- *  transaction. Fail-open: any failure returns applied:false with nothing fired. */
+ *  never decides scene membership), then locate the footer region through the Cleaner's own
+ *  resolved footer config (no region matched → skip), then parse the region's records against
+ *  that roster, then the guarded transaction. Fail-open: any failure returns applied:false with
+ *  nothing fired. */
 export async function applyCharacterVisualState(
   deps: CharacterVisualStateDeps,
   userId: string,
   chatId: string,
   messageId: string,
   text: string,
+  footerCfg: RegionConfig,
 ): Promise<CharacterVisualStateResult> {
   const header = parseStoryHeader(text);
   if (!header) {
     log.debug('character visual state: no two-line header, skipping extraction', { chatId, messageId });
     return { applied: false, fired: [] };
   }
-  const parsed = parseCharacterVisualStateFooter(text, header);
+  const region = extractRegion(text, footerCfg);
+  if (!region) {
+    log.debug('character visual state: no footer region matched, skipping extraction (fail-open)', { chatId, messageId });
+    return { applied: false, fired: [] };
+  }
+  const parsed = parseCharacterVisualStateFooter(region.text, header);
   if (!parsed.ok) {
     log.debug('character visual state: footer parse rejected, skipping extraction (fail-open)', {
       chatId,
@@ -188,8 +206,8 @@ async function applyInSession(
   for (let i = 0; i < records.length; i++) {
     const record = records[i]!;
     const characterId = characterIds[i]!;
-    const snapshot = normalizedSnapshot(record);
     const before = await readState(session, userId, chatId, characterId);
+    const snapshot = buildSnapshot(record, before);
 
     if (!before) {
       await upsertState(session, userId, chatId, characterId, messageId, msg.active_swipe_id, snapshot);
@@ -216,12 +234,26 @@ async function applyInSession(
   return { applied: true, fired };
 }
 
+/** Merge the parsed partial outfit into the full stored form: a parsed slot overrides the prior
+ *  value (normalized); an omitted slot keeps the prior value; a slot with no prior value stays ''
+ *  (unknown). `''` and `none` are distinct values that are never converted into each other. */
+function mergeOutfit(parsed: OutfitUpdate, before: OutfitFields | null): OutfitFields {
+  const outfit = {} as OutfitFields;
+  for (const key of OUTFIT_SLOT_KEYS) {
+    const value = parsed[key];
+    outfit[key] = value !== undefined ? normalizeOutfitField(value) : before ? before[key] : '';
+  }
+  return outfit;
+}
+
 /** The stored snapshot form: normalized (trim + casefold) expression/outfit, trimmed inner
  *  thoughts — so the diff is a direct string comparison and the cache keys derive unchanged. */
-function normalizedSnapshot(record: CharacterVisualRecord): CharacterVisualSnapshot {
-  const outfit = {} as OutfitFields;
-  for (const key of OUTFIT_SLOT_KEYS) outfit[key] = normalizeOutfitField(record.outfit[key]);
-  return { innerThoughts: record.innerThoughts.trim(), expression: normalizeExpression(record.expression), outfit };
+function buildSnapshot(record: CharacterVisualRecord, before: CharacterVisualSnapshot | null): CharacterVisualSnapshot {
+  return {
+    innerThoughts: record.innerThoughts.trim(),
+    expression: normalizeExpression(record.expression),
+    outfit: mergeOutfit(record.outfit, before ? before.outfit : null),
+  };
 }
 
 async function readState(

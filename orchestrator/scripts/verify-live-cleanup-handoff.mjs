@@ -117,8 +117,9 @@ function createStubLlm() {
 // header check judges it 'ok' (no dispatch), the tail pass finds no slop, the footer check finds
 // the footer present — so finishStream makes no LLM call and leaves composed === baseText, which
 // drives finalizeCleanupResult down its no-change path (recordJobsForActiveSwipe). The footer is
-// the canonical inner-thoughts block (character-visual-state-plan.md) — the only shape the
-// structure-aware footer regex accepts.
+// the canonical inner-thoughts block (character-visual-state-plan.md) — a conforming footer under
+// the structure-aware footer regex (the <summary>▸</summary> header and the outfit slots are
+// optional).
 const COMPOSED =
   '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n\n' +
   'A clean opening paragraph that needs no repair.\n\n' +

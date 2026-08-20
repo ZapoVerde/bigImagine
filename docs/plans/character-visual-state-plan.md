@@ -14,46 +14,61 @@ This is current, scene-scoped state. It is not a change to permanent `characters
 
 ## Canonical footer format
 
-The existing hidden `<details><summary>▸</summary> … </details>` remains the only wrapper. There
-are no extra wrapper tags inside it.
+The footer is a single hidden `<details> … </details>` inner-thoughts block per reply. Its location
+is **owned by the Cleaner**: `cleanup_footer_regex` (Settings-editable, `DEFAULT_CLEANUP_CONFIG`
+fallback) is the one and only authority on where the footer is. `inspectFooter` (the repair
+trigger), `extractRegion` (the visual-state location — `cleanupHeuristics.ts`), and the repair
+prompt all derive from the same resolved config (`resolveCleanupConfig` in `cleanupLoop.ts`), so
+the live path, the poll loop, and the visual-state pipeline can never disagree over where the
+footer is. Nothing in the visual-state path hardcodes a second outer-footer regex or the
+`<details>`/`<summary>▸</summary>` layout.
+
+The `<summary>▸</summary>` header is optional. One `<Name>…</Name>` block per `Present:` roster
+character; the parser is wrapper-tolerant and only treats leaf blocks carrying the field markers as
+character blocks, so it does not re-encode the wrapper itself.
 
 ```html
-<details><summary>▸</summary>
+<details>
 <Ava>
 Inner thoughts: She is trying not to let Brian see her worry.
 Expression: wary
 Outfit:
-- Outerwear: charcoal wool coat
 - Top: cream ribbed turtleneck
 - Bottom: dark straight-leg trousers
-- Underwear top: none
-- Underwear bottom: none
 - Accessory: silver watch
 </Ava>
-
-<Brian>
-Inner thoughts: He has noticed more than he is letting on.
-Expression: amused
-Outfit:
-- Outerwear: none
-- Top: navy overshirt
-- Bottom: worn jeans
-- Underwear top: none
-- Underwear bottom: none
-- Accessory: leather bracelet
-</Brian>
 </details>
 ```
 
-Fields are exact and ordered: `Inner thoughts:`, `Expression:`, then `Outfit:` with `Outerwear`,
-`Top`, `Bottom`, `Underwear top`, `Underwear bottom`, and `Accessory`. Every slot is present;
-`none` means explicitly absent. Expression is exactly one normalized word. Inner thoughts remain
-free text exactly as authored.
+Fields are exact and ordered: `Inner thoughts:`, `Expression:`, then `Outfit:`. Outfit slots are a
+**partial update** (see Partial outfit state below): zero or more `- Slot: value` lines, each known
+slot at most once, in canonical relative order (present slots follow the same Outerwear/Top/Bottom/
+Underwear top/Underwear bottom/Accessory sequence, gaps allowed) — an omitted slot carries no
+information (it is merged against the prior state), and `- Slot: none` is the explicit "wearing
+nothing there" value. Empty slot values are a format failure (ambiguous between "unknown" and
+"none"). Expression is exactly one normalized word. Inner thoughts remain free text exactly as
+authored.
 
 `<Ava>…</Ava>` is deliberately the record boundary. The parser validates tag names against the
 trusted header's `Present:` roster and resolves identity only through that roster's
 `character_id`; a footer tag never creates or selects a character by itself. A name incompatible
 with this compact syntax is a Cleaner format failure, not a reason to guess a different identity.
+
+## Partial outfit state
+
+An outfit slot has three distinct states that are never collapsed into each other:
+
+- `''` (unknown) — no footer has ever declared a value for the slot; it carries no information and
+  is never rendered as "not worn".
+- `none` — the footer explicitly declares the character is wearing nothing there (e.g. a topless
+  transition from a prior concrete value).
+- a concrete worn item.
+
+The stored `character_visual_states` row is always a complete six-slot snapshot; the merge on each
+parsed footer is `next[slot] = parsed[slot]` when the footer declared it, else `before[slot]`, else
+`''`. Only a *declared* slot can change state, so omission alone never autofires. `''` and `none`
+produce distinct normalized cache keys, so a topless `none` and a never-declared `''` are never
+the same image key.
 
 ## Current behavior and gap
 
@@ -169,9 +184,11 @@ All five tables: normal forced RLS (`enable row level security` + `force row lev
 ### 1. Cleaner produces the concrete status block
 
 Revise the default, Settings-overridable footer repair prompt (`cleanupHeuristics.ts`'s
-`DEFAULT_CLEANUP_CONFIG.footerPrompt`) to output only the canonical block above. It rebuilds the
+`DEFAULT_CLEANUP_CONFIG.footerPrompt`) to output the canonical block above. It rebuilds the
 current snapshot from the reply and recent history, preserves existing inner thoughts where
-available, and lists only characters in `Present:` order.
+available, and lists only characters in `Present:` order. The fallback must not be able to
+recreate the obsolete format: no `<summary>▸</summary>`, no requirement to fill all six slots,
+no filling unspecified slots with `none`, and one history pair.
 
 The repair prompt needs the roster to know which characters to emit — add a new `{{roster}}`
 macro to `buildRepairPrompt`'s `interpolateMacros` resolveArg hook (parallel to the existing
@@ -184,18 +201,30 @@ does *not* validate the roster match, because `inspectFooter` runs independently
 parsing today and has no roster available to it. Roster cross-validation is Stage 2's job only
 (`parseCharacterVisualStateFooter`, which explicitly takes the parsed header). Keep
 `inspectHeader`/`inspectFooter`'s existing independence — don't thread header state into
-`inspectFooter` to chase full validation there.
+`inspectFooter` to chase full validation there. `inspectFooter` and the visual-state location
+share `compileRegionRegex`, so they can never disagree over config semantics.
+
+**The footer's location is Cleaner-owned.** Add a pure `extractRegion(text, cfg)` export to
+`cleanupHeuristics.ts` — the first span the same region regex matches (`null` when the pattern is
+unparseable or nothing matches). Stage 3 locates the footer through the resolved
+`cleanup_footer_regex` before parsing; there is no second, hardcoded footer regex anywhere in the
+visual-state path.
 
 Legacy footers are opportunistically repaired on their next processed turn (existing behavior,
 unchanged — a non-conforming footer is simply `malformed` under the new structural check).
 
 ### 2. Parse final response text deterministically
 
-Add pure `parseCharacterVisualStateFooter(text, header)` in a new
+Add pure `parseCharacterVisualStateFooter(footerText, header)` in a new
 `orchestrator/src/orchestrator/characterVisualStateParser.ts`. Runs after final turn text is
-available: the normal final-turn flow and the deferred Cleaner writeback path. Validates required
-labels/ordering, all six outfit slots exactly once, one-word expression, and a one-to-one match
-with the header roster. Returns complete records or a structured failure.
+available — the normal final-turn flow and the deferred Cleaner writeback path — on the footer
+*region* located by Stage 1's config (never the whole turn text). Validates required
+labels/ordering, the partial outfit grammar (zero or more known slots, each at most once, any
+order, non-empty value, `none` an ordinary value), one-word expression, and a one-to-one match
+with the header roster. Returns complete records (with a partial outfit) or a structured failure.
+The parser is wrapper-tolerant: it scans open tags and treats only leaf blocks carrying the field
+markers as character blocks, so it does not hardcode `<details>`/`<summary>` and a bare block
+parses just as well as a wrapped one.
 
 Also exports the normalization helpers used by both the diff (Stage 3) and the cache keys
 (`visual_expression_definitions.word`, `character_visual_combinations.outfit_key`/
@@ -217,7 +246,9 @@ New `orchestrator/src/orchestrator/characterVisualState.ts`. Resolve parsed reco
 character ids and compare structured fields to the existing `character_visual_states` row in a
 user-scoped transaction, guarded against a stale swipe the same way `cleanupLoop.ts` guards its
 own writeback (`for update` row lock, compare against `chat_messages.active_swipe_id`, drop the
-write if the swipe has moved on).
+write if the swipe has moved on). The footer region is located through the same
+`extractRegion(text, config.footer)` the Cleaner's resolved config provides (no region matched →
+fail open before any DB work).
 
 - New snapshot: insert it, record an initialization event.
 - Identical normalized values (via `normalizeExpression`/`normalizeOutfitKey`): update provenance
@@ -226,6 +257,12 @@ write if the swipe has moved on).
 - Expression or outfit-slot change (normalized): persist, append one visible-change event per
   affected character/turn, **and fire `fireCharacterVisualAutofire`** (fire-and-forget, after the
   transaction commits — never inline, never awaited by the request path).
+
+Each parsed record's outfit is a partial update merged against the prior row before the diff:
+`next[slot] = parsed[slot]` (normalized) when declared, else `before[slot]`, else `''`. The stored
+row is always a complete six-slot snapshot; `''` and `none` are distinct stored values and are
+never converted into each other. Omission alone — a footer that declares no outfit slots — leaves
+every slot unchanged and therefore never autofires.
 
 ### 4. Autofire the portrait
 
@@ -304,19 +341,22 @@ persistent per-character panel? something else?) before this part is built.
 - `db/migrations/0125_character_visual_states.sql` — five new tables per Data model above.
 - `orchestrator/src/orchestrator/characterVisualStateParser.ts` — new Pure Function module: footer
   grammar, `normalizeExpression`/`normalizeOutfitKey`, field comparison helpers.
-- `orchestrator/src/orchestrator/characterVisualState.ts` — new Orchestrator: parse, resolve
-  roster ids, guarded upsert, diff/event sequence, fires autofire on a visible change.
+- `orchestrator/src/orchestrator/characterVisualState.ts` — new Orchestrator: locate region via
+  the resolved footer config, parse, resolve roster ids, guarded upsert, diff/event sequence,
+  fires autofire on a visible change.
 - `orchestrator/src/orchestrator/characterVisualAutofire.ts` — new Orchestrator: the autofire
   pipeline (Pipeline §4 above), sibling of `generateLocationImage.ts`.
-- `orchestrator/src/orchestrator/cleanupHeuristics.ts` — structure-aware footer inspection,
-  revised default repair prompt, new `{{roster}}` macro.
+- `orchestrator/src/orchestrator/cleanupHeuristics.ts` — structure-aware footer inspection, new
+  `extractRegion` export, revised default repair prompt, new `{{roster}}` macro.
 - `orchestrator/src/orchestrator/cleanupLoop.ts` / `liveCleanupHandoff.ts` — state extraction
   after cleaned text is durably written (deferred path).
 - `orchestrator/src/server/handleChatCompletions.ts` / `turnExecution.ts` — state extraction for
   the normal final-text path, without double-running the deferred path (same precedent
   `fireCharacterDescription`'s index.ts wiring already established for this exact hazard).
 - `orchestrator/src/server/characterVisualState.ts` — thin fire-and-forget wrapper, called from
-  both trigger sites above, analogous to `server/characterDescription.ts`.
+  both trigger sites above, analogous to `server/characterDescription.ts`; resolves the live
+  Cleaner config (`resolveCleanupConfig`) and passes `config.footer` into Stage 3 so the trigger
+  and the cleanup loop share the single footer authority.
 - Settings API/UI and `orchestratorSettings.ts` — retain the revised Cleaner footer prompt under
   the existing Cleanup prompt configuration; `orchestrator_settings.key` CHECK constraint rebuild
   needs no new key (footer prompt reuses `cleanup_footer_prompt`).
@@ -332,6 +372,8 @@ new caller, not a new branch inside the existing generation functions.
 ## Edge cases
 
 - No valid header/roster: skip extraction entirely; footer content never decides scene membership.
+- No footer region matched by the Cleaner's regex (or an unparseable regex config): fail open
+  before any DB work — existing visual state stays, nothing fires.
 - Unknown, duplicate, or missing character record: reject the entire snapshot extraction, retain
   prior state, no autofire.
 - Character leaves `Present:`: no deletion, no invented cleared outfit — they simply have no
@@ -352,17 +394,23 @@ new caller, not a new branch inside the existing generation functions.
 
 ## Tests
 
-- **Parser** (`verify-character-visual-parser.mjs` or similar, pure/no DB): multi-character
-  records; every required slot; `none`; `normalizeExpression`/`normalizeOutfitKey` behavior
-  (whitespace/case/`none` canonicalization); malformed/missing/duplicate slot; non-one-word
-  expression; unknown/duplicate tags; roster mismatch.
-- **Cleaner**: canonical minimal block passes structural inspection; legacy generic inner-thought
-  block is flagged malformed and needs repair; the revised repair prompt contains the roster
-  correctly and no internal wrapper tags.
+- **Parser** (`verify-character-visual-state.mjs`, pure/no DB): multi-character records; partial
+  outfits (zero or more slots in canonical relative order, `none` as an ordinary value); every
+  structural failure (missing/unknown/duplicate/out-of-order slot, empty slot value, field order, non-one-word expression,
+  unknown/duplicate tags, roster mismatch); wrapper tolerance (a bare block and a wrapped turn
+  both parse); `normalizeExpression`/`normalizeOutfitKey` behavior — whitespace/case/`none`
+  canonicalization and the three-way `''` vs `none` vs concrete cache-key distinction.
+- **Cleaner**: canonical minimal block passes structural inspection (with and without
+  `<summary>▸</summary>`, with a partial outfit); legacy generic inner-thought block is flagged
+  malformed and needs repair; the revised repair prompt contains the roster correctly, no internal
+  wrapper tags, and cannot recreate the obsolete six-slot/summary format; `extractRegion` matches
+  the same config and fails open on an unparseable regex.
 - **Fake-DB orchestrator** (`characterVisualState.ts`): initial state, identical no-op,
   inner-thought-only update (no event, no autofire call), expression change (event + autofire
   called with the right args), outfit change (same), multiple fields at once, stale-swipe
-  rejection.
+  rejection; partial-outfit merge (declared slot overrides, omitted slot keeps its prior value,
+  no prior value → `''`); `Top: shirt` → `Top: none` is a visible change that fires; omission
+  alone never autofires; unparseable footer regex fails open.
 - **Autofire** (`characterVisualAutofire.ts`, fake-pool + fake image provider, following the
   `verify-portrait-telemetry.mjs` convention of throwing on any unrecognized SQL string):
   - Combination cache hit — no Subject/Expression mint, no provider call, existing `image_url`
@@ -375,7 +423,8 @@ new caller, not a new branch inside the existing generation functions.
   - Provider failure — fail-open, no combination row written.
   - `source_appearance_hash` mismatch — forces a Subject re-mint.
 - **Integration**: normal and deferred-cleanup paths each update state once and never
-  double-autofire the same turn.
+  double-autofire the same turn; live and poll cleanup resolve the footer region from the same
+  `resolveCleanupConfig` settings store (`verify-cleanup-loop.mjs`).
 - Run targeted verifiers, `npm run check --workspace=@bigbrain/orchestrator`, frontend
   check/build (only relevant if the Chat surfacing section above ends up in scope), and
   `git diff --check`.

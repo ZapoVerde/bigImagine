@@ -20,6 +20,7 @@ import {
   evaluateSlopRules,
   inspectHeader,
   inspectFooter,
+  extractRegion,
   formatHistoryPairs,
   parseHistoryPairs,
   buildRepairPrompt,
@@ -42,9 +43,9 @@ const CANONICAL_HEADER = `[ Early Morning | 🗓️ Tuesday, August 7, 2026 AD |
 Present: Kael, Mira
 The fire crackled in the hearth.`;
 // The canonical inner-thoughts footer (character-visual-state-plan.md §Canonical footer format):
-// <details><summary>▸</summary> + one <Name> block per roster character, each carrying
-// Inner thoughts:/Expression:/Outfit: in order and the six canonical `- Slot:` lines in canonical
-// order, closed by </details>. This is the ONLY shape the structure-aware footer regex accepts.
+// <details> + one <Name> block per roster character, each carrying Inner thoughts:/Expression:/
+// Outfit: in order, closed by </details>. The <summary>▸</summary> header and the outfit slots are
+// optional (plan §Partial outfit state); the field markers are mandatory.
 const CANONICAL_FOOTER = `Kael turned the cup in his hands.
 
 <details><summary>▸</summary>
@@ -69,6 +70,18 @@ const LEGACY_FOOTER = `Kael turned the cup in his hands.
 Kael:
 Nervous about the gathering.
 </inner thoughts>
+</details>`;
+// A summary-less footer declaring a PARTIAL outfit — valid under the editable footer regex.
+const PARTIAL_FOOTER = `Kael turned the cup in his hands.
+
+<details>
+<Kael>
+Inner thoughts: Nervous about the gathering.
+Expression: calm
+Outfit:
+- Top: shirt
+- Accessory: signet ring
+</Kael>
 </details>`;
 
 const HEADER_CFG = {
@@ -189,6 +202,29 @@ const SLOP = [
   assert(inspectFooter('Kael smiled.\n\n<details><summary>▸</summary>\n<inner thoughts>\nTrailing, unclosed.', FOOTER_CFG).status === 'malformed', 'footer: an unclosed details block is malformed');
   assert(inspectFooter('Kael smiled.\n\n*She hesitated, her heart racing.*', FOOTER_CFG).status === 'suspected', 'footer: whole-line italic narration is suspected (stray inner thoughts)');
   assert(inspectFooter('Kael smiled and set the cup down.', FOOTER_CFG).status === 'missing', 'footer: a clean reply with no thought evidence stays missing (must not gain one)');
+  // The canonical format is no longer locked to <summary>▸</summary> + all six slots (plan §Partial
+  // outfit state): a summary-less partial-outfit footer is ok; a block without the field markers
+  // still fails.
+  assert(inspectFooter(PARTIAL_FOOTER, FOOTER_CFG).status === 'ok', 'footer: a summary-less partial-outfit footer is ok');
+  assert(inspectFooter('<details>\n<Kael>\nOutfit:\n- Top: shirt\n</Kael>\n</details>', FOOTER_CFG).status === 'malformed', 'footer: a block without Inner thoughts/Expression is still malformed (field markers are mandatory)');
+}
+
+// --- extractRegion (the single region authority shared with the visual-state path) --------------
+{
+  const region = extractRegion(CANONICAL_FOOTER, FOOTER_CFG);
+  assert(region !== null && region.text.startsWith('<details>') && region.text.endsWith('</details>'), 'extractRegion: the canonical footer region is the matched <details> block');
+  assert(extractRegion(PARTIAL_FOOTER, FOOTER_CFG) !== null, 'extractRegion: a summary-less partial footer region matches');
+  assert(extractRegion('Kael smiled.', FOOTER_CFG) === null, 'extractRegion: no footer → null');
+  assert(extractRegion(CANONICAL_FOOTER, { ...FOOTER_CFG, regex: '(' }) === null, 'extractRegion: an unparseable regex yields null (fail-open)');
+}
+
+// --- footerPrompt: the fallback must not be able to recreate the obsolete format ---------------
+{
+  const { prompt: footerPrompt } = FOOTER_CFG;
+  assert(!footerPrompt.includes('- Outerwear:'), 'footerPrompt: no longer demands all six slot lines');
+  assert(!footerPrompt.includes('<summary>▸'), 'footerPrompt: no longer emits the summary arrow');
+  assert(!footerPrompt.includes('Underwear top: none'), "footerPrompt: no longer fills unspecified slots with 'none'");
+  assert(footerPrompt.includes('{{history, 1}}'), 'footerPrompt: uses one history pair, not two');
 }
 
 // --- formatHistoryPairs / parseHistoryPairs ----------------------------------------------------

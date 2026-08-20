@@ -34,8 +34,10 @@
  * cleanup_footer_regex, cleanup_footer_prompt), and DEFAULT_CLEANUP_CONFIG below is the fallback
  * when a key is unset. The header's canonical shape is locationAndPresenceScraper.ts's
  * `[ TimeOfDay | 🗓️ DayOfWeek, Month DD, YYYY Era | 📍 Location - Specific Area ]` + `Present: …`
- * (two lines, nothing before them); the footer is 0066's
- * `<details><summary>▸</summary>…</details>` inner-thoughts block. Footer repair fires on any
+ * (two lines, nothing before them); the footer is the `<details>…</details>` inner-thoughts block
+ * (character-visual-state-plan.md) — the `<summary>▸</summary>` header and the outfit slots are
+ * optional, but the `Inner thoughts:`/`Expression:`/`Outfit:` field markers are mandatory. Footer
+ * repair fires on any
  * non-'ok' status: 'malformed' (details-tag family present but not conforming) and 'suspected'
  * (whole-line italic narration) reformat what's already there; 'missing' (no inner-thought
  * evidence at all) builds a fresh footer from the reply's own content. This reverses 0066's
@@ -50,6 +52,7 @@
  * evaluateSlopRules(text, rules)                     — applies all enabled 'remove' rules in order; collects replace-paragraph/llm steps + invalid-rule list
  * inspectHeader(text, cfg)                           — 'ok' | 'malformed' | 'missing' against the editable header regex
  * inspectFooter(text, cfg)                           — 'ok' | 'malformed' | 'suspected' | 'missing' against the editable footer regex
+ * extractRegion(text, cfg)                           — the first regex match span ({ text, start, end }) of the editable footer regex, or null when the pattern is invalid or unmatched
  * formatHistoryPairs(history, pairs)                 — {{history, N}} expansion: last N turn pairs as labeled User:/Assistant: lines (mirrors the old formatPreviousTurns)
  * parseHistoryPairs(arg)                             — the N of {{history, N}}; 2 when missing/unparsable (cleanup_prompt.md §3.2's default)
  * interpolateSlopPrompt(template, vars)              — slop prompt resolution: {{keyword}}/{{paragraph}} literal pass + macro pass
@@ -350,6 +353,18 @@ export function inspectFooter(text: string, cfg: RegionConfig): { status: Region
   return { status: 'missing' };
 }
 
+/** The first span the editable region regex matches — the region boundary for consumers that need
+ *  the matched text itself, not just a status. Pure: uses the same compileRegionRegex as
+ *  inspectFooter so the two can never disagree over config semantics. Returns null when the pattern
+ *  is unparseable or nothing matches, so callers fail open exactly like inspectFooter's 'missing'. */
+export function extractRegion(text: string, cfg: RegionConfig): { text: string; start: number; end: number } | null {
+  const re = compileRegionRegex(cfg);
+  if (!re) return null;
+  const m = re.exec(text);
+  if (!m) return null;
+  return { text: m[0], start: m.index, end: m.index + m[0].length };
+}
+
 // ---------------------------------------------------------------------------
 // Repair prompt resolution — {{history, N}} / {{prev_turns, N}} / {{message}}
 // ---------------------------------------------------------------------------
@@ -539,24 +554,21 @@ export const DEFAULT_CLEANUP_CONFIG = {
     '{{message}}\n\n' +
     'Output ONLY the two header lines, nothing else.',
   /** Canonical footer shape (character-visual-state-plan.md): the hidden inner-thoughts details
-   *  block, structure-aware — the <details><summary>▸</summary> wrapper plus one or more
-   *  <Name>…</Name> blocks, each carrying Inner thoughts:/Expression:/Outfit: in order and the
-   *  six canonical `- Slot:` lines in canonical order, closed by </details>. The legacy generic
-   *  <inner thoughts> block (0066's shape) FAILS this pattern — it lacks the field markers — so
-   *  it lands as 'malformed' and gets repaired into the canonical shape. */
+   *  block, structure-aware — a <details> wrapper that may carry a <summary>▸</summary> header,
+   *  plus one or more <Name>…</Name> blocks each carrying Inner thoughts:/Expression:/Outfit: in
+   *  order. Outfit slots are optional — zero or more `- Slot: value` lines in any known-slot
+   *  presence — so a partial outfit is valid and the absent slots carry no information. The
+   *  legacy generic <inner thoughts> block (0066's shape) FAILS this pattern — it lacks the field
+   *  markers — so it lands as 'malformed' and gets repaired into the canonical shape. */
   footerRegex:
-    '<details\\s*[^>]*>\\s*<summary\\s*[^>]*>\\s*▸\\s*</summary>\\s*' +
+    '<details\\s*[^>]*>\\s*' +
+    '(?:<summary\\s*[^>]*>[^<]*</summary>\\s*)?' +
     '(?:<[A-Za-z][A-Za-z0-9 _-]*>\\s*' +
     'Inner\\s*thoughts:[^\\n]*' +
     '(?:\\n(?!\\s*(?:Expression|Outfit):)[^\\n]*)*' +
     '\\n?\\s*Expression:[^\\n]*' +
     '\\n?\\s*Outfit:[^\\n]*' +
-    '\\n?\\s*-\\s*Outerwear:[^\\n]*' +
-    '\\n?\\s*-\\s*Top:[^\\n]*' +
-    '\\n?\\s*-\\s*Bottom:[^\\n]*' +
-    '\\n?\\s*-\\s*Underwear top:[^\\n]*' +
-    '\\n?\\s*-\\s*Underwear bottom:[^\\n]*' +
-    '\\n?\\s*-\\s*Accessory:[^\\n]*' +
+    '(?:\\s*\\n?\\s*-\\s*[A-Za-z][A-Za-z0-9 _-]*:[^\\n]*)*' +
     '\\s*</[A-Za-z][A-Za-z0-9 _-]*>\\s*' +
     ')+' +
     '</details>',
@@ -565,42 +577,30 @@ export const DEFAULT_CLEANUP_CONFIG = {
     'The character\'s reply below is missing its hidden inner-thoughts footer, or the footer is ' +
     'malformed. Produce the standard hidden footer block, exactly this shape, appended after the ' +
     'reply with nothing before or after it:\n\n' +
-    '<details><summary>▸</summary>\n' +
+    '<details>\n' +
     '<Ava>\n' +
     'Inner thoughts: What Ava is feeling beneath what she is showing. What Ava wants from {{user}} right now.\n' +
     'Expression: pleased\n' +
     'Outfit:\n' +
-    '- Outerwear: leather jacket\n' +
     '- Top: white blouse\n' +
-    '- Bottom: jeans\n' +
-    '- Underwear top: none\n' +
-    '- Underwear bottom: none\n' +
     '- Accessory: silver pendant\n' +
     '</Ava>\n' +
-    '<Brian>\n' +
-    'Inner thoughts: What Brian is feeling beneath what he is showing. What Brian wants from {{user}} right now.\n' +
-    'Expression: calm\n' +
-    'Outfit:\n' +
-    '- Outerwear: none\n' +
-    '- Top: t-shirt\n' +
-    '- Bottom: trousers\n' +
-    '- Underwear top: none\n' +
-    '- Underwear bottom: none\n' +
-    '- Accessory: none\n' +
-    '</Brian>\n' +
     '</details>\n\n' +
     '- One block per character in the roster, in roster order: {{roster}}\n' +
     '- Inner thoughts: keep the reply\'s existing inner thoughts if any; otherwise infer them from ' +
     'the reply\'s tone, actions, and subtext. Two parts: what the character is feeling beneath what ' +
     'they are showing, and what they want from {{user}} right now. Free-form, a few sentences at most.\n' +
     '- Expression: exactly ONE word (e.g. pleased, calm, angry) — never a phrase.\n' +
-    '- Outfit: exactly six lines in this order, each with the character\'s currently worn item in ' +
-    'that slot, or \'none\' when nothing is worn there.\n' +
+    '- Outfit: the currently worn item per known slot as `- Slot: item` lines, in this fixed order — ' +
+    'Outerwear, Top, Bottom, Underwear top, Underwear bottom, Accessory — omitting any slot that is ' +
+    'not meaningfully worn or that the reply gives no evidence for (skipping a slot does not break ' +
+    'the order of the ones you do include) — never fill a slot with \'none\' for the sake of ' +
+    'completeness.\n' +
     '- Never invent characters — only the roster\'s characters, never characters absent from the ' +
     'reply.\n' +
     '- Output ONLY the footer block, nothing else — never repeat the reply text.\n\n' +
     'Recent conversation:\n' +
-    '{{history, 2}}\n\n' +
+    '{{history, 1}}\n\n' +
     'Reply:\n' +
     '{{message}}',
 } as const;

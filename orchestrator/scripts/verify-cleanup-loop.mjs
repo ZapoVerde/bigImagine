@@ -22,13 +22,14 @@ import {
   getCleanupJobs,
   claimCleanupInFlight,
   releaseCleanupInFlight,
+  resolveCleanupConfig,
 } from '../dist/orchestrator/cleanupLoop.js';
 import {
   getCleanupSettings,
   parseSetCleanupSettingsBody,
   setCleanupSettings,
 } from '../dist/server/adminServer.js';
-import { DEFAULT_CLEANUP_CONFIG } from '../dist/orchestrator/cleanupHeuristics.js';
+import { DEFAULT_CLEANUP_CONFIG, extractRegion } from '../dist/orchestrator/cleanupHeuristics.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -360,7 +361,8 @@ function addSlopRule(pool, { pattern, action = 'remove', flags = 'i', replacemen
 
 const VALID_HEADER = '[ Early Morning | 🗓️ Wednesday, June 15, 2026 AD | 📍 Deck 6 - Observation Deck ]\nPresent: Mair\n';
 // The canonical inner-thoughts footer (character-visual-state-plan.md) — a conforming single-block
-// footer, the only shape the structure-aware footer regex accepts.
+// footer under the structure-aware footer regex (the <summary>▸</summary> header and the outfit
+// slots are optional).
 const VALID_FOOTER =
   '\n<details><summary>▸</summary>\n' +
   '<Mair>\n' +
@@ -792,6 +794,43 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   assert(pool.slopRules.length === 2, 'slop rules are replaced, not appended (old rule gone)');
   assert(pool.slopRules.every((r) => r.set_name === 'custom'), 'all replaced rules land in the given set');
   assert(pool.slopRules[1].action === 'llm' && pool.slopRules[1].llm_prompt === 'Fix this.', 'llm-action rule fields survive the round trip');
+}
+
+// ---------------------------------------------------------------------------
+// 13b. resolveCleanupConfig: the poll loop and the visual-state trigger (fireCharacterVisualState)
+// resolve the footer region through the SAME settings-backed config — the operator's
+// cleanup_footer_regex is the single authority, so the two can never disagree on where the footer
+// is or what its repaired shape is.
+// ---------------------------------------------------------------------------
+{
+  const pool = createFakePool();
+  const db = createPostgresClient(pool);
+
+  // Unset keys → DEFAULT_CLEANUP_CONFIG, byte-for-byte the fallback inspectFooter/extractRegion use.
+  const cfg = await resolveCleanupConfig(createFakeSettings());
+  assert(cfg.footer.regex === DEFAULT_CLEANUP_CONFIG.footerRegex, 'resolveCleanupConfig: unset footer regex falls back to the default (the visual-state path sees the same)');
+  assert(cfg.footer.flags === DEFAULT_CLEANUP_CONFIG.footerFlags && cfg.footer.prompt === DEFAULT_CLEANUP_CONFIG.footerPrompt, 'resolveCleanupConfig: unset footer flags/prompt fall back to the defaults');
+
+  // An operator override persists through setCleanupSettings and is what BOTH the poll loop and
+  // the visual-state trigger read — then the resolved config drives extraction verbatim.
+  const overrides = new Map();
+  const settings = {
+    async get(key) { return overrides.get(key); },
+    async set(key, value) { overrides.set(key, value); },
+  };
+  const parsed = parseSetCleanupSettingsBody({
+    footer_regex: '<details>[\\s\\S]*?</details>',
+    footer_prompt: 'Rebuild the footer.',
+  });
+  assert(parsed !== undefined, 'a footer-only cleanup settings body parses');
+  await setCleanupSettings(settings, db, parsed);
+  const live = await resolveCleanupConfig(settings);
+  assert(live.footer.regex === '<details>[\\s\\S]*?</details>' && live.footer.prompt === 'Rebuild the footer.', 'resolveCleanupConfig: a footer override is resolved from the same settings store the poll loop writes');
+  const region = extractRegion(
+    `She turned.\n\n<details>\n<Ava>\nInner thoughts: a.\nExpression: calm\nOutfit:\n- Top: shirt\n</Ava>\n</details>`,
+    live.footer,
+  );
+  assert(region !== null && region.text.startsWith('<details>'), 'the resolved footer config drives extraction for the visual-state pipeline');
 }
 
 // ---------------------------------------------------------------------------
