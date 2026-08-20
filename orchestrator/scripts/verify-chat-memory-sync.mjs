@@ -263,6 +263,22 @@ function createFakePool() {
           }
 
           if (sql.includes('insert into chat_memory_entries')) {
+            // Two param layouts: the digest lane passes topic_key as $4 (5 params); the rp bridge
+            // hard-codes 'scene'/'events' as a VALUES literal (4 params, $4 = content). Disambiguate
+            // by which literal the SQL carries so topic_key lands correctly for both lanes.
+            if (sql.includes("'scene'") || sql.includes("'events'")) {
+              const [chatId, syncId, userId, content] = params;
+              const topicKey = sql.includes("'scene'") ? 'scene' : 'events';
+              chatMemoryEntries.set(`${chatId}::${topicKey}`, {
+                chat_id: chatId,
+                sync_id: syncId,
+                user_id: userId,
+                topic_key: topicKey,
+                content,
+                updated_at: now(),
+              });
+              return { rows: [] };
+            }
             const [chatId, syncId, userId, topicKey, content] = params;
             chatMemoryEntries.set(`${chatId}::${topicKey}`, {
               chat_id: chatId,
@@ -544,10 +560,29 @@ function installSyncFetchMock(backend) {
       const forceTool = body.tool_choice?.function?.name;
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
       if (backend.gateHook) await backend.gateHook(forceTool);
-      // Plain-text completion: the summarize_chat_chunk classifier (chat-memory-structured-output-plan:
-      // no forced tool — raw text out, parsed locally). The only tool-free call this backend serves.
+      // Plain-text completions (chat-memory-structured-output-plan: no forced tool — raw text out,
+      // parsed locally). TWO tool-free callers now share the same connection within one tick — the
+      // chunk classifier and the rp bridge — so the backend routes on a distinguishing string in
+      // the system prompt (the bridge's chronicler header) rather than on tool_choice's absence
+      // alone; routing on absence would silently serve the classifier's canned summary to the
+      // bridge and surface as a confusing parser failure (plan Chunk 2 §5's gap).
       if (!forceTool) {
+        const sys = body.messages.find((m) => m.role === 'system')?.content ?? '';
         const content = body.messages.find((m) => m.role === 'user').content;
+        if (sys.includes('NARRATIVE CHRONICLER')) {
+          return oaiTextResponse(
+            `EVENTS:
+| When | What | Who |
+|------|------|-----|
+
+SCENE:
+A quiet square at dusk.
+
+**NEW: The Ashford Siege Breaks Open**
+The siege wall breached.
+#siege_break`,
+          );
+        }
         return oaiTextResponse(`Summary[${content}]`);
       }
       switch (forceTool) {
@@ -555,12 +590,6 @@ function installSyncFetchMock(backend) {
           return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
         case 'classify_household_memory':
           return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
-        case 'bridge_chat_memory':
-          return oaiToolResponse('bridge_chat_memory', {
-            events: '| When | What | Who |\n|------|------|-----|',
-            scene: 'SCENE: A quiet square at dusk.',
-            plot_entries: [{ name: 'The Ashford Siege Breaks Open', content: 'The siege wall breached.', arc_tag: 'siege_break' }],
-          });
         case 'curate_lorebook':
           return oaiToolResponse('curate_lorebook', { entries: [{ action: 'new', name: 'The Pavilion', category: 'place', content: 'A weathered pavilion.' }] });
         case 'curate_people':
@@ -653,8 +682,22 @@ function distillCalls() {
   return llm.calls.filter((c) => c.options.forceTool === 'distill_chat_memory');
 }
 
+// The rp bridge is a tool-free completion too (chat-memory-structured-output-plan Chunk 2), so it
+// is identified by the chronicler header in its system prompt, not by forceTool's absence — the
+// same discriminator the fake HTTP backend uses to route the two tool-free callers apart.
+function isBridgeCall(c) {
+  return (
+    c.options.forceTool === undefined &&
+    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('NARRATIVE CHRONICLER')
+  );
+}
+
+function bridgeCalls() {
+  return llm.calls.filter(isBridgeCall);
+}
+
 function summarizeCalls() {
-  return llm.calls.filter((c) => c.options.forceTool === undefined);
+  return llm.calls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c));
 }
 
 // --- Tick 1: 12 fresh messages, well past the 8-message due threshold ---
@@ -1002,12 +1045,37 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     rpSyncs[0].bridge_prompt.includes('RP-user-1'),
     "the persisted bridge prompt carries this sync's raw transcript, not a placeholder",
   );
+  assert(
+    rpSyncs[0].bridge_prompt?.includes('PREVIOUS OUTPUT:') && rpSyncs[0].bridge_prompt.includes('OUTPUT FORMAT'),
+    "the persisted inspection prompt still renders the system prompt, transcript, previous output, and the output-format block (only the forced-tool sentence is gone)",
+  );
+
+  // chat-memory-structured-output-plan Chunk 2: the bridge is now a plain-text completion parsed
+  // locally, so its request carries no tools and no forceTool — and the fake backend discriminates
+  // it from the chunk classifier's tool-free call within the same 'rp' tick via the chronicler
+  // header in its system prompt.
+  assert(
+    bridgeCalls().length === 1,
+    'exactly one bridge call this tick — the fake backend routed the bridge to its own canned text output, not the classifier summary',
+  );
+  assert(
+    bridgeCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'each bridge request carries no tools array and no forceTool — ordinary completion transport',
+  );
 
   const rpEntries = [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === RP_CHAT_ID);
   assert(rpEntries.length === 2, 'the bridge writes its SCENE and EVENTS entries');
   assert(
     rpEntries.every((e) => e.sync_id === rpSyncId),
     'both bridge entries point at the sync that created them, so the inspection can list them per sync',
+  );
+  assert(
+    rpEntries.find((e) => e.topic_key === 'scene')?.content === 'A quiet square at dusk.',
+    "the parsed SCENE body is stored with no SCENE: heading — the raw text response was parsed, not re-wrapped",
+  );
+  assert(
+    rpEntries.find((e) => e.topic_key === 'events')?.content === '| When | What | Who |\n|------|------|-----|',
+    "the parsed EVENTS table is stored table-only (header + separator, no heading)",
   );
 
   const rpFacts = pool.canonFacts.filter((f) => f.chat_id === RP_CHAT_ID);
@@ -1194,11 +1262,11 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   assert(
-    namedCalls.filter((c) => c.options.forceTool === undefined).length === 2,
+    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c)).length === 2,
     'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
   );
   assert(
-    namedCalls.some((c) => c.options.forceTool === 'bridge_chat_memory'),
+    namedCalls.some((c) => isBridgeCall(c) && c.url === `${NAMED_FAKE_BASE}/chat/completions`),
     "the rp bridge also rides the chat_memory_profile connection, not the chat's narrator profile",
   );
   assert(

@@ -1,7 +1,7 @@
 /**
  * @file orchestrator/src/io/chatMemory/bridgeChatMemory.ts
- * @stamp 2026-08-06
- * @architectural-role IO Wrapper — forced-schema LLM call
+ * @stamp 2026-08-20
+ * @architectural-role IO Wrapper — plain-text LLM call with local parsing
  * @description
  * The 'rp'-kind sync lane's hookseeker-parity bridge: maintains an evolving SCENE (present-tense
  * prose, carried forward and revised, never reset), an EVENTS text block (upcoming confirmed
@@ -27,9 +27,14 @@
  * {{prev_scene}}/{{#if existing_threads}} placeholders are resolved by this wrapper building the
  * user message directly (mirroring what CNZ's own client-side interpolate() does before the prompt
  * ever reaches an LLM — the model itself never saw literal Handlebars tokens there either), and the
- * raw-markdown "OUTPUT FORMAT" section is replaced with an equivalent forced-tool-call instruction.
- * That is the one unavoidable adaptation; everything upstream of it in DEFAULT_BRIDGE_PROMPT is
- * verbatim.
+ * user message's tail carries Canonize's own literal "OUTPUT FORMAT" block (EVENTS table, SCENE
+ * prose, `**NEW:` plot entries with arc tags) — the raw-text convention the old forced
+ * `bridge_chat_memory` tool call replaced. That restoration (plus local parsing via
+ * parseBridgeOutput.ts) is the only adaptation; everything upstream of it in DEFAULT_BRIDGE_PROMPT
+ * is verbatim. The forced-tool transport is gone because it tied sync's reliability to whichever
+ * model/route is active (chat-memory-structured-output-plan.md): plain text extraction works across
+ * every connection the household connects, including ones that reject or mishandle forced
+ * tool_choice.
  *
  * @api-declaration
  * DEFAULT_BRIDGE_PROMPT
@@ -43,8 +48,9 @@
  *     external_io:     [LLM, via the LlmProvider passed in]
  */
 
-import type { LlmProvider, ToolDefinition } from '../llm/types.js';
+import type { LlmProvider } from '../llm/types.js';
 import { interpolateMacros } from '../../util/interpolateMacros.js';
+import { parseBridgeOutput } from './parseBridgeOutput.js';
 
 export const DEFAULT_BRIDGE_PROMPT = `**[SYSTEM: TASK — NARRATIVE CHRONICLER]**
 
@@ -105,50 +111,6 @@ Rules:
 
 If none of the above occurred, output only EVENTS and SCENE.`;
 
-const bridgeChatMemoryTool: ToolDefinition = {
-  name: 'bridge_chat_memory',
-  description:
-    "Record this sync window's EVENTS table, SCENE prose, and any PLOT entries, per the three-part chronicler task above. " +
-    'plot_entries is empty when none of the PART 3 trigger conditions occurred.',
-  parameters: {
-    type: 'object',
-    properties: {
-      events: {
-        type: 'string',
-        description:
-          'The full EVENTS table in markdown, header row included even when there are no upcoming events to list.',
-      },
-      scene: {
-        type: 'string',
-        description: "Approximately 150-200 words of present-tense SCENE prose, beginning with 'SCENE:' on its own line.",
-      },
-      plot_entries: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            name: { type: 'string', description: "A vivid label for this arc's progression in this window." },
-            content: {
-              type: 'string',
-              description: "2-4 sentences in past tense covering this arc's developments this window.",
-            },
-            arc_tag: {
-              type: 'string',
-              description:
-                'Exactly one arc tag, snake_case, no leading #. Reuse an existing tag exactly when continuing an ' +
-                'established thread; coin a new one only for a genuinely unrelated arc.',
-            },
-          },
-          required: ['name', 'content', 'arc_tag'],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ['events', 'scene', 'plot_entries'],
-    additionalProperties: false,
-  },
-};
-
 export interface BridgePlotEntryDraft {
   name: string;
   content: string;
@@ -167,26 +129,6 @@ export interface BridgeResult {
   prompt: string;
 }
 
-interface BridgeToolResponse {
-  events: string;
-  scene: string;
-  plot_entries: { name: string; content: string; arc_tag: string }[];
-}
-
-function isBridgeResponse(value: unknown): value is BridgeToolResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (typeof v.events !== 'string' || typeof v.scene !== 'string' || !Array.isArray(v.plot_entries)) return false;
-  return v.plot_entries.every(
-    (e) =>
-      typeof e === 'object' &&
-      e !== null &&
-      typeof (e as Record<string, unknown>).name === 'string' &&
-      typeof (e as Record<string, unknown>).content === 'string' &&
-      typeof (e as Record<string, unknown>).arc_tag === 'string',
-  );
-}
-
 export async function bridgeChatMemory(
   llm: LlmProvider,
   transcript: string,
@@ -203,7 +145,19 @@ export async function bridgeChatMemory(
     `TRANSCRIPT:\n${transcript}\n\n` +
     `PREVIOUS OUTPUT:\n${previousOutput || '(none yet)'}\n\n` +
     threadsBlock +
-    'Answer by calling bridge_chat_memory with the EVENTS table, SCENE prose, and any PLOT entries.';
+    `OUTPUT FORMAT — follow exactly:
+
+EVENTS:
+| When | What | Who |
+|------|------|-----|
+| [when] | [what] | [who] |
+
+SCENE:
+[approximately 150–200 words of present-tense prose]
+
+**NEW: [Entry Name]**
+[2–4 sentences in past tense.]
+#thread_tag`;
 
   const prompt = `${instructions}\n\n${userMessage}`;
 
@@ -212,21 +166,14 @@ export async function bridgeChatMemory(
       { role: 'system', content: instructions },
       { role: 'user', content: userMessage },
     ],
-    [bridgeChatMemoryTool],
-    { forceTool: 'bridge_chat_memory' },
+    [],
   );
 
-  const call = turn.toolCalls.find((c) => c.name === 'bridge_chat_memory');
-  if (!call) {
-    throw new Error('bridgeChatMemory: model did not call bridge_chat_memory despite forceTool');
-  }
-  if (!isBridgeResponse(call.arguments)) {
-    throw new Error(`bridgeChatMemory: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
-  }
+  const parsed = parseBridgeOutput(turn.message.content);
   return {
-    events: call.arguments.events,
-    scene: call.arguments.scene,
-    plotEntries: call.arguments.plot_entries.map((e) => ({ name: e.name, content: e.content, arcTag: e.arc_tag })),
+    events: parsed.events,
+    scene: parsed.scene,
+    plotEntries: parsed.plotEntries,
     prompt,
   };
 }
