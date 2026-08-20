@@ -17,6 +17,7 @@ import {
   getChatBackgroundSettings,
   getChatLegibilitySettings,
   getChatTurnStatus,
+  getChatSyncStatus,
   listFolders,
   listToolNames,
   reportBrokenLocationImage,
@@ -39,6 +40,7 @@ import type {
   ChatMessage,
   ChatParams,
   ChatSessionRow,
+  ChatSyncHealth,
   CleanupPatchFrame,
   CleanupStatusFrame,
   ContextStackPreset,
@@ -476,6 +478,42 @@ export default function ChatView({
   const [liveReasoningDone, setLiveReasoningDone] = useState(false);
   const [liveReasoningTargetId, setLiveReasoningTargetId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Rolling-memory sync health (orchestrator/chatMemorySync.ts's computeChatSyncHealth, read
+  // through GET /v1/chats/:id/sync-status's syncHealth) — the RP chat screen's warning/blocked
+  // banner and composer-disable. Polled only while an RP chat is open; null before the first
+  // fetch resolves (no banner). The "View sync status" button on either banner opens the
+  // standalone ChatSyncStatusPanel (the same panel the settings rail embeds).
+  const [syncHealth, setSyncHealth] = useState<ChatSyncHealth | null>(null);
+  const [syncStatusOpen, setSyncStatusOpen] = useState(false);
+  // The blocking truth as a plain boolean so send() and the composer's disabled prop read the
+  // same value. true exactly when the server is refusing new turns with 409 CHAT_SYNC_STALLED.
+  const syncBlocked = syncHealth?.blocking === true;
+
+  // Poll cadence matches the panel's own (30s) and the orchestrator's POLL_INTERVAL_MS, so the
+  // banner is at most one tick behind the loop's last attempt. Best-effort: a transient poll
+  // failure keeps the last-known health (or no banner) rather than flashing an error. Non-RP
+  // chats have no live-window arc to stall, so nothing polls.
+  useEffect(() => {
+    if (!chatId || activeChat?.kind !== 'rp') {
+      setSyncHealth(null);
+      return;
+    }
+    let disposed = false;
+    const load = () => {
+      getChatSyncStatus(chatId, apiKey)
+        .then((status) => {
+          if (!disposed) setSyncHealth(status.syncHealth);
+        })
+        .catch(() => {});
+    };
+    load();
+    const interval = setInterval(load, 30_000);
+    return () => {
+      disposed = true;
+      clearInterval(interval);
+    };
+  }, [chatId, apiKey, activeChat?.kind]);
 
   // Staged file attachments: held only in this tab's own state, never persisted — cleared once
   // the message carrying them is sent (see orchestrator/src/util/attachmentContext.ts).
@@ -1363,6 +1401,7 @@ export default function ChatView({
     const text = composerRef.current?.getValue().trim() ?? '';
     const resendLast = resendMode();
     if (sending || resumingTurn) return;
+    if (syncBlocked) return; // the banner above the composer explains; the server would 409 anyway
     if (!resendLast && !text && stagedFiles.length === 0 && stagedImages.length === 0) return;
 
     // A file/image-only send (no typed text) still needs non-empty, readable content for the
@@ -1449,6 +1488,24 @@ export default function ChatView({
           void reconcileTurnInFlight(activeChat.chatId);
         } else {
           setError('a turn is already in progress for this chat');
+        }
+      } else if (err instanceof ApiError && err.status === 409 && err.message === 'CHAT_SYNC_STALLED') {
+        // Rolling-memory sync stall (handleChatCompletions.ts): the server refused this NEW turn
+        // because sync has fallen a full block behind. The poll can lag up to 30s behind the
+        // server's view, so reflect the block immediately — the banner's blocked state shows now,
+        // not on the next tick. The optimistic user message this send pushed was never persisted
+        // and disappears on the refresh (same as the 499 path).
+        setSyncHealth({
+          state: 'blocked',
+          blocking: true,
+          lastStatus: null,
+          lastStep: null,
+          lastError: null,
+          consecutiveErrors: 0,
+          turnsUntilBlock: null,
+        });
+        if (activeChat && chatIdRef.current === activeChat.chatId) {
+          void refreshActiveMessages(activeChat.chatId).catch(() => {});
         }
       } else if (err instanceof ApiError) {
         setError(err.message);
@@ -2275,6 +2332,49 @@ export default function ChatView({
             </div>
           )}
 
+          {/* Rolling-memory sync warning/block banner (RP chats only): a sync failure behind the
+              live-window arc is surfaced right where the user is about to send, not buried in the
+              settings rail. Warning = still advancing, N turns of grace remain; blocked = the
+              server refuses new turns (409 CHAT_SYNC_STALLED) and the composer is disabled.
+              "View sync status" opens the standalone ChatSyncStatusPanel overlay. */}
+          {activeChat?.kind === 'rp' &&
+            syncHealth &&
+            (syncHealth.state === 'warning' || syncHealth.state === 'blocked') && (
+              <div
+                className={`chat-sync-banner chat-sync-banner-${syncHealth.state}`}
+                role={syncHealth.state === 'blocked' ? 'alert' : undefined}
+              >
+                <span className="chat-sync-banner-text">
+                  {syncHealth.state === 'blocked' ? (
+                    <>Memory sync has failed and new messages are paused until it catches up.</>
+                  ) : (
+                    <>
+                      Memory sync is running behind —{' '}
+                      {syncHealth.turnsUntilBlock === null
+                        ? 'new messages may be paused soon.'
+                        : `${syncHealth.turnsUntilBlock} more turn${syncHealth.turnsUntilBlock === 1 ? '' : 's'} until new messages are paused.`}
+                    </>
+                  )}
+                  {/* The compact underlying error, when the last attempt actually failed (a stall
+                      reached by turn count alone, with no failed attempt yet, has neither) — so the
+                      user sees what's broken without opening the detail panel. */}
+                  {syncHealth.lastError && (
+                    <span className="chat-sync-banner-detail">
+                      {' '}
+                      ({syncHealth.lastStep ?? 'unknown step'}: {syncHealth.lastError})
+                    </span>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="chat-sync-banner-link"
+                  onClick={() => setSyncStatusOpen(true)}
+                >
+                  View sync status
+                </button>
+              </div>
+            )}
+
           <form
             className="chat-input"
             onSubmit={(e) => {
@@ -2329,11 +2429,13 @@ export default function ChatView({
             )}
             {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this
                 tab lost track of (resumingTurn) — typing into a conversation whose transcript is
-                about to change under you is worse than waiting for the refresh. */}
+                about to change under you is worse than waiting for the refresh. Also disabled
+                while rolling-memory sync is blocking new turns (syncBlocked — the banner above
+                explains; the server would 409 CHAT_SYNC_STALLED anyway). */}
             <ChatComposer
               ref={composerRef}
               tabId={tabId}
-              disabled={resumingTurn}
+              disabled={resumingTurn || syncBlocked}
               onSend={send}
               onEmptyChange={onEmptyChange}
             />
@@ -2354,6 +2456,7 @@ export default function ChatView({
                 !sending &&
                 !swipeRegenerating &&
                 !resumingTurn &&
+                !syncBlocked &&
                 (selectionMode ||
                   (!resendMode() && !composerHasText && stagedFiles.length === 0 && stagedImages.length === 0))
               }
@@ -2394,6 +2497,28 @@ export default function ChatView({
           onOpenChat={onOpenChat ?? (() => {})}
           onClose={() => setBranchMapOpen(false)}
         />
+      )}
+
+      {/* The standalone Sync status panel opened from the warning/blocked banner — the same
+          ChatSyncStatusPanel the settings rail embeds, remounted as a floating panel with its own
+          header (title, refresh, close). Clicking the scrim closes it. */}
+      {syncStatusOpen && activeChat && (
+        <div
+          className="chat-sync-status-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Sync status"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setSyncStatusOpen(false);
+          }}
+        >
+          <ChatSyncStatusPanel
+            apiKey={apiKey}
+            chatId={activeChat.chatId}
+            archived={!!activeChat.archivedAt}
+            onClose={() => setSyncStatusOpen(false)}
+          />
+        </div>
       )}
 
       {restartOpen && activeChat?.characterId && (

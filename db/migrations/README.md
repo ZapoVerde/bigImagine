@@ -578,3 +578,10 @@ Already applied by hand, not run automatically (see the file for the exact comma
   (defaults `<think>`/`</think>`, read live by `orchestrator/liveReasoning.ts`, editable from
   the Cleanup page's setup block). Same wholesale CHECK rebuild as 0091/0092 (complete
   vocabulary, all of 0010–0094, 73 keys). Idempotent hand-apply one-shot.
+- `0127_chat_memory_sync_status_failure_class.sql` — permanent-failure classification for the
+  rolling chat-memory sync loop's status row: nullable `last_error_kind`
+  (`'permanent'|'transient'`, with a CHECK) and `failure_signature` (a fingerprint of the
+  connection a permanent failure ran through — `kind|model|baseUrl`). The tick suppresses the
+  identical permanent failure instead of retrying every 30s, retrying only when the signature
+  changes or a slow periodic retry elapses; ok/skipped clears both columns. No settings keys, no
+  new tables. Idempotent hand-apply one-shot.

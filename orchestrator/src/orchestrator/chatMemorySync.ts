@@ -89,11 +89,39 @@
  *   eagerChunkSync.ts and chatChunkResize.ts): reads the live chat_memory_profile setting and
  *   returns a gated provider on that connection, falling back to the household's active connection
  *   (resolved live) when unset or unknown. Never reads chat_sessions.params->>'profile'.
+ * resolveChatMemoryProfile(deps) — the profile half of the above (LlmProfile | undefined), split
+ *   out so the failure_signature (chatMemoryProfileSignature) comes from the same resolution the
+ *   failing provider ran through.
+ * chatMemoryProfileSignature(profile) — kind|model|baseUrl fingerprint, the failure_signature a
+ *   permanent sync failure is stamped with (migration 0127).
+ * computeChatSyncHealth(input) — pure derivation of a chat's sync health (healthy/warning/blocked)
+ *   from its turn boundaries vs. the last closed sync point's anchor and the live/sync window pairs.
+ * loadChatSyncHealth(deps, userId, chatId, messages, liveWindowPairs, syncEveryPairs) — the DB
+ *   reads behind computeChatSyncHealth, shared by handleChatCompletions's 409 CHAT_SYNC_STALLED
+ *   guard and chatSessions.ts's getChatSyncStatus.
  * startChatMemorySyncLoop(deps) — begins polling every POLL_INTERVAL_MS
- * runChatMemorySyncTick(deps) — one poll cycle, exported so verify scripts can drive it directly
+ * runChatMemorySyncTick(deps) — one poll cycle, exported so verify scripts can drive it directly.
+ *   Resolves all settings (including the connection) once per tick; excludes permanently-failing
+ *   chats while suppression is active.
  * archiveChatMemory(deps, userId, chatId, chatTitle) — the end-of-chat long-term-memory
  *   extraction, called by server/httpServer.ts's archive_chat route once chatSessions.ts's
  *   archiveChat has stamped archived_at
+ *
+ * Permanent-failure suppression (bi_principles.md §11 follow-up, migration 0127): a sync pass that
+ * fails with a permanent error — a 400/401/403/404 HTTP status, or a real-but-unusable response
+ * (io/llm/llmFailureClassify.ts) — would otherwise fail identically every 30s poll tick forever
+ * (observed ×1500 consecutive on a dead "No endpoints found for <model>" 404). The catch stamps
+ * the chat's chat_memory_sync_status row with last_error_kind='permanent' plus the connection's
+ * failure_signature; findDueChats then excludes the chat until either the signature differs (a
+ * Settings-tab edit — chat_memory_profile switched, the active connection's model/baseUrl changed —
+ * retries on the very next tick) or PERMANENT_FAILURE_RETRY_MS (~30min) elapses. An excluded chat
+ * is silently absent (recordSyncStatus is never called for it), preserving the error row — the
+ * skipped branch would clear it, and a suppressed failure is not a skip. Recovery needs no locked
+ * flag: everything derives from the status row.
+ *
+ * RP-progression blocking: the frontend turns the same health into a warning/blocked banner, and
+ * handleChatCompletions.ts refuses a NEW turn with 409 CHAT_SYNC_STALLED while the chat is
+ * blocked (live window + two sync windows behind — one full sync interval of grace past due).
  *
  * @contract
  *   assertions:
@@ -107,8 +135,10 @@
 import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { createLlmProviderForProfile } from '../io/llm/index.js';
+import { classifyLlmFailure } from '../io/llm/llmFailureClassify.js';
 import type { LlmConnectionStore } from '../io/llmConnections.js';
 import { createGatedLlmProvider } from '../io/llm/llmGate.js';
+import type { LlmProfile } from '../io/llm/profiles.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import type { EmbeddingProvider } from '../io/embeddings/types.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
@@ -126,6 +156,14 @@ const POLL_INTERVAL_MS = 30_000; // a rolling digest has no live-conversation ur
 export const DEFAULT_LIVE_WINDOW_PAIRS = 8; // mirrors Canonize's own default live-context buffer
 export const DEFAULT_SYNC_EVERY_PAIRS = 8; // mirrors Canonize's own default sync-window size
 const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_memory_entries already persists state across syncs
+
+/** How long a suppressed permanent failure stays quiet before the loop tries again even though
+ *  nothing about the connection changed — a provider that comes back from the dead without an
+ *  operator touching anything deserves another chance eventually, just not every 30s. Far enough
+ *  out that the observed ×1500-in-a-row 404 spam (one attempt per 30s poll tick, ~12h of it)
+ *  becomes roughly one retry per half hour. A chat_memory_profile/active-connection edit lifts
+ *  suppression immediately regardless of this window — see isPermanentFailureSuppressed. */
+const PERMANENT_FAILURE_RETRY_MS = 30 * 60_000;
 
 /** chatIds whose sync pass is currently running. The poll tick fires every POLL_INTERVAL_MS while
  *  a single pass can take minutes of LLM round-trips, and a chat stays 'due' to every tick until
@@ -164,24 +202,37 @@ type SyncResult =
   | { status: 'skipped' }
   | { status: 'ok'; chunksAdded: number; entriesUpdated: number };
 
+/** An error outcome is stamped with the failure's classification and the signature of the
+ *  connection it ran through — the two columns the permanent-failure suppression (migration 0127)
+ *  reads to decide whether the identical failure should stop hammering every 30s tick. */
+interface SyncErrorResult {
+  status: 'error';
+  step: string;
+  error: string;
+  kind: 'permanent' | 'transient';
+  signature: string;
+}
+
 // Written through deps.db directly (a fresh transaction), never the `session` runOneChatSync ran
 // its own work through — so this record survives even when that work's transaction rolled back.
 async function recordSyncStatus(
   db: PostgresClient,
   userId: string,
   chatId: string,
-  outcome: SyncResult | { status: 'error'; step: string; error: string },
+  outcome: SyncResult | SyncErrorResult,
 ): Promise<void> {
   await db.withUserScope(userId, (session) => {
     if (outcome.status === 'error') {
       return session.query(
-        `insert into chat_memory_sync_status (chat_id, user_id, last_attempt_at, last_status, last_step, last_error, consecutive_errors)
-         values ($1, $2, now(), 'error', $3, $4, 1)
+        `insert into chat_memory_sync_status
+           (chat_id, user_id, last_attempt_at, last_status, last_step, last_error, last_error_kind, failure_signature, consecutive_errors)
+         values ($1, $2, now(), 'error', $3, $4, $5, $6, 1)
          on conflict (chat_id) do update set
            last_attempt_at = excluded.last_attempt_at, last_status = 'error',
            last_step = excluded.last_step, last_error = excluded.last_error,
+           last_error_kind = excluded.last_error_kind, failure_signature = excluded.failure_signature,
            consecutive_errors = chat_memory_sync_status.consecutive_errors + 1`,
-        [chatId, userId, outcome.step, outcome.error],
+        [chatId, userId, outcome.step, outcome.error, outcome.kind, outcome.signature],
       );
     }
     if (outcome.status === 'skipped') {
@@ -190,7 +241,7 @@ async function recordSyncStatus(
          values ($1, $2, now(), 'skipped')
          on conflict (chat_id) do update set
            last_attempt_at = excluded.last_attempt_at, last_status = 'skipped',
-           last_step = null, last_error = null`,
+           last_step = null, last_error = null, last_error_kind = null, failure_signature = null`,
         [chatId, userId],
       );
     }
@@ -200,6 +251,7 @@ async function recordSyncStatus(
        values ($1, $2, now(), 'ok', now(), $3, $4, 0)
        on conflict (chat_id) do update set
          last_attempt_at = excluded.last_attempt_at, last_status = 'ok', last_step = null, last_error = null,
+         last_error_kind = null, failure_signature = null,
          last_success_at = excluded.last_success_at, last_chunks_added = excluded.last_chunks_added,
          last_entries_updated = excluded.last_entries_updated, consecutive_errors = 0`,
       [chatId, userId, outcome.chunksAdded, outcome.entriesUpdated],
@@ -225,6 +277,11 @@ interface DueChatRow {
 
 interface SyncSettings {
   llm: LlmProvider;
+  /** kind|model|baseUrl fingerprint of the connection `llm` runs through (the resolved
+   *  chat_memory_profile or the fallback active connection) — the failure_signature a permanent
+   *  sync failure gets stamped with (migration 0127), so the suppression retries the moment a
+   *  Settings-tab edit changes the connection rather than waiting out PERMANENT_FAILURE_RETRY_MS. */
+  profileSignature: string;
   chunkSummaryPrompt: string | undefined;
   distillPrompt: string | undefined;
   householdMemoryPrompt: string | undefined;
@@ -252,21 +309,38 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
  *  to the household's active connection, resolved live each call so a Settings-tab activation
  *  switch takes effect without restart. A profile naming a connection that no longer exists logs
  *  clearly and falls back to the active connection too — deliberately NOT the calling chat's
- *  narrator profile. */
-export async function resolveChatMemoryLlm(deps: ChatMemorySyncDeps): Promise<LlmProvider> {
+ *  narrator profile. Returns undefined only when neither a profile nor an active connection exists
+ *  (resolveChatMemoryLlm then falls back to the process default provider). */
+export async function resolveChatMemoryProfile(deps: ChatMemorySyncDeps): Promise<LlmProfile | undefined> {
   const profileName = await deps.settings.get('chat_memory_profile');
   if (profileName) {
     const profile = await deps.llmConnections.resolveByName(profileName);
     if (profile) {
-      return createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
+      return profile;
     }
     log.error(`chat-memory: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
   }
   const active = await deps.llmConnections.resolveActive();
   if (active) {
-    return createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
+    return active;
   }
   log.error('chat-memory: no active LLM connection — falling back to the default provider');
+  return undefined;
+}
+
+/** The failure_signature (migration 0127) for a resolved chat-memory connection: enough of the
+ *  connection's identity that a Settings-tab edit (chat_memory_profile switched, the active
+ *  connection's model/baseUrl changed) produces a different signature and immediately un-suppresses
+ *  a permanent failure, while a cosmetic edit (apiKey rotated, name changed) does not. */
+export function chatMemoryProfileSignature(profile: LlmProfile | undefined): string {
+  return profile ? `${profile.kind}|${profile.model}|${profile.baseUrl ?? ''}` : 'default';
+}
+
+export async function resolveChatMemoryLlm(deps: ChatMemorySyncDeps): Promise<LlmProvider> {
+  const profile = await resolveChatMemoryProfile(deps);
+  if (profile) {
+    return createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
+  }
   return deps.llm;
 }
 
@@ -299,8 +373,15 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
 
   // The whole pipeline's connection, resolved through the shared chat-memory resolver — read
   // live every tick from chat_memory_profile, never from this chat's own params->>'profile' (that
-  // is the narrator/generation connection, a different configuration domain).
-  const llm = await resolveChatMemoryLlm(deps);
+  // is the narrator/generation connection, a different configuration domain). The profile itself
+  // is resolved here (not just via resolveChatMemoryLlm) because its kind|model|baseUrl
+  // fingerprint is the failure_signature a permanent failure gets stamped with — the signature
+  // must come from the same resolution the failing provider ran through, once per tick like the
+  // rest of the settings.
+  const profile = await resolveChatMemoryProfile(deps);
+  const llm = profile
+    ? createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile)
+    : deps.llm;
 
   const livePairs = toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
   const syncEveryPairs = toPositiveInt(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
@@ -311,6 +392,7 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
 
   return {
     llm,
+    profileSignature: chatMemoryProfileSignature(profile),
     chunkSummaryPrompt: chunkSummaryPrompt || undefined,
     distillPrompt: distillPrompt || undefined,
     householdMemoryPrompt: householdMemoryPrompt || undefined,
@@ -325,7 +407,13 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
   };
 }
 
-async function findDueChats(db: PostgresClient, userId: string, syncEveryMessages: number, liveWindowMessages: number): Promise<string[]> {
+async function findDueChats(
+  db: PostgresClient,
+  userId: string,
+  syncEveryMessages: number,
+  liveWindowMessages: number,
+  profileSignature: string,
+): Promise<string[]> {
   return db.withUserScope(userId, async (session) => {
     // "Due" = unsynced messages (past the last sync point's anchor message, or all of them if
     // never synced) exceed the live window by at least a full sync-window's worth. This is a rough
@@ -334,18 +422,34 @@ async function findDueChats(db: PostgresClient, userId: string, syncEveryMessage
     // archived, and simply no-ops if this filter ever over-selects a chat that isn't really due.
     // archived_at excludes an already-archived chat from ongoing rolling sync entirely — its
     // history is done changing.
+    //
+    // Permanent-failure suppression (bi_principles.md §11 follow-up, migration 0127): a chat whose
+    // last attempt was a permanent failure (400/401/403/404, or a malformed/empty response) under
+    // the SAME connection signature (chat_memory_profile/active-connection identity) is excluded
+    // here — folded into the due-filter rather than checked per-chat in the tick so it costs zero
+    // extra queries. It was observed hammering a dead "No endpoints found for <model>" 404 once
+    // per 30s tick forever (×1500 in a row); this stops that. An excluded chat is silently absent
+    // from the loop (never recorded), preserving the error row; suppression lifts when the
+    // signature changes (a Settings-tab edit retries on the very next tick) or after
+    // PERMANENT_FAILURE_RETRY_MS.
     const rows = await session.query<DueChatRow>(
       `select cs.chat_id
        from chat_sessions cs
        left join chat_sync_points sp on sp.chat_id = cs.chat_id
          and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = cs.chat_id and closed_at is not null)
        left join chat_messages anchor on anchor.message_id = sp.last_message_id
+       left join chat_memory_sync_status st on st.chat_id = cs.chat_id
        where cs.archived_at is null
          and (
            select count(*) from chat_messages m
            where m.chat_id = cs.chat_id and (anchor.created_at is null or m.created_at > anchor.created_at)
-         ) >= $1`,
-      [syncEveryMessages + liveWindowMessages],
+         ) >= $1
+         and not (
+           st.last_status = 'error' and st.last_error_kind = 'permanent'
+           and st.failure_signature = $2
+           and now() - st.last_attempt_at < make_interval(secs => $3)
+         )`,
+      [syncEveryMessages + liveWindowMessages, profileSignature, PERMANENT_FAILURE_RETRY_MS / 1000],
     );
     return rows.map((r) => r.chat_id);
   });
@@ -376,6 +480,104 @@ export function findTurnBoundaries(messages: { role: 'user' | 'assistant' }[]): 
     }
   }
   return boundaries;
+}
+
+/** Machine-readable health of a chat's rolling-memory sync, for the RP chat screen's block/warn
+ *  banner (and the server-side 409 CHAT_SYNC_STALLED guard). `state` is derived purely from how
+ *  far the chat has fallen behind sync, in turn units (never raw message counts — findTurnBoundaries):
+ *
+ *  - healthy:    unsyncedTurns below the due threshold — nothing to surface.
+ *  - warning:    unsyncedTurns past the due threshold (live window + one sync window) — the chat
+ *                can keep advancing, but the banner tells the user sync has fallen behind.
+ *  - blocked:    unsyncedTurns past the block threshold (live window + TWO sync windows — one full
+ *                sync interval of grace beyond due, the agreed "allow one sync interval of lag,
+ *                then block" budget). New turns are refused server-side; `blocking` is the flag
+ *                the client checks to disable its composer.
+ *
+ *  `turnsUntilBlock` is meaningful only in warning: the number of additional turns the chat can
+ *  advance before it crosses into blocked (blockThreshold - unsyncedTurns). It is null in every
+ *  other state.
+ */
+export interface ChatSyncHealth {
+  state: 'healthy' | 'warning' | 'blocked';
+  blocking: boolean;
+  lastStatus: 'ok' | 'skipped' | 'error' | null;
+  lastStep: string | null;
+  lastError: string | null;
+  consecutiveErrors: number;
+  turnsUntilBlock: number | null;
+}
+
+export function computeChatSyncHealth(input: {
+  messages: { messageId: string; role: 'user' | 'assistant' }[];
+  /** The newest CLOSED sync point's anchor message id — everything at or before it is consumed
+   *  (the same closed-only narrowing getChatSyncStatus/findDueChats use; an eagerly-opened,
+   *  closed_at-null point is chunk-progress only, never a consolidation boundary). */
+  anchorMessageId: string | null;
+  lastStatus: 'ok' | 'skipped' | 'error' | null;
+  lastStep: string | null;
+  lastError: string | null;
+  consecutiveErrors: number;
+  liveWindowPairs: number;
+  syncEveryPairs: number;
+}): ChatSyncHealth {
+  const anchorIdx = input.anchorMessageId ? input.messages.findIndex((m) => m.messageId === input.anchorMessageId) : -1;
+  const unsyncedTurns = findTurnBoundaries(input.messages).filter((idx) => idx > anchorIdx).length;
+  const dueThreshold = input.liveWindowPairs + input.syncEveryPairs;
+  const blockThreshold = input.liveWindowPairs + 2 * input.syncEveryPairs;
+  const state = unsyncedTurns >= blockThreshold ? 'blocked' : unsyncedTurns >= dueThreshold ? 'warning' : 'healthy';
+  return {
+    state,
+    blocking: state === 'blocked',
+    lastStatus: input.lastStatus,
+    lastStep: input.lastStep,
+    lastError: input.lastError,
+    consecutiveErrors: input.consecutiveErrors,
+    turnsUntilBlock: state === 'warning' ? blockThreshold - unsyncedTurns : null,
+  };
+}
+
+interface SyncStatusRow {
+  last_status: 'ok' | 'skipped' | 'error' | null;
+  last_step: string | null;
+  last_error: string | null;
+  consecutive_errors: number | string;
+}
+
+/** The DB reads behind computeChatSyncHealth, shared by the RP turn guard (handleChatCompletions)
+ *  and the status endpoint (io/chatSessions.ts's getChatSyncStatus) so both compute health from
+ *  the same anchor + status row. Pure computation stays in computeChatSyncHealth (testable without
+ *  a pool); this is only the fetching half. */
+export async function loadChatSyncHealth(
+  deps: ChatMemorySyncDeps,
+  userId: string,
+  chatId: string,
+  messages: { messageId: string; role: 'user' | 'assistant' }[],
+  liveWindowPairs: number,
+  syncEveryPairs: number,
+): Promise<ChatSyncHealth> {
+  return deps.db.withUserScope(userId, async (session) => {
+    const [anchor] = await session.query<{ last_message_id: string }>(
+      `select last_message_id from chat_sync_points
+       where chat_id = $1 and closed_at is not null order by ordinal desc limit 1`,
+      [chatId],
+    );
+    const [status] = await session.query<SyncStatusRow>(
+      `select last_status, last_step, last_error, consecutive_errors
+       from chat_memory_sync_status where chat_id = $1`,
+      [chatId],
+    );
+    return computeChatSyncHealth({
+      messages,
+      anchorMessageId: anchor?.last_message_id ?? null,
+      lastStatus: status?.last_status ?? null,
+      lastStep: status?.last_step ?? null,
+      lastError: status?.last_error ?? null,
+      consecutiveErrors: Number(status?.consecutive_errors ?? 0),
+      liveWindowPairs,
+      syncEveryPairs,
+    });
+  });
 }
 
 interface ExistingEntryRow {
@@ -893,20 +1095,34 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
 }
 
 export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<void> {
+  // Settings (including the pipeline's connection) are resolved ONCE per tick and shared by every
+  // due chat — previously each chat re-resolved them inside the loop, so N due chats paid N
+  // settings reads plus N connection resolutions for the same answer, and could even disagree
+  // with each other if a Settings-tab edit landed mid-tick.
   const defaults = await resolveSyncSettings(deps);
   const users = await deps.db.withSystemScope((session) => session.query<UserRow>('select user_id from users'));
   for (const { user_id: userId } of users) {
-    const due = await findDueChats(deps.db, userId, defaults.syncEveryMessages, defaults.liveWindowMessages);
+    // findDueChats also applies permanent-failure suppression (migration 0127): a chat whose last
+    // attempt was a permanent failure under the current connection signature is excluded from the
+    // loop entirely until the signature changes or PERMANENT_FAILURE_RETRY_MS elapses — a dead
+    // "No endpoints found for <model>" 404 no longer re-fires once per 30s tick forever.
+    const due = await findDueChats(deps.db, userId, defaults.syncEveryMessages, defaults.liveWindowMessages, defaults.profileSignature);
     for (const chatId of due) {
       try {
-        const sync = await resolveSyncSettings(deps);
-        const result = await runOneChatSync(deps, sync, userId, chatId);
+        const result = await runOneChatSync(deps, defaults, userId, chatId);
         await recordSyncStatus(deps.db, userId, chatId, result);
       } catch (err) {
         log.error('chat-memory sync: sync failed for one chat, will retry next tick', { chatId, err });
         const step = err instanceof SyncStepError ? err.step : 'unknown';
         const message = err instanceof Error ? err.message : String(err);
-        await recordSyncStatus(deps.db, userId, chatId, { status: 'error', step, error: message });
+        const kind = classifyLlmFailure(err);
+        await recordSyncStatus(deps.db, userId, chatId, {
+          status: 'error',
+          step,
+          error: message,
+          kind,
+          signature: defaults.profileSignature,
+        });
       }
     }
   }

@@ -452,7 +452,7 @@ function createFakeChatSessionStore() {
       row.updatedAt = new Date().toISOString();
       return row;
     },
-    async getChatSyncStatus(userId, chatId, dueAfterMessages) {
+    async getChatSyncStatus(userId, chatId, liveWindowPairs, syncEveryPairs) {
       const row = sessions.get(chatId);
       if (!row || row.userId !== userId) return undefined;
       const entry = syncStatusByChat.get(chatId);
@@ -469,7 +469,7 @@ function createFakeChatSessionStore() {
         canonApprovedCount: entry?.canonApprovedCount ?? 0,
         canonLastProposedAt: entry?.canonLastProposedAt ?? null,
         unsyncedMessages: (messagesByChat.get(chatId) ?? []).length,
-        dueAfterMessages,
+        dueAfterMessages: (liveWindowPairs + syncEveryPairs) * 2,
         syncs: [],
       };
     },
@@ -826,6 +826,16 @@ function createFakePool() {
           // matches via the 'from canon_facts f' inside). No archived turns / no approved facts is
           // a legitimate, common state; nothing here asserts on their contents either.
           if (sql.includes('from chat_chunks')) {
+            return { rows: [] };
+          }
+          // handleChatCompletions' sync-stall guard (handleChatCompletions.ts) calls
+          // loadChatSyncHealth on every RP turn now — the anchor + status-row reads behind
+          // computeChatSyncHealth. No closed sync point / no status row is the honest "healthy,
+          // nothing synced yet" answer, so the guard never trips on this suite's RP turns.
+          if (sql.includes('select last_message_id from chat_sync_points')) {
+            return { rows: [] };
+          }
+          if (sql.includes('select last_status') && sql.includes('from chat_memory_sync_status')) {
             return { rows: [] };
           }
           // GET /v1/chats/:id/location-image (endpoint.md §6.4 + §5.1.8):
@@ -3079,6 +3089,103 @@ server.close();
   }
 
   serverRp.close();
+}
+
+// --- Part 5b-stall: the rolling-memory sync-stall guard (handleChatCompletions.ts, plan item 6) —
+// an RP chat whose sync has fallen live+TWO sync windows behind must be refused a NEW turn with
+// 409 CHAT_SYNC_STALLED, BEFORE the user message is persisted and BEFORE the narrator runs. Only
+// the pure turn-boundary math (computeChatSyncHealth) had unit coverage before this; nothing drove
+// the guard through the actual HTTP route, so a wiring regression (ordering vs. appendMessages, a
+// wrong sessionKind check, a broken loadChatSyncHealth call) would have shipped silently. ---
+{
+  const capturedStall = [];
+  const capturingLlmStall = {
+    name: 'capturing-stall',
+    async complete(messages, toolDefs) {
+      capturedStall.push({ messages, toolDefs });
+      return { message: { role: 'assistant', content: 'reply' }, toolCalls: [] };
+    },
+  };
+  const poolStall = createFakePool();
+  const dbStall = createPostgresClient(poolStall);
+  const settingsStall = createFakeSettingsStore();
+  const chatsStall = createFakeChatSessionStore();
+  const apiKeysStall = createApiKeyStore('good-key-stall:77777777-7777-7777-7777-777777777777');
+  const userIdStall = '77777777-7777-7777-7777-777777777777';
+  const serverStall = startHttpServer({
+    llm: capturingLlmStall,
+    db: dbStall,
+    tools: createToolRegistry([echoTool]),
+    apiKeys: apiKeysStall,
+    accessIdentity: createFakeAccessIdentityResolver(),
+    chats: chatsStall,
+    adminApiKey: 'unused-in-this-part',
+    credentials: createFakeCredentialStore(),
+    settings: settingsStall,
+    llmConnections: createFakeLlmConnectionStore(),
+    imageConnections: createFakeImageConnectionStore(),
+    modelName: 'bigbrain',
+    port: 0,
+  });
+  await new Promise((resolve) => serverStall.once('listening', resolve));
+  const baseStall = `http://127.0.0.1:${serverStall.address().port}`;
+  const authStall = { authorization: 'Bearer good-key-stall' };
+
+  const stallChat = await chatsStall.createChat(userIdStall, {});
+  await chatsStall.updateChat(userIdStall, stallChat.chatId, { kind: 'rp' });
+
+  // live=1 + sync=1 pairs: due (warning) at >= 2 unsynced turns, blocked at >= 3 (live + TWO sync
+  // windows — the same "one full sync interval of grace" budget computeChatSyncHealth enforces
+  // everywhere else). No chat_sync_points/chat_memory_sync_status rows exist in this fresh pool
+  // (the stubs near createFakePool's chat_sync_points/chat_memory_sync_status handlers return
+  // empty rows unconditionally), so every persisted turn here counts as unsynced.
+  await settingsStall.set('chat_memory_live_window_pairs', '1');
+  await settingsStall.set('chat_memory_sync_every_pairs', '1');
+
+  // Seed 3 complete turns directly (bypassing the HTTP route — no narrator calls, no title-gen
+  // noise) so the chat is already AT the block threshold before the guarded turn is attempted.
+  await chatsStall.appendMessages(userIdStall, stallChat.chatId, [
+    { role: 'user', content: 'stall-u1' },
+    { role: 'assistant', content: 'stall-a1' },
+    { role: 'user', content: 'stall-u2' },
+    { role: 'assistant', content: 'stall-a2' },
+    { role: 'user', content: 'stall-u3' },
+    { role: 'assistant', content: 'stall-a3' },
+  ]);
+
+  const messagesBefore = (await chatsStall.getChat(userIdStall, stallChat.chatId)).messages.length;
+  const stallRes = await fetch(`${baseStall}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authStall, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'stall-u4 — a genuinely new turn' }], chat_id: stallChat.chatId }),
+  });
+  assert(stallRes.status === 409, 'a NEW turn on a chat past the block threshold is refused with 409');
+  const stallBody = await stallRes.json();
+  assert(stallBody.error === 'CHAT_SYNC_STALLED', 'the 409 body names the CHAT_SYNC_STALLED error code');
+  assert(typeof stallBody.sync === 'object' && stallBody.sync !== null, 'the 409 body carries the sync diagnostics object');
+  assert(capturedStall.length === 0, 'the blocked turn never reaches the narrator — zero llm.complete() calls');
+  const afterBlocked = await chatsStall.getChat(userIdStall, stallChat.chatId);
+  assert(afterBlocked.messages.length === messagesBefore, 'the blocked turn\'s user message is never persisted — message count is unchanged');
+
+  // --- Recovery: raising the live/sync window (the DB-backed settings the guard reads live, no
+  // restart) past the same 3 unsynced turns un-blocks the identical retry — same "no locked flag,
+  // everything derives from state" contract the anchor-based recovery has. ---
+  await settingsStall.set('chat_memory_live_window_pairs', '10');
+  await settingsStall.set('chat_memory_sync_every_pairs', '10');
+  const recoveredRes = await fetch(`${baseStall}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { ...authStall, 'content-type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'user', content: 'stall-u4 — a genuinely new turn' }], chat_id: stallChat.chatId }),
+  });
+  assert(recoveredRes.status === 200, 'once the window is widened past the same turn count, the identical retry succeeds — no restart needed');
+  assert(capturedStall.length === 1, 'the recovered turn reaches the narrator exactly once');
+  const afterRecovered = await chatsStall.getChat(userIdStall, stallChat.chatId);
+  assert(
+    afterRecovered.messages.length === messagesBefore + 2,
+    'the recovered turn persists both the user message and the assistant reply',
+  );
+
+  serverStall.close();
 }
 
 // --- Part 5c: the Prompt Inspector's "Main Prompt" is the exact text the last turn sent ----------

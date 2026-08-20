@@ -797,6 +797,20 @@ export interface ChatSyncInspection {
   }[];
 }
 
+/** Machine-readable health of a chat's rolling-memory sync (orchestrator/chatMemorySync.ts's
+ *  computeChatSyncHealth) — the RP chat screen's warning/blocked banner and composer-disable
+ *  read this. `blocking` is true exactly when the server is refusing new turns (409
+ *  CHAT_SYNC_STALLED); `turnsUntilBlock` counts remaining sends only while in warning. */
+export interface ChatSyncHealth {
+  state: 'healthy' | 'warning' | 'blocked';
+  blocking: boolean;
+  lastStatus: 'ok' | 'skipped' | 'error' | null;
+  lastStep: string | null;
+  lastError: string | null;
+  consecutiveErrors: number;
+  turnsUntilBlock: number | null;
+}
+
 export interface ChatSyncStatus {
   lastAttemptAt: string | null;
   lastStatus: 'ok' | 'skipped' | 'error' | null;
@@ -811,6 +825,9 @@ export interface ChatSyncStatus {
   canonLastProposedAt: string | null;
   unsyncedMessages: number;
   dueAfterMessages: number;
+  /** Machine-readable sync health — the warning/blocked signal the chat screen surfaces above the
+   *  composer. */
+  syncHealth: ChatSyncHealth;
   /** Every sync point this chat has produced, newest first — the "click a sync and play it
    *  back" list. Summary-only; the per-sync detail is fetched on demand (getChatSyncInspection). */
   syncs: ChatSyncSummary[];

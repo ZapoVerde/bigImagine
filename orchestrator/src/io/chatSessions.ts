@@ -108,6 +108,8 @@
  */
 
 import type { DbSession, PostgresClient } from './postgres.js';
+import { computeChatSyncHealth } from '../orchestrator/chatMemorySync.js';
+import type { ChatSyncHealth } from '../orchestrator/chatMemorySync.js';
 
 export interface ChatParams {
   system?: string;
@@ -302,6 +304,11 @@ export interface ChatSyncStatus {
   canonLastProposedAt: string | null;
   unsyncedMessages: number;
   dueAfterMessages: number;
+  /** Machine-readable health of this chat's sync (orchestrator/chatMemorySync.ts's
+   *  computeChatSyncHealth): healthy/warning/blocked from turn boundaries vs. the last closed sync
+   *  point's anchor, plus the last attempt's outcome. The RP chat screen's warning/blocked banner
+   *  and composer-disable read this. */
+  syncHealth: ChatSyncHealth;
   /** Every sync point this chat has produced, newest first — the panel's "click a sync and play
    *  it back" list. Summary-only; the per-sync detail (entries, canon facts, bridge prompt) is
    *  fetched on demand. */
@@ -352,11 +359,16 @@ export interface ChatSessionStore {
   getChat(userId: string, chatId: string): Promise<ChatDetail | undefined>;
   /** This chat's slice of the rolling sync loop's status record — same read surface as the admin
    *  Review Panel, but user-scoped and single-chat, so the RP chat's header menu can show it
-   *  without an admin key (bi_principles.md §11's read surface, per-chat). dueAfterMessages is the
-   *  liveWindow+syncEvery message threshold the loop's own due-check uses — computed by the caller
-   *  from DB-backed settings, since this store reads no settings. Undefined only if chatId doesn't
-   *  exist. */
-  getChatSyncStatus(userId: string, chatId: string, dueAfterMessages: number): Promise<ChatSyncStatus | undefined>;
+   *  without an admin key (bi_principles.md §11's read surface, per-chat). `liveWindowPairs`/
+   *  `syncEveryPairs` are the live/sync window settings — the caller resolves them from DB-backed
+   *  settings, since this store reads no settings; the threshold, dueAfterMessages, and syncHealth
+   *  all derive from them. Undefined only if chatId doesn't exist. */
+  getChatSyncStatus(
+    userId: string,
+    chatId: string,
+    liveWindowPairs: number,
+    syncEveryPairs: number,
+  ): Promise<ChatSyncStatus | undefined>;
   /** One sync point's full inspection record (0079) — the entries it created/changed, the
    *  canon-fact proposals it wrote, and the bridge prompt it sent. Fetched on demand when the
    *  Sync Status panel expands a sync row, so the 30s status poll never ships the heavy detail.
@@ -682,7 +694,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
       });
     },
 
-    async getChatSyncStatus(userId, chatId, dueAfterMessages) {
+    async getChatSyncStatus(userId, chatId, liveWindowPairs, syncEveryPairs) {
       return db.withUserScope(userId, async (session) => {
         const exists = await session.query<{ chat_id: string }>('select chat_id from chat_sessions where chat_id = $1', [chatId]);
         if (!exists[0]) return undefined;
@@ -775,6 +787,30 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           factCount: Number(sp.fact_count),
         }));
 
+        // The turn-boundary health (computeChatSyncHealth — the same pure function the RP turn
+        // guard uses via loadChatSyncHealth): unsynced TURNS past the last closed sync point's
+        // anchor vs. liveWindow+syncEvery pairs. Counted in turns, never raw messages, matching
+        // runOneChatSync's own slicing.
+        const [anchor] = await session.query<{ last_message_id: string }>(
+          `select last_message_id from chat_sync_points
+           where chat_id = $1 and closed_at is not null order by ordinal desc limit 1`,
+          [chatId],
+        );
+        const messageRows = await session.query<{ message_id: string; role: 'user' | 'assistant' }>(
+          'select message_id, role from chat_messages where chat_id = $1 order by created_at, message_id',
+          [chatId],
+        );
+        const syncHealth = computeChatSyncHealth({
+          messages: messageRows.map((m) => ({ messageId: m.message_id, role: m.role })),
+          anchorMessageId: anchor?.last_message_id ?? null,
+          lastStatus: status?.last_status ?? null,
+          lastStep: status?.last_step ?? null,
+          lastError: status?.last_error ?? null,
+          consecutiveErrors: status?.consecutive_errors ?? 0,
+          liveWindowPairs,
+          syncEveryPairs,
+        });
+
         return {
           lastAttemptAt: status?.last_attempt_at ?? null,
           lastStatus: status?.last_status ?? null,
@@ -788,7 +824,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           canonApprovedCount: Number(status?.canon_approved_count ?? 0),
           canonLastProposedAt: status?.canon_last_proposed_at ?? null,
           unsyncedMessages: Number(counts?.unsynced ?? 0),
-          dueAfterMessages,
+          dueAfterMessages: (liveWindowPairs + syncEveryPairs) * 2,
+          syncHealth,
           syncs,
         };
       });

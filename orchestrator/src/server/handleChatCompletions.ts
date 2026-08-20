@@ -36,6 +36,7 @@ import { generateChatTitle } from '../io/llm/generateChatTitle.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
 import { log } from '../io/logger.js';
 import { recordPromptTrace, type PromptTraceEntry } from '../io/promptTrace.js';
+import { loadChatSyncHealth, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { runTurn } from '../orchestrator/loop.js';
 import { runStreamingRpTurn, type RunStreamingRpTurnResult } from '../orchestrator/streamingTurn.js';
 import { abortTurn, isAbortError, registerTurnAbort, unregisterTurnAbort } from '../orchestrator/turnAbort.js';
@@ -53,6 +54,7 @@ import { appendAttachmentsToLatestUserMessage, attachImagesToLatestUserMessage }
 import { formatCurrentDateContext } from '../util/dateContext.js';
 import { createToolRegistry, filterToolRegistry } from '../orchestrator/toolRegistry.js';
 import { getHouseholdTimezone } from './adminServer.js';
+import { pairsSetting } from './handleChats.js';
 import { assembleSessionTurnContext } from './promptAssembly.js';
 import { toPreviewItem, type PromptPreviewItem } from './promptPreview.js';
 import { fireLocationImageGeneration } from './locationImages.js';
@@ -189,12 +191,16 @@ export async function handleChatCompletions(
   // The last user message the DB actually holds (role+content), read in the chat_id block below —
   // used by the isNewTurn decision further down as the identity side of its check (see there).
   let lastPersistedUserMessage: { content: string } | undefined;
+  // The persisted transcript, captured for the sync-stall guard below (its turn-boundary math
+  // must read what the DB holds, not the request body) — detail itself is block-scoped.
+  let detailMessages: { messageId: string; role: 'user' | 'assistant'; content: string }[] | undefined;
   if (body.chat_id) {
     const detail = await chats.getChat(userId, body.chat_id);
     if (!detail) {
       sendJson(res, 404, { error: 'unknown chat_id' });
       return;
     }
+    detailMessages = detail.messages;
     sessionParams = detail.session.params;
     sessionWasEmpty = detail.messages.length === 0;
     sessionTitle = detail.session.title;
@@ -308,6 +314,40 @@ export async function handleChatCompletions(
   const isNewTurn =
     messages.length > priorMessageCount ||
     (!!latestUserMessage && !!lastPersistedUserMessage && latestUserMessage.content !== lastPersistedUserMessage.content);
+
+  // Rolling-memory sync stall guard (chatMemorySync.ts's blocking semantics, RP lane only): a NEW
+  // turn in a chat whose sync has fallen liveWindow + TWO sync windows behind is refused with 409
+  // before the user message is persisted — the chat cannot advance until the loop catches up
+  // (recovery is automatic: no locked flag, the guard lifts the moment a sync pass commits or the
+  // failure's connection changes, e.g. a chat_memory_profile edit). Computed from persisted state
+  // only — detail.messages, the newest closed sync point's anchor, and chat_memory_sync_status —
+  // via loadChatSyncHealth, the same pure computation the /v1/chats/:id/sync-status endpoint
+  // returns. Reruns/swipes (isNewTurn false) and stateless Open WebUI traffic (no chat_id) are
+  // untouched; non-RP chats are untouched (their sync lag has no live-window arc to corrupt).
+  let syncBlockedHealth: { lastStep: string | null; lastError: string | null; consecutiveErrors: number } | null = null;
+  if (sessionKind === 'rp' && body.chat_id && isNewTurn) {
+    const [livePairsRaw, syncEveryPairsRaw] = await Promise.all([
+      deps.settings.get('chat_memory_live_window_pairs'),
+      deps.settings.get('chat_memory_sync_every_pairs'),
+    ]);
+    const livePairs = pairsSetting(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
+    const syncEveryPairs = pairsSetting(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
+    const health = await loadChatSyncHealth(deps, userId, body.chat_id, detailMessages!, livePairs, syncEveryPairs);
+    if (health.blocking) {
+      syncBlockedHealth = {
+        lastStep: health.lastStep,
+        lastError: health.lastError,
+        consecutiveErrors: health.consecutiveErrors,
+      };
+      sendJson(res, 409, {
+        error: 'CHAT_SYNC_STALLED',
+        message: 'Rolling memory sync has failed and the chat cannot advance until it catches up.',
+        sync: syncBlockedHealth,
+      });
+      return;
+    }
+  }
+
   let anchorMessageId: string | undefined = existingLatestUserMessageId;
   if (body.chat_id && latestUserMessage && isNewTurn) {
     const [inserted] = await chats.appendMessages(userId, body.chat_id, [{ role: 'user', content: latestUserMessage.content }]);

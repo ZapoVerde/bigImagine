@@ -37,6 +37,8 @@
 
 const NON_RETRYABLE_RESPONSE_SHAPES = [/malformed arguments/i, /returned no choices/i, /returned a \d+-dim embedding/i];
 
+export { NON_RETRYABLE_RESPONSE_SHAPES };
+
 export function isRetryableLlmError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
 

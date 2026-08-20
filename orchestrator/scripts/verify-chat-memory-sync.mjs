@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
-import { runChatMemorySyncTick, archiveChatMemory } from '../dist/orchestrator/chatMemorySync.js';
+import { runChatMemorySyncTick, archiveChatMemory, computeChatSyncHealth } from '../dist/orchestrator/chatMemorySync.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -78,12 +78,22 @@ function createFakePool() {
 
           // findDueChats — the "last sync point" anchor is closed-only now (eager-chunk-sync-plan:
           // an open, chunk-only point is never a consolidation boundary, so it must not suppress
-          // due-ness).
+          // due-ness). Also the permanent-failure suppression (migration 0127): a chat whose last
+          // attempt was a permanent failure under the CURRENT connection signature — params[1] —
+          // is excluded until the signature differs or the retry window (params[2], seconds)
+          // elapses, so a dead "No endpoints found for <model>" 404 doesn't re-fire every 30s tick.
           if (sql.includes('from chat_sessions cs')) {
-            const [threshold] = params;
+            const [threshold, signature, retrySeconds] = params;
             const due = [];
             for (const [chatId, sess] of chatSessions) {
               if (sess.user_id !== scopedUserId || sess.archived_at) continue;
+              const st = chatMemorySyncStatus.get(chatId);
+              if (st && st.last_status === 'error' && st.last_error_kind === 'permanent') {
+                if (st.failure_signature === signature) {
+                  const elapsed = new Date(now()).getTime() - new Date(st.last_attempt_at).getTime();
+                  if (elapsed < retrySeconds * 1000) continue;
+                }
+              }
               const chatSyncs = chatSyncPoints.filter((sp) => sp.chat_id === chatId && sp.closed_at);
               const last = chatSyncs.length ? chatSyncs.reduce((a, b) => (b.ordinal > a.ordinal ? b : a)) : undefined;
               const anchor = last ? chatMessages.find((m) => m.message_id === last.last_message_id) : undefined;
@@ -276,7 +286,7 @@ function createFakePool() {
           // archiveChatMemory/runOneChatSync branches above already use for overlapping query text.
           if (sql.includes('insert into chat_memory_sync_status')) {
             if (sql.includes("'error'")) {
-              const [chatId, userId, step, error] = params;
+              const [chatId, userId, step, error, kind, signature] = params;
               const prev = chatMemorySyncStatus.get(chatId);
               chatMemorySyncStatus.set(chatId, {
                 chat_id: chatId,
@@ -285,6 +295,8 @@ function createFakePool() {
                 last_status: 'error',
                 last_step: step,
                 last_error: error,
+                last_error_kind: kind,
+                failure_signature: signature,
                 last_success_at: prev?.last_success_at ?? null,
                 last_chunks_added: prev?.last_chunks_added ?? null,
                 last_entries_updated: prev?.last_entries_updated ?? null,
@@ -303,6 +315,8 @@ function createFakePool() {
                 last_status: 'skipped',
                 last_step: null,
                 last_error: null,
+                last_error_kind: null,
+                failure_signature: null,
               });
               return { rows: [] };
             }
@@ -314,6 +328,8 @@ function createFakePool() {
               last_status: 'ok',
               last_step: null,
               last_error: null,
+              last_error_kind: null,
+              failure_signature: null,
               last_success_at: now(),
               last_chunks_added: chunksAdded,
               last_entries_updated: entriesUpdated,
@@ -496,6 +512,16 @@ function installSyncFetchMock(backend) {
   globalThis.fetch = async (url, init) => {
     const u = String(url);
     if (knownBases.includes(u.replace('/chat/completions', ''))) {
+      // Permanent/transient-failure injection: when set, every sync call in this pass returns that
+      // HTTP status so the tick's error path (and the classifier stamping it) can be exercised.
+      if (backend.forceStatus) {
+        return {
+          ok: false,
+          status: backend.forceStatus,
+          text: async () => `{"error":{"message":"forced failure ${backend.forceStatus}"}}`,
+          json: async () => ({ error: { message: `forced failure ${backend.forceStatus}` } }),
+        };
+      }
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
@@ -547,8 +573,11 @@ function createFakeEmbeddings() {
 
 function createFakeSettingsStore(initial) {
   const map = new Map(Object.entries(initial));
+  const getCounts = new Map();
   return {
+    getCounts,
     async get(key) {
+      getCounts.set(key, (getCounts.get(key) ?? 0) + 1);
       return map.get(key);
     },
     async set(key, value) {
@@ -1253,6 +1282,135 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     'an unknown chat_memory_profile falls back to the ACTIVE connection (logged), never to the chat narrator profile',
   );
   assert(pool.chatMemorySyncStatus.get(UNKNOWN_MEM_CHAT_ID)?.last_status === 'ok', 'the fallback sync still completes');
+}
+
+// --- computeChatSyncHealth: the pure turn-boundary health derivation behind both the status
+// endpoint's syncHealth and handleChatCompletions's 409 CHAT_SYNC_STALLED guard. liveWindow 2 +
+// syncEvery 2 pairs here: due at >= 4 unsynced turns, blocked at >= 6 (live window + TWO sync
+// windows — the agreed one-full-sync-interval-of-grace budget). ---
+{
+  const turns = (n) => {
+    const messages = [];
+    for (let i = 1; i <= n; i++) {
+      messages.push({ messageId: `t${i}u`, role: 'user' });
+      messages.push({ messageId: `t${i}a`, role: 'assistant' });
+    }
+    return messages;
+  };
+  const base = {
+    lastStatus: 'error',
+    lastStep: 'summarize_embed',
+    lastError: 'OpenAI-compatible API error 404: no endpoints',
+    consecutiveErrors: 42,
+    liveWindowPairs: 2,
+    syncEveryPairs: 2,
+  };
+
+  const healthy = computeChatSyncHealth({ ...base, messages: turns(3), anchorMessageId: null });
+  assert(healthy.state === 'healthy' && healthy.blocking === false, '3 unsynced turns (below live+sync) is healthy');
+  assert(healthy.turnsUntilBlock === null, 'turnsUntilBlock is null outside warning');
+
+  const warning = computeChatSyncHealth({ ...base, messages: turns(4), anchorMessageId: null });
+  assert(warning.state === 'warning' && warning.blocking === false, '4 unsynced turns (live+sync) crosses into warning');
+  assert(warning.turnsUntilBlock === 2, 'warning reports the turns remaining before block (6 - 4 = 2)');
+
+  const warningEdge = computeChatSyncHealth({ ...base, messages: turns(5), anchorMessageId: null });
+  assert(warningEdge.turnsUntilBlock === 1, 'at 5 unsynced turns exactly one more send is allowed before blocking');
+
+  const blocked = computeChatSyncHealth({ ...base, messages: turns(6), anchorMessageId: null });
+  assert(blocked.state === 'blocked' && blocked.blocking === true, '6 unsynced turns (live + 2 sync windows) blocks');
+  assert(blocked.turnsUntilBlock === null, 'turnsUntilBlock is null once blocked');
+
+  const anchored = computeChatSyncHealth({ ...base, messages: turns(8), anchorMessageId: 't4a' });
+  assert(
+    anchored.state === 'warning' && anchored.turnsUntilBlock === 2,
+    'the anchor moves the boundary: turns after the last closed sync point count, not all turns',
+  );
+  assert(blocked.lastStatus === 'error' && blocked.lastError?.includes('404'), 'health carries the last attempt outcome for the banner');
+  assert(blocked.consecutiveErrors === 42, 'health carries consecutiveErrors for the banner');
+
+  const healthyBase = computeChatSyncHealth({ ...base, messages: turns(4), anchorMessageId: 't4a' });
+  assert(healthyBase.state === 'healthy', 'no turns past the anchor is healthy even when a sync point exists');
+}
+
+// --- Resolve-once-per-tick: N due chats in one poll cycle must share ONE resolveSyncSettings
+// (one settings read, one connection resolution) — previously each due chat re-resolved inside the
+// loop, so every chat-memory settings key was read N times per tick (and mid-tick edits could
+// split the roster across two different resolutions). ---
+{
+  const MULTI_A = randomUUID();
+  const MULTI_B = randomUUID();
+  pool.chatSessions.set(MULTI_A, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(MULTI_B, { user_id: USER, archived_at: null });
+  seedMessages(MULTI_A, 'MULTA', 12);
+  seedMessages(MULTI_B, 'MULTB', 12);
+
+  settings.getCounts.clear();
+  await runChatMemorySyncTick(deps);
+  const reads = settings.getCounts.get('chat_memory_chunk_summary_prompt') ?? 0;
+  assert(
+    reads === 1,
+    `resolveSyncSettings is resolved exactly once per tick no matter how many chats are due (${reads} reads — the per-chat re-resolution bug is fixed)`,
+  );
+  assert(pool.chatMemorySyncStatus.get(MULTI_A)?.last_status === 'ok' && pool.chatMemorySyncStatus.get(MULTI_B)?.last_status === 'ok', 'both multi-due chats still sync with the shared resolution');
+}
+
+// --- Permanent-failure suppression (migration 0127, bi_principles.md §11 follow-up): a 404 that
+// previously re-fired once per 30s poll tick forever (observed ×1500 in a row) is classified
+// permanent, stamped with the connection signature, and then EXCLUDED from the loop until the
+// signature changes or the ~30min retry window elapses. ---
+{
+  const ACTIVE_SIGNATURE = 'openai-compatible|sync-active-model|https://sync-active-fake.example';
+  const SUPPRESSED_CHAT = randomUUID();
+  pool.chatSessions.set(SUPPRESSED_CHAT, { user_id: USER, archived_at: null });
+  seedMessages(SUPPRESSED_CHAT, 'SUPP', 12);
+
+  backend.forceStatus = 404;
+  await runChatMemorySyncTick(deps);
+  backend.forceStatus = null;
+
+  const failed = pool.chatMemorySyncStatus.get(SUPPRESSED_CHAT);
+  assert(failed?.last_status === 'error', 'a permanent 404 failure records chat_memory_sync_status as error');
+  assert(failed?.last_error_kind === 'permanent', 'a 404 is classified permanent, not transient');
+  assert(failed?.failure_signature === ACTIVE_SIGNATURE, 'the error row is stamped with the connection signature the failure ran through');
+
+  const callsAfterFail = backend.calls.length;
+  const attemptAfterFail = failed.last_attempt_at;
+  await runChatMemorySyncTick(deps);
+
+  assert(pool.chatMemorySyncStatus.get(SUPPRESSED_CHAT).last_attempt_at === attemptAfterFail, 'the suppressed chat is NOT re-attempted on the next 30s tick (last_attempt_at frozen)');
+  assert(backend.calls.length === callsAfterFail, 'suppression issues zero LLM calls for the excluded chat');
+  assert(pool.chatChunks.filter((c) => c.chat_id === SUPPRESSED_CHAT).length === 0, 'suppression never runs (and never archives) the failing chat');
+
+  // A chat_memory_profile edit changes the signature → suppression lifts on the very next tick.
+  await settings.set('chat_memory_profile', 'memory-d');
+  await runChatMemorySyncTick(deps);
+  await settings.set('chat_memory_profile', undefined);
+  assert(pool.chatMemorySyncStatus.get(SUPPRESSED_CHAT)?.last_status === 'ok', 'changing chat_memory_profile lifts suppression — the next tick retries and succeeds');
+
+  // The success cleared the permanent-failure stamp, so this chat is ordinary again.
+  const recovered = pool.chatMemorySyncStatus.get(SUPPRESSED_CHAT);
+  assert(recovered.last_error_kind === null && recovered.failure_signature === null, 'a successful sync clears the failure classification and signature');
+}
+
+// --- A transient failure (429) is NOT suppressed — the next tick retries normally, because a
+// rate-limit/availability error can plausibly clear on its own. ---
+{
+  const TRANSIENT_CHAT = randomUUID();
+  pool.chatSessions.set(TRANSIENT_CHAT, { user_id: USER, archived_at: null });
+  seedMessages(TRANSIENT_CHAT, 'TRANS', 12);
+
+  backend.forceStatus = 429;
+  await runChatMemorySyncTick(deps);
+  backend.forceStatus = null;
+
+  const failed = pool.chatMemorySyncStatus.get(TRANSIENT_CHAT);
+  assert(failed?.last_status === 'error' && failed?.last_error_kind === 'transient', 'a 429 is classified transient, never permanent');
+
+  const callsBeforeRetry = backend.calls.length;
+  await runChatMemorySyncTick(deps);
+  assert(backend.calls.length > callsBeforeRetry, 'a transient failure is retried on the very next tick (not suppressed)');
+  assert(pool.chatMemorySyncStatus.get(TRANSIENT_CHAT)?.last_status === 'ok', 'the retry after the transient failure succeeds');
 }
 
 if (process.exitCode) {

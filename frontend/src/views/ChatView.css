@@ -1356,3 +1356,65 @@
     height: 2.5rem;
   }
 }
+
+/* --- Rolling-memory sync warning/block banner (chatMemorySync.ts's computeChatSyncHealth) ---
+   Sits directly above the composer in the bottom overlay, so a sync failure surfaces at the exact
+   moment the user is about to send. Same visual family as .chat-delete-bar — a full-width strip
+   on the panel surface, danger/warning-tinted. */
+.chat-sync-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 1rem;
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.chat-sync-banner-warning {
+  background: var(--color-bg-subtle);
+  color: var(--color-secondary);
+}
+
+.chat-sync-banner-blocked {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.chat-sync-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-sync-banner-detail {
+  opacity: 0.75;
+  font-size: 0.9em;
+  word-break: break-word;
+}
+
+.chat-sync-banner-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+.chat-sync-banner-link:hover {
+  opacity: 1;
+}
+
+/* The standalone Sync status panel opened from the banner — a scrim so the floating panel reads
+   as a modal-ish readout over the conversation (the panel itself gets the desktop right-side
+   treatment from ChatSyncStatusPanel.css's own rules). */
+.chat-sync-status-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex;
+  justify-content: flex-end;
+}

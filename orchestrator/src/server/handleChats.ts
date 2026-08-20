@@ -305,8 +305,9 @@ export async function handleChatRoutes(
   // getChatSyncStatus) — the RP chat header menu's "Sync status" panel. User-scoped like every
   // other chat route (a user's own chat's sync history is no more sensitive than the chat
   // itself), unlike the cross-user Review Panel endpoint /v1/admin/chat-memory-sync-status.
-  // dueAfterMessages is computed from the same DB-backed settings the loop reads live every tick,
-  // falling back to the loop's own defaults when unset.
+  // The live/sync window pairs come from the same DB-backed settings the loop reads live every
+  // tick, falling back to the loop's own defaults when unset; getChatSyncStatus derives the
+  // dueAfterMessages threshold and syncHealth from them.
   if (segments[1] === 'sync-status' && segments.length === 2 && req.method === 'GET') {
     const [livePairsRaw, syncEveryPairsRaw] = await Promise.all([
       deps.settings.get('chat_memory_live_window_pairs'),
@@ -314,7 +315,7 @@ export async function handleChatRoutes(
     ]);
     const livePairs = pairsSetting(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
     const syncEveryPairs = pairsSetting(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
-    const sync = await deps.chats.getChatSyncStatus(userId, chatId, (livePairs + syncEveryPairs) * 2);
+    const sync = await deps.chats.getChatSyncStatus(userId, chatId, livePairs, syncEveryPairs);
     if (!sync) {
       sendJson(res, 404, { error: 'not found' });
       return;

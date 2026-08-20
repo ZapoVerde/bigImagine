@@ -242,6 +242,17 @@ function createFakePool() {
               .map((sp) => ({ sync_id: sp.sync_id, ordinal: sp.ordinal, last_message_id: sp.last_message_id, closed_at: sp.closed_at ?? null }));
             return { rows };
           }
+          // getChatSyncStatus's health anchor read (chatMemorySync.ts's computeChatSyncHealth):
+          // the newest CLOSED sync point's last_message_id. Distinct start distinguishes it from
+          // the generic empty-rows chat_sync_points stub below.
+          if (sql.startsWith('select last_message_id from chat_sync_points')) {
+            const rows = syncPoints
+              .filter((sp) => sp.chat_id === params[0] && sp.closed_at)
+              .sort((a, b) => b.ordinal - a.ordinal)
+              .slice(0, 1)
+              .map((sp) => ({ last_message_id: sp.last_message_id }));
+            return { rows };
+          }
           if (sql.includes('from chat_sync_points where chat_id')) {
             // The unsynced-count query's own embedded max(ordinal) subquery — empty-rows stub,
             // as before (no sync points exist in this pool's status tests).
@@ -1323,7 +1334,7 @@ pool.syncStatus.set(syncChat.chatId, {
 });
 pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_at: '2026-08-07T11:00:00.000Z' });
 {
-  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 16, 0);
   assert(sync !== undefined, 'getChatSyncStatus finds an existing chat');
   assert(sync.lastStatus === 'ok', 'an ok status row reads back as ok');
   assert(sync.lastChunksAdded === 2 && sync.lastEntriesUpdated === 1, 'last run chunk/entry counts round-trip');
@@ -1331,14 +1342,17 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
   assert(sync.canonProposedCount === 3 && sync.canonApprovedCount === 2, 'canon proposed/approved counts round-trip');
   assert(sync.canonLastProposedAt === '2026-08-07T11:00:00.000Z', 'last canon proposal timestamp round-trips');
   assert(sync.unsyncedMessages === 2, 'unsynced counts the chat\'s messages past its last sync point');
-  assert(sync.dueAfterMessages === 32, 'the caller-supplied due threshold is echoed through');
+  assert(sync.dueAfterMessages === 32, 'the due threshold derives from the supplied live+sync pairs ((16 + 0) × 2)');
+  assert(sync.syncHealth?.state === 'healthy', 'well under the 16-pair threshold reads syncHealth as healthy');
+  assert(sync.syncHealth?.blocking === false, 'a healthy chat never blocks');
+  assert(sync.syncHealth?.lastStatus === 'ok' && sync.syncHealth?.consecutiveErrors === 0, 'syncHealth carries the same last-attempt outcome as the flat fields');
 }
 {
-  const sync = await store.getChatSyncStatus(USER_B, syncChat.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_B, syncChat.chatId, 16, 0);
   assert(sync === undefined, "another user's getChatSyncStatus can't see the chat (RLS scoping)");
 }
 {
-  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 16, 0);
   assert(sync !== undefined, 'a chat that never synced still gets a status read');
   assert(sync.lastStatus === null, 'a never-synced chat has a null last status, not a fabricated one');
   assert(sync.lastAttemptAt === null && sync.lastSuccessAt === null, 'a never-synced chat has no attempt/success timestamps');
@@ -1360,14 +1374,22 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
     last_entries_updated: null,
     consecutive_errors: 3,
   });
-  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_A, defaultTitled.chatId, 16, 0);
   assert(sync.lastStatus === 'error' && sync.lastStep === 'summarize_embed', 'an error row names the exact step that failed');
   assert(sync.lastError === 'embeddings provider unreachable', 'an error row carries the underlying error message');
   assert(sync.consecutiveErrors === 3, 'consecutive failures round-trip');
   assert(sync.lastSuccessAt === '2026-08-07T12:00:00.000Z', 'the last success timestamp survives an error status');
+  assert(
+    sync.syncHealth?.state === 'healthy',
+    'syncHealth is turn-count-derived, not last_status-derived — an error row on a chat far under the pair threshold still reads healthy',
+  );
+  assert(
+    sync.syncHealth?.lastStep === 'summarize_embed' && sync.syncHealth?.lastError === 'embeddings provider unreachable',
+    'syncHealth still carries the failed step/error through for the banner, even while healthy',
+  );
 }
 {
-  const sync = await store.getChatSyncStatus(USER_A, 'nonexistent-chat', 32);
+  const sync = await store.getChatSyncStatus(USER_A, 'nonexistent-chat', 16, 0);
   assert(sync === undefined, 'getChatSyncStatus on a nonexistent chat returns undefined');
 }
 
@@ -1404,7 +1426,7 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
     proposed_at: '2026-08-07T13:01:30.000Z',
   });
 
-  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_A, syncChat.chatId, 16, 0);
   assert(Array.isArray(sync.syncs) && sync.syncs.length === 1, 'getChatSyncStatus returns the chat\'s sync-point summaries, newest first');
   const summary = sync.syncs[0];
   assert(
@@ -1461,13 +1483,62 @@ pool.canonCounts.set(syncChat.chatId, { proposed: 3, approved: 2, last_proposed_
     { sync_id: randomUUID(), chat_id: openChat.chatId, user_id: USER_A, ordinal: 1, last_message_id: m4.messageId, created_at: '2026-08-13T00:01:00.000Z', closed_at: null },
   );
 
-  const sync = await store.getChatSyncStatus(USER_A, openChat.chatId, 32);
+  const sync = await store.getChatSyncStatus(USER_A, openChat.chatId, 16, 0);
   assert(
     sync.unsyncedMessages === 3,
     'unsyncedMessages anchors on the last CLOSED sync point only — the 3 messages after it, not 0 (which reading the open point as the anchor would give)',
   );
   assert(sync.syncs.length === 1, "the panel's syncs list includes the closed point only");
   assert(sync.syncs[0].ordinal === 0, 'the one listed sync is the closed point, not the open one');
+}
+
+// --- getChatSyncStatus's syncHealth field, exercised through the real DB-wired path (its own
+// anchor + chat_messages queries in chatSessions.ts, not the pure computeChatSyncHealth unit tests
+// in verify-chat-memory-sync.mjs) — proves the plumbing (closed-only anchor lookup, message
+// role/order, and the caller's liveWindowPairs/syncEveryPairs) lines up with the pure function
+// rather than just compiling. liveWindowPairs 1 + syncEveryPairs 1: due (warning) at >= 2 unsynced
+// turns, blocked at >= 3 (live + TWO sync windows). ---
+{
+  const healthChat = await store.createChat(USER_A, { title: 'Sync health chat' });
+  await store.appendMessages(USER_A, healthChat.chatId, [
+    { role: 'user', content: 'h-u1' },
+    { role: 'assistant', content: 'h-a1' },
+    { role: 'user', content: 'h-u2' },
+    { role: 'assistant', content: 'h-a2' },
+  ]);
+
+  const warning = await store.getChatSyncStatus(USER_A, healthChat.chatId, 1, 1);
+  assert(warning.syncHealth.state === 'warning', '2 unsynced turns at live=1/sync=1 (due at 2) crosses into warning');
+  assert(warning.syncHealth.blocking === false, 'a warning chat does not block yet');
+  assert(warning.syncHealth.turnsUntilBlock === 1, 'one more turn is allowed before block (3 - 2 = 1)');
+
+  await store.appendMessages(USER_A, healthChat.chatId, [
+    { role: 'user', content: 'h-u3' },
+    { role: 'assistant', content: 'h-a3' },
+  ]);
+  const blocked = await store.getChatSyncStatus(USER_A, healthChat.chatId, 1, 1);
+  assert(blocked.syncHealth.state === 'blocked', '3 unsynced turns (live + 2×sync) blocks');
+  assert(blocked.syncHealth.blocking === true, 'blocked reports blocking:true — the field the RP turn guard reads');
+  assert(blocked.syncHealth.turnsUntilBlock === null, 'turnsUntilBlock is null once blocked');
+
+  // A closed sync point anchored at the second turn's end moves the boundary: only the turn after
+  // it counts as unsynced, dropping the chat back to healthy despite the same total message count.
+  const healthMessages = await store.getChat(USER_A, healthChat.chatId);
+  const secondTurnEnd = healthMessages.messages[3]; // h-a2
+  pool.syncPoints.push({
+    sync_id: randomUUID(),
+    chat_id: healthChat.chatId,
+    user_id: USER_A,
+    ordinal: 0,
+    last_message_id: secondTurnEnd.messageId,
+    created_at: '2026-08-20T00:00:00.000Z',
+    closed_at: '2026-08-20T00:00:00.000Z',
+  });
+  const anchored = await store.getChatSyncStatus(USER_A, healthChat.chatId, 1, 1);
+  assert(
+    anchored.syncHealth.state === 'healthy',
+    'a closed sync point anchored at the last synced turn drops syncHealth back to healthy — only turns after the anchor count',
+  );
 }
 
 if (process.exitCode) {
