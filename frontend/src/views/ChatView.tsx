@@ -1797,6 +1797,17 @@ export default function ChatView({
     }
   }
 
+  async function truncateFrom(messageId: string) {
+    if (!activeChat) return;
+    if (!window.confirm('Delete this message and everything after it?')) return;
+    try {
+      await truncateMessagesFrom(activeChat.chatId, messageId, apiKey);
+      await refreshActiveMessages(activeChat.chatId);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'failed to delete history');
+    }
+  }
+
   // --- Selection-mode bulk delete (⋯ menu → "Delete messages") ---
   // Ticking a message selects everything below it too, so the selection is always a trailing
   // suffix of the conversation; un-ticking works symmetrically (clears that message and all
@@ -2002,6 +2013,8 @@ export default function ChatView({
   submitEditRef.current = submitEdit;
   const removeMessageRef = useRef(removeMessage);
   removeMessageRef.current = removeMessage;
+  const truncateFromRef = useRef(truncateFrom);
+  truncateFromRef.current = truncateFrom;
   const toggleSelectRef = useRef(toggleSelect);
   toggleSelectRef.current = toggleSelect;
   const forkFromRef = useRef(forkFrom);
@@ -2014,6 +2027,7 @@ export default function ChatView({
   const stableCancelEdit = useCallback(() => cancelEditRef.current(), []);
   const stableSubmitEdit = useCallback((inPlace: boolean) => submitEditRef.current(inPlace), []);
   const stableRemoveMessage = useCallback((messageId: string) => removeMessageRef.current(messageId), []);
+  const stableTruncateFrom = useCallback((messageId: string) => truncateFromRef.current(messageId), []);
   const stableToggleSelect = useCallback((index: number) => toggleSelectRef.current(index), []);
   const stableForkFrom = useCallback((messageId: string) => forkFromRef.current(messageId), []);
   const stableToggleMessageActions = useCallback((messageId: string | undefined) => toggleMessageActionsRef.current(messageId), []);
@@ -2029,6 +2043,11 @@ export default function ChatView({
     });
     return { lastAssistantIndex: lastAssistant, lastUserIndex: lastUser };
   }, [messages]);
+
+  const settledBoundaryIndex = useMemo(
+    () => (syncBoundary ? messages.findIndex((m) => m.messageId === syncBoundary.lastMessageId) : -1),
+    [syncBoundary, messages],
+  );
 
   // The rollout display (docs/plans/rp-sync-boundary-rollout-plan.md): split the full message
   // array into the consumed (rolled-out) region, the revealed archive pages the reader has scrolled
@@ -2110,6 +2129,7 @@ export default function ChatView({
     // orphan the exchange that followed).
     const isLastUserMsg = m.role === 'user' && i === lastUserIndex;
     const isOpeningGreeting = i === 0 && m.role === 'assistant';
+    const settled = settledBoundaryIndex >= 0 && i <= settledBoundaryIndex;
     const isLiveReasoningTarget =
       liveReasoning !== null &&
       (m.messageId ? m.messageId === liveReasoningTargetId : i === messages.length - 1);
@@ -2139,7 +2159,9 @@ export default function ChatView({
         onSwipe={stableSwipe}
         onStartEdit={stableStartEdit}
         onForkFrom={stableForkFrom}
-        onRemoveMessage={stableRemoveMessage}
+         onRemoveMessage={stableRemoveMessage}
+         onTruncateFrom={stableTruncateFrom}
+         settled={settled}
         shownReasoning={shownReasoning}
         reasoningLiveOpen={reasoningLiveOpen}
       />

@@ -62,6 +62,17 @@ import { fireCharacterVisualState } from './characterVisualState.js';
 import { regenerateSwipe } from './turnExecution.js';
 import type { CleanupLiveEvent } from '../orchestrator/liveCleanup.js';
 import type { HttpServerDeps } from './httpServer.js';
+import { isMessageSettled } from '../orchestrator/chatHistoryBoundary.js';
+
+async function rejectSettledMessageMutation(deps: HttpServerDeps, userId: string, chatId: string, messageId: string, res: ServerResponse): Promise<boolean> {
+  const settled = await deps.db.withUserScope(userId, (session) => isMessageSettled(session, chatId, messageId));
+  if (!settled) return false;
+  sendJson(res, 409, {
+    error: 'CHAT_HISTORY_SETTLED',
+    message: 'This message has already been synchronized. Fork from this point or truncate the conversation to change earlier history.',
+  });
+  return true;
+}
 
 /** The decoupled post-regeneration trigger shared by both finish-event sites (rp-cast-
  *  infrastructure-plan.md A3): fires the location-image generation pass for the scraped
@@ -409,6 +420,7 @@ export async function handleChatRoutes(
     const messageId = decodeURIComponent(segments[2]!);
 
     if (segments.length === 3 && req.method === 'DELETE') {
+      if (await rejectSettledMessageMutation(deps, userId, chatId, messageId, res)) return;
       const deleted = await deps.chats.deleteMessage(userId, chatId, messageId);
       sendJson(res, deleted ? 200 : 404, deleted ? { deleted: true } : { error: 'not found' });
       return;
@@ -430,6 +442,7 @@ export async function handleChatRoutes(
         sendJson(res, 400, { error: 'expected { content: non-empty string }' });
         return;
       }
+      if (await rejectSettledMessageMutation(deps, userId, chatId, messageId, res)) return;
       const detail = await deps.chats.getChat(userId, chatId);
       if (!detail) {
         sendJson(res, 404, { error: 'not found' });
@@ -477,6 +490,7 @@ export async function handleChatRoutes(
         sendJson(res, 404, { error: "not found — messageId must be this chat's current last assistant reply" });
         return;
       }
+      if (await rejectSettledMessageMutation(deps, userId, chatId, messageId, res)) return;
 
       const cycled = await deps.chats.cycleSwipe(userId, chatId, messageId, direction);
       if (cycled.status === 'not_found') {

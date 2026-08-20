@@ -106,6 +106,7 @@
 import type { DbSession, PostgresClient } from './postgres.js';
 import { computeChatSyncHealth } from '../orchestrator/chatMemorySync.js';
 import type { ChatSyncHealth } from '../orchestrator/chatMemorySync.js';
+import { getClosedSyncPoints } from '../orchestrator/chatHistoryBoundary.js';
 
 export interface ChatParams {
   system?: string;
@@ -629,28 +630,17 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
         // or before it is consumed.
         let syncBoundary: ChatDetail['syncBoundary'];
         if (sessionRow.kind === 'rp') {
-          const boundaryRows = await session.query<{
-            sync_id: string;
-            last_message_id: string;
-            ordinal: number;
-            created_at: string;
-          }>(
-            `select sync_id, last_message_id, ordinal, created_at
-             from chat_sync_points
-             where chat_id = $1 and closed_at is not null
-             order by ordinal desc`,
-            [chatId],
-          );
-          if (boundaryRows.length > 0) {
-            syncBoundary = {
-              lastMessageId: boundaryRows[0].last_message_id,
-              pages: boundaryRows.map((sp) => ({
-                syncId: sp.sync_id,
-                lastMessageId: sp.last_message_id,
-                ordinal: sp.ordinal,
-                createdAt: sp.created_at,
-              })),
-            };
+           const boundaryRows = await getClosedSyncPoints(session, chatId);
+           if (boundaryRows.length > 0) {
+             syncBoundary = {
+               lastMessageId: boundaryRows[0].lastMessageId,
+               pages: boundaryRows.map((sp) => ({
+                 syncId: sp.syncId,
+                 lastMessageId: sp.lastMessageId,
+                 ordinal: sp.ordinal,
+                 createdAt: sp.createdAt,
+               })),
+             };
           }
         }
         return {
@@ -955,6 +945,28 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
     async truncateMessagesFrom(userId, chatId, messageId) {
       return db.withUserScope(userId, async (session) => {
+        await session.query('select pg_advisory_xact_lock(hashtext($1))', [chatId]);
+        const affected = await session.query<{ sync_id: string }>(
+          `select point.sync_id
+           from chat_sync_points point
+           join chat_messages anchor on anchor.message_id = point.last_message_id
+           where point.chat_id = $1
+             and (anchor.created_at, anchor.message_id) >= (
+               select created_at, message_id from chat_messages where message_id = $2 and chat_id = $1
+             )`,
+          [chatId, messageId],
+        );
+        if (affected.length > 0) {
+          await session.query('delete from chat_sync_points where sync_id = any($1) and chat_id = $2', [affected.map((row) => row.sync_id), chatId]);
+          await session.query(
+            `update chat_memory_sync_status
+             set last_status = null, last_step = null, last_error = null, last_error_kind = null,
+                 failure_signature = null, consecutive_errors = 0, last_chunks_added = null,
+                 last_entries_updated = null
+             where chat_id = $1`,
+            [chatId],
+          );
+        }
         // Row-value comparison against the target's own (created_at, message_id) — the exact same
         // tiebreak getChat's `order by created_at, message_id` uses, so "everything from here on"
         // means precisely what the UI displayed as "from here on".

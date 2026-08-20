@@ -58,6 +58,7 @@ function createFakePool() {
       return {
         async query(sql, params = []) {
           if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK') return { rows: [] };
+          if (sql.includes('pg_advisory_xact_lock')) return { rows: [] };
           if (sql.includes('set_config')) {
             scopedUserId = params[0];
             return { rows: [] };
@@ -250,6 +251,45 @@ function createFakePool() {
               .slice(0, 1)
               .map((sp) => ({ last_message_id: sp.last_message_id }));
             return { rows };
+          }
+          if (sql.startsWith('select point.sync_id')) {
+            const [chatId, messageId] = params;
+            const target = messages.find((m) => m.chat_id === chatId && m.message_id === messageId && m.user_id === scopedUserId);
+            if (!target) return { rows: [] };
+            return {
+              rows: syncPoints
+                .filter((sp) => sp.chat_id === chatId)
+                .filter((sp) => {
+                  const anchor = messages.find((m) => m.message_id === sp.last_message_id);
+                  return anchor && anchor.created_at >= target.created_at;
+                })
+                .map((sp) => ({ sync_id: sp.sync_id })),
+            };
+          }
+          if (sql.startsWith('delete from chat_sync_points')) {
+            const [ids, chatId] = params;
+            for (const id of ids) {
+              const idx = syncPoints.findIndex((sp) => sp.sync_id === id && sp.chat_id === chatId);
+              if (idx >= 0) syncPoints.splice(idx, 1);
+            }
+            return { rows: [] };
+          }
+          if (sql.startsWith('update chat_memory_sync_status')) {
+            const [chatId] = params;
+            const row = syncStatus.get(chatId);
+            // Absent row is a no-op, same as the real UPDATE matching zero rows — a chat that
+            // never synced has nothing to clear.
+            if (row) {
+              row.last_status = null;
+              row.last_step = null;
+              row.last_error = null;
+              row.last_error_kind = null;
+              row.failure_signature = null;
+              row.consecutive_errors = 0;
+              row.last_chunks_added = null;
+              row.last_entries_updated = null;
+            }
+            return { rows: [] };
           }
           if (sql.includes('from chat_sync_points where chat_id')) {
             // The unsynced-count query's own embedded max(ordinal) subquery — empty-rows stub,
@@ -894,6 +934,129 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(
     afterTruncate.messages.length === 1 && afterTruncate.messages[0].messageId === u1.messageId,
     'truncating from U2 removes U2 and everything chronologically after it (A2), leaving only U1',
+  );
+}
+
+// --- truncateMessagesFrom's settled-history rollback (settled-history-mutation-guard.md §8-13):
+// a destructive truncate must delete exactly the sync-point suffix the truncation point falls
+// into (open or closed), leave the earlier prefix untouched, and reset chat_memory_sync_status —
+// but only when a sync point was actually affected. ---
+{
+  const chat = await store.createChat(USER_A, { title: 'Truncate rollback scratch' });
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+  ]);
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ]);
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U3' },
+    { role: 'assistant', content: 'A3' },
+  ]);
+  const detail = await store.getChat(USER_A, chat.chatId);
+  const [, a1, , a2, , a3] = detail.messages;
+
+  pool.syncStatus.set(chat.chatId, {
+    user_id: USER_A,
+    last_attempt_at: '2026-08-19T00:00:00.000Z',
+    last_status: 'ok',
+    last_step: 'summarize_embed',
+    last_error: null,
+    last_error_kind: null,
+    failure_signature: null,
+    last_success_at: '2026-08-19T00:00:00.000Z',
+    last_chunks_added: 2,
+    last_entries_updated: 1,
+    consecutive_errors: 0,
+  });
+
+  // sync0 closed at A1 (earliest), sync1 closed at A2, sync2 OPEN (eager-only) at A3.
+  const sync0 = { sync_id: randomUUID(), chat_id: chat.chatId, user_id: USER_A, ordinal: 1, last_message_id: a1.messageId, created_at: '2026-08-18T00:00:00.000Z', bridge_prompt: null, closed_at: '2026-08-18T00:00:00.000Z' };
+  const sync1 = { sync_id: randomUUID(), chat_id: chat.chatId, user_id: USER_A, ordinal: 2, last_message_id: a2.messageId, created_at: '2026-08-18T01:00:00.000Z', bridge_prompt: null, closed_at: '2026-08-18T01:00:00.000Z' };
+  const sync2 = { sync_id: randomUUID(), chat_id: chat.chatId, user_id: USER_A, ordinal: 3, last_message_id: a3.messageId, created_at: '2026-08-18T02:00:00.000Z', bridge_prompt: null, closed_at: null };
+  pool.syncPoints.push(sync0, sync1, sync2);
+
+  // Truncate at U3 — chronologically after sync1's anchor (A2) and at/before sync2's open anchor
+  // (A3). Only the affected suffix (the open sync2) should go; sync0 and sync1 must survive.
+  const u3 = detail.messages[4];
+  const truncatedLiveTail = await store.truncateMessagesFrom(USER_A, chat.chatId, u3.messageId);
+  assert(truncatedLiveTail === true, 'truncate at U3 succeeds');
+  const remainingAfterOpen = pool.syncPoints.filter((sp) => sp.chat_id === chat.chatId).map((sp) => sp.ordinal).sort();
+  assert(
+    remainingAfterOpen.length === 2 && remainingAfterOpen[0] === 1 && remainingAfterOpen[1] === 2,
+    'truncating up to an open eager sync point removes only that point, leaving the closed prefix intact',
+  );
+  const statusAfterOpenTruncate = pool.syncStatus.get(chat.chatId);
+  assert(
+    statusAfterOpenTruncate.last_status === null && statusAfterOpenTruncate.consecutive_errors === 0 && statusAfterOpenTruncate.last_chunks_added === null,
+    'a truncate that removes a sync point clears the stale chat_memory_sync_status fields',
+  );
+
+  // Now truncate exactly AT sync1's own anchor (A2): the plan's "M == B" rule — the sync whose
+  // anchor IS the truncation point must die too, since its anchor message is being destroyed.
+  // sync0 (anchor A1, strictly before) must survive.
+  const truncatedAtAnchor = await store.truncateMessagesFrom(USER_A, chat.chatId, a2.messageId);
+  assert(truncatedAtAnchor === true, 'truncate exactly at a closed anchor succeeds');
+  const remainingAfterAnchor = pool.syncPoints.filter((sp) => sp.chat_id === chat.chatId).map((sp) => sp.ordinal);
+  assert(
+    remainingAfterAnchor.length === 1 && remainingAfterAnchor[0] === 1,
+    'truncating exactly at a sync point\'s own anchor deletes that sync point too (M == B), leaving only the strictly-earlier prefix',
+  );
+}
+
+// --- truncateMessagesFrom purely inside the live tail must not touch sync-point or status state
+// at all (settled-history-mutation-guard.md §15's "the main payoff" carried through to truncate:
+// no sync points affected means the reset branch never runs). ---
+{
+  const chat = await store.createChat(USER_A, { title: 'Live-tail truncate scratch' });
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U1' },
+    { role: 'assistant', content: 'A1' },
+  ]);
+  await store.appendMessages(USER_A, chat.chatId, [
+    { role: 'user', content: 'U2' },
+    { role: 'assistant', content: 'A2' },
+  ]);
+  const detail = await store.getChat(USER_A, chat.chatId);
+  const a1 = detail.messages[1];
+
+  pool.syncStatus.set(chat.chatId, {
+    user_id: USER_A,
+    last_attempt_at: '2026-08-19T00:00:00.000Z',
+    last_status: 'ok',
+    last_step: 'summarize_embed',
+    last_error: null,
+    last_error_kind: null,
+    failure_signature: null,
+    last_success_at: '2026-08-19T00:00:00.000Z',
+    last_chunks_added: 1,
+    last_entries_updated: 1,
+    consecutive_errors: 0,
+  });
+  pool.syncPoints.push({
+    sync_id: randomUUID(),
+    chat_id: chat.chatId,
+    user_id: USER_A,
+    ordinal: 1,
+    last_message_id: a1.messageId,
+    created_at: '2026-08-18T00:00:00.000Z',
+    bridge_prompt: null,
+    closed_at: '2026-08-18T00:00:00.000Z',
+  });
+
+  const u2 = detail.messages[2];
+  const truncated = await store.truncateMessagesFrom(USER_A, chat.chatId, u2.messageId);
+  assert(truncated === true, 'truncating the live tail succeeds');
+  assert(
+    pool.syncPoints.filter((sp) => sp.chat_id === chat.chatId).length === 1,
+    'a truncate that never reaches a sync point leaves it untouched',
+  );
+  const status = pool.syncStatus.get(chat.chatId);
+  assert(
+    status.last_status === 'ok' && status.consecutive_errors === 0 && status.last_chunks_added === 1,
+    'a live-tail-only truncate never resets chat_memory_sync_status — nothing synced was disturbed',
   );
 }
 

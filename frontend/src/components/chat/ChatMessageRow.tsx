@@ -66,6 +66,8 @@ interface ChatMessageRowProps {
   onStartEdit: (messageId: string, content: string) => void;
   onForkFrom: (messageId: string) => void;
   onRemoveMessage: (messageId: string) => void;
+  onTruncateFrom: (messageId: string) => void;
+  settled: boolean;
   /** Precomputed by ChatView: the live streaming buffer when this row is the in-flight turn's
    *  target, else this message's own persisted reasoning (or undefined — no block at all). */
   shownReasoning: string | undefined;
@@ -101,6 +103,8 @@ function ChatMessageRow({
   onStartEdit,
   onForkFrom,
   onRemoveMessage,
+  onTruncateFrom,
+  settled,
   shownReasoning,
   reasoningLiveOpen,
 }: ChatMessageRowProps) {
@@ -194,7 +198,7 @@ function ChatMessageRow({
           {m.messageId && !selectionMode &&
             (isLastAssistant && m.role === 'assistant' ? (
               <div className="last-chat-actions" onClick={(e) => e.stopPropagation()}>
-                {hasPrevSwipe && (
+                {!settled && hasPrevSwipe && (
                   <button
                     type="button"
                     className="last-chat-arrow"
@@ -205,7 +209,7 @@ function ChatMessageRow({
                     ‹
                   </button>
                 )}
-                <button
+                {!settled && <button
                   type="button"
                   className="last-chat-icon"
                   title="Edit this reply — rewrite the text in place, the original stays one ‹ away"
@@ -213,8 +217,8 @@ function ChatMessageRow({
                   onClick={() => onStartEdit(m.messageId!, m.content)}
                 >
                   ✏️
-                </button>
-                {showRerun && (
+                </button>}
+                {!settled && showRerun && (
                   <button
                     type="button"
                     className="last-chat-icon"
@@ -233,15 +237,17 @@ function ChatMessageRow({
                 >
                   <GitBranchIcon />
                 </button>
-                <button type="button" className="last-chat-icon" title="Delete" onClick={() => onRemoveMessage(m.messageId!)}>
-                  🗑
-                </button>
+                {!settled && (
+                  <button type="button" className="last-chat-icon" title="Delete" onClick={() => onRemoveMessage(m.messageId!)}>
+                    🗑
+                  </button>
+                )}
                 {showCounter && (
                   <span className="last-chat-counter">
                     [{m.swipes!.index + 1}/{m.swipes!.count}]
                   </span>
                 )}
-                {hasNextSwipe && (
+                {!settled && hasNextSwipe && (
                   <button
                     type="button"
                     className="last-chat-arrow"
@@ -252,14 +258,19 @@ function ChatMessageRow({
                     ›
                   </button>
                 )}
+                {settled && <button type="button" className="last-chat-icon" title="Delete this and everything after" onClick={() => onTruncateFrom(m.messageId!)}>Delete from here</button>}
               </div>
             ) : (
               <div className="message-actions" onClick={(e) => e.stopPropagation()}>
-                <button onClick={() => onStartEdit(m.messageId!, m.content)}>Edit</button>
+                {!settled && <button onClick={() => onStartEdit(m.messageId!, m.content)}>Edit</button>}
                 <button onClick={() => onForkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
                   Fork from here
                 </button>
-                <button onClick={() => onRemoveMessage(m.messageId!)}>Delete</button>
+                {settled ? (
+                  <button onClick={() => onTruncateFrom(m.messageId!)}>Delete from here</button>
+                ) : (
+                  <button onClick={() => onRemoveMessage(m.messageId!)}>Delete</button>
+                )}
               </div>
             ))}
         </>

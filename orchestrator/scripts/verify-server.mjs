@@ -729,6 +729,11 @@ function createFakePool() {
   // numeric column), plus a recorder for the `days` lookback param the clamp assertions read.
   const llmStatsRows = [];
   const llmStatsDaysRead = [];
+  // Settled-history guard (settled-history-mutation-guard-plan.md): isMessageSettled's query
+  // reads through this pool, disconnected from whichever fake chat-session store a test group's
+  // `deps.chats` actually uses — a test opts a chatId+messageId pair into "settled" here rather
+  // than seeding real chat_sync_points rows the query would otherwise have to join through.
+  const settledMessageIds = new Set();
   return {
     inserts,
     characters,
@@ -737,6 +742,9 @@ function createFakePool() {
     cleanupJobs,
     llmStatsRows,
     llmStatsDaysRead,
+    markMessageSettled(chatId, messageId) {
+      settledMessageIds.add(`${chatId}:${messageId}`);
+    },
     set resolveCleanupMessage(fn) {
       resolveCleanupMessage = fn;
     },
@@ -915,6 +923,18 @@ function createFakePool() {
             llmStatsDaysRead.push(params[0]);
             return { rows: llmStatsRows };
           }
+          // Settled-history guard and truncate serialization. No real chat_sync_points rows exist
+          // in this fake (it's disconnected from whichever chat-session store a test group uses),
+          // so isMessageSettled answers from the settledMessageIds set a test opts into instead —
+          // everything else defaults to live, matching "no sync point → mutable".
+          if (sql.includes('pg_advisory_xact_lock')) return { rows: [] };
+          if (sql.includes('select (target.created_at, target.message_id)')) {
+            const [chatId, messageId] = params;
+            return { rows: [{ settled: settledMessageIds.has(`${chatId}:${messageId}`) }] };
+          }
+          if (sql.includes('select point.sync_id')) return { rows: [] };
+          if (sql.includes('delete from chat_sync_points')) return { rows: [] };
+          if (sql.includes('update chat_memory_sync_status')) return { rows: [] };
           throw new Error(`fake pool got an unexpected query: ${sql}`);
         },
         release() {},
@@ -2290,7 +2310,8 @@ server.close();
       return { message: { role: 'assistant', content: 'terse reply' }, toolCalls: [] };
     },
   };
-  const db3 = createPostgresClient(createFakePool());
+  const pool3 = createFakePool();
+  const db3 = createPostgresClient(pool3);
   const apiKeys3 = createApiKeyStore('good-key-3:33333333-3333-3333-3333-333333333333');
   const chats3 = createFakeChatSessionStore();
   const tools3 = createToolRegistry([echoTool]);
@@ -2597,6 +2618,61 @@ server.close();
       afterMidEdit.messages[3].content === 'third answer',
     'editing a mid-conversation reply leaves everything after it untouched (no truncation)',
   );
+
+  // --- Settled-history mutation guard (settled-history-mutation-guard-plan.md): a message at or
+  // before the latest closed sync point rejects edit/delete/swipe with 409 CHAT_HISTORY_SETTLED,
+  // and does not touch the row. pool3.markMessageSettled stands in for a closed chat_sync_points
+  // anchor (see the fake pool's own comment) since this suite's chat store is disconnected from
+  // pool3's chat_sync_points reads. ---
+  {
+    const settledMessageId = withThird.messages[1].messageId; // "reply, edited mid-conversation"
+    pool3.markMessageSettled(chat2.chatId, settledMessageId);
+
+    const settledEditRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${settledMessageId}/edit`, {
+      method: 'POST',
+      headers: { ...auth3, 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'trying to rewrite settled history' }),
+    });
+    assert(settledEditRes.status === 409, 'POST .../edit on a settled message returns 409');
+    const settledEditBody = await settledEditRes.json();
+    assert(settledEditBody.error === 'CHAT_HISTORY_SETTLED', 'the 409 body names the CHAT_HISTORY_SETTLED error code');
+
+    const settledDeleteRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${settledMessageId}`, {
+      method: 'DELETE',
+      headers: auth3,
+    });
+    assert(settledDeleteRes.status === 409, 'DELETE on a settled message returns 409');
+    const settledDeleteBody = await settledDeleteRes.json();
+    assert(settledDeleteBody.error === 'CHAT_HISTORY_SETTLED', "delete's 409 body also names CHAT_HISTORY_SETTLED");
+
+    const afterSettledGuard = await chats3.getChat(userId3, chat2.chatId);
+    assert(
+      afterSettledGuard.messages.length === 4 && afterSettledGuard.messages[1].content === 'reply, edited mid-conversation',
+      'the rejected edit and delete left the settled message and the rest of the conversation untouched',
+    );
+
+    // Settle the chat's current last assistant reply too, so swipe (which only ever targets the
+    // last message) has a settled target to reject.
+    const settledLastId = afterSettledGuard.messages[3].messageId;
+    pool3.markMessageSettled(chat2.chatId, settledLastId);
+    const settledSwipeRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${settledLastId}/swipe`, {
+      method: 'POST',
+      headers: { ...auth3, 'content-type': 'application/json' },
+      body: JSON.stringify({ direction: 'prev' }),
+    });
+    assert(settledSwipeRes.status === 409, 'POST .../swipe on a settled last message returns 409');
+    const settledSwipeBody = await settledSwipeRes.json();
+    assert(settledSwipeBody.error === 'CHAT_HISTORY_SETTLED', "swipe's 409 body also names CHAT_HISTORY_SETTLED");
+
+    // A message never marked settled (the live tail) still edits/deletes/swipes normally — the
+    // guard is opt-in per message here, not a blanket block once any message in the chat is settled.
+    const liveEditRes = await fetch(`${base3}/v1/chats/${chat2.chatId}/messages/${afterSettledGuard.messages[2].messageId}/edit`, {
+      method: 'POST',
+      headers: { ...auth3, 'content-type': 'application/json' },
+      body: JSON.stringify({ content: 'third question, still editable' }),
+    });
+    assert(liveEditRes.status === 200, 'a message the guard was never told is settled still edits normally');
+  }
 
   // --- A chat's own profile override swaps in a throwaway provider for that turn, no restart ---
   const originalFetch3 = globalThis.fetch;
