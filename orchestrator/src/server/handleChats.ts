@@ -408,7 +408,7 @@ export async function handleChatRoutes(
     // back with imageUrl: null — the post-turn bg pass (endpoint.md §5) fires after the reply
     // is sent, so the client keeps the previous background (or its current one) until the
     // pending render lands, never blanking the layer (§5.1.8).
-    const image = await resolveChatLocationImage(deps.db, userId, chatId);
+    const image = await resolveChatLocationImage(deps.db, userId, chatId, deps.settings);
     sendJson(res, 200, {
       current: image.current ?? { locationId: null, name: null, definition: null, imageUrl: null },
       previous: image.previous ?? { locationId: null, name: null, definition: null, imageUrl: null },

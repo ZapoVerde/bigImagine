@@ -255,7 +255,7 @@ export async function handleChatBackgroundSettingsSet(req: IncomingMessage, res:
   if (!value) {
     sendJson(res, 400, {
       error:
-        'expected a partial { parallaxEnabled?, overlayOpacity?, overlayShade?, bubbleOpacity?, bubbleUserShade?, bubbleAssistantShade? } with at least one field',
+        'expected a partial chat background settings object with at least one field',
     });
     return;
   }

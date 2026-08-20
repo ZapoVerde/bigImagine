@@ -495,8 +495,9 @@ export async function getChatLegibilitySettings(apiKey: string | null): Promise<
 /** POST /v1/locations/:id/image-broken (endpoint.md §5.2) — the Chat View's background <img>
  *  onError notifies the server that the CDN link 404'd/expired; the server clears image_url so the
  *  next visit's cache check sees a miss and re-renders a fresh URL. */
-export async function reportBrokenLocationImage(locationId: string, apiKey: string | null): Promise<void> {
-  await jsonRequest<{ cleared: boolean }>(`/v1/locations/${encodeURIComponent(locationId)}/image-broken`, apiKey, {
+export async function reportBrokenLocationImage(locationId: string, apiKey: string | null, imageUrl?: string | null): Promise<void> {
+  const suffix = imageUrl ? `?imageUrl=${encodeURIComponent(imageUrl)}` : '';
+  await jsonRequest<{ cleared: boolean }>(`/v1/locations/${encodeURIComponent(locationId)}/image-broken${suffix}`, apiKey, {
     method: 'POST',
     body: {},
   });

@@ -346,24 +346,30 @@ async function resolveOrCreateLocationRow(
   }
 
   // §4.2.5 same-place carry — the row-churn reuse described in the docstring above. Also clones
-  // the prior row's visual_description/definition when it was actually described (non-name): the
-  // carried image hash was computed over the described prompt, so the new row must hold the same
-  // description or the §5.1.2 cache check misses and the render fires with a name-only prompt
-  // (worse image + wasted gen). The describer's own skip rule (describeLocation.ts) sees the
-  // carried description as "already described" — no second LLM call for the same room.
+  // the prior row's visual_description/definition when it was actually described (non-name): a
+  // described row is far more likely to have real location_image_combinations worth cloning below,
+  // and the describer's own skip rule (describeLocation.ts) sees the carried description as
+  // "already described" — no second LLM call for the same room. The candidate must actually have
+  // at least one location_image_combinations row — ordering by plain l.updated_at would pick
+  // whichever same-named row was most recently *touched* (bumped on every environment refresh),
+  // not the one worth carrying forward, which would silently defeat the "same room never wastes a
+  // generation" guarantee the clone below exists for.
   const [prior] = await session.query<{
-    image_url: string | null;
-    image_rendered_input: unknown;
-    image_render_hash: string | null;
     seed: number | null;
     visual_description: string | null;
     definition: string | null;
+    prior_location_id: string;
   }>(
-    `select l.image_url, l.image_rendered_input, l.image_render_hash, l.seed, l.visual_description, l.definition
+    `select l.seed, l.visual_description, l.definition, l.location_id as prior_location_id
      from locations l
      join location_chat_links lcl on lcl.location_id = l.location_id and lcl.chat_id = $3
-     where l.user_id = $1 and l.name = $2 and l.image_url is not null
-     order by l.image_generated_at desc nulls last
+     join lateral (
+       select max(c.image_generated_at) as latest_generated_at
+       from location_image_combinations c
+       where c.location_id = l.location_id
+     ) combo on true
+     where l.user_id = $1 and l.name = $2 and combo.latest_generated_at is not null
+     order by combo.latest_generated_at desc
      limit 1`,
     [userId, name, chatId],
   );
@@ -376,8 +382,8 @@ async function resolveOrCreateLocationRow(
       : name;
 
   const [created] = await session.query<{ location_id: string }>(
-    `insert into locations (user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, status, parent_location_id)
-     values ($1, $2, $3, $4, $5::jsonb, $6, $7, $8::jsonb, $9, 'transient', $10)
+    `insert into locations (user_id, name, visual_description, definition, environment, seed, status, parent_location_id)
+     values ($1, $2, $3, $4, $5::jsonb, $6, 'transient', $7)
      returning location_id`,
     [
       userId,
@@ -386,9 +392,6 @@ async function resolveOrCreateLocationRow(
       prior?.definition ?? null,
       environment,
       toImageGenSeed(prior?.seed),
-      prior?.image_url ?? null,
-      prior?.image_rendered_input ?? null,
-      prior?.image_render_hash ?? null,
       parentLocationId,
     ],
   );
@@ -397,6 +400,15 @@ async function resolveOrCreateLocationRow(
     chatId,
     swipeId,
   ]);
+  if (prior?.prior_location_id) {
+    await session.query(
+      `insert into location_image_combinations
+         (location_id, time_of_day_key, image_url, image_generated_at, rendered_prompt, provider_kind, provider_model, seed, render_metadata)
+       select $1, time_of_day_key, image_url, image_generated_at, rendered_prompt, provider_kind, provider_model, seed, render_metadata
+       from location_image_combinations where location_id = $2 on conflict do nothing`,
+      [created!.location_id, prior.prior_location_id],
+    );
+  }
   return created!.location_id;
 }
 

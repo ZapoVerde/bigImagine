@@ -374,6 +374,7 @@ export interface ImageConnectionTestResult {
  *  dark-theme colors). ChatView applies them as CSS custom properties at chat load. */
 export interface ChatBackgroundSettings {
   parallaxEnabled: boolean;
+  todVariantsEnabled: boolean;
   /** 0..1 — the veil's strength over the location background (default 0.5). */
   overlayOpacity: number;
   /** '#rrggbb' — the veil's color (default '#000000'). */

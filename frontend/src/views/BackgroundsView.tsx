@@ -42,6 +42,8 @@ export default function BackgroundsView() {
   // --- Chat Background settings (parallax_fade_teststep.md §2.2 + migration 0073) ---
   const [chatBackgroundParallax, setChatBackgroundParallax] = useState(false);
   const [selectedParallax, setSelectedParallax] = useState(false);
+  const [chatBackgroundTodVariants, setChatBackgroundTodVariants] = useState(false);
+  const [selectedTodVariants, setSelectedTodVariants] = useState(false);
   const [chatBackgroundOverlayOpacity, setChatBackgroundOverlayOpacity] = useState(0.5);
   const [selectedOverlayOpacity, setSelectedOverlayOpacity] = useState(0.5);
   const [chatBackgroundOverlayShade, setChatBackgroundOverlayShade] = useState('#000000');
@@ -66,6 +68,8 @@ export default function BackgroundsView() {
   function applyChatBackgroundSettings(settings: ChatBackgroundSettings) {
     setChatBackgroundParallax(settings.parallaxEnabled);
     setSelectedParallax(settings.parallaxEnabled);
+    setChatBackgroundTodVariants(settings.todVariantsEnabled);
+    setSelectedTodVariants(settings.todVariantsEnabled);
     setChatBackgroundOverlayOpacity(settings.overlayOpacity);
     setSelectedOverlayOpacity(settings.overlayOpacity);
     setChatBackgroundOverlayShade(settings.overlayShade);
@@ -144,6 +148,7 @@ export default function BackgroundsView() {
   async function saveChatBackgroundSettings() {
     const value: ChatBackgroundSettings = {
       parallaxEnabled: selectedParallax,
+      todVariantsEnabled: selectedTodVariants,
       overlayOpacity: selectedOverlayOpacity,
       overlayShade: selectedOverlayShade,
       bubbleOpacity: selectedBubbleOpacity,
@@ -152,6 +157,7 @@ export default function BackgroundsView() {
     };
     if (
       value.parallaxEnabled === chatBackgroundParallax &&
+      value.todVariantsEnabled === chatBackgroundTodVariants &&
       value.overlayOpacity === chatBackgroundOverlayOpacity &&
       value.overlayShade === chatBackgroundOverlayShade &&
       value.bubbleOpacity === chatBackgroundBubbleOpacity &&
@@ -237,6 +243,11 @@ export default function BackgroundsView() {
           <input type="checkbox" checked={selectedParallax} onChange={(e) => setSelectedParallax(e.target.checked)} />{' '}
           Parallax pan on the chat location background
         </label>
+        <label>
+          <input type="checkbox" checked={selectedTodVariants} onChange={(e) => setSelectedTodVariants(e.target.checked)} />{' '}
+          Time-of-day variants
+        </label>
+        <div className="status">Keep a separate persistent background for each scene time of day.</div>
         <div className="status">
           The location background pans gently opposite the pointer / device tilt
           (parallax_fade_teststep.md §2), matching SillyTavern-Vistalyze's parallax. Off by
@@ -297,6 +308,7 @@ export default function BackgroundsView() {
           onClick={saveChatBackgroundSettings}
           disabled={
             selectedParallax === chatBackgroundParallax &&
+            selectedTodVariants === chatBackgroundTodVariants &&
             selectedOverlayOpacity === chatBackgroundOverlayOpacity &&
             selectedOverlayShade === chatBackgroundOverlayShade &&
             selectedBubbleOpacity === chatBackgroundBubbleOpacity &&

@@ -12,9 +12,11 @@
 //     network at all), and io/imageGen/runware.ts's wire shape is pinned directly against a
 //     mocked fetch (Bearer header + array body + imageInference taskType + positivePrompt/
 //     CFGScale/scheduler field names — the proven REST contract, not the legacy WS-era shape);
-//   - orchestrator/generateLocationImage.ts: cache hit (updated_at <= image_generated_at → no
-//     provider call), cache miss on a touched row, miss on a null image_url, no-active-connection
-//     fail-open, unknown-location fail-open, and the URL + image_generated_at write-back;
+//   - orchestrator/generateLocationImage.ts (migration 0129): a base combination cache hit (no
+//     provider call), an existing combination surviving a description/environment/provider drift
+//     (proves prompt hashing is gone), a fresh render on a location with no combination at all,
+//     no-active-connection fail-open, unknown-location fail-open, and the swipe -> combination
+//     association write;
 //   - endpoint.md §3.3's testImageConnection probe for the pollinations kind (URL constructed,
 //     no fetch — but the key is required, see below).
 
@@ -42,18 +44,20 @@ const cipher = createFieldCipher({ BIGBRAIN_FIELD_ENCRYPTION_KEY: randomBytes(32
 function createFakePool() {
   const imageConnections = [];
   const locations = [];
+  const locationImageCombinations = []; // {combination_id, location_id, time_of_day_key, image_url, image_generated_at, rendered_prompt, provider_kind, provider_model, seed} (migration 0129)
   const chatMessages = []; // {chat_id, active_swipe_id} — feeds the location_swipe_images association branch
   const locationChatLinks = []; // {location_id, chat_id, anchor_swipe_id} (migration 0096)
-  const swipeImages = new Map(); // `${chatId}:${swipeId}` -> location_swipe_images row (0076)
+  const swipeImages = new Map(); // `${chatId}:${swipeId}` -> location_swipe_images row (0076, widened 0129)
   const settings = new Map();
   let connCounter = 0;
-  let locCounter = 0;
+  let comboCounter = 0;
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
 
   return {
     imageConnections,
     locations,
+    locationImageCombinations,
     chatMessages,
     locationChatLinks,
     swipeImages,
@@ -175,7 +179,11 @@ function createFakePool() {
           }
 
           // --- locations queries (generateLocationImage) ---
-          if (sql.includes('from locations where location_id =')) {
+          // Two distinct location_id selects: the initial eligibility+row load (several columns,
+          // used once per call) and the pre-provider eligibility recheck (location_id alone,
+          // migration 0129) — must be told apart or the recheck would wrongly resolve the full
+          // row shape.
+          if (sql.includes('from locations where location_id =') && sql.includes('visual_description, environment, seed')) {
             // db/migrations/0096 eligibility (BG_ELIGIBILITY_CLAUSE), modeled in JS: user-authored
             // (status null) is always eligible; an auto-registered row is eligible when linked to
             // the calling chat via location_chat_links and not inactive, OR when the chat's active
@@ -198,10 +206,6 @@ function createFakePool() {
                       environment: row.environment,
                       // bigint-as-string, exactly like node-postgres hands locations.seed back
                       seed: row.seed == null ? null : String(row.seed),
-                      image_url: row.image_url,
-                      image_generated_at: row.image_generated_at,
-                      image_rendered_input: row.image_rendered_input,
-                      image_render_hash: row.image_render_hash ?? null,
                       // anchor_swipe_id now lives on location_chat_links, read via the same
                       // correlated-subquery shape the real query uses.
                       anchor_swipe_id: anchorLink?.anchor_swipe_id ?? null,
@@ -211,26 +215,48 @@ function createFakePool() {
                 : [],
             };
           }
-          if (sql.startsWith('update locations set image_url')) {
-            const row = locations.find((l) => l.location_id === params[0] && l.user_id === params[4]);
-            if (row) {
-              row.image_url = params[1];
-              row.image_generated_at = now();
-              row.image_rendered_input = JSON.parse(params[2]);
-              row.image_render_hash = params[3];
-            }
-            return { rows: [] };
+          if (sql.startsWith('select location_id from locations where location_id =')) {
+            // migration 0129's pre-provider eligibility recheck — same predicate, one column.
+            const chatId = params[2];
+            const activeSwipeIds = chatMessages.filter((m) => m.chat_id === chatId && m.active_swipe_id).map((m) => m.active_swipe_id);
+            const eligible = (l) =>
+              l.status == null ||
+              (l.status !== 'inactive' && locationChatLinks.some((link) => link.location_id === l.location_id && link.chat_id === chatId)) ||
+              activeSwipeIds.some((swipeId) => swipeImages.get(`${chatId}:${swipeId}`)?.location_id === l.location_id);
+            const row = locations.find((l) => l.location_id === params[0] && l.user_id === scopedUserId && eligible(l));
+            return { rows: row ? [{ location_id: row.location_id }] : [] };
           }
-          if (sql.startsWith('update locations set image_render_hash')) {
-            // §5.1.2 legacy backfill: a pre-0076 cache hit writes the hash so the next check fast-paths.
-            const row = locations.find((l) => l.location_id === params[0] && l.user_id === scopedUserId);
-            if (row) row.image_render_hash = params[1];
-            return { rows: [] };
+
+          // --- location_image_combinations queries (migration 0129) ---
+          if (sql.includes('from location_image_combinations') && sql.includes('is not distinct from')) {
+            const [locationId, todKey] = params;
+            const row = locationImageCombinations.find((c) => c.location_id === locationId && c.time_of_day_key === (todKey ?? null));
+            return { rows: row ? [{ combination_id: row.combination_id, image_url: row.image_url }] : [] };
+          }
+          if (sql.startsWith('insert into location_image_combinations')) {
+            const [locationId, todKey, imageUrl, renderedPrompt, providerKind, providerModel, seed] = params;
+            if (locationImageCombinations.some((c) => c.location_id === locationId && c.time_of_day_key === (todKey ?? null))) {
+              return { rows: [] }; // on conflict do nothing — the race-loser path
+            }
+            const row = {
+              combination_id: `combo-${++comboCounter}`,
+              location_id: locationId,
+              time_of_day_key: todKey ?? null,
+              image_url: imageUrl,
+              image_generated_at: now(),
+              rendered_prompt: renderedPrompt,
+              provider_kind: providerKind,
+              provider_model: providerModel ?? null,
+              seed: seed ?? null,
+            };
+            locationImageCombinations.push(row);
+            return { rows: [{ combination_id: row.combination_id, image_url: row.image_url }] };
           }
           if (sql.startsWith('insert into location_swipe_images')) {
-            // migration 0076: per-swipe association recorded on every successful render.
-            const [chatId, swipeId, locationId, imageUrl, renderHash] = params;
-            swipeImages.set(`${chatId}:${swipeId}`, { chat_id: chatId, swipe_id: swipeId, location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: now() });
+            // migration 0076, widened by 0129: per-swipe association recorded on every successful
+            // resolution (cache hit or fresh render), keyed by combination_id.
+            const [chatId, swipeId, locationId, combinationId, imageUrl] = params;
+            swipeImages.set(`${chatId}:${swipeId}`, { chat_id: chatId, swipe_id: swipeId, location_id: locationId, combination_id: combinationId, image_url: imageUrl, image_generated_at: now() });
             return { rows: [] };
           }
 
@@ -419,7 +445,7 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
   }
 }
 
-// --- generateLocationImage: cache hit (image + matching input snapshot) ---
+// --- generateLocationImage: combination cache hit (migration 0129) ---
 {
   pool.locations.push({
     location_id: 'loc-cached',
@@ -427,45 +453,43 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'The Forest Clearing',
     environment: { time_of_day: 'dusk' },
     seed: 7,
+  });
+  pool.locationImageCombinations.push({
+    combination_id: 'combo-clearing',
+    location_id: 'loc-cached',
+    time_of_day_key: null,
     image_url: 'https://cdn.example.invalid/clearing.png',
-    image_generated_at: new Date().toISOString(),
-    image_rendered_input: { visual_description: 'The Forest Clearing', environment: { time_of_day: 'dusk' }, seed: 7 },
   });
   const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-cached');
-  assert(result.ok === true && result.cached === true && result.imageUrl === 'https://cdn.example.invalid/clearing.png', 'a row whose inputs match its render snapshot is a cache hit — no provider call');
+  assert(result.ok === true && result.cached === true && result.imageUrl === 'https://cdn.example.invalid/clearing.png', 'an existing base combination is a cache hit — no provider call');
 }
 
-// --- generateLocationImage: cache miss on changed inputs (snapshot diverges) ---
+// --- generateLocationImage: prompt/environment changes never invalidate an existing combination ---
+// The whole point of the 0129 rewrite: combination identity is location_id (+ optional TOD), never
+// the synthesized prompt or provider inputs. A location whose environment/description has since
+// drifted from what was rendered must still resolve its existing combination unchanged.
 {
   pool.locations.push({
-    location_id: 'loc-miss',
+    location_id: 'loc-drifted',
     user_id: USER,
-    visual_description: 'A mossy clearing',
+    visual_description: 'A mossy clearing, now overgrown and rain-slicked',
     environment: { time_of_day: 'dusk', weather: 'rain' },
     seed: 7,
-    image_url: 'https://cdn.example.invalid/old.png',
-    image_generated_at: new Date(Date.now() - 120_000).toISOString(),
-    // snapshot records the old state: weather changed (or was added) since the render → miss
-    image_rendered_input: { visual_description: 'A mossy clearing', environment: { time_of_day: 'dusk' }, seed: 7 },
   });
-  // The active connection is runware (activated above) — make it pollinations instead so the
-  // miss path needs no network. Pollinations is NOT keyless (anonymous requests are
-  // watermarked/rate-limited since 2025), so the row carries a token and the adapter bakes it
-  // into the URL as `token` (io/imageGen/pollinations.ts).
+  pool.locationImageCombinations.push({
+    combination_id: 'combo-drifted',
+    location_id: 'loc-drifted',
+    time_of_day_key: null,
+    image_url: 'https://cdn.example.invalid/old.png',
+  });
+  // Swap the active connection entirely (provider/model change) — must not matter for a hit.
   const poll = await imageConnections.create({ name: 'poll', kind: 'pollinations', model: 'flux', apiKey: 'poll-token-123' });
   await imageConnections.activate(poll.id);
-  const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-miss');
-  assert(result.ok === true && result.cached !== true, 'a touched row is a cache miss and re-renders');
-  assert(
-    typeof result.imageUrl === 'string' && result.imageUrl.startsWith('https://image.pollinations.ai/prompt/')
-      && result.imageUrl.includes('token=poll-token-123'),
-    'the pollinations adapter returns its constructed URL carrying the connection token (no network needed)',
-  );
-  const row = pool.locations.find((l) => l.location_id === 'loc-miss');
-  assert(row.image_url === result.imageUrl && row.image_generated_at !== null, 'the new URL + image_generated_at are written back to the location row');
+  const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-drifted');
+  assert(result.ok === true && result.cached === true && result.imageUrl === 'https://cdn.example.invalid/old.png', 'a changed description/environment/provider never invalidates an existing combination — prompt hashing is gone');
 }
 
-// --- generateLocationImage: null image_url is a miss even if the row is untouched ---
+// --- generateLocationImage: no existing combination renders fresh through the active connection ---
 {
   pool.locations.push({
     location_id: 'loc-noimg',
@@ -473,12 +497,10 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'A dark cave',
     environment: {},
     seed: null,
-    image_url: null,
-    image_generated_at: null,
-    updated_at: new Date().toISOString(),
   });
   const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-noimg');
-  assert(result.ok === true && result.cached !== true && typeof result.imageUrl === 'string', 'a null image_url is a miss that renders a fresh image');
+  assert(result.ok === true && result.cached !== true && typeof result.imageUrl === 'string', 'a location with no combination at all renders fresh');
+  assert(pool.locationImageCombinations.some((c) => c.location_id === 'loc-noimg' && c.time_of_day_key === null && c.image_url === result.imageUrl), 'the fresh render is persisted as a new base combination');
 }
 
 // --- generateLocationImage fail-open: unknown location ---
@@ -499,9 +521,6 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'An empty hall',
     environment: {},
     seed: null,
-    image_url: null,
-    image_generated_at: null,
-    image_rendered_input: null,
   });
   const result = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-noactive');
   assert(result.ok === false && result.error === 'no_active_connection', 'with no active connection the pass fails open (no throw, structured result)');
@@ -519,9 +538,6 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'The Dark Cave',
     environment: {},
     seed: null,
-    image_url: null,
-    image_generated_at: null,
-    image_rendered_input: null,
     status: 'inactive', // demoted alternate timeline
   });
   pool.locationChatLinks.push({ location_id: 'loc-inactive', chat_id: chatId, anchor_swipe_id: 'swipe-dead' });
@@ -531,9 +547,6 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'The Forest Clearing',
     environment: {},
     seed: null,
-    image_url: null,
-    image_generated_at: null,
-    image_rendered_input: null,
     status: 'transient',
   });
   pool.locationChatLinks.push({ location_id: 'loc-transient-live', chat_id: chatId, anchor_swipe_id: liveSwipe });
@@ -553,13 +566,14 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
   const transientLiveChat = await generateLocationImage({ db, settings, imageConnections }, USER, 'loc-transient-live', chatId);
   assert(transientLiveChat.ok === true && typeof transientLiveChat.imageUrl === 'string', "a transient location on the calling chat's active swipe path renders normally");
 
-  // migration 0076: the successful render records the (chat, swipe, location) -> URL + hash
-  // association — the per-swipe record that makes the image reusable on cycle-back instead of
-  // re-generated (the "save that image url association with that location and swipe" rule).
+  // migration 0076, widened by 0129: the successful resolution records the (chat, swipe,
+  // location) -> combination association — the per-swipe record that makes the image reusable on
+  // cycle-back instead of re-generated (the "save that combination with that location and swipe"
+  // rule).
   const assoc = pool.swipeImages.get(`${chatId}:${liveSwipe}`);
   assert(
-    assoc?.location_id === 'loc-transient-live' && assoc.image_url === transientLiveChat.imageUrl && typeof assoc.render_hash === 'string' && assoc.render_hash.length === 64,
-    'the rendered URL + prompt render hash are recorded against the swipe (migration 0076)',
+    assoc?.location_id === 'loc-transient-live' && assoc.image_url === transientLiveChat.imageUrl && typeof assoc.combination_id === 'string',
+    'the rendered combination is recorded against the swipe (migration 0076/0129)',
   );
 }
 
@@ -586,9 +600,6 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'A windmill at noon',
     environment: {},
     seed: null,
-    image_url: null,
-    image_generated_at: null,
-    updated_at: new Date().toISOString(),
   });
   const noKey = await imageConnections.create({ name: 'poll-nokey', kind: 'pollinations', model: 'flux' });
   await imageConnections.activate(noKey.id);
@@ -631,9 +642,6 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     visual_description: 'A sunlit study',
     environment: {},
     seed: 7,
-    image_url: null,
-    image_generated_at: null,
-    image_rendered_input: null,
   });
   const realFetch = global.fetch;
   let captured;

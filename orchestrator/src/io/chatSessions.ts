@@ -1386,11 +1386,12 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           const swipeImageRows = await session.query<{
             swipe_id: string;
             location_id: string;
+            combination_id: string | null;
             image_url: string | null;
             render_hash: string | null;
             image_generated_at: string | null;
           }>(
-            `select swipe_id, location_id, image_url, render_hash, image_generated_at from location_swipe_images
+            `select swipe_id, location_id, combination_id, image_url, render_hash, image_generated_at from location_swipe_images
              where chat_id = $1 and swipe_id = any($2::uuid[])`,
             [chatId, copiedSwipeIds],
           );
@@ -1398,14 +1399,15 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             const branchSwipeId = swipeIdMap.get(si.swipe_id);
             if (!branchSwipeId) continue;
             await session.query(
-              `insert into location_swipe_images (chat_id, swipe_id, location_id, image_url, render_hash, image_generated_at)
-               values ($1, $2, $3, $4, $5, $6)
+              `insert into location_swipe_images (chat_id, swipe_id, location_id, combination_id, image_url, render_hash, image_generated_at)
+               values ($1, $2, $3, $4, $5, $6, $7)
                on conflict (chat_id, swipe_id) do update set
-                 location_id = excluded.location_id,
+                  location_id = excluded.location_id,
+                  combination_id = excluded.combination_id,
                  image_url = excluded.image_url,
                  render_hash = excluded.render_hash,
                  image_generated_at = excluded.image_generated_at`,
-              [newChatId, branchSwipeId, si.location_id, si.image_url, si.render_hash, si.image_generated_at],
+              [newChatId, branchSwipeId, si.location_id, si.combination_id, si.image_url, si.render_hash, si.image_generated_at],
             );
           }
         }

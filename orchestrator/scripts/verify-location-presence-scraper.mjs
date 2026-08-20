@@ -32,7 +32,8 @@ function assert(cond, message) {
 // scenes / scene_presence / chat_messages, covering exactly the queries
 // locationAndPresenceScraper.ts issues. ---
 function createFakePool() {
-  const locations = []; // { location_id, user_id, name, visual_description, definition, environment, seed, image_url, image_rendered_input, image_render_hash, image_generated_at, status, parent_location_id }
+  const locations = []; // { location_id, user_id, name, visual_description, definition, environment, seed, status, parent_location_id }
+  const locationImageCombinations = []; // { combination_id, location_id, time_of_day_key, image_url, image_generated_at, rendered_prompt, provider_kind, provider_model, seed, render_metadata } (migration 0129)
   const characters = []; // { character_id, user_id, name, status }
   const locationChatLinks = []; // { location_id, chat_id, anchor_swipe_id } (migration 0096)
   const characterChatLinks = []; // { character_id, chat_id, anchor_swipe_id } (migration 0096)
@@ -52,6 +53,7 @@ function createFakePool() {
 
   return {
     locations,
+    locationImageCombinations,
     characters,
     locationChatLinks,
     characterChatLinks,
@@ -70,29 +72,45 @@ function createFakePool() {
             return { rows: [] };
           }
 
-          // §4.2.5 same-place carry: the mint-path clone-source read — the most recent
-          // same-named row rendered in THIS chat (joined through location_chat_links, so another
-          // chat's row of the same name never leaks in).
-          if (sql.includes('from locations l') && sql.includes('image_url is not null')) {
+          // §4.2.5 same-place carry (migration 0129): the mint-path clone-source read — the most
+          // recent same-named row THIS chat has actually rendered at least one combination for
+          // (joined through location_chat_links, so another chat's row of the same name never
+          // leaks in; gated on having a real location_image_combinations row, not just
+          // updated_at, so a same-named row that was merely touched but never rendered can't win).
+          if (sql.includes('from locations l') && sql.includes('location_image_combinations') && sql.includes('latest_generated_at')) {
             const [userId, name, chatId] = params;
             const linkedIds = new Set(locationChatLinks.filter((l) => l.chat_id === chatId).map((l) => l.location_id));
+            const latestFor = (locationId) =>
+              locationImageCombinations
+                .filter((c) => c.location_id === locationId)
+                .map((c) => c.image_generated_at)
+                .sort()
+                .at(-1) ?? null;
             const matches = locations
-              .filter((l) => l.user_id === userId && l.name === name && l.image_url != null && linkedIds.has(l.location_id))
-              .sort((a, b) => String(b.image_generated_at ?? '').localeCompare(String(a.image_generated_at ?? '')));
+              .filter((l) => l.user_id === userId && l.name === name && linkedIds.has(l.location_id) && latestFor(l.location_id) != null)
+              .sort((a, b) => String(latestFor(b.location_id)).localeCompare(String(latestFor(a.location_id))));
             return {
               rows: matches.length
                 ? [
                     {
-                      image_url: matches[0].image_url,
-                      image_rendered_input: matches[0].image_rendered_input ?? null,
-                      image_render_hash: matches[0].image_render_hash ?? null,
                       seed: matches[0].seed ?? null,
                       visual_description: matches[0].visual_description ?? null,
                       definition: matches[0].definition ?? null,
+                      prior_location_id: matches[0].location_id,
                     },
                   ]
                 : [],
             };
+          }
+          // The mint-path combination clone: copy the prior row's location_image_combinations
+          // rows onto the freshly created row, so the new row is an immediate cache hit instead
+          // of wasting a fresh render for a room that was already rendered under its old row.
+          if (sql.startsWith('insert into location_image_combinations') && sql.includes('select $1')) {
+            const [newLocationId, priorLocationId] = params;
+            for (const c of locationImageCombinations.filter((c) => c.location_id === priorLocationId)) {
+              locationImageCombinations.push({ ...c, combination_id: randomUUID(), location_id: newLocationId });
+            }
+            return { rows: [] };
           }
 
           // §4.2 location match (eligible rows only).
@@ -124,7 +142,9 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into locations')) {
-            const [userId, name, visualDescription, definition, environmentJson, seed, imageUrl, renderedInput, renderHash, parentLocationId] = params;
+            // migration 0129: the mint no longer carries image_url/hash columns — those live on
+            // location_image_combinations now, cloned separately (see the clone-insert above).
+            const [userId, name, visualDescription, definition, environmentJson, seed, parentLocationId] = params;
             const row = {
               location_id: randomUUID(),
               user_id: userId,
@@ -133,9 +153,6 @@ function createFakePool() {
               definition,
               environment: JSON.parse(environmentJson),
               seed,
-              image_url: imageUrl,
-              image_rendered_input: renderedInput,
-              image_render_hash: renderHash,
               status: 'transient',
               parent_location_id: parentLocationId ?? null,
             };
@@ -485,12 +502,14 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   assert(pool.locations.length === 2, 'an inactive location is never matched, even when linked to this exact chat — a fresh row is minted instead');
 }
 
-// --- §4.2.5 same-place carry: a rerun-superseded row's rendered image is inherited -----------
+// --- §4.2.5 same-place carry (migration 0129): a rerun-superseded row's rendered combinations
+// are inherited by the fresh mint ------------------------------------------------------------
 // The rerun of the turn that anchored a row supersedes its swipe -> in the OLD per-swipe model
 // this made the row ineligible; under the link-table model (migration 0096) the row stays linked
 // to this chat and WOULD normally still match. This case instead demotes the row to `inactive`
 // first (what the sync tick actually does once a swipe is truly superseded), so the mint-with-carry
-// path is exercised the way it now really triggers.
+// path is exercised the way it now really triggers. Carry identity is now a
+// location_image_combinations row, not image_url/hash columns on locations itself.
 {
   const pool = poolWithActiveSwipe(createFakePool());
   const superseded = {
@@ -501,12 +520,15 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     environment: {},
     status: 'inactive', // demoted by the sync tick once its anchoring swipe lost the live window
     seed: 12345,
-    image_url: 'https://cdn.example.com/kraken.png',
-    image_rendered_input: { visual_description: 'The Drunken Kraken - Main Hall', environment: {}, seed: 12345 },
-    image_render_hash: 'hash-kraken',
-    image_generated_at: '2026-08-08T10:00:00.000Z',
   };
   pool.locations.push(superseded);
+  pool.locationImageCombinations.push({
+    combination_id: randomUUID(),
+    location_id: superseded.location_id,
+    time_of_day_key: null,
+    image_url: 'https://cdn.example.com/kraken.png',
+    image_generated_at: '2026-08-08T10:00:00.000Z',
+  });
   pool.locationChatLinks.push({ location_id: superseded.location_id, chat_id: CHAT, anchor_swipe_id: randomUUID() });
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
@@ -514,18 +536,19 @@ const FAKE_SETTINGS = { get: async () => 'false' };
 
   assert(pool.locations.length === 2, 'the inactive row is not matched — a fresh row is minted (timeline semantics unchanged)');
   const fresh = pool.locations.find((l) => l.location_id !== 'eeeeeeee-0000-0000-0000-000000000005');
-  assert(fresh.image_url === 'https://cdn.example.com/kraken.png', 'the fresh row inherits the prior same-named row\'s image_url (§4.2.5 carry, still scoped through this chat\'s link)');
-  assert(fresh.image_render_hash === 'hash-kraken', 'the fresh row inherits the render hash — the follow-up generation pass is a §5.1.2 cache hit');
+  const freshCombo = pool.locationImageCombinations.find((c) => c.location_id === fresh.location_id);
+  assert(freshCombo && freshCombo.image_url === 'https://cdn.example.com/kraken.png', 'the fresh row inherits the prior same-named row\'s combination (§4.2.5 carry, still scoped through this chat\'s link) — a 0129 cache hit, not a fresh render');
   assert(fresh.seed === 12345, 'the fresh row inherits the seed');
   assert(fresh.visual_description === 'The Drunken Kraken - Main Hall', 'visual_description is still seeded from the extracted name');
   assert(fresh.definition === null, 'a name-seeded prior carries no definition');
 }
 
 // --- §4.2.5 carry with a described prior: the description/definition ride along -------------
-// Once the describer (describeLocation.ts) has enriched a row, the carried hash covers the
-// *described* prompt — the fresh mint must carry the description too or the §5.1.2 cache check
-// misses and the render fires a name-only prompt (worse image + wasted gen). The describer's own
-// skip rule sees the carried description as "already described" — no second LLM call for the room.
+// Once the describer (describeLocation.ts) has enriched a row, the carried combination covers the
+// *described* prompt — the fresh mint must carry the description too or the 0129 combination
+// lookup (keyed on location_id, not prompt content) would otherwise pair a stale description with
+// an already-rendered image. The describer's own skip rule sees the carried description as
+// "already described" — no second LLM call for the room.
 {
   const pool = poolWithActiveSwipe(createFakePool());
   const superseded = {
@@ -537,21 +560,25 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     environment: {},
     status: 'inactive',
     seed: 12345,
-    image_url: 'https://cdn.example.com/kraken.png',
-    image_rendered_input: { visual_description: 'A wide taproom with low oak beams…', environment: {}, seed: 12345 },
-    image_render_hash: 'hash-kraken-described',
-    image_generated_at: '2026-08-08T10:00:00.000Z',
   };
   pool.locations.push(superseded);
+  pool.locationImageCombinations.push({
+    combination_id: randomUUID(),
+    location_id: superseded.location_id,
+    time_of_day_key: null,
+    image_url: 'https://cdn.example.com/kraken.png',
+    image_generated_at: '2026-08-08T10:00:00.000Z',
+  });
   pool.locationChatLinks.push({ location_id: superseded.location_id, chat_id: CHAT, anchor_swipe_id: randomUUID() });
   const db = createPostgresClient(pool);
   const ensure = fakeEnsureActiveSwipe(pool);
   await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, HEADER);
 
   const fresh = pool.locations.find((l) => l.location_id !== 'ffffffff-0000-0000-0000-000000000006');
-  assert(fresh.visual_description === 'A wide taproom with low oak beams, a great hearth, and lanterns casting warm light across scarred tables.', 'a described prior\'s visual_description is carried onto the fresh row (hash-match keeps the §5.1.2 cache hit)');
+  const freshCombo = pool.locationImageCombinations.find((c) => c.location_id === fresh.location_id);
+  assert(fresh.visual_description === 'A wide taproom with low oak beams, a great hearth, and lanterns casting warm light across scarred tables.', 'a described prior\'s visual_description is carried onto the fresh row');
   assert(fresh.definition === 'A rowdy dockside tavern and the crew\'s usual meeting spot.', 'a described prior\'s definition is carried onto the fresh row');
-  assert(fresh.image_render_hash === 'hash-kraken-described', 'the carried description matches the carried hash — the render stays a cache hit');
+  assert(freshCombo && freshCombo.image_url === 'https://cdn.example.com/kraken.png', 'the carried combination rides along with the carried description — the render stays a cache hit');
 }
 
 // --- Re-anchor: a transient row reused by a later turn follows the live timeline's swipe -------

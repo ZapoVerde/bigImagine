@@ -590,6 +590,7 @@ function createFakePool() {
               rows: rows.map((s) => ({
                 swipe_id: s.swipe_id,
                 location_id: s.location_id,
+                combination_id: s.combination_id ?? null,
                 image_url: s.image_url ?? null,
                 render_hash: s.render_hash ?? null,
                 image_generated_at: s.image_generated_at ?? null,
@@ -597,12 +598,13 @@ function createFakePool() {
             };
           }
           if (sql.includes('insert into location_swipe_images')) {
-            const [chatId, swipeId, locationId, imageUrl, renderHash, imageGeneratedAt] = params;
+            // migration 0129 widened this insert with combination_id as the 4th column.
+            const [chatId, swipeId, locationId, combinationId, imageUrl, renderHash, imageGeneratedAt] = params;
             const existing = swipeImages.find((s) => s.chat_id === chatId && s.swipe_id === swipeId);
             if (existing) {
-              Object.assign(existing, { location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
+              Object.assign(existing, { location_id: locationId, combination_id: combinationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
             } else {
-              swipeImages.push({ chat_id: chatId, swipe_id: swipeId, location_id: locationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
+              swipeImages.push({ chat_id: chatId, swipe_id: swipeId, location_id: locationId, combination_id: combinationId, image_url: imageUrl, render_hash: renderHash, image_generated_at: imageGeneratedAt });
             }
             return { rows: [] };
           }
@@ -1380,11 +1382,15 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     anchor_swipe_id: forkSwipe2,
   });
   pool.characterChatLinks.push({ character_id: goblinId, chat_id: parent.chatId, anchor_swipe_id: forkSwipe2 });
-  // Per-swipe image associations (migration 0076): both turns' swipes have recorded bgs.
+  // Per-swipe image associations (migration 0076, widened by 0129 with combination_id): both
+  // turns' swipes have recorded bgs.
+  const caveCombinationId = randomUUID();
+  const bridgeCombinationId = randomUUID();
   pool.swipeImages.push({
     chat_id: parent.chatId,
     swipe_id: forkSwipe2,
     location_id: caveId,
+    combination_id: caveCombinationId,
     image_url: 'https://cdn.example.invalid/dark-cave.png',
     render_hash: 'render-hash-abc',
     image_generated_at: '2026-08-13T00:00:00.000Z',
@@ -1393,6 +1399,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
     chat_id: parent.chatId,
     swipe_id: turnSwipe1,
     location_id: bridgeId,
+    combination_id: bridgeCombinationId,
     image_url: 'https://cdn.example.invalid/old-bridge.png',
     render_hash: 'render-hash-def',
     image_generated_at: '2026-08-13T00:00:01.000Z',
@@ -1457,6 +1464,10 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(
     branchBridgeRow && branchBridgeRow.swipe_id === branchMsgA1.active_swipe_id && branchBridgeRow.image_url === 'https://cdn.example.invalid/old-bridge.png' && branchBridgeRow.render_hash === 'render-hash-def',
     'an earlier turn\'s association is re-keyed too, so prev/next cycling inside the branch reuses the recorded URL',
+  );
+  assert(
+    branchCaveRow?.combination_id === caveCombinationId && branchBridgeRow?.combination_id === bridgeCombinationId,
+    'combination_id (migration 0129) rides along on the re-keyed association too, not just the legacy image_url/render_hash columns',
   );
 
   assert(

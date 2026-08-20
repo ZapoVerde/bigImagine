@@ -383,6 +383,7 @@ export const SETTING_NAMES = [
   'location_split_enabled',
   'location_injection_enabled',
   'location_injection_prompt',
+  'background_tod_variants_enabled',
   'lorebook_mode',
   'lorebook_token_budget',
   'lorebook_recall_top_k',

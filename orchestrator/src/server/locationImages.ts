@@ -29,6 +29,7 @@ import { describeLocationIfNeeded } from '../orchestrator/describeLocation.js';
 import { log } from '../io/logger.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
+import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import { sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
 
@@ -83,6 +84,7 @@ export async function resolveChatLocationImage(
   db: PostgresClient,
   userId: string,
   chatId: string,
+  settings?: OrchestratorSettingsStore,
 ): Promise<{ current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null; previous: { locationId: string; name: string; definition: string | null; imageUrl: string } | null }> {
   return db.withUserScope(userId, async (session) => {
     // The chat's scene pointers — current and last-turn/previous — which everything below
@@ -92,6 +94,7 @@ export async function resolveChatLocationImage(
       [chatId],
     );
 
+    const todVariants = settings ? (await settings.get('background_tod_variants_enabled')) === 'true' : false;
     let current: { locationId: string; name: string; definition: string | null; imageUrl: string | null } | null = null;
     if (chatState?.scene_id) {
       // Primary path: the scene_id cache pointer (segway.md §2.2) -> scenes.active_location_id
@@ -99,7 +102,12 @@ export async function resolveChatLocationImage(
       // pointer — e.g. prev/next cycling flipped the active swipe but not the scene — which the
       // fallback below catches.
       const [sceneRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string | null }>(
-        `select l.location_id, l.name, l.definition, l.image_url
+        `select l.location_id, l.name, l.definition,
+                (select c.image_url from location_image_combinations c
+                 where c.location_id = l.location_id
+                   and c.time_of_day_key is not distinct from
+                     case when $4 = 'true' then nullif(lower(trim(l.environment->>'time_of_day')), '') else null end
+                 limit 1) as image_url
          from scenes s
          join locations l on l.location_id = s.active_location_id and l.user_id = $1
          where s.scene_id = $2
@@ -111,7 +119,7 @@ export async function resolveChatLocationImage(
              )
            )
          limit 1`,
-        [userId, chatState.scene_id, chatId],
+         [userId, chatState.scene_id, chatId, todVariants ? 'true' : 'false'],
       );
       current = sceneRow
         ? { locationId: sceneRow.location_id, name: sceneRow.name, definition: sceneRow.definition, imageUrl: sceneRow.image_url }
@@ -122,9 +130,27 @@ export async function resolveChatLocationImage(
       // location_swipe_images association (the cycle-back case: the location row was since
       // re-anchored to a newer swipe, but this swipe's image is still valid for it — endpoint.md
       // §5.1.8's "save the association, stays inactive, reuse on return").
+      // The active-swipe join must stay a bounded (LATERAL ... LIMIT 1) lookup, not a plain LEFT
+      // JOIN: a location revisited across several messages in the chat can have several
+      // location_swipe_images rows whose swipe_id all satisfy the "chat's active swipe" subquery
+      // (one per message), so an unbounded join would duplicate `l` and make the final
+      // `order by ... limit 1` pick among them arbitrarily. Capping to the most recently recorded
+      // association keeps this deterministic, same as the previous-scene lookup below.
       const [swipeRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string | null }>(
-        `select l.location_id, l.name, l.definition, l.image_url
-         from locations l
+        `select l.location_id, l.name, l.definition, coalesce(aic.image_url, c.image_url) as image_url
+          from locations l
+          left join lateral (
+            select a.combination_id
+            from location_swipe_images a
+            where a.location_id = l.location_id and a.chat_id = $2
+              and a.swipe_id in (select active_swipe_id from chat_messages where chat_id = $2 and active_swipe_id is not null)
+            order by a.image_generated_at desc nulls last
+            limit 1
+          ) a on true
+          left join location_image_combinations aic on aic.combination_id = a.combination_id
+          left join lateral (select c.image_url from location_image_combinations c
+            where c.location_id = l.location_id and c.time_of_day_key is not distinct from
+              case when $3 = 'true' then nullif(lower(trim(l.environment->>'time_of_day')), '') else null end limit 1) c on true
          where l.user_id = $1
            and (
              l.status is null or (
@@ -140,10 +166,10 @@ export async function resolveChatLocationImage(
            )
          order by (l.status = 'transient') desc, l.updated_at desc
          limit 1`,
-        [userId, chatId],
+        [userId, chatId, todVariants ? 'true' : 'false'],
       );
       current = swipeRow
-        ? { locationId: swipeRow.location_id, name: swipeRow.name, definition: swipeRow.definition, imageUrl: swipeRow.image_url }
+         ? { locationId: swipeRow.location_id, name: swipeRow.name, definition: swipeRow.definition, imageUrl: swipeRow.image_url }
         : null;
     }
 
@@ -153,12 +179,21 @@ export async function resolveChatLocationImage(
       // definition rides along (describer.md's "Definition:" half) so the canvas caption stays
       // complete when the UI is showing the previous background, mirroring the current path.
       const [prevRow] = await session.query<{ location_id: string; name: string; definition: string | null; image_url: string }>(
-        `select l.location_id, l.name, l.definition, l.image_url
-         from scenes s
-         join locations l on l.location_id = s.active_location_id and l.user_id = $1
-         where s.scene_id = $2 and l.image_url is not null
-         limit 1`,
-        [userId, chatState.previous_scene_id],
+        `select l.location_id, l.name, l.definition, coalesce(swi.image_url, c.image_url) as image_url
+          from scenes s
+          join locations l on l.location_id = s.active_location_id and l.user_id = $1
+          left join lateral (select coalesce(c.image_url, swi0.image_url) as image_url
+            from location_swipe_images swi0
+            left join location_image_combinations c on c.combination_id = swi0.combination_id
+            where swi0.location_id = l.location_id and swi0.chat_id = $3
+            order by swi0.image_generated_at desc nulls last limit 1) swi on true
+          left join lateral (select c0.image_url from location_image_combinations c0
+            where c0.location_id = l.location_id and c0.time_of_day_key is not distinct from
+              case when $4 = 'true' then nullif(lower(trim(l.environment->>'time_of_day')), '') else null end
+            limit 1) c on true
+          where s.scene_id = $2 and coalesce(swi.image_url, c.image_url) is not null
+          limit 1`,
+        [userId, chatState.previous_scene_id, chatId, todVariants ? 'true' : 'false'],
       );
       previous = prevRow ? { locationId: prevRow.location_id, name: prevRow.name, definition: prevRow.definition, imageUrl: prevRow.image_url } : null;
     }
@@ -173,7 +208,7 @@ export async function resolveChatLocationImage(
  *  repeat triggers no-ops whenever the image already exists or a render is already running. */
 export async function ensureActiveLocationImage(deps: HttpServerDeps, userId: string, chatId: string): Promise<void> {
   try {
-    const state = await resolveChatLocationImage(deps.db, userId, chatId);
+    const state = await resolveChatLocationImage(deps.db, userId, chatId, deps.settings);
     if (state.current && !state.current.imageUrl) {
       fireLocationImageGeneration(deps, userId, chatId, state.current.locationId);
     }
@@ -196,12 +231,15 @@ export async function handleLocationImageBroken(_req: IncomingMessage, res: Serv
     return;
   }
   const locationId = decodeURIComponent(segments[0]!);
+  const imageUrl = url.searchParams.get('imageUrl');
   await deps.db.withUserScope(userId, async (session) => {
-    await session.query('update locations set image_url = null where location_id = $1 and user_id = $2', [locationId, userId]);
-    // endpoint.md §5.1.8: a per-swipe association must not resurrect the expired link on a
-    // cycle-back — clear its URL too. The association row stays (the location identity is still
-    // real); the next pass re-renders and re-records it.
-    await session.query('update location_swipe_images set image_url = null where location_id = $1', [locationId]);
+    if (imageUrl) {
+      await session.query('delete from location_image_combinations where location_id = $1 and image_url = $2', [locationId, imageUrl]);
+      await session.query('update locations set image_url = null where location_id = $1 and user_id = $2 and image_url = $3', [locationId, userId, imageUrl]);
+    } else {
+      await session.query('delete from location_image_combinations where location_id = $1', [locationId]);
+      await session.query('update locations set image_url = null where location_id = $1 and user_id = $2', [locationId, userId]);
+    }
   });
   log.info('location image cleared after a client-side load failure (endpoint.md §5.2)', { locationId });
   sendJson(res, 200, { cleared: true });

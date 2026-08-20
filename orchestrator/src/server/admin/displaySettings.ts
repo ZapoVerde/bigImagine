@@ -45,6 +45,7 @@ import type { OrchestratorSettingsStore, SettingName } from '../../io/orchestrat
 // unsaved light-theme install keeps its own colors until the first save.
 export interface ChatBackgroundSettings {
   parallaxEnabled: boolean;
+  todVariantsEnabled: boolean;
   /** 0..1 — the veil's strength over the location background. Default 0.5, the pre-0073
    *  resting bg dimming, now a real layer so the image itself stays at full opacity. */
   overlayOpacity: number;
@@ -61,6 +62,7 @@ export interface ChatBackgroundSettings {
 /** A partial update: every field optional, at least one present (enforced by the parser). */
 export interface ChatBackgroundSettingsPatch {
   parallaxEnabled?: boolean;
+  todVariantsEnabled?: boolean;
   overlayOpacity?: number;
   overlayShade?: string;
   bubbleOpacity?: number;
@@ -86,8 +88,9 @@ function parseClampedOpacity(raw: string | undefined, fallback: number): number 
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
 export async function getChatBackgroundSettings(store: OrchestratorSettingsStore): Promise<ChatBackgroundSettings> {
-  const [parallax, overlayOpacity, overlayShade, bubbleOpacity, bubbleUserShade, bubbleAssistantShade] = await Promise.all([
+  const [parallax, todVariants, overlayOpacity, overlayShade, bubbleOpacity, bubbleUserShade, bubbleAssistantShade] = await Promise.all([
     store.get('chat_background_parallax'),
+    store.get('background_tod_variants_enabled'),
     store.get('chat_background_overlay_opacity'),
     store.get('chat_background_overlay_shade'),
     store.get('chat_background_bubble_opacity'),
@@ -96,6 +99,7 @@ export async function getChatBackgroundSettings(store: OrchestratorSettingsStore
   ]);
   return {
     parallaxEnabled: parallax === 'true',
+    todVariantsEnabled: todVariants === 'true',
     overlayOpacity: parseClampedOpacity(overlayOpacity, CHAT_BG_DEFAULTS.overlayOpacity),
     overlayShade: overlayShade ?? CHAT_BG_DEFAULTS.overlayShade,
     bubbleOpacity: parseClampedOpacity(bubbleOpacity, CHAT_BG_DEFAULTS.bubbleOpacity),
@@ -108,6 +112,7 @@ export function parseSetChatBackgroundSettingsBody(raw: unknown): ChatBackground
   if (typeof raw !== 'object' || raw === null) return undefined;
   const {
     parallaxEnabled,
+    todVariantsEnabled,
     overlayOpacity,
     overlayShade,
     bubbleOpacity,
@@ -116,6 +121,7 @@ export function parseSetChatBackgroundSettingsBody(raw: unknown): ChatBackground
   } = raw as Record<string, unknown>;
   const isBoundedOpacity = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
   if (parallaxEnabled !== undefined && typeof parallaxEnabled !== 'boolean') return undefined;
+  if (todVariantsEnabled !== undefined && typeof todVariantsEnabled !== 'boolean') return undefined;
   if (overlayOpacity !== undefined && !isBoundedOpacity(overlayOpacity)) return undefined;
   if (bubbleOpacity !== undefined && !isBoundedOpacity(bubbleOpacity)) return undefined;
   for (const shade of [overlayShade, bubbleUserShade, bubbleAssistantShade]) {
@@ -123,6 +129,7 @@ export function parseSetChatBackgroundSettingsBody(raw: unknown): ChatBackground
   }
   if (
     parallaxEnabled === undefined &&
+    todVariantsEnabled === undefined &&
     overlayOpacity === undefined &&
     overlayShade === undefined &&
     bubbleOpacity === undefined &&
@@ -133,6 +140,7 @@ export function parseSetChatBackgroundSettingsBody(raw: unknown): ChatBackground
   }
   return {
     parallaxEnabled: typeof parallaxEnabled === 'boolean' ? parallaxEnabled : undefined,
+    todVariantsEnabled: typeof todVariantsEnabled === 'boolean' ? todVariantsEnabled : undefined,
     overlayOpacity: isBoundedOpacity(overlayOpacity) ? overlayOpacity : undefined,
     overlayShade: typeof overlayShade === 'string' && HEX_COLOR_RE.test(overlayShade) ? overlayShade : undefined,
     bubbleOpacity: isBoundedOpacity(bubbleOpacity) ? bubbleOpacity : undefined,
@@ -145,6 +153,7 @@ export function parseSetChatBackgroundSettingsBody(raw: unknown): ChatBackground
 export async function setChatBackgroundSettings(store: OrchestratorSettingsStore, patch: ChatBackgroundSettingsPatch): Promise<void> {
   const writes: Array<[SettingName, string]> = [];
   if (patch.parallaxEnabled !== undefined) writes.push(['chat_background_parallax', patch.parallaxEnabled ? 'true' : 'false']);
+  if (patch.todVariantsEnabled !== undefined) writes.push(['background_tod_variants_enabled', patch.todVariantsEnabled ? 'true' : 'false']);
   if (patch.overlayOpacity !== undefined) writes.push(['chat_background_overlay_opacity', String(patch.overlayOpacity)]);
   if (patch.overlayShade !== undefined) writes.push(['chat_background_overlay_shade', patch.overlayShade]);
   if (patch.bubbleOpacity !== undefined) writes.push(['chat_background_bubble_opacity', String(patch.bubbleOpacity)]);

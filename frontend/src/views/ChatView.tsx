@@ -2155,7 +2155,7 @@ export default function ChatView({
               alt=""
               aria-hidden="true"
               onError={() => {
-                reportBrokenLocationImage(locationImage?.locationId ?? '', apiKey).catch(() => {});
+                reportBrokenLocationImage(locationImage?.locationId ?? '', apiKey, locationImage?.imageUrl).catch(() => {});
                 setLocationImage(null);
               }}
             />
