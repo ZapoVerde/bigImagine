@@ -1,7 +1,7 @@
 /**
  * @file orchestrator/src/io/chatMemory/curatePeople.ts
- * @stamp 2026-08-17
- * @architectural-role IO Wrapper — forced-schema LLM call
+ * @stamp 2026-08-20
+ * @architectural-role IO Wrapper — plain-text LLM call
  * @description
  * The 'rp'-kind sync lane's periodic person curator: maintains living, seven-section records for
  * every named person against the sync window's transcript — ported near-verbatim from
@@ -11,26 +11,29 @@
  * is 'person' — curateWorldMemory.ts explicitly refuses to touch it, same split CNZ enforces via its
  * own two dedicated prompts.
  *
- * Two adaptations from the CNZ source, both intentional and both matching curateWorldMemory.ts's own:
+ * Three adaptations from the CNZ source, all intentional and all matching the transport the
+ * earlier chat-memory chunks set (classifier, bridge, world curator):
  *  - The "Keys:" keyword-list instruction is dropped — docs/spec.md's vector recall replaces
  *    keyword-lorebook matching outright, so there is nothing that would ever read a generated key.
- *  - The raw-markdown "### OUTPUT FORMAT" section is replaced by a forced tool call
- *    (curate_people). Appearance is its own structured `appearance` parameter on the call —
- *    split out of `content` because Portrait Studio's from-character seeding reads exactly the
- *    physical part (docs/plans/character-appearance-field-plan.md), and its section rule comes
- *    from the shared APPEARANCE_SECTION_RULE constant (personCuratorAppearance.ts) so this
- *    curator and the mint-time describer (describeCharacter.ts) can never drift apart.
- *    Personality/Core Misread stay free-text prose inside `content` exactly as CNZ's own card
- *    shows them — this port does not split the remaining sections into separate structured
- *    fields (same "flat text block now, structure later if ever needed" precedent
- *    bridgeChatMemory.ts's own SCENE/EVENTS blocks set; nothing downstream needs Personality or
- *    Goals in isolation the way Portrait Studio needs Appearance). CNZ's own
+ *  - The raw-markdown "### OUTPUT FORMAT" section becomes this chunk's own plain-text OUTPUT FORMAT
+ *    (docs/plans/chat-memory-people-curator-plan.md) instead of a forced tool call: ordinary text
+ *    completion out, strict local parse (parsePeopleMemoryOutput.ts) back into the existing
+ *    PeopleCuratorEntryDraft shape. The model emits the natural person card it already understands —
+ *    ## Appearance as its own card section, Personality/Core Misread free-text prose — and the
+ *    parser deterministically carves ## Appearance back out into BI's dedicated `appearance` field.
+ *    Nothing else splits: the remaining five sections stay one markdown `content` block, exactly as
+ *    CNZ's own card shows them, because nothing downstream needs Personality or Goals in isolation
+ *    the way Portrait Studio needs Appearance (its section rule comes from the shared
+ *    APPEARANCE_SECTION_RULE constant, personCuratorAppearance.ts, so this curator and the
+ *    mint-time describer describeCharacter.ts can never drift apart). CNZ's own
  *    `**dup** — duplicate of [Primary Name]` free-text convention becomes a first-class
- *    'duplicate' action with a duplicate_of field, same structural swap curateWorldMemory.ts
- *    makes.
+ *    'duplicate' action with a duplicate_of field, same structural swap curateWorldMemory.ts makes.
  *
  * {{user}} is resolved via util/interpolateMacros.ts (the household's persona_name), same live-macro
- * shape bridgeChatMemory.ts already uses — kept literal in the ported prompt text below.
+ * shape bridgeChatMemory.ts already uses — kept literal in the ported prompt text below. The
+ * relationship heading therefore reaches the model as `## Relationship with {{user}}` and may come
+ * back as `## Relationship with <resolved name>`; the parser recognizes it structurally, not by the
+ * user's actual name.
  *
  * @api-declaration
  * DEFAULT_PEOPLE_CURATOR_PROMPT
@@ -44,9 +47,10 @@
  *     external_io:     [LLM, via the LlmProvider passed in]
  */
 
-import type { LlmProvider, ToolDefinition } from '../llm/types.js';
+import type { LlmProvider } from '../llm/types.js';
 import { interpolateMacros } from '../../util/interpolateMacros.js';
 import { APPEARANCE_SECTION_RULE } from '../../orchestrator/personCuratorAppearance.js';
+import { parsePeopleMemoryOutput } from './parsePeopleMemoryOutput.js';
 
 export const DEFAULT_PEOPLE_CURATOR_PROMPT = `**[SYSTEM: TASK — PEOPLE CURATOR]**
 You will receive a transcript of recent story events and the current person entries for this story. The primary character is {{user}}.
@@ -140,59 +144,67 @@ Rules:
 - Only update on clear, meaningful change — do not issue micro-adjustments or speculative updates.
 - Reproduce ## Appearance, ## Personality, ## Core Misread exactly. Never alter them.
 - Write in third-person present tense.
-- If no changes are needed, propose no entries at all.`;
+- If no changes are needed, propose no entries at all.
 
-const curatePeopleTool: ToolDefinition = {
-  name: 'curate_people',
-  description:
-    "Record this sync window's person entry updates, new entries, and duplicate flags, per the people curator task above. " +
-    'entries is empty when nothing in the transcript warrants a change.',
-  parameters: {
-    type: 'object',
-    properties: {
-      entries: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            action: {
-              type: 'string',
-              enum: ['update', 'new', 'duplicate'],
-              description:
-                "'update' rewrites an existing person entry's full content, 'new' creates one, 'duplicate' flags this entry as redundant with another (existing) entry.",
-            },
-            name: {
-              type: 'string',
-              description:
-                'For update/duplicate: the exact existing two-word entry name to match. For new: the two-word entry name to create.',
-            },
-            content: {
-              type: 'string',
-              description:
-                'Full replacement or new content: the five sections (Personality, Core Misread, Connections, ' +
-                'Relationship with {{user}}, Goals) as markdown, per the section rules above. Appearance is a separate ' +
-                'field — see appearance below. Required for update/new; omit for duplicate.',
-            },
-            appearance: {
-              type: 'string',
-              description:
-                'The physical-appearance treatment for this entry, per the ## Appearance section rule above. ' +
-                'Required alongside content for update/new; omit for duplicate.',
-            },
-            duplicate_of: {
-              type: 'string',
-              description: "For 'duplicate' only: the exact two-word name of the primary entry this one duplicates.",
-            },
-          },
-          required: ['action', 'name'],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ['entries'],
-    additionalProperties: false,
-  },
-};
+OUTPUT FORMAT — follow exactly.
+
+For a new person:
+
+**NEW: [Two Word Name]**
+
+## Appearance
+[Physical appearance treatment.]
+
+## Personality
+[Existing required format.]
+
+## Core Misread
+[Existing required format.]
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+...
+
+## Relationship with {{user}}
+[Persistent relationship state.]
+
+## Goals
+Major: ...
+Minor: ...
+Minor: ...
+Minor: ...
+
+For an existing person that needs changing:
+
+**UPDATE: [Exact Existing Two Word Name]**
+
+## Appearance
+[Reproduce exactly.]
+
+## Personality
+[Reproduce exactly.]
+
+## Core Misread
+[Reproduce exactly.]
+
+## Connections
+...
+
+## Relationship with {{user}}
+...
+
+## Goals
+...
+
+For a redundant person entry:
+
+**DUPLICATE: [Exact Redundant Two Word Name]**
+Duplicate of: [Exact Primary Two Word Name]
+
+If nothing needs changing, output exactly:
+
+NO CHANGES NEEDED`;
 
 export interface PeopleCuratorEntryDraft {
   action: 'update' | 'new' | 'duplicate';
@@ -200,29 +212,6 @@ export interface PeopleCuratorEntryDraft {
   content?: string;
   appearance?: string;
   duplicateOf?: string;
-}
-
-interface PeopleCuratorToolResponse {
-  entries: {
-    action: 'update' | 'new' | 'duplicate';
-    name: string;
-    content?: string;
-    appearance?: string;
-    duplicate_of?: string;
-  }[];
-}
-
-function isPeopleCuratorResponse(value: unknown): value is PeopleCuratorToolResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (!Array.isArray(v.entries)) return false;
-  return v.entries.every((e) => {
-    if (typeof e !== 'object' || e === null) return false;
-    const entry = e as Record<string, unknown>;
-    if (typeof entry.name !== 'string') return false;
-    if (entry.action !== 'update' && entry.action !== 'new' && entry.action !== 'duplicate') return false;
-    return true;
-  });
 }
 
 export async function curatePeople(
@@ -237,30 +226,15 @@ export async function curatePeople(
 
   const userMessage =
     `CURRENT PERSON ENTRIES:\n${existingEntries || '(none yet)'}\n\n` +
-    `TRANSCRIPT:\n${transcript}\n\n` +
-    'Answer by calling curate_people with any updates, new entries, and duplicate flags.';
+    `TRANSCRIPT:\n${transcript}\n\n`;
 
   const turn = await llm.complete(
     [
       { role: 'system', content: instructions },
       { role: 'user', content: userMessage },
     ],
-    [curatePeopleTool],
-    { forceTool: 'curate_people' },
+    [],
   );
 
-  const call = turn.toolCalls.find((c) => c.name === 'curate_people');
-  if (!call) {
-    throw new Error('curatePeople: model did not call curate_people despite forceTool');
-  }
-  if (!isPeopleCuratorResponse(call.arguments)) {
-    throw new Error(`curatePeople: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
-  }
-  return call.arguments.entries.map((e) => ({
-    action: e.action,
-    name: e.name,
-    content: e.content,
-    appearance: e.appearance,
-    duplicateOf: e.duplicate_of,
-  }));
+  return parsePeopleMemoryOutput(turn.message.content);
 }

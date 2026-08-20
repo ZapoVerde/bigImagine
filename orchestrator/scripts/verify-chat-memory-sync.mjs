@@ -561,12 +561,13 @@ function installSyncFetchMock(backend) {
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
       if (backend.gateHook) await backend.gateHook(forceTool);
       // Plain-text completions (chat-memory-structured-output-plan + chat-memory-world-curator-
-      // plan: no forced tool — raw text out, parsed locally). THREE tool-free callers now share the
-      // same connection within one tick — the chunk classifier, the rp bridge, and the rp world
-      // curator — so the backend routes on a distinguishing string in the system prompt (the
-      // bridge's chronicler header, the curator's lorebook-curator header) rather than on
-      // tool_choice's absence alone; routing on absence would silently serve the classifier's
-      // canned summary to the others and surface as a confusing parser failure.
+      // plan + chat-memory-people-curator-plan: no forced tool — raw text out, parsed locally).
+      // FOUR tool-free callers now share the same connection within one tick — the chunk
+      // classifier, the rp bridge, the rp world curator, and the rp people curator — so the backend
+      // routes on a distinguishing string in the system prompt (the bridge's chronicler header, the
+      // world curator's lorebook-curator header, the people curator's people-curator header) rather
+      // than on tool_choice's absence alone; routing on absence would silently serve the
+      // classifier's canned summary to the others and surface as a confusing parser failure.
       if (!forceTool) {
         const sys = body.messages.find((m) => m.role === 'system')?.content ?? '';
         const content = body.messages.find((m) => m.role === 'user').content;
@@ -599,6 +600,56 @@ Category: concept
 Duplicate of: Primary Thing`,
           );
         }
+        if (sys.includes('PEOPLE CURATOR')) {
+          return oaiTextResponse(
+            backend.curatePeopleOverride ??
+              `**UPDATE: Existing Person**
+## Appearance
+A weathered face under a heavy brow.
+
+## Personality
+Loyal ↔ brusque: warm beneath the gruffness.
+
+## Core Misread
+He believes debts are only ever paid in blood.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+He trusts the protagonist now.
+
+## Goals
+Major: Hold the gate.
+Minor: Mend his shield.
+Minor: Repay the carpenter.
+Minor: Find his brother.
+
+**NEW: Elena Ashford**
+## Appearance
+Tall, with a lantern jaw and steel-grey eyes.
+
+## Personality
+Resolute ↔ guarded: steel wrapped in courtesy.
+
+## Core Misread
+She mistakes silence for indifference.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+She has begun to trust the protagonist's word.
+
+## Goals
+Major: Hold the eastern gate.
+Minor: Recover the lost ledger.
+Minor: Secure the supply road.
+Minor: Find her brother.`,
+          );
+        }
         return oaiTextResponse(`Summary[${content}]`);
       }
       switch (forceTool) {
@@ -606,17 +657,6 @@ Duplicate of: Primary Thing`,
           return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
         case 'classify_household_memory':
           return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
-        case 'curate_people':
-          return oaiToolResponse('curate_people', backend.curatePeopleOverride ?? {
-            entries: [
-              {
-                action: 'new',
-                name: 'Elena Ashford',
-                content: '**Personality:** resolute.\n**Goals:** hold the gate.',
-                appearance: 'Tall, with a lantern jaw and steel-grey eyes.',
-              },
-            ],
-          });
       }
       throw new Error(`fake sync HTTP backend got an unexpected forceTool: ${forceTool}`);
     }
@@ -717,6 +757,17 @@ function isWorldCuratorCall(c) {
   );
 }
 
+// The rp people curator is a fourth tool-free completion (chat-memory-people-curator-plan.md),
+// keyed on its own people-curator header — distinct from the bridge, world curator, and
+// classifier. The same two call-count assertions that already exclude bridge and world must
+// exclude people too, or they silently go wrong once people joins the tool-free pool.
+function isPeopleCuratorCall(c) {
+  return (
+    c.options.forceTool === undefined &&
+    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('PEOPLE CURATOR')
+  );
+}
+
 function bridgeCalls() {
   return llm.calls.filter(isBridgeCall);
 }
@@ -725,8 +776,14 @@ function worldCuratorCalls() {
   return llm.calls.filter(isWorldCuratorCall);
 }
 
+function peopleCuratorCalls() {
+  return llm.calls.filter(isPeopleCuratorCall);
+}
+
 function summarizeCalls() {
-  return llm.calls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c));
+  return llm.calls.filter(
+    (c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c),
+  );
 }
 
 // --- Tick 1: 12 fresh messages, well past the 8-message due threshold ---
@@ -1079,10 +1136,11 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     "the persisted inspection prompt still renders the system prompt, transcript, previous output, and the output-format block (only the forced-tool sentence is gone)",
   );
 
-  // chat-memory-structured-output-plan Chunk 2 + chat-memory-world-curator-plan.md: the bridge and
-  // the world curator are now plain-text completions parsed locally, so their requests carry no
-  // tools and no forceTool — and the fake backend discriminates them from the chunk classifier's
-  // tool-free call within the same 'rp' tick via their distinct system-prompt headers.
+  // chat-memory-structured-output-plan Chunk 2 + chat-memory-world-curator-plan.md +
+  // chat-memory-people-curator-plan.md: the bridge, world curator, and people curator are now
+  // plain-text completions parsed locally, so their requests carry no tools and no forceTool — and
+  // the fake backend discriminates all three from the chunk classifier's tool-free call within the
+  // same 'rp' tick via their distinct system-prompt headers.
   assert(
     bridgeCalls().length === 1,
     'exactly one bridge call this tick — the fake backend routed the bridge to its own canned text output, not the classifier summary',
@@ -1099,6 +1157,30 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     worldCuratorCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
     'each world-curator request carries no tools array and no forceTool — ordinary completion transport',
   );
+  assert(
+    peopleCuratorCalls().length === 1,
+    'exactly one people-curator call this tick, routed on its own people-curator header — before the generic classifier fallthrough',
+  );
+  assert(
+    peopleCuratorCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'each people-curator request carries no tools array and no forceTool — ordinary completion transport',
+  );
+  const peoplePrompt = peopleCuratorCalls()[0].messages.find((m) => m.role === 'system')?.content;
+  assert(
+    peoplePrompt?.includes('## Relationship with the protagonist'),
+    '{{user}} is still interpolated into the people-curator prompt before it is sent (resolved to the persona name)',
+  );
+  {
+    const toolFree = llm.calls.filter((c) => c.options.forceTool === undefined);
+    const bridged = toolFree.filter(isBridgeCall);
+    const worlded = toolFree.filter(isWorldCuratorCall);
+    const people = toolFree.filter(isPeopleCuratorCall);
+    const classified = toolFree.filter((c) => !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c));
+    assert(
+      bridged.length + worlded.length + people.length + classified.length === toolFree.length,
+      'the four tool-free callers partition every tool-free request with no overlap (bridge / world curator / people curator / classifier)',
+    );
+  }
 
   const rpEntries = [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === RP_CHAT_ID);
   assert(rpEntries.length === 2, 'the bridge writes its SCENE and EVENTS entries');
@@ -1120,7 +1202,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   // their canon_facts rows (proposed, keyed by entity_key); the DUPLICATE names an entry that does
   // not exist among existingRows (this is a first sync), so its category lookup misses and it is
   // skipped per-entry downstream — structurally well-formed, but no existing entry to flag.
-  assert(rpFacts.length === 4, 'the tick proposes one plot, two world (update+new), and one people fact');
+  assert(rpFacts.length === 5, 'the tick proposes one plot, two world (update+new), and two people (update+new) facts');
   assert(
     rpFacts.every((f) => f.sync_id === rpSyncId),
     'every canon-fact proposal the sync wrote carries its sync_id — plot, lorebook, and people lanes alike',
@@ -1131,7 +1213,17 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   );
   assert(
     rpFacts.some((f) => f.category === 'person' && f.entity_key === 'person:elena-ashford'),
-    "the people curator's proposal lands with its entity_key intact",
+    "the people curator's NEW proposal lands with its entity_key intact",
+  );
+  const peopleUpdate = rpFacts.find((f) => f.entity_key === 'person:existing-person');
+  assert(
+    peopleUpdate?.category === 'person' && peopleUpdate?.summary.includes('Hold the gate'),
+    "the people curator's UPDATE maps to the same proposed person/canon path, with the card's content intact",
+  );
+  const elenaFact = rpFacts.find((f) => f.entity_key === 'person:elena-ashford');
+  assert(
+    elenaFact?.summary.startsWith('## Personality') && !elenaFact.summary.includes('## Appearance'),
+    "the remaining person-card markdown lands in the fact's summary (content) starting at ## Personality, never ## Appearance",
   );
   const worldUpdate = rpFacts.find((f) => f.entity_key === 'place:existing-place');
   assert(worldUpdate?.category === 'place' && worldUpdate?.summary === '[replacement text]', "the world UPDATE maps to the same existing-entry update path, with 'place' surviving unchanged");
@@ -1147,8 +1239,8 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     "the rp tick's people-curator appearance writes back onto the matching appearance-blank characters row",
   );
   assert(
-    pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 7,
-    'an rp sync reports 7 entries updated (scene + events + plot + 3 world entries + people)',
+    pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 8,
+    'an rp sync reports 8 entries updated (scene + events + plot + 3 world entries + 2 people)',
   );
 }
 
@@ -1183,6 +1275,58 @@ Person is not a valid world category.`;
   assert(status?.last_step === 'curate_world_memory', 'the status row names curate_world_memory as the exact failing step');
 }
 
+// --- chat-memory-people-curator-plan.md §12/§17: a malformed people-curator response fails the
+// whole sync stage the same way. The curator's plain text is parsed strictly — one bad block
+// throws before upsert_people ever runs, so zero person results from that pass are committed (not
+// even the well-formed NEW preceding the bad block) and the sync records the failure at the exact
+// curate_people step. The boundary does not advance: the tick recorded an error and no successful
+// commit — last_success_at stays null (the fake pool's ROLLBACK is a no-op, so the pre-people rows
+// the failing transaction wrote — chunks, sync point, bridge entries — cannot be asserted away
+// here, the same limitation the world FAIL test above documents). ---
+{
+  const BAD_PEOPLE_CHAT_ID = randomUUID();
+  pool.chatSessions.set(BAD_PEOPLE_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  seedMessages(BAD_PEOPLE_CHAT_ID, 'BADPEOPLE', 12);
+
+  backend.curatePeopleOverride = `**NEW: Good Person**
+## Appearance
+Fine.
+
+## Personality
+Fine.
+
+## Core Misread
+Fine.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+Fine.
+
+## Goals
+Major: Fine.
+Minor: Fine.
+Minor: Fine.
+Minor: Fine.
+
+**UPDATE: Broken Person**
+## Personality
+Missing every other section.`;
+  await runChatMemorySyncTick(deps);
+  backend.curatePeopleOverride = null;
+
+  assert(
+    pool.canonFacts.filter((f) => f.chat_id === BAD_PEOPLE_CHAT_ID && f.category === 'person').length === 0,
+    'on parser failure no people-curator results from that pass are committed — not even the well-formed NEW before the bad block',
+  );
+  const status = pool.chatMemorySyncStatus.get(BAD_PEOPLE_CHAT_ID);
+  assert(status?.last_status === 'error', 'a malformed people-curator response records the sync as error');
+  assert(status?.last_step === 'curate_people', 'the status row names curate_people as the exact failing step');
+  assert(status?.last_success_at == null, 'the failing tick never advanced the closed sync boundary — no successful commit was recorded');
+}
+
 // --- character-appearance-field-plan.md: the upsert_people appearance write-back's edge cases.
 // A curator entry whose exact case-insensitive name matches no characters row still inserts its
 // canon_facts row (the write-back never blocks or fails the tick); a matching row whose
@@ -1199,13 +1343,74 @@ Person is not a valid world category.`;
     { character_id: randomUUID(), user_id: USER, name: 'Garrick Stone', appearance: 'A heavyset old soldier.', status: 'transient' },
   );
 
-  backend.curatePeopleOverride = {
-    entries: [
-      { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, with ash-blonde hair.' },
-      { action: 'new', name: 'Unknown Stranger', content: '**Personality:** elusive.', appearance: 'A hooded figure.' },
-      { action: 'new', name: 'Garrick Stone', content: '**Personality:** gruff.', appearance: 'Fresh description that must NOT land.' },
-    ],
-  };
+  backend.curatePeopleOverride = `**NEW: Mira Vale**
+## Appearance
+Slender, with ash-blonde hair.
+
+## Personality
+Wary.
+
+## Core Misread
+She doubts every kindness offered.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+She is measuring the protagonist still.
+
+## Goals
+Major: Guard her caravan.
+Minor: Repay the innkeeper.
+Minor: Recover her coin.
+Minor: Cross the high pass.
+
+**NEW: Unknown Stranger**
+## Appearance
+A hooded figure.
+
+## Personality
+Elusive.
+
+## Core Misread
+They mistake attention for threat.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+They are watching the protagonist warily.
+
+## Goals
+Major: Reach the coast.
+Minor: Avoid the patrols.
+Minor: Find a guide.
+Minor: Burn old letters.
+
+**NEW: Garrick Stone**
+## Appearance
+Fresh description that must NOT land.
+
+## Personality
+Gruff.
+
+## Core Misread
+He thinks kindness is always a trap.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with the protagonist
+He owes the protagonist nothing yet.
+
+## Goals
+Major: Keep the forge running.
+Minor: Settle the debt.
+Minor: Mend the plough.
+Minor: Train his apprentice.`;
 
   const peopleFactsBefore = pool.canonFacts.filter((f) => f.chat_id === APPEAR_CHAT_ID && f.category === 'person').length;
   await runChatMemorySyncTick(deps);
@@ -1229,33 +1434,65 @@ Person is not a valid world category.`;
   );
 }
 
-// --- curatePeople() return shape: the tool call's appearance parameter round-trips through the
-// return value distinctly from content; a 'duplicate' action entry carries neither. ---
+// --- chat-memory-people-curator-plan.md: curatePeople() is an ordinary text completion — the
+// request carries no tools and no forceTool, {{user}} is still interpolated into the sent prompt,
+// and the plain assistant text parses back into the PeopleCuratorEntryDraft shape with appearance
+// carried distinctly from content; a 'duplicate' action entry carries neither. ---
 {
   const { curatePeople } = await import('../dist/io/chatMemory/curatePeople.js');
-  const entriesReply = {
-    message: { role: 'assistant', content: '' },
-    toolCalls: [
-      {
-        id: randomUUID(),
-        name: 'curate_people',
-        arguments: {
-          entries: [
-            { action: 'new', name: 'Mira Vale', content: '**Personality:** wary.', appearance: 'Slender, ash-blonde.' },
-            { action: 'duplicate', name: 'Mira V.', duplicate_of: 'Mira Vale' },
-          ],
-        },
+
+  let capturedTools;
+  let capturedOptions;
+  let capturedMessages;
+  const drafts = await curatePeople(
+    {
+      async complete(messages, tools, options) {
+        capturedMessages = messages;
+        capturedTools = tools;
+        capturedOptions = options;
+        return {
+          message: {
+            role: 'assistant',
+            content:
+              `**NEW: Mira Vale**
+## Appearance
+Slender, ash-blonde.
+
+## Personality
+Wary.
+
+## Core Misread
+She doubts every kindness.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with Elara
+She is testing the trust between them.
+
+## Goals
+Major: Guard her caravan.
+Minor: Repay the innkeeper.
+Minor: Recover her coin.
+Minor: Cross the high pass.
+
+**DUPLICATE: Mira V.**
+Duplicate of: Mira Vale`,
+          },
+        };
       },
-    ],
-  };
-  const stubLlm = {
-    async complete() {
-      return entriesReply;
     },
-  };
-  const drafts = await curatePeople(stubLlm, 'TRANSCRIPT', '', 'Elara');
+    'TRANSCRIPT',
+    '',
+    'Elara',
+  );
+  assert(Array.isArray(capturedTools) && capturedTools.length === 0, 'curatePeople passes an empty tools array — no forced tool transport');
+  assert(capturedOptions?.forceTool === undefined, 'curatePeople sends no forceTool');
+  const sentPrompt = capturedMessages.find((m) => m.role === 'system')?.content;
+  assert(sentPrompt?.includes('## Relationship with Elara'), '{{user}} is interpolated into the people-curator prompt before the model sees it');
   const newEntry = drafts.find((d) => d.name === 'Mira Vale');
-  assert(newEntry?.content === '**Personality:** wary.' && newEntry?.appearance === 'Slender, ash-blonde.', "curatePeople round-trips appearance distinctly from content");
+  assert(newEntry?.appearance === 'Slender, ash-blonde.' && newEntry?.content.startsWith('## Personality'), "curatePeople round-trips appearance distinctly from content");
   const dupEntry = drafts.find((d) => d.action === 'duplicate');
   assert(dupEntry?.appearance === undefined && dupEntry?.content === undefined, "a 'duplicate' action entry has no appearance value (same as content today)");
 }
@@ -1342,7 +1579,7 @@ Person is not a valid world category.`;
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   assert(
-    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c)).length === 2,
+    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c)).length === 2,
     'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
   );
   assert(
@@ -1354,8 +1591,8 @@ Person is not a valid world category.`;
     'the world curator also rides the chat_memory_profile connection, alongside the bridge',
   );
   assert(
-    namedCalls.some((c) => c.options.forceTool === 'curate_people'),
-    'the people curator also rides the chat_memory_profile connection',
+    namedCalls.some((c) => isPeopleCuratorCall(c) && c.url === `${NAMED_FAKE_BASE}/chat/completions`),
+    'the people curator also rides the chat_memory_profile connection, alongside the bridge and world curator',
   );
   assert(
     !namedCalls.some((c) => c.options.forceTool === 'distill_chat_memory'),

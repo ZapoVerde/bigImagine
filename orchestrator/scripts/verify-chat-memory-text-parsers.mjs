@@ -7,6 +7,7 @@
 
 import { parseBridgeOutput } from '../dist/io/chatMemory/parseBridgeOutput.js';
 import { parseWorldMemoryOutput } from '../dist/io/chatMemory/parseWorldMemoryOutput.js';
+import { parsePeopleMemoryOutput } from '../dist/io/chatMemory/parsePeopleMemoryOutput.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -486,6 +487,418 @@ worldParseFails(
 {
   const r = worldParseOk('**UPDATE: The Wandering Pavilion**\nCategory: place\nLine one.\nLine two.');
   assert(r[0].content === 'Line one.\nLine two.', 'multi-line content with no internal blank line is not mistaken for stray trailing text');
+}
+
+// =============================================================================
+// People-curator parser (chat-memory-people-curator-plan.md): parsePeopleMemoryOutput
+// turns the curator's plain-text OUTPUT FORMAT back into the PeopleCuratorEntryDraft
+// shape the old forced curate_people tool call produced. ## Appearance is carved out
+// of the card into its own field; the remaining five sections stay together, headings
+// included, as one markdown content block.
+// =============================================================================
+
+function peopleOutput({ cards = [], userName = 'Jeremy' } = {}) {
+  const blocks = [];
+  for (const c of cards) {
+    const lines = [`**${c.action}: ${c.name}**`];
+    if (c.duplicateOf !== undefined) {
+      lines.push(`Duplicate of: ${c.duplicateOf}`);
+      blocks.push(lines.join('\n'));
+      continue;
+    }
+    const omit = new Set(c.omit ?? []);
+    if (!omit.has('appearance')) lines.push('## Appearance', c.appearance ?? 'A default appearance.');
+    if (!omit.has('personality')) lines.push('', '## Personality', c.personality ?? 'Resolute.');
+    if (!omit.has('coreMisread')) lines.push('', '## Core Misread', c.coreMisread ?? 'Misreads others.');
+    if (!omit.has('connections')) lines.push('', '## Connections', ...(c.connections ?? ['| Person | Relation | Tone |', '|--------|----------|------|']));
+    if (!omit.has('relationship')) lines.push('', `## Relationship with ${userName}`, c.relationship ?? 'Steadfast.');
+    if (!omit.has('goals')) lines.push('', '## Goals', ...(c.goals ?? ['Major: Guard the gate.', 'Minor: A.', 'Minor: B.', 'Minor: C.']));
+    blocks.push(lines.join('\n'));
+  }
+  return blocks.join('\n\n');
+}
+
+function peopleParseOk(raw) {
+  try {
+    return parsePeopleMemoryOutput(raw);
+  } catch (e) {
+    throw new Error(`expected parsePeopleMemoryOutput to succeed but it threw: ${e.message}\n--- raw ---\n${raw}`);
+  }
+}
+
+function peopleParseFails(raw, label) {
+  let threw = false;
+  try {
+    parsePeopleMemoryOutput(raw);
+  } catch {
+    threw = true;
+  }
+  assert(threw, label);
+}
+
+// --- 42. exact NO CHANGES NEEDED -> [] ---------------------------------------
+
+{
+  const r = peopleParseOk('NO CHANGES NEEDED');
+  assert(Array.isArray(r) && r.length === 0, 'the exact NO CHANGES NEEDED sentinel parses to an empty array');
+  assert(peopleParseOk('no changes needed').length === 0, 'the sentinel is case-insensitive-tolerant (but still the exact sentinel, not prose)');
+  peopleParseFails('There were no meaningful changes.', 'arbitrary prose is not accepted as a no-op — only the exact sentinel');
+}
+
+// --- 43. one NEW -> valid -----------------------------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }));
+  assert(r.length === 1 && r[0].action === 'new' && r[0].name === 'Guard Renn', 'one NEW block -> one new entry');
+  assert(r[0].appearance === 'A default appearance.', 'appearance is captured from the ## Appearance body');
+  assert(r[0].content.startsWith('## Personality'), 'content begins at ## Personality, never ## Appearance');
+}
+
+// --- 44. one UPDATE -> valid --------------------------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'UPDATE', name: 'Elena Valcieri' }] }));
+  assert(r.length === 1 && r[0].action === 'update' && r[0].name === 'Elena Valcieri', 'one UPDATE block -> one update entry');
+}
+
+// --- 45. one DUPLICATE -> valid -----------------------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'DUPLICATE', name: 'Elena Vale', duplicateOf: 'Elena Valcieri' }] }));
+  assert(
+    r.length === 1 && r[0].action === 'duplicate' && r[0].name === 'Elena Vale' && r[0].duplicateOf === 'Elena Valcieri' && r[0].content === undefined && r[0].appearance === undefined,
+    'one DUPLICATE block -> one duplicate entry carrying no content or appearance',
+  );
+}
+
+// --- 46. multiple people -> valid ---------------------------------------------
+
+{
+  const r = peopleParseOk(
+    peopleOutput({
+      cards: [
+        { action: 'NEW', name: 'Guard Renn' },
+        { action: 'NEW', name: 'Maid Rose' },
+      ],
+    }),
+  );
+  assert(r.length === 2 && r.every((e) => e.action === 'new'), 'multiple NEW blocks all parse, in order');
+  assert(r[1].name === 'Maid Rose', 'the second NEW block keeps its own name');
+}
+
+// --- 47. mixed NEW + UPDATE + DUPLICATE -> valid ------------------------------
+
+{
+  const r = peopleParseOk(
+    peopleOutput({
+      cards: [
+        { action: 'NEW', name: 'Guard Renn' },
+        { action: 'UPDATE', name: 'Elena Valcieri' },
+        { action: 'DUPLICATE', name: 'Elena Vale', duplicateOf: 'Elena Valcieri' },
+      ],
+    }),
+  );
+  assert(r.length === 3, 'a mixed response yields exactly three entries');
+  assert(r.map((e) => e.action).join(',') === 'new,update,duplicate', 'mixed blocks keep their action order');
+}
+
+// --- 48. CRLF -> valid --------------------------------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }).replace(/\n/g, '\r\n'));
+  assert(r.length === 1 && r[0].name === 'Guard Renn', 'CRLF line endings parse the same as LF');
+}
+
+// --- 49. enclosing markdown fence -> valid ------------------------------------
+
+{
+  const r = peopleParseOk('```\n' + peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }) + '\n```');
+  assert(r.length === 1 && r[0].name === 'Guard Renn', 'one enclosing markdown fence is tolerated and stripped');
+}
+
+// --- 50. surrounding whitespace -> valid --------------------------------------
+
+{
+  const r = peopleParseOk('\n\n  ' + peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }) + '\n\t  ');
+  assert(r.length === 1 && r[0].name === 'Guard Renn', 'leading/trailing whitespace is normalized away');
+}
+
+// --- 51. Appearance body extracted without heading ----------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', appearance: 'Heavy brows, scarred knuckles.' }] }));
+  assert(r[0].appearance === 'Heavy brows, scarred knuckles.', 'the ## Appearance body is stored body-only, with no heading wrapper');
+  assert(!r[0].appearance.includes('## Appearance'), 'appearance never contains the ## Appearance heading');
+}
+
+// --- 52. remaining content begins at ## Personality ---------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }));
+  assert(r[0].content.startsWith('## Personality'), 'content begins at the ## Personality heading — Appearance is excluded');
+}
+
+// --- 53. all remaining headings preserved -------------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }));
+  for (const heading of ['## Personality', '## Core Misread', '## Connections', '## Relationship with Jeremy', '## Goals']) {
+    assert(r[0].content.includes(heading), `content preserves the ${heading} heading`);
+  }
+  assert(!r[0].content.includes('## Appearance'), 'content never contains the ## Appearance heading');
+}
+
+// --- 54. relationship heading with an arbitrary interpolated username ---------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }], userName: 'Queen Aranea' }));
+  assert(
+    r[0].content.includes('## Relationship with Queen Aranea'),
+    'the relationship heading is recognized and preserved under any interpolated username, not just {{user}}',
+  );
+}
+
+// --- 55. missing Appearance -> fail -------------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['appearance'] }] }),
+  'a NEW block missing ## Appearance throws',
+);
+
+// --- 56. empty Appearance -> fail ---------------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', appearance: '   ' }] }),
+  'a NEW block with a whitespace-only ## Appearance body throws',
+);
+
+// --- 57. missing Personality -> fail ------------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['personality'] }] }),
+  'a NEW block missing ## Personality throws',
+);
+
+// --- 58. missing Core Misread -> fail -----------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['coreMisread'] }] }),
+  'a NEW block missing ## Core Misread throws',
+);
+
+// --- 59. missing Connections -> fail ------------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['connections'] }] }),
+  'a NEW block missing ## Connections throws',
+);
+
+// --- 60. missing Relationship -> fail -----------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['relationship'] }] }),
+  'a NEW block missing ## Relationship with ... throws',
+);
+
+// --- 61. missing Goals -> fail ------------------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', omit: ['goals'] }] }),
+  'a NEW block missing ## Goals throws',
+);
+
+// --- 62. sections out of order -> fail ----------------------------------------
+
+peopleParseFails(
+  `**NEW: Guard Renn**
+## Appearance
+Tall.
+
+## Core Misread
+Misreads others.
+
+## Personality
+Resolute.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with Jeremy
+Steadfast.
+
+## Goals
+Major: Guard the gate.
+Minor: A.
+Minor: B.
+Minor: C.`,
+  'sections presented out of order (Core Misread before Personality) throw',
+);
+
+// --- 63. duplicate section heading -> fail ------------------------------------
+
+peopleParseFails(
+  `**NEW: Guard Renn**
+## Appearance
+Tall.
+
+## Appearance
+Taller.
+
+## Personality
+Resolute.
+
+## Core Misread
+Misreads others.
+
+## Connections
+| Person | Relation | Tone |
+|--------|----------|------|
+
+## Relationship with Jeremy
+Steadfast.
+
+## Goals
+Major: Guard the gate.
+Minor: A.
+Minor: B.
+Minor: C.`,
+  'a repeated ## Appearance heading throws — exactly one of each section is required',
+);
+
+// --- 64. Connections header-only table -> valid -------------------------------
+
+{
+  const r = peopleParseOk(peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }));
+  assert(
+    r[0].content.includes('| Person | Relation | Tone |\n|--------|----------|------|'),
+    'a Connections table with a header and separator but no data rows is valid (no named connections yet)',
+  );
+}
+
+// --- 65. malformed Connections table -> fail ----------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', connections: ['| Person | Relation | Tone |'] }] }),
+  'a Connections table with no separator row throws',
+);
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', connections: ['| Who | What | Where |', '|----|------|-------|'] }] }),
+  'a Connections table whose header lacks Person/Relation/Tone throws',
+);
+
+// --- 66. Goals shape: missing Major -> fail -----------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', goals: ['Minor: A.', 'Minor: B.', 'Minor: C.'] }] }),
+  'a Goals section with no Major: line throws',
+);
+
+// --- 67. Goals shape: fewer than three Minors -> fail -------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', goals: ['Major: Guard the gate.', 'Minor: A.', 'Minor: B.'] }] }),
+  'a Goals section with only two Minor: lines throws',
+);
+
+// --- 68. Goals shape: more than three Minors -> fail --------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn', goals: ['Major: Guard the gate.', 'Minor: A.', 'Minor: B.', 'Minor: C.', 'Minor: D.'] }] }),
+  'a Goals section with four Minor: lines throws',
+);
+
+// --- 69. naming: one-word name -> fail ----------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Elena' }] }),
+  'a one-word person name throws — the two-word contract is enforced',
+);
+
+// --- 70. naming: three-word name -> fail --------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Elena Maria Valcieri' }] }),
+  'a three-word person name throws — the two-word contract is enforced',
+);
+
+// --- 71. naming: parenthetical qualifier -> fail ------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'NEW', name: 'Elena (Doctor)' }] }),
+  'a parenthetical qualifier in a person name throws',
+);
+
+// --- 72. duplicate missing target -> fail -------------------------------------
+
+peopleParseFails(
+  peopleOutput({ cards: [{ action: 'DUPLICATE', name: 'Elena Vale' }] }),
+  'a DUPLICATE block with no Duplicate-of line throws',
+);
+
+// --- 73. duplicate carrying person-card content -> fail -----------------------
+
+peopleParseFails(
+  `**DUPLICATE: Elena Vale**
+Duplicate of: Elena Valcieri
+## Personality
+Resolute.`,
+  'a DUPLICATE block carrying person-card content throws',
+);
+
+// --- 74. one malformed block fails the whole response -------------------------
+
+peopleParseFails(
+  peopleOutput({
+    cards: [
+      { action: 'NEW', name: 'Guard Renn' },
+      { action: 'UPDATE', name: 'Elena Valcieri', omit: ['appearance'] },
+      { action: 'NEW', name: 'Maid Rose' },
+    ],
+  }),
+  'a single malformed block among valid blocks fails the entire response (whole-response failure)',
+);
+
+// --- 75. arbitrary prose outside any block -> fail ----------------------------
+
+peopleParseFails(
+  'Here are the people I recommend updating:\n\n' + peopleOutput({ cards: [{ action: 'NEW', name: 'Guard Renn' }] }),
+  'prose before the first block throws — the format is exact, no preamble allowed',
+);
+
+// --- 76. parsed object matches the existing PeopleCuratorEntryDraft shape ------
+// new/update entries are exactly { action, name, content, appearance }; duplicates are exactly
+// { action, name, duplicateOf } — the same key sets chatMemorySync.ts's upsert_people consumes.
+
+{
+  const r = peopleParseOk(
+    peopleOutput({
+      cards: [
+        { action: 'NEW', name: 'Guard Renn' },
+        { action: 'UPDATE', name: 'Elena Valcieri' },
+        { action: 'DUPLICATE', name: 'Elena Vale', duplicateOf: 'Elena Valcieri' },
+      ],
+    }),
+  );
+  const news = r.find((e) => e.action === 'new');
+  const update = r.find((e) => e.action === 'update');
+  const duplicate = r.find((e) => e.action === 'duplicate');
+  assert(
+    Object.keys(news).sort().join(',') === 'action,appearance,content,name',
+    'a new entry is exactly { action, name, content, appearance }',
+  );
+  assert(
+    Object.keys(update).sort().join(',') === 'action,appearance,content,name',
+    'an update entry is exactly { action, name, content, appearance }',
+  );
+  assert(
+    Object.keys(duplicate).sort().join(',') === 'action,duplicateOf,name',
+    'a duplicate entry is exactly { action, name, duplicateOf } — no content, no appearance',
+  );
+  assert(
+    typeof news.appearance === 'string' && typeof news.content === 'string' && typeof duplicate.duplicateOf === 'string',
+    'entry fields are plain strings',
+  );
 }
 
 console.log(`\nverify-chat-memory-text-parsers: ${process.exitCode ? 'FAILED' : 'all assertions passed'}`);
