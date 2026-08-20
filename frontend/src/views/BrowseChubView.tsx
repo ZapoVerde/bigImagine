@@ -99,6 +99,7 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
   const [query, setQuery] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [page, setPage] = useState(1);
+  const [pageInput, setPageInput] = useState('1');
   const [tagStates, setTagStates] = useState<Record<string, TagState>>(loadStoredTagStates);
   const [filters, setFilters] = useState<StoredFilters>(loadStoredFilters);
   const [filtersCollapsed, setFiltersCollapsed] = useState(true);
@@ -148,6 +149,10 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
   }, [runSearch, submittedQuery, page]);
 
   useEffect(() => {
+    setPageInput(String(page));
+  }, [page]);
+
+  useEffect(() => {
     localStorage.setItem(TAG_STATES_STORAGE_KEY, JSON.stringify(tagStates));
   }, [tagStates]);
 
@@ -192,11 +197,13 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
   function onSubmitSearch(e: FormEvent) {
     e.preventDefault();
     setPage(1);
+    setPageInput('1');
     setSubmittedQuery(query.trim());
   }
 
   function onTapTag(tag: string) {
     setPage(1);
+    setPageInput('1');
     setTagStates((prev) => {
       const next = { ...prev };
       const nextState = cycleTagState(prev[tag]);
@@ -208,7 +215,26 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
 
   function clearAllTags() {
     setPage(1);
+    setPageInput('1');
     setTagStates({});
+  }
+
+  function onSubmitPageJump(e: FormEvent) {
+    e.preventDefault();
+    const parsedPage = Number.parseInt(pageInput, 10);
+    if (pageInput.trim() === '' || Number.isNaN(parsedPage)) {
+      setPageInput(String(page));
+      return;
+    }
+
+    const resolvedPage = Math.min(totalPages, Math.max(1, parsedPage));
+    setPageInput(String(resolvedPage));
+    if (resolvedPage !== page) setPage(resolvedPage);
+  }
+
+  function onBlurPageInput() {
+    const parsedPage = Number.parseInt(pageInput, 10);
+    if (pageInput.trim() === '' || Number.isNaN(parsedPage)) setPageInput(String(page));
   }
 
   async function importCharacter(fullPath: string) {
@@ -275,9 +301,21 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
               <button type="button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page <= 1}>
                 &larr; Prev
               </button>
-              <span>
-                Page {page} of {totalPages} &mdash; {result.count} results
-              </span>
+              <form className="browse-chub-page-jump" onSubmit={onSubmitPageJump}>
+                <label htmlFor="browse-chub-page-input">Page</label>
+                <input
+                  id="browse-chub-page-input"
+                  type="number"
+                  min={1}
+                  max={totalPages}
+                  inputMode="numeric"
+                  aria-label="Page number"
+                  value={pageInput}
+                  onChange={(e) => setPageInput(e.target.value)}
+                  onBlur={onBlurPageInput}
+                />
+                <span>of {totalPages} &mdash; {result.count} results</span>
+              </form>
               <button type="button" onClick={() => setPage((p) => p + 1)} disabled={page >= totalPages}>
                 Next &rarr;
               </button>
@@ -294,13 +332,13 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
         onTapTag={onTapTag}
         onClearAllTags={clearAllTags}
         sort={filters.sort}
-        onSortChange={(sort) => { setPage(1); setFilters((f) => ({ ...f, sort })); }}
-        minTokens={filters.minTokens}
-        onMinTokensChange={(minTokens) => { setPage(1); setFilters((f) => ({ ...f, minTokens })); }}
-        maxTokens={filters.maxTokens}
-        onMaxTokensChange={(maxTokens) => { setPage(1); setFilters((f) => ({ ...f, maxTokens })); }}
-        minRating={filters.minRating}
-        onMinRatingChange={(minRating) => { setPage(1); setFilters((f) => ({ ...f, minRating })); }}
+         onSortChange={(sort) => { setPage(1); setPageInput('1'); setFilters((f) => ({ ...f, sort })); }}
+         minTokens={filters.minTokens}
+         onMinTokensChange={(minTokens) => { setPage(1); setPageInput('1'); setFilters((f) => ({ ...f, minTokens })); }}
+         maxTokens={filters.maxTokens}
+         onMaxTokensChange={(maxTokens) => { setPage(1); setPageInput('1'); setFilters((f) => ({ ...f, maxTokens })); }}
+         minRating={filters.minRating}
+         onMinRatingChange={(minRating) => { setPage(1); setPageInput('1'); setFilters((f) => ({ ...f, minRating })); }}
         recencyBucket={filters.recencyBucket}
         onRecencyBucketChange={(recencyBucket) => setFilters((f) => ({ ...f, recencyBucket }))}
       />

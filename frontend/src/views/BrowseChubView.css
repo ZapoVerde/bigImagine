@@ -201,3 +201,27 @@
   opacity: 0.4;
   cursor: default;
 }
+
+.browse-chub-page-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.browse-chub-page-jump input {
+  width: 4.2em;
+  min-width: 0;
+  padding: 0.25rem 0.2rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  font: inherit;
+  text-align: center;
+}
+
+.browse-chub-page-jump input:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
