@@ -497,6 +497,10 @@ export function findTurnBoundaries(messages: { role: 'user' | 'assistant' }[]): 
  *  `turnsUntilBlock` is meaningful only in warning: the number of additional turns the chat can
  *  advance before it crosses into blocked (blockThreshold - unsyncedTurns). It is null in every
  *  other state.
+ *
+ *  `syncEveryPairs` is echoed back (not derived) so the client can size its own display grace
+ *  window — e.g. the RP chat screen holds the warning banner until turnsUntilBlock has counted
+ *  down to half of this — without hardcoding the server's configured interval.
  */
 export interface ChatSyncHealth {
   state: 'healthy' | 'warning' | 'blocked';
@@ -506,6 +510,7 @@ export interface ChatSyncHealth {
   lastError: string | null;
   consecutiveErrors: number;
   turnsUntilBlock: number | null;
+  syncEveryPairs: number;
 }
 
 export function computeChatSyncHealth(input: {
@@ -534,6 +539,7 @@ export function computeChatSyncHealth(input: {
     lastError: input.lastError,
     consecutiveErrors: input.consecutiveErrors,
     turnsUntilBlock: state === 'warning' ? blockThreshold - unsyncedTurns : null,
+    syncEveryPairs: input.syncEveryPairs,
   };
 }
 
