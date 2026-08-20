@@ -1,11 +1,12 @@
-// Proves parseBridgeOutput.ts in isolation — the first genuinely structured text format of the
-// chat-memory structured-output migration (docs/plans/chat-memory-structured-output-plan.md Chunk
-// 2). The bridge's LLM call is an ordinary text completion whose raw output follows Canonize's own
-// "OUTPUT FORMAT" convention; this pure parser turns it back into the existing BridgeResult draft
-// shape. Later chunks (world/people/digest) can join this file rather than each getting their own
-// verify script.
+// Proves the chat-memory text parsers in isolation — the first genuinely structured text formats of
+// the chat-memory structured-output migration (docs/plans/chat-memory-structured-output-plan.md
+// Chunk 2, docs/plans/chat-memory-world-curator-plan.md). The bridge's and the world curator's LLM
+// calls are ordinary text completions whose raw output follows their own "OUTPUT FORMAT"
+// conventions; these pure parsers turn that raw text back into the existing draft shapes.
+// Later chunks (people/digest) can join this file rather than each getting their own verify script.
 
 import { parseBridgeOutput } from '../dist/io/chatMemory/parseBridgeOutput.js';
+import { parseWorldMemoryOutput } from '../dist/io/chatMemory/parseWorldMemoryOutput.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -244,6 +245,247 @@ parseFails(
   const raw = 'EVENTS: | When | What | Who |\n|------|------|-----|\n\nSCENE:\nThe dusk settles.';
   const r = parseOk(raw);
   assert(r.events === '| When | What | Who |\n|------|------|-----|', 'an EVENTS heading whose table header starts on the same line still parses, not just heading-then-newline');
+}
+
+// =============================================================================
+// World-curator parser (chat-memory-world-curator-plan.md): parseWorldMemoryOutput
+// turns the curator's plain-text OUTPUT FORMAT back into the WorldMemoryCuratorEntryDraft
+// shape the old forced curate_lorebook tool call produced.
+// =============================================================================
+
+function worldOutput({ updates = [], news = [], duplicates = [] } = {}) {
+  const lines = [];
+  for (const u of updates) lines.push(`**UPDATE: ${u.name}**`, `Category: ${u.category}`, u.content, '');
+  for (const n of news) lines.push(`**NEW: ${n.name}**`, `Category: ${n.category}`, n.content, '');
+  for (const d of duplicates) lines.push(`**DUPLICATE: ${d.name}**`, `Duplicate of: ${d.duplicateOf}`, '');
+  return lines.join('\n').trim();
+}
+
+function worldParseOk(raw) {
+  try {
+    return parseWorldMemoryOutput(raw);
+  } catch (e) {
+    throw new Error(`expected parseWorldMemoryOutput to succeed but it threw: ${e.message}\n--- raw ---\n${raw}`);
+  }
+}
+
+function worldParseFails(raw, label) {
+  let threw = false;
+  try {
+    parseWorldMemoryOutput(raw);
+  } catch {
+    threw = true;
+  }
+  assert(threw, label);
+}
+
+// --- 20. exact NO CHANGES NEEDED -> [] ---------------------------------------
+
+{
+  const r = worldParseOk('NO CHANGES NEEDED');
+  assert(Array.isArray(r) && r.length === 0, 'the exact NO CHANGES NEEDED sentinel parses to an empty array');
+  assert(worldParseOk('no changes needed').length === 0, 'the sentinel is case-insensitive-tolerant (but still the exact sentinel, not prose)');
+}
+
+// --- 21. one UPDATE -> valid --------------------------------------------------
+
+{
+  const r = worldParseOk(
+    worldOutput({
+      updates: [{ name: 'The Wandering Pavilion', category: 'place', content: 'The pavilion sits at the crossroads.\nIt has weathered three wars.' }],
+    }),
+  );
+  assert(r.length === 1 && r[0].action === 'update' && r[0].name === 'The Wandering Pavilion' && r[0].category === 'place', 'one UPDATE block -> one update entry with name/category');
+  assert(r[0].content.includes('weathered three wars'), 'the body after the Category line becomes the entry content');
+}
+
+// --- 22. one NEW -> valid -----------------------------------------------------
+
+{
+  const r = worldParseOk(
+    worldOutput({ news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order of archivists.' }] }),
+  );
+  assert(r.length === 1 && r[0].action === 'new' && r[0].name === 'Ash Covenant' && r[0].category === 'concept', 'one NEW block -> one new entry');
+}
+
+// --- 23. one DUPLICATE -> valid ----------------------------------------------
+
+{
+  const r = worldParseOk(worldOutput({ duplicates: [{ name: 'The Pavilion', duplicateOf: 'The Wandering Pavilion' }] }));
+  assert(
+    r.length === 1 && r[0].action === 'duplicate' && r[0].name === 'The Pavilion' && r[0].duplicateOf === 'The Wandering Pavilion' && r[0].category === undefined && r[0].content === undefined,
+    'one DUPLICATE block -> one duplicate entry carrying no category or content',
+  );
+}
+
+// --- 24. mixed UPDATE + NEW + DUPLICATE -> valid ------------------------------
+
+{
+  const r = worldParseOk(
+    worldOutput({
+      updates: [{ name: 'The Wandering Pavilion', category: 'place', content: 'It now flies a black banner.' }],
+      news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order of archivists.' }],
+      duplicates: [{ name: 'The Pavilion', duplicateOf: 'The Wandering Pavilion' }],
+    }),
+  );
+  assert(r.length === 3, 'a mixed response yields exactly three entries');
+  assert(r.map((e) => e.action).join(',') === 'update,new,duplicate', 'mixed blocks keep their action order');
+}
+
+// --- 25. multiple entries of the same action -> valid -------------------------
+
+{
+  const r = worldParseOk(
+    worldOutput({
+      news: [
+        { name: 'Ash Covenant', category: 'concept', content: 'First.' },
+        { name: 'The Iron Road', category: 'thing', content: 'Second.' },
+        { name: 'The Hollow Vale', category: 'place', content: 'Third.' },
+      ],
+    }),
+  );
+  assert(r.length === 3 && r.every((e) => e.action === 'new'), 'multiple NEW blocks all parse, in order');
+  assert(r[2].name === 'The Hollow Vale', 'the third NEW block keeps its own name');
+}
+
+// --- 26. CRLF -> valid --------------------------------------------------------
+
+{
+  const r = worldParseOk(
+    '**UPDATE: The Wandering Pavilion**\r\nCategory: place\r\nIt now flies a black banner.\r\n\r\n**NEW: Ash Covenant**\r\nCategory: concept\r\nA secretive order.\r\n',
+  );
+  assert(r.length === 2 && r[0].content === 'It now flies a black banner.', 'CRLF line endings parse the same as LF');
+}
+
+// --- 27. enclosing markdown fence -> valid ------------------------------------
+
+{
+  const r = worldParseOk('```\n' + worldOutput({ news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order.' }] }) + '\n```');
+  assert(r.length === 1 && r[0].name === 'Ash Covenant', 'one enclosing markdown fence is tolerated and stripped');
+}
+
+// --- 28. surrounding whitespace -> valid --------------------------------------
+
+{
+  const r = worldParseOk('\n\n  ' + worldOutput({ news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order.' }] }) + '\n\t  ');
+  assert(r.length === 1 && r[0].content === 'A secretive order.', 'leading/trailing whitespace is normalized away');
+}
+
+// --- 29. place / thing / concept each accepted --------------------------------
+
+{
+  for (const category of ['place', 'thing', 'concept']) {
+    const r = worldParseOk(worldOutput({ updates: [{ name: `X ${category}`, category, content: 'Body.' }] }));
+    assert(r[0].category === category, `the ${category} category is accepted`);
+  }
+}
+
+// --- 30. missing name -> fail -------------------------------------------------
+
+worldParseFails('**UPDATE:**\nCategory: place\nSome content.', 'an UPDATE block with an empty name throws');
+worldParseFails('**NEW:**\nCategory: concept\nSome content.', 'a NEW block with an empty name throws');
+
+// --- 31. missing Category -> fail ---------------------------------------------
+
+worldParseFails('**UPDATE: The Wandering Pavilion**\nNo category line here.\nSome content.', 'an UPDATE block with no Category line throws');
+
+// --- 32. Category: person -> fail ---------------------------------------------
+
+worldParseFails('**NEW: Some Person**\nCategory: person\nSome content.', 'a Category of person throws');
+
+// --- 33. unknown category -> fail ---------------------------------------------
+
+worldParseFails('**NEW: Somewhere**\nCategory: location\nSome content.', 'a Category of location throws');
+
+// --- 34. empty content -> fail ------------------------------------------------
+
+worldParseFails('**UPDATE: The Wandering Pavilion**\nCategory: place\n', 'an UPDATE block with empty content throws');
+worldParseFails('**NEW: Ash Covenant**\nCategory: concept\n   \n', 'a NEW block with whitespace-only content throws');
+
+// --- 35. DUPLICATE missing / empty target -> fail -----------------------------
+
+worldParseFails('**DUPLICATE: The Pavilion**', 'a DUPLICATE block with no Duplicate-of line throws');
+worldParseFails('**DUPLICATE: The Pavilion**\nDuplicate of: ', 'a DUPLICATE block with an empty Duplicate-of target throws');
+
+// --- 36. unknown action such as DELETE -> fail --------------------------------
+
+worldParseFails('**DELETE: Some Entry**\nSome content.', 'an unrecognized **DELETE:** block throws');
+
+// --- 37. one malformed block fails the whole response -------------------------
+
+worldParseFails(
+  worldOutput({
+    news: [{ name: 'Ash Covenant', category: 'concept', content: 'Good content.' }],
+    updates: [{ name: 'Broken', category: 'location', content: 'Bad category.' }],
+    duplicates: [{ name: 'The Pavilion', duplicateOf: 'The Wandering Pavilion' }],
+  }),
+  'a single malformed block among otherwise valid blocks fails the entire response (whole-response failure)',
+);
+
+// --- 38. arbitrary prose outside any block -> fail ----------------------------
+
+worldParseFails(
+  'Here are the changes I recommend:\n\n' + worldOutput({ news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order.' }] }),
+  'prose before the first block throws — the format is exact, no preamble allowed',
+);
+
+// --- 39. parsed object matches the existing WorldMemoryCuratorEntryDraft shape ---
+// update/new entries are exactly { action, name, category, content }; duplicates are exactly
+// { action, name, duplicateOf } — the same key sets chatMemorySync.ts's upsert_world_memory
+// consumes today.
+
+{
+  const r = worldParseOk(
+    worldOutput({
+      updates: [{ name: 'The Wandering Pavilion', category: 'place', content: 'It now flies a black banner.' }],
+      news: [{ name: 'Ash Covenant', category: 'concept', content: 'A secretive order.' }],
+      duplicates: [{ name: 'The Pavilion', duplicateOf: 'The Wandering Pavilion' }],
+    }),
+  );
+  const update = r.find((e) => e.action === 'update');
+  const news = r.find((e) => e.action === 'new');
+  const duplicate = r.find((e) => e.action === 'duplicate');
+  assert(
+    Object.keys(update).sort().join(',') === 'action,category,content,name',
+    'an update entry is exactly { action, name, category, content }',
+  );
+  assert(
+    Object.keys(news).sort().join(',') === 'action,category,content,name',
+    'a new entry is exactly { action, name, category, content }',
+  );
+  assert(
+    Object.keys(duplicate).sort().join(',') === 'action,duplicateOf,name',
+    'a duplicate entry is exactly { action, name, duplicateOf } — no category, no content',
+  );
+  assert(
+    typeof update.category === 'string' && typeof update.content === 'string' && typeof duplicate.duplicateOf === 'string',
+    'entry fields are plain strings',
+  );
+}
+
+// --- 40. stray text between two otherwise-valid blocks -> fail ---------------
+// The OUTPUT FORMAT puts a blank line only between blocks, never inside one. A model that tacks on
+// conversational filler after a block's content (before the next block header, or trailing after
+// the last block) must not have that filler silently merged into the preceding entry's content —
+// this is exactly the "arbitrary text between structured blocks" case plan §8 requires to fail the
+// whole response, not just the one block.
+
+worldParseFails(
+  '**NEW: Ash Covenant**\nCategory: concept\nA secretive order.\n\nLet me know if you need anything else!\n\n**DUPLICATE: The Pavilion**\nDuplicate of: The Wandering Pavilion',
+  'stray prose between two valid blocks throws — it must not silently merge into the previous entry\'s content',
+);
+worldParseFails(
+  '**NEW: Ash Covenant**\nCategory: concept\nA secretive order.\n\nHope that helps!',
+  'stray prose trailing after the last block throws — same rule applies at the end of the response',
+);
+
+// --- 41. legitimate single-paragraph multi-line content still parses ---------
+// The stray-text rule above must not reject ordinary multi-line content (several sentences on
+// separate lines with no blank line between them) — only a *second paragraph* is stray.
+
+{
+  const r = worldParseOk('**UPDATE: The Wandering Pavilion**\nCategory: place\nLine one.\nLine two.');
+  assert(r[0].content === 'Line one.\nLine two.', 'multi-line content with no internal blank line is not mistaken for stray trailing text');
 }
 
 console.log(`\nverify-chat-memory-text-parsers: ${process.exitCode ? 'FAILED' : 'all assertions passed'}`);

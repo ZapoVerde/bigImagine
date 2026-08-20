@@ -1,7 +1,7 @@
 /**
  * @file orchestrator/src/io/chatMemory/curateWorldMemory.ts
- * @stamp 2026-08-07
- * @architectural-role IO Wrapper — forced-schema LLM call
+ * @stamp 2026-08-20
+ * @architectural-role IO Wrapper — plain-text LLM call
  * @description
  * The 'rp'-kind sync lane's periodic place/thing/concept curator: reviews the sync window's
  * transcript against every existing approved entry in those three categories and proposes targeted
@@ -18,11 +18,15 @@
  *    just waste the model's output budget. CNZ's own #person-tag-correction carve-out is dropped
  *    with it: BI's lorebookSyncPrompt is never even shown person entries (curatePeople.ts owns that
  *    category start to finish), so there is nothing for this curator to mistag.
- *  - The raw-markdown "### OUTPUT FORMAT" section is replaced by a forced tool call
- *    (curate_lorebook), same structural swap bridgeChatMemory.ts already made for its own three
- *    parts. CNZ's own `**dup** — duplicate of [Primary Name]` free-text convention becomes a
- *    first-class 'duplicate' action with a duplicate_of field — same information, structured
- *    instead of parsed back out of prose.
+ *  - The raw-markdown "### OUTPUT FORMAT" section becomes this chunk's own plain-text OUTPUT FORMAT
+ *    (docs/plans/chat-memory-world-curator-plan.md) instead of a forced tool call, matching the
+ *    transport pattern Chunks 1–2 already set for the classifier and the bridge: ordinary text
+ *    completion out, strict local parse back into the existing draft shape. CNZ's own
+ *    `**dup** — duplicate of [Primary Name]` free-text convention becomes a first-class
+ *    'duplicate' action with a duplicate_of field — same information, structured instead of parsed
+ *    back out of prose. The prompt's behavioural rules (durability, logistics, entity resolution,
+ *    duplicate detection, hard-data tracking, rejection criteria, conservative inclusion) are
+ *    preserved verbatim — only the output contract changed.
  *
  * Never creates or rewrites a 'person' entry — curatePeople.ts owns that category exclusively, same
  * split CNZ itself enforces via its own two dedicated prompts.
@@ -39,7 +43,8 @@
  *     external_io:     [LLM, via the LlmProvider passed in]
  */
 
-import type { LlmProvider, ToolDefinition } from '../llm/types.js';
+import type { LlmProvider } from '../llm/types.js';
+import { parseWorldMemoryOutput } from './parseWorldMemoryOutput.js';
 
 export const DEFAULT_WORLD_MEMORY_CURATOR_PROMPT = `**[SYSTEM: TASK — LOREBOOK CURATOR]**
 You are reviewing a session transcript and the current lorebook entries for a character.
@@ -76,55 +81,35 @@ INSTRUCTIONS:
     - **Reject "Narrative Flourish":** If a concept is used only once to convey a mood or temporary feeling, do not index it.
 - When in doubt, exclude rather than include.
 - Keep entries concise (3–6 sentences). Write in third-person present tense.
-- If no changes are needed, propose no entries at all.`;
+- If no changes are needed, propose no entries at all.
 
-const curateWorldMemoryTool: ToolDefinition = {
-  name: 'curate_lorebook',
-  description:
-    "Record this sync window's place/thing/concept lorebook updates, new entries, and duplicate flags, per the curator task above. " +
-    'entries is empty when nothing in the transcript warrants a change.',
-  parameters: {
-    type: 'object',
-    properties: {
-      entries: {
-        type: 'array',
-        items: {
-          type: 'object',
-          properties: {
-            action: {
-              type: 'string',
-              enum: ['update', 'new', 'duplicate'],
-              description:
-                "'update' rewrites an existing entry's full content, 'new' creates one, 'duplicate' flags this entry as redundant with another (existing) entry.",
-            },
-            name: {
-              type: 'string',
-              description:
-                'For update/duplicate: the exact existing entry name to match. For new: the entry name to create.',
-            },
-            category: {
-              type: 'string',
-              enum: ['place', 'thing', 'concept'],
-              description: "The entry's category. Required for 'update'/'new'; omit for 'duplicate'.",
-            },
-            content: {
-              type: 'string',
-              description: "Full replacement or new content, 3-6 sentences, third-person present tense. Required for 'update'/'new'; omit for 'duplicate'.",
-            },
-            duplicate_of: {
-              type: 'string',
-              description: "For 'duplicate' only: the exact name of the primary entry this one duplicates.",
-            },
-          },
-          required: ['action', 'name'],
-          additionalProperties: false,
-        },
-      },
-    },
-    required: ['entries'],
-    additionalProperties: false,
-  },
-};
+OUTPUT FORMAT — follow exactly.
+
+For an existing entry that needs changing:
+
+**UPDATE: [Exact Existing Entry Name]**
+Category: place
+[Full replacement content, 3–6 sentences.]
+
+For a new entry:
+
+**NEW: [New Entry Name]**
+Category: concept
+[Full entry content, 3–6 sentences.]
+
+For an existing redundant entry:
+
+**DUPLICATE: [Exact Redundant Entry Name]**
+Duplicate of: [Exact Primary Entry Name]
+
+If nothing needs changing, output exactly:
+
+NO CHANGES NEEDED
+
+Allowed categories are only:
+place
+thing
+concept`;
 
 export interface WorldMemoryCuratorEntryDraft {
   action: 'update' | 'new' | 'duplicate';
@@ -132,29 +117,6 @@ export interface WorldMemoryCuratorEntryDraft {
   category?: 'place' | 'thing' | 'concept';
   content?: string;
   duplicateOf?: string;
-}
-
-interface WorldMemoryCuratorToolResponse {
-  entries: {
-    action: 'update' | 'new' | 'duplicate';
-    name: string;
-    category?: 'place' | 'thing' | 'concept';
-    content?: string;
-    duplicate_of?: string;
-  }[];
-}
-
-function isWorldMemoryCuratorResponse(value: unknown): value is WorldMemoryCuratorToolResponse {
-  if (typeof value !== 'object' || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (!Array.isArray(v.entries)) return false;
-  return v.entries.every((e) => {
-    if (typeof e !== 'object' || e === null) return false;
-    const entry = e as Record<string, unknown>;
-    if (typeof entry.name !== 'string') return false;
-    if (entry.action !== 'update' && entry.action !== 'new' && entry.action !== 'duplicate') return false;
-    return true;
-  });
 }
 
 export async function curateWorldMemory(
@@ -167,30 +129,15 @@ export async function curateWorldMemory(
 
   const userMessage =
     `CURRENT LOREBOOK ENTRIES:\n${existingEntries || '(none yet)'}\n\n` +
-    `SESSION TRANSCRIPT:\n${transcript}\n\n` +
-    'Answer by calling curate_lorebook with any updates, new entries, and duplicate flags.';
+    `SESSION TRANSCRIPT:\n${transcript}\n\n`;
 
   const turn = await llm.complete(
     [
       { role: 'system', content: instructions },
       { role: 'user', content: userMessage },
     ],
-    [curateWorldMemoryTool],
-    { forceTool: 'curate_lorebook' },
+    [],
   );
 
-  const call = turn.toolCalls.find((c) => c.name === 'curate_lorebook');
-  if (!call) {
-    throw new Error('curateWorldMemory: model did not call curate_lorebook despite forceTool');
-  }
-  if (!isWorldMemoryCuratorResponse(call.arguments)) {
-    throw new Error(`curateWorldMemory: model's call had an unexpected shape: ${JSON.stringify(call.arguments)}`);
-  }
-  return call.arguments.entries.map((e) => ({
-    action: e.action,
-    name: e.name,
-    category: e.category,
-    content: e.content,
-    duplicateOf: e.duplicate_of,
-  }));
+  return parseWorldMemoryOutput(turn.message.content);
 }

@@ -503,7 +503,7 @@ const llmConnections = {
 };
 
 function createFakeHttpBackend() {
-  return { calls: [], gateHook: null, curatePeopleOverride: null };
+  return { calls: [], gateHook: null, curatePeopleOverride: null, worldCuratorOverride: null };
 }
 
 function oaiToolResponse(name, args) {
@@ -560,12 +560,13 @@ function installSyncFetchMock(backend) {
       const forceTool = body.tool_choice?.function?.name;
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
       if (backend.gateHook) await backend.gateHook(forceTool);
-      // Plain-text completions (chat-memory-structured-output-plan: no forced tool — raw text out,
-      // parsed locally). TWO tool-free callers now share the same connection within one tick — the
-      // chunk classifier and the rp bridge — so the backend routes on a distinguishing string in
-      // the system prompt (the bridge's chronicler header) rather than on tool_choice's absence
-      // alone; routing on absence would silently serve the classifier's canned summary to the
-      // bridge and surface as a confusing parser failure (plan Chunk 2 §5's gap).
+      // Plain-text completions (chat-memory-structured-output-plan + chat-memory-world-curator-
+      // plan: no forced tool — raw text out, parsed locally). THREE tool-free callers now share the
+      // same connection within one tick — the chunk classifier, the rp bridge, and the rp world
+      // curator — so the backend routes on a distinguishing string in the system prompt (the
+      // bridge's chronicler header, the curator's lorebook-curator header) rather than on
+      // tool_choice's absence alone; routing on absence would silently serve the classifier's
+      // canned summary to the others and surface as a confusing parser failure.
       if (!forceTool) {
         const sys = body.messages.find((m) => m.role === 'system')?.content ?? '';
         const content = body.messages.find((m) => m.role === 'user').content;
@@ -583,6 +584,21 @@ The siege wall breached.
 #siege_break`,
           );
         }
+        if (sys.includes('LOREBOOK CURATOR')) {
+          return oaiTextResponse(
+            backend.worldCuratorOverride ??
+              `**UPDATE: Existing Place**
+Category: place
+[replacement text]
+
+**NEW: New Concept**
+Category: concept
+[new content]
+
+**DUPLICATE: Redundant Thing**
+Duplicate of: Primary Thing`,
+          );
+        }
         return oaiTextResponse(`Summary[${content}]`);
       }
       switch (forceTool) {
@@ -590,8 +606,6 @@ The siege wall breached.
           return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
         case 'classify_household_memory':
           return oaiToolResponse('classify_household_memory', { memories: ['A durable fact worth remembering.'] });
-        case 'curate_lorebook':
-          return oaiToolResponse('curate_lorebook', { entries: [{ action: 'new', name: 'The Pavilion', category: 'place', content: 'A weathered pavilion.' }] });
         case 'curate_people':
           return oaiToolResponse('curate_people', backend.curatePeopleOverride ?? {
             entries: [
@@ -684,7 +698,7 @@ function distillCalls() {
 
 // The rp bridge is a tool-free completion too (chat-memory-structured-output-plan Chunk 2), so it
 // is identified by the chronicler header in its system prompt, not by forceTool's absence — the
-// same discriminator the fake HTTP backend uses to route the two tool-free callers apart.
+// same discriminator the fake HTTP backend uses to route the tool-free callers apart.
 function isBridgeCall(c) {
   return (
     c.options.forceTool === undefined &&
@@ -692,12 +706,27 @@ function isBridgeCall(c) {
   );
 }
 
+// The rp world curator is a third tool-free completion (chat-memory-world-curator-plan.md), keyed
+// on its own lorebook-curator header — distinct from the bridge's chronicler header and the
+// classifier's headerless prompt, so the two pre-existing call-count assertions that assumed only
+// two tool-free callers (summarizeCalls, and the connection-lock check below) must exclude it.
+function isWorldCuratorCall(c) {
+  return (
+    c.options.forceTool === undefined &&
+    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('LOREBOOK CURATOR')
+  );
+}
+
 function bridgeCalls() {
   return llm.calls.filter(isBridgeCall);
 }
 
+function worldCuratorCalls() {
+  return llm.calls.filter(isWorldCuratorCall);
+}
+
 function summarizeCalls() {
-  return llm.calls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c));
+  return llm.calls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c));
 }
 
 // --- Tick 1: 12 fresh messages, well past the 8-message due threshold ---
@@ -1050,10 +1079,10 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     "the persisted inspection prompt still renders the system prompt, transcript, previous output, and the output-format block (only the forced-tool sentence is gone)",
   );
 
-  // chat-memory-structured-output-plan Chunk 2: the bridge is now a plain-text completion parsed
-  // locally, so its request carries no tools and no forceTool — and the fake backend discriminates
-  // it from the chunk classifier's tool-free call within the same 'rp' tick via the chronicler
-  // header in its system prompt.
+  // chat-memory-structured-output-plan Chunk 2 + chat-memory-world-curator-plan.md: the bridge and
+  // the world curator are now plain-text completions parsed locally, so their requests carry no
+  // tools and no forceTool — and the fake backend discriminates them from the chunk classifier's
+  // tool-free call within the same 'rp' tick via their distinct system-prompt headers.
   assert(
     bridgeCalls().length === 1,
     'exactly one bridge call this tick — the fake backend routed the bridge to its own canned text output, not the classifier summary',
@@ -1061,6 +1090,14 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   assert(
     bridgeCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
     'each bridge request carries no tools array and no forceTool — ordinary completion transport',
+  );
+  assert(
+    worldCuratorCalls().length === 1,
+    'exactly one world-curator call this tick, routed on its own lorebook-curator header',
+  );
+  assert(
+    worldCuratorCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'each world-curator request carries no tools array and no forceTool — ordinary completion transport',
   );
 
   const rpEntries = [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === RP_CHAT_ID);
@@ -1079,7 +1116,11 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   );
 
   const rpFacts = pool.canonFacts.filter((f) => f.chat_id === RP_CHAT_ID);
-  assert(rpFacts.length === 3, 'the tick proposes one plot, one lorebook, and one people fact');
+  // The fake world-curator text parses into UPDATE + NEW + DUPLICATE. The UPDATE and NEW insert
+  // their canon_facts rows (proposed, keyed by entity_key); the DUPLICATE names an entry that does
+  // not exist among existingRows (this is a first sync), so its category lookup misses and it is
+  // skipped per-entry downstream — structurally well-formed, but no existing entry to flag.
+  assert(rpFacts.length === 4, 'the tick proposes one plot, two world (update+new), and one people fact');
   assert(
     rpFacts.every((f) => f.sync_id === rpSyncId),
     'every canon-fact proposal the sync wrote carries its sync_id — plot, lorebook, and people lanes alike',
@@ -1092,15 +1133,54 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     rpFacts.some((f) => f.category === 'person' && f.entity_key === 'person:elena-ashford'),
     "the people curator's proposal lands with its entity_key intact",
   );
+  const worldUpdate = rpFacts.find((f) => f.entity_key === 'place:existing-place');
+  assert(worldUpdate?.category === 'place' && worldUpdate?.summary === '[replacement text]', "the world UPDATE maps to the same existing-entry update path, with 'place' surviving unchanged");
+  const worldNew = rpFacts.find((f) => f.entity_key === 'concept:new-concept');
+  assert(worldNew?.category === 'concept' && worldNew?.summary === '[new content]', "the world NEW maps to the same proposed canon-fact creation path, with 'concept' surviving unchanged");
+  assert(
+    !rpFacts.some((f) => f.detail === 'Redundant Thing'),
+    "the DUPLICATE lands in the existing duplicate handling — category resolved from existingRows, and with no matching existing entry on a first sync it is skipped, not inserted",
+  );
   const elenaChar = pool.characters.find((c) => c.name === 'Elena Ashford');
   assert(
     elenaChar?.appearance === 'Tall, with a lantern jaw and steel-grey eyes.',
     "the rp tick's people-curator appearance writes back onto the matching appearance-blank characters row",
   );
   assert(
-    pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 5,
-    'an rp sync reports 5 entries updated (scene + events + plot + lorebook + people)',
+    pool.chatMemorySyncStatus.get(RP_CHAT_ID)?.last_entries_updated === 7,
+    'an rp sync reports 7 entries updated (scene + events + plot + 3 world entries + people)',
   );
+}
+
+// --- chat-memory-world-curator-plan.md §8/§12: a malformed world-curator response fails the whole
+// sync stage. The curator's plain text is parsed strictly — one bad block throws before
+// upsert_world_memory ever runs, so zero world results from that pass are committed and the sync
+// records the failure at the exact curate_world_memory step (the real Postgres rollback of the
+// pre-world writes — chunks, sync point, bridge entries — is the same single-transaction step
+// machinery the FAIL test above exercises; this fake pool's ROLLBACK is a no-op for writes that
+// predate the failing step, so those particular rows can't be asserted away here). ---
+{
+  const BAD_WORLD_CHAT_ID = randomUUID();
+  pool.chatSessions.set(BAD_WORLD_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  seedMessages(BAD_WORLD_CHAT_ID, 'BADWORLD', 12);
+
+  backend.worldCuratorOverride = `**NEW: Good Concept**
+Category: concept
+Fine content.
+
+**UPDATE: Broken Entry**
+Category: person
+Person is not a valid world category.`;
+  await runChatMemorySyncTick(deps);
+  backend.worldCuratorOverride = null;
+
+  assert(
+    pool.canonFacts.filter((f) => f.chat_id === BAD_WORLD_CHAT_ID && ['place', 'thing', 'concept'].includes(f.category)).length === 0,
+    'on parser failure no world-curator results from that pass are committed — not even the well-formed NEW before the bad block',
+  );
+  const status = pool.chatMemorySyncStatus.get(BAD_WORLD_CHAT_ID);
+  assert(status?.last_status === 'error', 'a malformed world-curator response records the sync as error');
+  assert(status?.last_step === 'curate_world_memory', 'the status row names curate_world_memory as the exact failing step');
 }
 
 // --- character-appearance-field-plan.md: the upsert_people appearance write-back's edge cases.
@@ -1262,12 +1342,16 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   assert(
-    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c)).length === 2,
+    namedCalls.filter((c) => c.options.forceTool === undefined && !isBridgeCall(c) && !isWorldCuratorCall(c)).length === 2,
     'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
   );
   assert(
     namedCalls.some((c) => isBridgeCall(c) && c.url === `${NAMED_FAKE_BASE}/chat/completions`),
     "the rp bridge also rides the chat_memory_profile connection, not the chat's narrator profile",
+  );
+  assert(
+    namedCalls.some((c) => isWorldCuratorCall(c) && c.url === `${NAMED_FAKE_BASE}/chat/completions`),
+    'the world curator also rides the chat_memory_profile connection, alongside the bridge',
   );
   assert(
     namedCalls.some((c) => c.options.forceTool === 'curate_people'),
