@@ -141,8 +141,10 @@ function createFakePool() {
 
 // --- The resize llm rides the shared resolveChatMemoryLlm connection (chatMemorySync.ts) — a
 // gated openai-compatible provider called over HTTP — so the fake LLM seam moves into a mocked
-// global fetch, dispatching on the request's forced tool_choice. Two distinct endpoints prove the
-// lock: the active connection and the one chat_memory_profile names. ---
+// global fetch, dispatching on the request's forced tool_choice (the chunk classifier being the
+// one tool-free exception, keyed on tool_choice's absence per chat-memory-structured-output-plan).
+// Two distinct endpoints prove the lock: the active connection and the one chat_memory_profile
+// names. ---
 const ACTIVE_FAKE_BASE = 'https://resize-active-fake.example';
 const NAMED_FAKE_BASE = 'https://resize-named-fake.example';
 
@@ -192,6 +194,23 @@ function oaiToolResponse(name, args) {
   };
 }
 
+function oaiTextResponse(content) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [
+        {
+          message: { role: 'assistant', content, tool_calls: null },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    text: async () => '',
+  };
+}
+
 function installResizeFetchMock(backend) {
   const originalFetch = globalThis.fetch;
   const knownBases = [ACTIVE_FAKE_BASE, NAMED_FAKE_BASE];
@@ -200,10 +219,13 @@ function installResizeFetchMock(backend) {
     if (knownBases.includes(u.replace('/chat/completions', ''))) {
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
-      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
-      if (forceTool === 'summarize_chat_chunk') {
+      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
+      // Plain-text completion: the summarize_chat_chunk classifier (chat-memory-structured-output-
+      // plan: no forced tool — raw text out, parsed locally). The only tool-free call this backend
+      // serves.
+      if (!forceTool) {
         const content = body.messages.find((m) => m.role === 'user').content;
-        return oaiToolResponse('summarize_chat_chunk', { summary: `Summary[${content}]` });
+        return oaiTextResponse(`Summary[${content}]`);
       }
       throw new Error(`fake resize HTTP backend got an unexpected forceTool: ${forceTool}`);
     }
@@ -279,7 +301,7 @@ const settings = createFakeSettingsStore({
 const deps = { db, llm, embeddings, settings, llmConnections };
 
 function summarizeCalls() {
-  return backend.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk');
+  return backend.calls.filter((c) => c.options.forceTool === undefined);
 }
 
 // --- The connection contract (chatChunkResize.ts's resolveResizeSettings → resolveChatMemoryLlm):
@@ -293,6 +315,10 @@ function summarizeCalls() {
 
   const namedSummaries = summarizeCalls().filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   assert(namedSummaries.length === 2, 'the resize pass regenerates both chunks through the chat_memory_profile connection');
+  assert(
+    namedSummaries.every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'the resize backfill regenerates summaries through the plain completion transport — empty tools, no forceTool',
+  );
   assert(
     backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length === activeCallsBefore,
     "the resize pass never touches the active connection while chat_memory_profile is set — and never the chat's dead narrator profile",

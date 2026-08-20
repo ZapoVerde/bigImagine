@@ -151,8 +151,9 @@ function createFakePool() {
 // active connection — never the chat's own params->>'profile') and calls it over HTTP — so the
 // fake LLM seam moves into a mocked global fetch. The mock dispatches on the request's forced
 // tool_choice, records each request as the same { messages, options } shape the old fake recorded,
-// and returns the same summarize_chat_chunk turn. Two distinct endpoints prove the lock: the
-// active connection and the named one a chat is locked to. ---
+// and returns the summarize classifier's plain-text turn (chat-memory-structured-output-plan: the
+// chunk classifier is a tool-free completion keyed on tool_choice's absence). Two distinct
+// endpoints prove the lock: the active connection and the named one a chat is locked to. ---
 const ACTIVE_FAKE_BASE = 'https://eager-active-fake.example';
 const NAMED_FAKE_BASE = 'https://eager-named-fake.example';
 const EAGER_C_FAKE_BASE = 'https://eager-memory-c-fake.example';
@@ -207,6 +208,23 @@ function oaiToolResponse(name, args) {
   };
 }
 
+function oaiTextResponse(content) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [
+        {
+          message: { role: 'assistant', content, tool_calls: null },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    text: async () => '',
+  };
+}
+
 function installEagerFetchMock(backend) {
   const originalFetch = globalThis.fetch;
   const knownBases = [ACTIVE_FAKE_BASE, NAMED_FAKE_BASE, EAGER_C_FAKE_BASE, EAGER_D_FAKE_BASE];
@@ -215,10 +233,13 @@ function installEagerFetchMock(backend) {
     if (knownBases.includes(u.replace('/chat/completions', ''))) {
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
-      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
-      if (forceTool === 'summarize_chat_chunk') {
+      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
+      // Plain-text completion: the summarize_chat_chunk classifier (chat-memory-structured-output-
+      // plan: no forced tool — raw text out, parsed locally). The only tool-free call this backend
+      // serves.
+      if (!forceTool) {
         const content = body.messages.find((m) => m.role === 'user').content;
-        return oaiToolResponse('summarize_chat_chunk', { summary: `Summary[${content}]` });
+        return oaiTextResponse(`Summary[${content}]`);
       }
       throw new Error(`fake eager HTTP backend got an unexpected forceTool: ${forceTool}`);
     }
@@ -279,7 +300,7 @@ function seedMessages(chatId, tag, count) {
 }
 
 function summarizeCalls() {
-  return llm.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk');
+  return llm.calls.filter((c) => c.options.forceTool === undefined);
 }
 
 // --- No whole chunk eligible -> strict no-op: no chunks, no sync point, and no advisory-lock
@@ -316,6 +337,14 @@ let ONE_CHAT_ID;
   assert(pool.chatSyncPoints[0].ordinal === 0, 'the first sync point gets ordinal 0');
   assert(pool.chatSyncPoints[0].last_message_id === msgs[3].message_id, "the open point's anchor is the last message its chunk covers");
   assert(summarizeCalls().length === 1, 'the mandatory chunk summary was LLM-summarized (chat_chunks.summary is not null)');
+  assert(
+    pool.chatChunks[0].summary === 'Summary[User: ONE-user-1\nAssistant: ONE-assistant-2\nUser: ONE-user-3\nAssistant: ONE-assistant-4]',
+    'the plain assistant text is stored verbatim as the chunk summary — no tool wrapper',
+  );
+  assert(
+    summarizeCalls().every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'the eager summarizer rides the plain completion transport — empty tools, no forceTool',
+  );
   assert(
     pool.chatChunks[0].parent_chunk_id === null,
     'the first eager chunk is the chain head (parent_chunk_id null, migration 0100)',

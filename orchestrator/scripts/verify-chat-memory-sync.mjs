@@ -449,7 +449,8 @@ function createFakePool() {
 // never the chat's own params->>'profile') and calls it over HTTP — so the fake LLM seam moves
 // into a mocked global fetch. The mock dispatches on the request's forced tool_choice, records
 // each request as the same { messages, options } shape the old fake recorded (every llm.calls-based
-// helper below is untouched), and returns the same turns. Two
+// helper below is untouched), and returns the same turns — except the chunk classifier, which is a
+// tool-free completion keyed on tool_choice's absence (chat-memory-structured-output-plan). Two
 // distinct fake endpoints exist so the lock can be proven: the active connection and the named one
 // a chat is locked to. ---
 const ACTIVE_FAKE_BASE = 'https://sync-active-fake.example';
@@ -506,6 +507,23 @@ function oaiToolResponse(name, args) {
   };
 }
 
+function oaiTextResponse(content) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [
+        {
+          message: { role: 'assistant', content, tool_calls: null },
+          finish_reason: 'stop',
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    }),
+    text: async () => '',
+  };
+}
+
 function installSyncFetchMock(backend) {
   const originalFetch = globalThis.fetch;
   const knownBases = [ACTIVE_FAKE_BASE, NAMED_FAKE_BASE, MEMORY_C_FAKE_BASE, MEMORY_D_FAKE_BASE];
@@ -524,13 +542,15 @@ function installSyncFetchMock(backend) {
       }
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
-      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
+      backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u, tools: body.tools });
       if (backend.gateHook) await backend.gateHook(forceTool);
+      // Plain-text completion: the summarize_chat_chunk classifier (chat-memory-structured-output-plan:
+      // no forced tool — raw text out, parsed locally). The only tool-free call this backend serves.
+      if (!forceTool) {
+        const content = body.messages.find((m) => m.role === 'user').content;
+        return oaiTextResponse(`Summary[${content}]`);
+      }
       switch (forceTool) {
-        case 'summarize_chat_chunk': {
-          const content = body.messages.find((m) => m.role === 'user').content;
-          return oaiToolResponse('summarize_chat_chunk', { summary: `Summary[${content}]` });
-        }
         case 'distill_chat_memory':
           return oaiToolResponse('distill_chat_memory', { entries: [{ topic_key: 'thread', content: `Entry #${backend.calls.length}` }] });
         case 'classify_household_memory':
@@ -562,10 +582,13 @@ function installSyncFetchMock(backend) {
 }
 
 function createFakeEmbeddings() {
+  const seen = [];
   return {
     name: 'fake-embeddings',
     dimension: 3,
+    seen,
     async embed(texts) {
+      seen.push(...texts);
       return texts.map(() => [0.1, 0.2, 0.3]);
     },
   };
@@ -628,6 +651,10 @@ function seedMessages(chatId, tag, count) {
 
 function distillCalls() {
   return llm.calls.filter((c) => c.options.forceTool === 'distill_chat_memory');
+}
+
+function summarizeCalls() {
+  return llm.calls.filter((c) => c.options.forceTool === undefined);
 }
 
 // --- Tick 1: 12 fresh messages, well past the 8-message due threshold ---
@@ -897,7 +924,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     releaseGate = resolve;
   });
   backend.gateHook = async (forceTool) => {
-    if (forceTool === 'summarize_chat_chunk') {
+    if (!forceTool) {
       aInside = true;
       await gate;
     }
@@ -915,13 +942,13 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     // Pass B: findDueChats still sees the chat as due (A hasn't committed), but the in-flight
     // guard must skip it — no second summarize/embed/bridge pipeline, no second sync point, and
     // the status row says 'skipped', not a second attempt.
-    const summarizeCallsBeforeB = llm.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length;
+    const summarizeCallsBeforeB = summarizeCalls().length;
     const chunksBeforeB = pool.chatChunks.filter((c) => c.chat_id === CONCUR_CHAT_ID).length;
     await runChatMemorySyncTick(deps);
     const statusWhileAFlying = pool.chatMemorySyncStatus.get(CONCUR_CHAT_ID);
     assert(statusWhileAFlying?.last_status === 'skipped', "the overlapping tick records 'skipped' — the guard short-circuits before any work");
     assert(
-      llm.calls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length === summarizeCallsBeforeB,
+      summarizeCalls().length === summarizeCallsBeforeB,
       'the overlapping tick launches zero additional summarize calls for the in-flight chat',
     );
     assert(
@@ -1167,7 +1194,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   assert(
-    namedCalls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length === 2,
+    namedCalls.filter((c) => c.options.forceTool === undefined).length === 2,
     'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
   );
   assert(
@@ -1411,6 +1438,113 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   await runChatMemorySyncTick(deps);
   assert(backend.calls.length > callsBeforeRetry, 'a transient failure is retried on the very next tick (not suppressed)');
   assert(pool.chatMemorySyncStatus.get(TRANSIENT_CHAT)?.last_status === 'ok', 'the retry after the transient failure succeeds');
+}
+
+// --- chat-memory-structured-output-plan.md: summarizeChatChunk itself is an ordinary completion
+// (empty tools, no forceTool) whose raw text is parsed locally — no tool-call transport, no
+// schema wrapper. The built-in prompt is the retrieval-header classifier (most-important-
+// development, past tense, 2-4 sentences), not a generic digest. ---
+{
+  const { summarizeChatChunk, DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } = await import('../dist/io/chatMemory/classifyChatChunk.js');
+
+  let capturedTools;
+  let capturedOptions;
+  const summary = await summarizeChatChunk(
+    {
+      async complete(messages, tools, options) {
+        capturedTools = tools;
+        capturedOptions = options;
+        return { message: { role: 'assistant', content: '  The gate fell.\n\n' } };
+      },
+    },
+    'TRANSCRIPT',
+  );
+  assert(Array.isArray(capturedTools) && capturedTools.length === 0, 'summarizeChatChunk passes an empty tools array — no forced tool transport');
+  assert(capturedOptions?.forceTool === undefined, 'summarizeChatChunk sends no forceTool');
+  assert(summary === 'The gate fell.', 'plain assistant text becomes the chunk summary, trimmed');
+
+  const fenced = await summarizeChatChunk(
+    {
+      async complete() {
+        return { message: { role: 'assistant', content: '```markdown\nThe gate fell.\n```' } };
+      },
+    },
+    'TRANSCRIPT',
+  );
+  assert(fenced === 'The gate fell.', 'one enclosing markdown fence is tolerated and stripped');
+
+  let threwEmpty = false;
+  try {
+    await summarizeChatChunk(
+      {
+        async complete() {
+          return { message: { role: 'assistant', content: '   \n  ' } };
+        },
+      },
+      'TRANSCRIPT',
+    );
+  } catch {
+    threwEmpty = true;
+  }
+  assert(threwEmpty, 'an empty/whitespace response throws');
+
+  let sawCustom = null;
+  await summarizeChatChunk(
+    {
+      async complete(messages) {
+        sawCustom = messages.find((m) => m.role === 'system')?.content;
+        return { message: { role: 'assistant', content: 'The gate fell.' } };
+      },
+    },
+    'TRANSCRIPT',
+    'CUSTOM PROMPT',
+  );
+  assert(sawCustom === 'CUSTOM PROMPT', 'an existing custom chunk_summary_prompt is passed through unchanged');
+
+  assert(
+    DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT.includes('most important durable development') &&
+      DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT.includes('past tense') &&
+      DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT.includes('Write 2–4 concise sentences'),
+    'the built-in default is the retrieval-header classifier, not a generic digest',
+  );
+}
+
+// --- chat-memory-structured-output-plan.md: the sync pipeline's integration path — chunks are
+// summarized through a tool-free completion, the plain assistant text lands verbatim as
+// chat_chunks.summary, and that same text rides the 0094 summary embedding lane. RP and ordinary
+// chats both exercise this same classifier. ---
+{
+  const TOOLFREE_CHAT_ID = randomUUID();
+  pool.chatSessions.set(TOOLFREE_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(TOOLFREE_CHAT_ID, 'TOOLFREE', 12);
+
+  const TOOLFREE_RP_ID = randomUUID();
+  pool.chatSessions.set(TOOLFREE_RP_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  seedMessages(TOOLFREE_RP_ID, 'TOOLFREE_RP', 12);
+
+  embeddings.seen.length = 0;
+  const summarizeCallsBefore = summarizeCalls().length;
+  await runChatMemorySyncTick(deps);
+
+  for (const chatId of [TOOLFREE_CHAT_ID, TOOLFREE_RP_ID]) {
+    const chunks = pool.chatChunks.filter((c) => c.chat_id === chatId).sort((a, b) => a.ordinal - b.ordinal);
+    assert(chunks.length === 2, 'a tool-free sync still archives its chunks for every chat kind');
+    assert(
+      chunks.every((c) => c.summary === `Summary[${c.content}]`),
+      'the plain assistant text is stored verbatim as chat_chunks.summary — no tool wrapper',
+    );
+    assert(
+      chunks.every((c) => embeddings.seen.includes(c.summary)),
+      'the stored chunk summary is exactly the text the 0094 summary embedding lane embedded',
+    );
+  }
+
+  const tfSummarizeCalls = summarizeCalls().slice(summarizeCallsBefore);
+  assert(tfSummarizeCalls.length === 4, 'the tick summarized every chunk (2 per chat) through the tool-free completion');
+  assert(
+    tfSummarizeCalls.every((c) => c.tools === undefined && c.options.forceTool === undefined),
+    'each summarize request carries no tools array and no forceTool — plain completion transport, not a forced tool call',
+  );
 }
 
 if (process.exitCode) {
