@@ -4,7 +4,6 @@ import {
   ApiError,
   adminListConnections,
   abortTurn,
-  archiveChat,
   callTool,
   chatCompletion,
   createChat,
@@ -1845,19 +1844,6 @@ export default function ChatView({
     }
   }
 
-  /** Marks this chat done — the explicit signal (docs/bb_principles.md §3) that triggers its
-   *  end-of-chat long-term-memory extraction server-side. Once archived, a chat stops rolling
-   *  into ongoing sync (chatMemorySync.ts), though it's still fully readable/searchable. */
-  async function archiveCurrentChat() {
-    if (!activeChat || activeChat.archivedAt) return;
-    try {
-      const archived = await archiveChat(activeChat.chatId, apiKey);
-      setActiveChat(archived);
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'failed to archive chat');
-    }
-  }
-
   /** Best-effort mirror of CharactersView.applyDefaultStack: a fresh RP chat opts into the async
    *  cleanup subloop (migration 0072) and gets the user's default prompt stack (0061) so it
    *  doesn't start stack-less. Either can fail independently without blocking the restart. */
@@ -2219,12 +2205,6 @@ export default function ChatView({
                 }}
               />
             )}
-            {activeChat && activeChat.kind !== 'rp' && !activeChat.archivedAt && (
-              <button type="button" className="chat-archive-button" title="Mark this chat done — extracts anything worth remembering long-term" onClick={archiveCurrentChat}>
-                Archive
-              </button>
-            )}
-            {activeChat?.archivedAt && <span className="chat-archived-badge" title={activeChat.archivedAt}>Archived</span>}
             {activeChat?.kind === 'rp' ? (
               <div className="chat-menu-wrap" ref={chatMenuRef}>
                 <button
@@ -2528,7 +2508,6 @@ export default function ChatView({
           <ChatSyncStatusPanel
             apiKey={apiKey}
             chatId={activeChat.chatId}
-            archived={!!activeChat.archivedAt}
             onClose={() => setSyncStatusOpen(false)}
           />
         </div>
@@ -3042,7 +3021,7 @@ function ChatSyncSet({ apiKey, session }: { apiKey: string | null; session: Chat
       <summary className="chat-settings-set-summary">Sync status</summary>
       {open && (
         <div className="chat-settings-set-body">
-          <ChatSyncStatusPanel apiKey={apiKey} chatId={session.chatId} archived={!!session.archivedAt} />
+          <ChatSyncStatusPanel apiKey={apiKey} chatId={session.chatId} />
         </div>
       )}
     </details>

@@ -504,8 +504,6 @@ export interface ChatSessionRow {
   parentChatId: string | null;
   /** Set only on a forked chat — the parent's message id it branched from. */
   forkMessageId: string | null;
-  /** Set once, explicitly, via the Archive action — null means still ongoing. */
-  archivedAt: string | null;
   /** Set once at creation, never changed afterward. An 'rp' chat gets no household_memory
    *  read/write and runs with no tools at all (DEFAULT_RP_TOOLS = [], 2026-08-10 — the RP
    *  model just executes its prompt stack) — see orchestrator/src/io/chatSessions.ts; the
@@ -553,8 +551,6 @@ export interface ChatMemorySettings {
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;
   distillPromptIsDefault: boolean;
-  householdMemoryPrompt: string;
-  householdMemoryPromptIsDefault: boolean;
   bridgePrompt: string;
   bridgePromptIsDefault: boolean;
   worldCuratorPrompt: string;
@@ -983,7 +979,6 @@ export interface ChatLineageNode {
   folderId: string | null;
   parentChatId: string | null;
   forkMessageId: string | null;
-  archivedAt: string | null;
   kind: 'chat' | 'rp';
   createdAt: string;
   updatedAt: string;

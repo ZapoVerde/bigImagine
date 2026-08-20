@@ -297,11 +297,9 @@ turns out to matter in practice.
 
 `household_memory` is the one piece of derived state here that deliberately outlives its source chat
 (`on delete set null`, not cascade — everything else is chat-scoped and disappears with the chat).
-It's populated exactly once per chat, when a household member explicitly archives it
-(`POST /v1/chats/:chatId/archive` → `chatSessions.ts`'s `archiveChat` stamps `archived_at`, which
-triggers `chatMemorySync.ts`'s `archiveChatMemory`) — never inferred from an idle timeout. That's a
-direct application of `docs/bi_principles.md` §3 (explicit user signal outranks inferred): deciding
-a conversation is "done" is the household's call, not a heuristic's.
+Existing `household_memory` rows remain valid historical data, but this table is now write-never:
+the archive-time classifier was its only producer and has been removed. Existing rows continue to
+be injected into ordinary household chats.
 
 Every `household_memory` row also carries a `source` (`'inferred'` by default, flipped to `'user'`
 the moment a household member edits or directly creates one via `create_household_memory`/
@@ -323,12 +321,12 @@ section exposes:
   40, because the key-ideas digest already persists its own state forward as `chat_memory_entries`
   rows across syncs; the horizon here is a revision window layered on top of that persistence, not
   the sole source of continuity the way Canonize's wholesale bridge re-read is.
-- **Ten prompts**, each **default + bespoke**: the six writer prompts (chunk summary, key-ideas
-  digest, long-term memory, RP bridge, lorebook curator, people curator) plus the four RP read-path
+- **Writer and read-path prompts**, each **default + bespoke**: chunk summary, key-ideas digest, RP
+   bridge, lorebook curator, people curator, plus the RP read-path
   injection templates (bridge, plot threads, auto-recall wrapper, auto-recall chunk — the
   2026-08-13 component split, `io/chatMemory/memoryInjection.ts`). Every prompt ships a sensible
   built-in (`DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT`, `DEFAULT_DISTILL_CHAT_MEMORY_PROMPT`,
-  `DEFAULT_HOUSEHOLD_MEMORY_PROMPT`, `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_WORLD_MEMORY_CURATOR_PROMPT`,
+   `DEFAULT_BRIDGE_PROMPT`, `DEFAULT_WORLD_MEMORY_CURATOR_PROMPT`,
   `DEFAULT_PEOPLE_CURATOR_PROMPT`, `DEFAULT_INJECT_BRIDGE_PROMPT`, `DEFAULT_INJECT_PLOT_PROMPT`,
   `DEFAULT_INJECT_AUTO_RECALL_PROMPT`, `DEFAULT_AUTO_RECALL_CHUNK_PROMPT`, each exported from its
   own `io/chatMemory/*.ts` module) and can be overridden freely; an empty override clears back to
@@ -342,7 +340,7 @@ section exposes:
 
 All fourteen settings (`chat_memory_profile`, `chat_memory_live_window_pairs`,
 `chat_memory_sync_every_pairs`, `chat_memory_digest_horizon_pairs`, `chat_memory_chunk_summary_prompt`,
-`chat_memory_distill_prompt`, `chat_memory_household_memory_prompt`, `chat_memory_bridge_prompt`,
+`chat_memory_distill_prompt`, `chat_memory_bridge_prompt`,
 `chat_memory_world_curator_prompt`, `chat_memory_people_curator_prompt`,
 `chat_memory_inject_bridge_prompt`, `chat_memory_inject_plot_prompt`,
 `chat_memory_inject_auto_recall_prompt`, `chat_memory_auto_recall_chunk_prompt`) are read live — the

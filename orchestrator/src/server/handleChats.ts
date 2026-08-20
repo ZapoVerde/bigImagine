@@ -4,7 +4,7 @@
  * @architectural-role IO Wrapper — the /v1/chats route family from httpServer.ts
  * @description
  * The Chat tab's persisted-session surface (io/chatSessions.ts): chat CRUD (list/create/get/
- * patch/delete, fork, archive, lineage), the prompt-preview and sync-status/inspection reads,
+ * patch/delete, fork, lineage), the prompt-preview and sync-status/inspection reads,
  * the lorebook sidebar panel + overrides + quick-add, the location-image background read, and
  * the message-mutation family (delete/truncate/edit/swipe — swipe includes the streaming
  * "Rerun" branch, same SSE shape as handleChatCompletions). The dispatcher resolves the userId
@@ -20,14 +20,14 @@
  * @api-declaration
  * handleChatRoutes(req, res, deps, userId, url)
  *   — GET/POST /v1/chats; GET/POST/DELETE /v1/chats/:id
- *   — POST /v1/chats/:id/fork|archive; GET /v1/chats/:id/prompt-preview|lineage|sync-status|syncs|location-image
+ *   — POST /v1/chats/:id/fork; GET /v1/chats/:id/prompt-preview|lineage|sync-status|syncs|location-image
  *   — GET/PUT /v1/chats/:id/lorebook-panel|book-override|entry-override; POST /v1/chats/:id/lorebook-quick-add
  *   — DELETE /v1/chats/:id/messages/:msgId; POST .../truncate|edit|swipe
  *
  * @contract
  *   assertions:
  *     purity:          impure (reads/writes chats/messages/folders via deps.chats; fires
- *                       background passes: archiveChatMemory, ensureActiveLocationImage,
+ *                       background passes: ensureActiveLocationImage,
  *                       fireLocationImageGeneration)
  *     state_ownership: []
  *     external_io:     [Postgres (via deps.chats/deps.db), LLM (via regenerateSwipe),
@@ -38,7 +38,7 @@ import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { log } from '../io/logger.js';
 import { clearPromptTrace } from '../io/promptTrace.js';
-import { archiveChatMemory, DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
+import { DEFAULT_LIVE_WINDOW_PAIRS, DEFAULT_SYNC_EVERY_PAIRS } from '../orchestrator/chatMemorySync.js';
 import { abortTurn } from '../orchestrator/turnAbort.js';
 import { beginInteractiveTurn, endInteractiveTurn } from '../orchestrator/interactiveTurnLock.js';
 import { interpolateMacros } from '../util/interpolateMacros.js';
@@ -244,30 +244,6 @@ export async function handleChatRoutes(
       return;
     }
     sendJson(res, 201, forked);
-    return;
-  }
-
-  if (segments[1] === 'archive' && segments.length === 2 && req.method === 'POST') {
-    const archived = await deps.chats.archiveChat(userId, chatId);
-    if (!archived) {
-      sendJson(res, 404, { error: 'not found' });
-      return;
-    }
-    // Fire-and-forget: the end-of-chat memory judgment call can take a few seconds and the archive
-    // action itself has already fully succeeded (archived_at is stamped) — a failure here is
-    // logged, not surfaced as a failed archive (bb_principles.md §11: a discarded path is logged
-    // with why, not silently swallowed, but it doesn't need to block the caller either). Skipped
-    // entirely for an 'rp' chat — it never wrote to household_memory in its system prompt either
-    // (buildChatMemorySystemPrompt above), so it shouldn't write inferred facts back into it now.
-    if (archived.kind !== 'rp') {
-      archiveChatMemory(
-        { db: deps.db, llm: deps.llm, embeddings: deps.embeddings, settings: deps.settings, llmConnections: deps.llmConnections },
-        userId,
-        chatId,
-        archived.title,
-      ).catch((err) => log.error('archive_chat: long-term-memory extraction failed', { chatId, err }));
-    }
-    sendJson(res, 200, archived);
     return;
   }
 

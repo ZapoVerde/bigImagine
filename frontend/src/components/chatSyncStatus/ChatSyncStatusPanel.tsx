@@ -13,10 +13,6 @@ const POLL_INTERVAL_MS = 30_000;
 interface ChatSyncStatusPanelProps {
   apiKey: string | null;
   chatId: string;
-  /** Archived chats are excluded from the rolling sync loop's due-check (findDueChats filters on
-   *  archived_at is null) — passed in so the panel can say "archived — rolling sync stopped"
-   *  instead of "due now" for one. */
-  archived: boolean;
   /** When provided, renders the standalone floating panel with a header (title, refresh, close).
    *  Omit to embed the readout inside another surface — e.g. the chat settings rail's collapsible
    *  Sync status set (ChatView.tsx's ChatSyncSet) — where the surface's own title/collapse
@@ -32,7 +28,7 @@ interface ChatSyncStatusPanelProps {
 // next tick does anything. Lives in the RP chat settings rail's collapsible "Sync status" set
 // (ChatView.tsx's ChatSyncSet) — it used to open from the ⋯ menu as a standalone panel, which the
 // optional onClose still supports for any future standalone mount.
-export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose }: ChatSyncStatusPanelProps) {
+export default function ChatSyncStatusPanel({ apiKey, chatId, onClose }: ChatSyncStatusPanelProps) {
   const [status, setStatus] = useState<ChatSyncStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -79,7 +75,7 @@ export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose 
         ) : status === null ? (
           <div className="chat-sync-status-loading">Loading sync status&hellip;</div>
         ) : (
-          <SyncStatusBody status={status} archived={archived} chatId={chatId} apiKey={apiKey} />
+          <SyncStatusBody status={status} chatId={chatId} apiKey={apiKey} />
         )}
       </div>
     </div>
@@ -88,12 +84,10 @@ export default function ChatSyncStatusPanel({ apiKey, chatId, archived, onClose 
 
 function SyncStatusBody({
   status,
-  archived,
   chatId,
   apiKey,
 }: {
   status: ChatSyncStatus;
-  archived: boolean;
   chatId: string;
   apiKey: string | null;
 }) {
@@ -106,9 +100,7 @@ function SyncStatusBody({
           ? 'chat-sync-badge-skipped'
           : 'chat-sync-badge-none';
 
-  const dueLine = archived
-    ? 'Archived — rolling sync stopped.'
-    : status.unsyncedMessages >= status.dueAfterMessages
+  const dueLine = status.unsyncedMessages >= status.dueAfterMessages
       ? 'Due now — the loop runs every ~30s.'
       : `${status.dueAfterMessages - status.unsyncedMessages} more message${status.dueAfterMessages - status.unsyncedMessages === 1 ? '' : 's'} until the next sync (of ${status.dueAfterMessages}).`;
 

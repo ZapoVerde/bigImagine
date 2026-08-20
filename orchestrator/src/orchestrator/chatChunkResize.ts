@@ -6,7 +6,7 @@
  * @description
  * The chunk size is a live, household-wide setting (migration 0099); changing it only affects
  * NEW chunks the sync tick / eager path write. This module is the one-time backfill that brings
- * EXISTING archives in line: for every non-archived chat, delete all chat_chunks rows (they're
+ * EXISTING history in line: for every chat, delete all chat_chunks rows (they're
  * derived data — bi_principles.md §1) and regenerate the currently-eligible span at the live
  * size, from ordinal 0, with the live chat_memory_live_window_pairs recomputing the span exactly
  * as a sync tick would. Summaries + both embeddings (content and the 0094 summary lane) are
@@ -219,11 +219,11 @@ export async function runChatChunkResize(deps: ChatChunkResizeDeps): Promise<voi
   try {
     const s = await resolveResizeSettings(deps);
 
-    // Enumerate every non-archived chat with its owner, then run each chat under its own RLS
+    // Enumerate every chat with its owner, then run each chat under its own RLS
     // scope (chat_chunks/user data is user-scoped; the enumeration itself is system-scoped).
     const chats = await deps.db.withSystemScope(async (session) =>
       session.query<{ chat_id: string; user_id: string }>(
-        'select chat_id, user_id from chat_sessions where archived_at is null order by chat_id',
+        'select chat_id, user_id from chat_sessions order by chat_id',
       ),
     );
     await deps.db.withSystemScope((session) =>

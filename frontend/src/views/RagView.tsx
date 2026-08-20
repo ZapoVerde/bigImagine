@@ -42,7 +42,6 @@ export default function RagView() {
   const [selectedChunkPairs, setSelectedChunkPairs] = useState('');
   const [selectedChunkSummaryPrompt, setSelectedChunkSummaryPrompt] = useState('');
   const [selectedDistillPrompt, setSelectedDistillPrompt] = useState('');
-  const [selectedHouseholdMemoryPrompt, setSelectedHouseholdMemoryPrompt] = useState('');
   const [selectedBridgePrompt, setSelectedBridgePrompt] = useState('');
   const [selectedWorldCuratorPrompt, setSelectedWorldCuratorPrompt] = useState('');
   const [selectedPeopleCuratorPrompt, setSelectedPeopleCuratorPrompt] = useState('');
@@ -97,7 +96,6 @@ export default function RagView() {
     setSelectedChunkPairs(settings.chunkPairs === null ? '' : String(settings.chunkPairs));
     setSelectedChunkSummaryPrompt(settings.chunkSummaryPrompt);
     setSelectedDistillPrompt(settings.distillPrompt);
-    setSelectedHouseholdMemoryPrompt(settings.householdMemoryPrompt);
     setSelectedBridgePrompt(settings.bridgePrompt);
     setSelectedWorldCuratorPrompt(settings.worldCuratorPrompt);
     setSelectedPeopleCuratorPrompt(settings.peopleCuratorPrompt);
@@ -169,9 +167,6 @@ export default function RagView() {
     if (selectedChunkPairs && chunkPairs !== chatMemorySettings.chunkPairs) patch.chunk_pairs = chunkPairs;
     if (selectedChunkSummaryPrompt !== chatMemorySettings.chunkSummaryPrompt) patch.chunk_summary_prompt = selectedChunkSummaryPrompt;
     if (selectedDistillPrompt !== chatMemorySettings.distillPrompt) patch.distill_prompt = selectedDistillPrompt;
-    if (selectedHouseholdMemoryPrompt !== chatMemorySettings.householdMemoryPrompt) {
-      patch.household_memory_prompt = selectedHouseholdMemoryPrompt;
-    }
     if (selectedBridgePrompt !== chatMemorySettings.bridgePrompt) patch.bridge_prompt = selectedBridgePrompt;
     if (selectedWorldCuratorPrompt !== chatMemorySettings.worldCuratorPrompt) {
       patch.world_curator_prompt = selectedWorldCuratorPrompt;
@@ -247,7 +242,6 @@ export default function RagView() {
     field:
       | 'chunkSummaryPrompt'
       | 'distillPrompt'
-      | 'householdMemoryPrompt'
       | 'bridgePrompt'
       | 'worldCuratorPrompt'
       | 'peopleCuratorPrompt'
@@ -262,7 +256,6 @@ export default function RagView() {
   ) {
     if (field === 'chunkSummaryPrompt') setSelectedChunkSummaryPrompt('');
     if (field === 'distillPrompt') setSelectedDistillPrompt('');
-    if (field === 'householdMemoryPrompt') setSelectedHouseholdMemoryPrompt('');
     if (field === 'bridgePrompt') setSelectedBridgePrompt('');
     if (field === 'worldCuratorPrompt') setSelectedWorldCuratorPrompt('');
     if (field === 'peopleCuratorPrompt') setSelectedPeopleCuratorPrompt('');
@@ -502,16 +495,6 @@ export default function RagView() {
         </label>
         <br />
         <button type="button" onClick={() => resetChatMemoryPrompt('distillPrompt')}>
-          Reset to default
-        </button>
-        <br />
-        <label>
-          Long-term memory prompt {chatMemorySettings?.householdMemoryPromptIsDefault && <em>(default)</em>}
-          <br />
-          <textarea value={selectedHouseholdMemoryPrompt} onChange={(e) => setSelectedHouseholdMemoryPrompt(e.target.value)} rows={3} />
-        </label>
-        <br />
-        <button type="button" onClick={() => resetChatMemoryPrompt('householdMemoryPrompt')}>
           Reset to default
         </button>
         <br />

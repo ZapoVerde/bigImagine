@@ -9,7 +9,6 @@ import { parseBridgeOutput } from '../dist/io/chatMemory/parseBridgeOutput.js';
 import { parseWorldMemoryOutput } from '../dist/io/chatMemory/parseWorldMemoryOutput.js';
 import { parsePeopleMemoryOutput } from '../dist/io/chatMemory/parsePeopleMemoryOutput.js';
 import { parseDistillMemoryOutput } from '../dist/io/chatMemory/parseDistillMemoryOutput.js';
-import { parseHouseholdMemoryOutput } from '../dist/io/chatMemory/parseHouseholdMemoryOutput.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -1081,29 +1080,6 @@ distillParseFails(
   );
   assert(typeof r[0].topicKey === 'string' && typeof r[0].content === 'string', 'entry fields are plain strings');
 }
-
-function householdParseFails(raw, label) {
-  let threw = false;
-  try { parseHouseholdMemoryOutput(raw); } catch { threw = true; }
-  assert(threw, label);
-}
-
-// --- Household-memory classifier parser --------------------------------------
-assert(parseHouseholdMemoryOutput('NO MEMORIES').length === 0, 'NO MEMORIES parses to []');
-assert(parseHouseholdMemoryOutput('no memories').length === 0, 'no memories is case-insensitive');
-assert(parseHouseholdMemoryOutput('- One durable fact.')[0] === 'One durable fact.', 'one valid bullet parses');
-assert(parseHouseholdMemoryOutput('- First.\n- Second.').length === 2, 'multiple valid bullets parse');
-assert(parseHouseholdMemoryOutput('- First.\r\n- Second.').length === 2, 'CRLF parses');
-assert(parseHouseholdMemoryOutput('```\n- Fenced fact.\n```')[0] === 'Fenced fact.', 'enclosing markdown fence parses');
-assert(parseHouseholdMemoryOutput('\n  - Trimmed fact.  \n')[0] === 'Trimmed fact.', 'surrounding and bullet whitespace is trimmed');
-householdParseFails('-', 'empty bullet throws');
-householdParseFails('1. Numbered fact.', 'numbered list throws');
-householdParseFails('Here are the memories:\n- Fact.', 'prose before bullets throws');
-householdParseFails('- Fact.\nThat is all.', 'prose after bullets throws');
-householdParseFails('- Valid.\ninvalid', 'mixed valid and invalid lines fail as a whole');
-householdParseFails('- Same.\n- Same.', 'exact duplicate memories throw');
-assert(parseHouseholdMemoryOutput('- Likes dark mode.\n- Prefers dark mode.').length === 2, 'similar non-identical memories are valid');
-assert(parseHouseholdMemoryOutput('- Plain string.').every((value) => typeof value === 'string'), 'returned values are plain strings');
 
 console.log(`\nverify-chat-memory-text-parsers: ${process.exitCode ? 'FAILED' : 'all assertions passed'}`);
 process.exit(process.exitCode ?? 0);

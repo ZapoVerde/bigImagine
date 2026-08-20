@@ -44,7 +44,7 @@ function assert(cond, message) {
 // cleanup_slop_rules / cleanup_jobs, covering exactly the queries cleanupLoop.ts issues. ---
 function createFakePool() {
   const users = [];
-  const chatSessions = new Map(); // chat_id -> { user_id, kind, cleanup_enabled_at, archived_at }
+  const chatSessions = new Map(); // chat_id -> { user_id, kind, cleanup_enabled_at }
   const chatMessages = []; // { message_id, chat_id, user_id, role, content, created_at, active_swipe_id }
   const swipes = []; // { swipe_id, message_id, content, created_at }
   const slopRules = []; // cleanup_slop_rules rows (rule_id, set_name, position, pattern, flags, action, replacement, llm_prompt, enabled)
@@ -135,7 +135,7 @@ function createFakePool() {
           // findEnabledChats
           if (sql.includes('select chat_id, cleanup_enabled_at from chat_sessions')) {
             const rows = [...chatSessions.values()]
-              .filter((s) => s.user_id === scopedUserId && s.kind === 'rp' && s.cleanup_enabled_at != null && !s.archived_at)
+              .filter((s) => s.user_id === scopedUserId && s.kind === 'rp' && s.cleanup_enabled_at != null)
               .map((s) => ({ chat_id: s.chat_id, cleanup_enabled_at: s.cleanup_enabled_at }));
             return { rows };
           }
@@ -210,9 +210,9 @@ function createFakePool() {
           }
 
           // getCleanupStatus
-          if (sql.includes('select kind, cleanup_enabled_at, archived_at from chat_sessions')) {
+          if (sql.includes('select kind, cleanup_enabled_at from chat_sessions')) {
             const sess = chatSessions.get(params[0]);
-            return { rows: sess ? [{ kind: sess.kind, cleanup_enabled_at: sess.cleanup_enabled_at, archived_at: sess.archived_at }] : [] };
+            return { rows: sess ? [{ kind: sess.kind, cleanup_enabled_at: sess.cleanup_enabled_at }] : [] };
           }
 
           // loadLocationBlock (location.md §5.5 / segway.md §2.6, added by 0083's cleanup-coupled
@@ -332,8 +332,8 @@ function addUser(pool, userId) {
   pool.users.push(userId);
 }
 
-function addChat(pool, { chatId = randomUUID(), userId, kind = 'rp', cleanupEnabledAt = pool.now(), archivedAt = null } = {}) {
-  pool.chatSessions.set(chatId, { chat_id: chatId, user_id: userId, kind, cleanup_enabled_at: cleanupEnabledAt, archived_at: archivedAt });
+function addChat(pool, { chatId = randomUUID(), userId, kind = 'rp', cleanupEnabledAt = pool.now() } = {}) {
+  pool.chatSessions.set(chatId, { chat_id: chatId, user_id: userId, kind, cleanup_enabled_at: cleanupEnabledAt });
   return chatId;
 }
 
@@ -689,7 +689,7 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
 
 // ---------------------------------------------------------------------------
 // 10. getCleanupStatus: disabled chat → enabled:false; enabled chat → thinking → modified;
-//     non-RP/archived chats with a stray stamp report enabled:false (roster mirror)
+//     non-RP chats report enabled:false (roster mirror)
 // ---------------------------------------------------------------------------
 {
   const pool = createFakePool();
@@ -703,10 +703,6 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
   const chatKindChat = addChat(pool, { userId: 'u1', kind: 'chat' });
   const chatKindStatus = await getCleanupStatus(db, 'u1', chatKindChat);
   assert(chatKindStatus && chatKindStatus.enabled === false, 'a chat-kind chat with a stamp reports enabled:false (the loop never processes it)');
-
-  const archivedChat = addChat(pool, { userId: 'u1', archivedAt: '2026-06-01T00:00:00.000Z' });
-  const archivedStatus = await getCleanupStatus(db, 'u1', archivedChat);
-  assert(archivedStatus && archivedStatus.enabled === false, 'an archived chat with a stamp reports enabled:false (the loop never processes it)');
 
   const onChat = addChat(pool, { userId: 'u1' });
   const msg = addMessage(pool, { chatId: onChat, userId: 'u1', content: 'No header here.\n' });

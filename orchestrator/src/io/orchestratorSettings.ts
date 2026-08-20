@@ -49,8 +49,8 @@
  *
  * chat_memory_profile/chat_memory_live_window_pairs/chat_memory_sync_every_pairs/
  * chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/chat_memory_distill_prompt/
- * chat_memory_household_memory_prompt (docs/chat-memory.md, orchestrator/src/orchestrator/
- * chatMemorySync.ts) are read live on every sync tick, same no-restart shape as
+ * chat-memory prompts (docs/chat-memory.md, orchestrator/src/orchestrator/chatMemorySync.ts) are
+ * read live on every sync tick, same no-restart shape as
  * household_timezone — mirrors SillyTavern-Canonize's own "Connections & Prompts" settings panel: a
  * household connection override for the sync pipeline's classification calls (unset = the active
  * connection, same fallback a chat's own params.profile uses), three timing knobs in turn-pairs
@@ -324,7 +324,6 @@ export const SETTING_NAMES = [
   'chat_memory_chunk_pairs',
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
-  'chat_memory_household_memory_prompt',
   'chat_memory_bridge_prompt',
   'chat_memory_world_curator_prompt',
   'chat_memory_people_curator_prompt',

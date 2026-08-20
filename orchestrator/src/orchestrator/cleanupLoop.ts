@@ -14,7 +14,7 @@
  * Same roster-then-process shape as chatMemorySync.ts / agentRoutineDispatch.ts: withSystemScope
  * to list users (chat_sessions is RLS-forced, so there is no single-user context to scan across
  * all of them from), then per user withUserScope to find enabled chats — kind = 'rp' (RP-only by
- * design, plan v2 §1), cleanup_enabled_at not null (the per-chat opt-in switch), archived_at null
+ * design, plan v2 §1), cleanup_enabled_at not null (the per-chat opt-in switch)
  * — then each chat's due assistant messages: role 'assistant', created AFTER the chat's
  * cleanup_enabled_at stamp (the retro-flood guard — enabling cleanup never re-processes old
  * history), with fewer than three cleanup_jobs rows for their active swipe (per-region dedup:
@@ -201,7 +201,6 @@ interface SlopRuleRow {
 interface StatusChatRow {
   kind: string;
   cleanup_enabled_at: string | null;
-  archived_at: string | null;
 }
 
 interface LatestMessageRow {
@@ -726,8 +725,8 @@ async function recordJobsForActiveSwipe(
 async function findEnabledChats(db: PostgresClient, userId: string): Promise<ChatRow[]> {
   return db.withUserScope(userId, (session) =>
     session.query<ChatRow>(
-      `select chat_id, cleanup_enabled_at from chat_sessions
-       where kind = 'rp' and cleanup_enabled_at is not null and archived_at is null
+       `select chat_id, cleanup_enabled_at from chat_sessions
+        where kind = 'rp' and cleanup_enabled_at is not null
        order by updated_at desc`,
     ),
   );
@@ -788,7 +787,7 @@ export function startCleanupLoop(deps: CleanupLoopDeps): void {
 
 /** The pill/page read surface: whether the chat is opted in, how many messages are still pending,
  *  and the newest eligible message's per-region pill states. Mirrors the loop's roster predicates
- *  exactly (kind = 'rp', archived_at null) — a chat that the loop would never process reports
+ *  exactly (kind = 'rp') — a chat that the loop would never process reports
  *  enabled:false rather than a never-draining pending count. Undefined only when the chat doesn't
  *  exist. While a turn streams, the live path's ambient map (cleanupLiveStatus.ts) is overlaid on
  *  top of the settled rows, so a polling read never shows stale 'not-called' for a region a repair
@@ -796,15 +795,12 @@ export function startCleanupLoop(deps: CleanupLoopDeps): void {
 export async function getCleanupStatus(db: PostgresClient, userId: string, chatId: string): Promise<CleanupStatus | undefined> {
   return db.withUserScope(userId, async (session) => {
     const [chat] = await session.query<StatusChatRow>(
-      'select kind, cleanup_enabled_at, archived_at from chat_sessions where chat_id = $1',
+      'select kind, cleanup_enabled_at from chat_sessions where chat_id = $1',
       [chatId],
     );
     if (!chat) return undefined;
 
-    // The loop's findEnabledChats requires kind = 'rp' and archived_at null — status must agree,
-    // or a 'chat'-kind/archived chat with a stray stamp would read enabled with a pending count
-    // that can never drain (the loop never touches it).
-    const enabledAt = chat.kind === 'rp' && !chat.archived_at ? chat.cleanup_enabled_at : null;
+    const enabledAt = chat.kind === 'rp' ? chat.cleanup_enabled_at : null;
     if (!enabledAt) return { enabled: false, pending: 0, latest: null };
 
     const [pendingRow] = await session.query<{ count: string }>(
@@ -876,8 +872,8 @@ export async function runCleanupNow(deps: CleanupLoopDeps, userId: string, chatI
     const rules = await loadSlopRules(deps.db);
     const [chat] = await deps.db.withUserScope(userId, (session) =>
       session.query<ChatRow>(
-        `select chat_id, cleanup_enabled_at from chat_sessions
-         where chat_id = $1 and kind = 'rp' and cleanup_enabled_at is not null and archived_at is null`,
+         `select chat_id, cleanup_enabled_at from chat_sessions
+          where chat_id = $1 and kind = 'rp' and cleanup_enabled_at is not null`,
         [chatId],
       ),
     );

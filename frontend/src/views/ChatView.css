@@ -150,18 +150,6 @@
   flex-shrink: 0;
 }
 
-.chat-archive-button {
-  font-size: var(--font-size-sm);
-  padding: 0.3rem 0.7rem;
-  flex-shrink: 0;
-}
-
-.chat-archived-badge {
-  font-size: var(--font-size-sm);
-  color: var(--color-text-muted);
-  flex-shrink: 0;
-}
-
 /* RP-chat header ⋯ menu — one control folding the branch-map toggle, file/image attach, bulk
    delete and restart (the input-row paper clip is hidden for RP chats). The prompt inspector
    lives in the left sidebar drawer and the sync status readout in the right-hand settings rail

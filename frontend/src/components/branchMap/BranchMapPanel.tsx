@@ -97,7 +97,6 @@ function BranchMapRow({
       >
         <span className="branch-map-node-title">{node.title}</span>
         {node.kind === 'rp' && <span className="branch-map-node-badge">RP</span>}
-        {node.archivedAt && <span className="branch-map-node-badge branch-map-node-badge-archived">Archived</span>}
       </button>
       {node.children.length > 0 && (
         <ul className="branch-map-children">

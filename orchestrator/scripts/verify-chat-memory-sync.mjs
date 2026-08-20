@@ -6,7 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { createPostgresClient } from '../dist/io/postgres.js';
-import { runChatMemorySyncTick, archiveChatMemory, computeChatSyncHealth } from '../dist/orchestrator/chatMemorySync.js';
+import { runChatMemorySyncTick, computeChatSyncHealth } from '../dist/orchestrator/chatMemorySync.js';
 
 function assert(cond, message) {
   if (!cond) {
@@ -22,12 +22,11 @@ function assert(cond, message) {
 // issues. ---
 function createFakePool() {
   const users = [];
-  const chatSessions = new Map(); // chat_id -> { user_id, archived_at }
+  const chatSessions = new Map(); // chat_id -> { user_id }
   const chatMessages = []; // { message_id, chat_id, user_id, role, content, created_at }
   const chatSyncPoints = []; // { sync_id, chat_id, user_id, ordinal, last_message_id, closed_at }
   const chatChunks = []; // { chat_id, sync_id, user_id, ordinal, content, summary, vector_embed }
   const chatMemoryEntries = new Map(); // `${chat_id}::${topic_key}` -> row
-  const householdMemory = []; // { user_id, source_chat_id, content, source }
   const chatMemorySyncStatus = new Map(); // chat_id -> row (chat_memory_sync_status, migration 0055)
   const canonFacts = []; // { fact_id, chat_id, user_id, status, approved_at } (canon_facts, migration 0058)
   const swipes = []; // { swipe_id, message_id, created_at } (chat_message_swipes, migration 0059)
@@ -47,7 +46,6 @@ function createFakePool() {
     chatSyncPoints,
     chatChunks,
     chatMemoryEntries,
-    householdMemory,
     chatMemorySyncStatus,
     canonFacts,
     swipes,
@@ -86,7 +84,7 @@ function createFakePool() {
             const [threshold, signature, retrySeconds] = params;
             const due = [];
             for (const [chatId, sess] of chatSessions) {
-              if (sess.user_id !== scopedUserId || sess.archived_at) continue;
+              if (sess.user_id !== scopedUserId) continue;
               const st = chatMemorySyncStatus.get(chatId);
               if (st && st.last_status === 'error' && st.last_error_kind === 'permanent') {
                 if (st.failure_signature === signature) {
@@ -173,15 +171,6 @@ function createFakePool() {
             return { rows: demoted.map((c) => ({ character_id: c.character_id })) };
           }
 
-          // archiveChatMemory's tail read (checked before any other chat_messages branch)
-          if (sql.includes('limit 20')) {
-            const rows = chatMessages
-              .filter((m) => m.chat_id === params[0])
-              .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.message_id.localeCompare(a.message_id))
-              .slice(0, 20)
-              .map((m) => ({ role: m.role, content: m.content }));
-            return { rows };
-          }
 
           // runOneChatSync's open-sync-point lookup (eager-chunk-sync-plan: reuse-or-create) —
           // checked before the closed-only lastSynced branch below (neither matches the other).
@@ -235,15 +224,6 @@ function createFakePool() {
             return { rows };
           }
 
-          // archiveChatMemory's own entries read (order by updated_at) — checked before the plain
-          // runOneChatSync read below, since that plain query's text is a substring of this one.
-          if (sql.includes('order by updated_at')) {
-            const rows = [...chatMemoryEntries.values()]
-              .filter((e) => e.chat_id === params[0])
-              .sort((a, b) => a.updated_at.localeCompare(b.updated_at))
-              .map((e) => ({ topic_key: e.topic_key, content: e.content }));
-            return { rows };
-          }
           if (sql.includes('select topic_key, content from chat_memory_entries')) {
             const rows = [...chatMemoryEntries.values()]
               .filter((e) => e.chat_id === params[0])
@@ -291,15 +271,8 @@ function createFakePool() {
             return { rows: [] };
           }
 
-          if (sql.includes('insert into household_memory')) {
-            const [userId, chatId, content] = params;
-            householdMemory.push({ user_id: userId, source_chat_id: chatId, content, source: 'inferred' });
-            return { rows: [] };
-          }
-
           // recordSyncStatus's three upsert shapes (chatMemorySync.ts) — matched by the literal
           // status text each one's own VALUES clause hard-codes, same disambiguation approach the
-          // archiveChatMemory/runOneChatSync branches above already use for overlapping query text.
           if (sql.includes('insert into chat_memory_sync_status')) {
             if (sql.includes("'error'")) {
               const [chatId, userId, step, error, kind, signature] = params;
@@ -509,7 +482,6 @@ function createFakeHttpBackend() {
     curatePeopleOverride: null,
     worldCuratorOverride: null,
     distillOverride: null,
-    householdMemoryOverride: null,
   };
 }
 
@@ -569,9 +541,9 @@ function installSyncFetchMock(backend) {
       if (backend.gateHook) await backend.gateHook(forceTool);
       // Plain-text completions (chat-memory-structured-output-plan + chat-memory-world-curator-
       // plan + chat-memory-people-curator-plan + chat-memory-distill-plan: no forced tool — raw text
-      // out, parsed locally). SIX tool-free callers now share the same connection within one tick —
-      // the chunk classifier, the rp bridge, the rp world curator, the rp people curator, the
-      // household distill, and the archive-only household classifier — so the backend routes on a
+       // out, parsed locally). Five tool-free callers now share the same connection within one tick —
+       // the chunk classifier, the rp bridge, the rp world curator, the rp people curator, and the
+       // household distill — so the backend routes on a
       // distinguishing string in the system prompt
       // (the bridge's chronicler header, the world curator's lorebook-curator header, the people
       // curator's people-curator header, the distiller's CHAT MEMORY DISTILLER header) rather than
@@ -666,9 +638,6 @@ Minor: Find her brother.`,
 The server upgrade moved forward after replacement storage was selected.`,
           );
         }
-        if (sys.includes('HOUSEHOLD MEMORY CLASSIFIER')) {
-          return oaiTextResponse(backend.householdMemoryOverride ?? '- A durable fact worth remembering.');
-        }
         return oaiTextResponse(`Summary[${content}]`);
       }
       throw new Error(`fake sync HTTP backend got an unexpected forceTool: ${forceTool}`);
@@ -711,8 +680,8 @@ const NOT_DUE_CHAT_ID = randomUUID();
 
 const pool = createFakePool();
 pool.users.push(USER);
-pool.chatSessions.set(CHAT_ID, { user_id: USER, archived_at: null });
-pool.chatSessions.set(NOT_DUE_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(CHAT_ID, { user_id: USER });
+  pool.chatSessions.set(NOT_DUE_CHAT_ID, { user_id: USER });
 
 const db = createPostgresClient(pool);
 const backend = createFakeHttpBackend();
@@ -792,13 +761,6 @@ function isDistillCall(c) {
   );
 }
 
-function isHouseholdMemoryCall(c) {
-  return (
-    c.options.forceTool === undefined &&
-    (c.messages.find((m) => m.role === 'system')?.content ?? '').includes('HOUSEHOLD MEMORY CLASSIFIER')
-  );
-}
-
 function bridgeCalls() {
   return llm.calls.filter(isBridgeCall);
 }
@@ -818,8 +780,7 @@ function summarizeCalls() {
       !isBridgeCall(c) &&
       !isWorldCuratorCall(c) &&
       !isPeopleCuratorCall(c) &&
-      !isDistillCall(c) &&
-      !isHouseholdMemoryCall(c),
+       !isDistillCall(c),
   );
 }
 
@@ -900,7 +861,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // to archive. ---
 {
   const SKIP_CHAT_ID = randomUUID();
-  pool.chatSessions.set(SKIP_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(SKIP_CHAT_ID, { user_id: USER });
   seedMessages(SKIP_CHAT_ID, 'SKIP', 6); // outer threshold with sync_every_pairs=1: 2 + 4 = 6
 
   await settings.set('chat_memory_sync_every_pairs', '1');
@@ -920,7 +881,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // surface for this pipeline's existing log-only failure seams). ---
 {
   const FAIL_CHAT_ID = randomUUID();
-  pool.chatSessions.set(FAIL_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(FAIL_CHAT_ID, { user_id: USER });
   seedMessages(FAIL_CHAT_ID, 'FAIL', 12);
 
   const realEmbed = embeddings.embed;
@@ -957,7 +918,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // runOneChatSync actually ran for that chat, not on a standalone timer. ---
 {
   const CANON_CHAT_ID = randomUUID();
-  pool.chatSessions.set(CANON_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(CANON_CHAT_ID, { user_id: USER });
   seedMessages(CANON_CHAT_ID, 'CANON', 8); // clears the due threshold
 
   const proposedId = randomUUID();
@@ -968,7 +929,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   );
 
   const NOT_DUE_CANON_CHAT_ID = randomUUID();
-  pool.chatSessions.set(NOT_DUE_CANON_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(NOT_DUE_CANON_CHAT_ID, { user_id: USER });
   seedMessages(NOT_DUE_CANON_CHAT_ID, 'NOTDUE', 2); // well under the due threshold
   const untouchedId = randomUUID();
   pool.canonFacts.push({ fact_id: untouchedId, chat_id: NOT_DUE_CANON_CHAT_ID, user_id: USER, status: 'proposed', approved_at: null });
@@ -986,64 +947,11 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   assert(untouched?.status === 'proposed', "a fact belonging to a chat that isn't due yet is not promoted");
 }
 
-// --- archiveChatMemory: the one-shot end-of-chat long-term-memory extraction ---
-{
-  const archiveChatId = randomUUID();
-  backend.householdMemoryOverride =
-    '- The household prefers compact technical answers over long explanations.\n- The home server runs Proxmox.';
-  pool.chatMemoryEntries.set(`${archiveChatId}::topic_a`, {
-    chat_id: archiveChatId,
-    topic_key: 'topic_a',
-    content: 'Household prefers oat milk.',
-    updated_at: pool.now(),
-  });
-  pool.chatMessages.push({
-    message_id: randomUUID(),
-    chat_id: archiveChatId,
-    user_id: USER,
-    role: 'user',
-    content: 'thanks, thats everything',
-    created_at: pool.now(),
-  });
-
-  await archiveChatMemory(deps, USER, archiveChatId, 'Grocery run planning');
-
-  const householdRows = pool.householdMemory.filter((h) => h.source_chat_id === archiveChatId);
-  assert(householdRows.length === 2, 'archiveChatMemory writes exactly the parsed household memories');
-  assert(
-    householdRows.map((h) => h.content).join('|') ===
-      'The household prefers compact technical answers over long explanations.|The home server runs Proxmox.',
-    'archive rows carry the exact memory text the LLM returned',
-  );
-  assert(householdRows.every((h) => h.source === 'inferred' && h.user_id === USER), 'archive rows preserve inferred source and user linkage');
-
-  const call = llm.calls[llm.calls.length - 1];
-  const digest = call.messages.find((m) => m.role === 'user').content;
-  assert(digest.includes('Grocery run planning'), "the digest sent to the household classifier includes the chat's title");
-  assert(digest.includes('Household prefers oat milk.'), 'the digest includes the existing key-ideas entries');
-
-  const emptyArchiveChatId = randomUUID();
-  backend.householdMemoryOverride = 'NO MEMORIES';
-  await archiveChatMemory(deps, USER, emptyArchiveChatId, 'Nothing durable');
-  assert(pool.householdMemory.filter((h) => h.source_chat_id === emptyArchiveChatId).length === 0, 'NO MEMORIES succeeds without inserting rows');
-
-  const malformedArchiveChatId = randomUUID();
-  backend.householdMemoryOverride = '- Valid durable memory\nThis line is malformed.';
-  let malformedFailed = false;
-  try {
-    await archiveChatMemory(deps, USER, malformedArchiveChatId, 'Malformed classifier response');
-  } catch {
-    malformedFailed = true;
-  }
-  assert(malformedFailed, 'malformed household classification fails archive');
-  assert(pool.householdMemory.filter((h) => h.source_chat_id === malformedArchiveChatId).length === 0, 'malformed classification inserts no partial household rows');
-}
-
 // --- segway.md §2.5: the transient settle step promotes the active swipe's rows and demotes the
 // alternate swipes' rows for the messages leaving the live window, never deleting anything ---
 {
   const settleChatId = randomUUID();
-  pool.chatSessions.set(settleChatId, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(settleChatId, { user_id: USER });
   const settleMessages = [];
   for (let i = 1; i <= 12; i++) {
     settleMessages.push({
@@ -1100,7 +1008,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // skip ('skipped' status, zero extra LLM work, zero extra chunks) instead of racing it. ---
 {
   const CONCUR_CHAT_ID = randomUUID();
-  pool.chatSessions.set(CONCUR_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(CONCUR_CHAT_ID, { user_id: USER });
   seedMessages(CONCUR_CHAT_ID, 'CONCUR', 12); // clears the due threshold
 
   // Gate the fake HTTP backend's summarize calls so pass A is provably parked mid-pipeline (before
@@ -1166,7 +1074,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // sync and play it back" inspection. ---
 {
   const RP_CHAT_ID = randomUUID();
-  pool.chatSessions.set(RP_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  pool.chatSessions.set(RP_CHAT_ID, { user_id: USER, kind: 'rp' });
   seedMessages(RP_CHAT_ID, 'RP', 12); // same 12-message due profile as the household tick above
 
   // character-appearance-field-plan.md: the people curator's entry carries a separate
@@ -1237,7 +1145,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
     const classified = toolFree.filter((c) => !isBridgeCall(c) && !isWorldCuratorCall(c) && !isPeopleCuratorCall(c));
     assert(
       bridged.length + worlded.length + people.length + classified.length === toolFree.length,
-      'the four rp tick tool-free callers partition every tick request with no overlap (bridge / world curator / people curator / classifier)',
+      'the four rp tick tool-free callers partition every tick request with no overlap (bridge / world curator / people curator / chunk summary)',
     );
   }
 
@@ -1312,7 +1220,7 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
 // predate the failing step, so those particular rows can't be asserted away here). ---
 {
   const BAD_WORLD_CHAT_ID = randomUUID();
-  pool.chatSessions.set(BAD_WORLD_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  pool.chatSessions.set(BAD_WORLD_CHAT_ID, { user_id: USER, kind: 'rp' });
   seedMessages(BAD_WORLD_CHAT_ID, 'BADWORLD', 12);
 
   backend.worldCuratorOverride = `**NEW: Good Concept**
@@ -1344,7 +1252,7 @@ Person is not a valid world category.`;
 // here, the same limitation the world FAIL test above documents). ---
 {
   const BAD_PEOPLE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(BAD_PEOPLE_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  pool.chatSessions.set(BAD_PEOPLE_CHAT_ID, { user_id: USER, kind: 'rp' });
   seedMessages(BAD_PEOPLE_CHAT_ID, 'BADPEOPLE', 12);
 
   backend.curatePeopleOverride = `**NEW: Good Person**
@@ -1392,7 +1300,7 @@ Missing every other section.`;
 // appearance is already non-empty is never overwritten (bi_principles.md §3 per field). ---
 {
   const APPEAR_CHAT_ID = randomUUID();
-  pool.chatSessions.set(APPEAR_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  pool.chatSessions.set(APPEAR_CHAT_ID, { user_id: USER, kind: 'rp' });
   seedMessages(APPEAR_CHAT_ID, 'APPEAR', 12);
 
   // One matching appearance-blank row, one matching already-filled row, and no row at all for
@@ -1563,7 +1471,7 @@ Duplicate of: Mira Vale`,
 // not-yet-chunked span, never a re-chunk. ---
 {
   const EAGER_CHAT_ID = randomUUID();
-  pool.chatSessions.set(EAGER_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(EAGER_CHAT_ID, { user_id: USER });
   seedMessages(EAGER_CHAT_ID, 'EAGER', 12); // 6 turns; the tick archives turns 1-4 (msgs 0-7)
 
   // Simulate an eager pass that already chunked the whole archive span (msgs 0-7) under an open
@@ -1593,7 +1501,7 @@ Duplicate of: Mira Vale`,
 
 {
   const TOPUP_CHAT_ID = randomUUID();
-  pool.chatSessions.set(TOPUP_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(TOPUP_CHAT_ID, { user_id: USER });
   seedMessages(TOPUP_CHAT_ID, 'TOPUP', 12);
 
   // Eager covered only the first chunk's worth (msgs 0-3); the tick must top up msgs 4-7 under
@@ -1628,7 +1536,7 @@ Duplicate of: Mira Vale`,
 // model used to drag the whole memory pipeline onto that dead model, a ×1500 permanent 404 loop. ---
 {
   const LOCK_CHAT_ID = randomUUID();
-  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp', params: { profile: 'obsolete-rp-model' } });
+  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, kind: 'rp', params: { profile: 'obsolete-rp-model' } });
   seedMessages(LOCK_CHAT_ID, 'LOCK', 12);
 
   await settings.set('chat_memory_profile', 'sync-profile');
@@ -1668,7 +1576,7 @@ Duplicate of: Mira Vale`,
 // chat_memory_profile unset, such a chat syncs normally via the active connection. ---
 {
   const REFUSE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'ghost-connection' } });
+  pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, params: { profile: 'ghost-connection' } });
   seedMessages(REFUSE_CHAT_ID, 'REFUSE', 12);
 
   const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
@@ -1689,7 +1597,7 @@ Duplicate of: Mira Vale`,
 // both sides of the edit. ---
 {
   const NARR_CHAT_ID = randomUUID();
-  pool.chatSessions.set(NARR_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'narr-model-a' } });
+  pool.chatSessions.set(NARR_CHAT_ID, { user_id: USER, params: { profile: 'narr-model-a' } });
   seedMessages(NARR_CHAT_ID, 'NARR', 12);
 
   const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
@@ -1720,7 +1628,7 @@ Duplicate of: Mira Vale`,
 // (docs/chat-memory.md's Settings section). ---
 {
   const LIVE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(LIVE_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(LIVE_CHAT_ID, { user_id: USER });
   seedMessages(LIVE_CHAT_ID, 'LIVEC', 12);
 
   await settings.set('chat_memory_profile', 'memory-c');
@@ -1744,7 +1652,7 @@ Duplicate of: Mira Vale`,
 // active connection), and it must never silently fall back to a chat's narrator profile instead. ---
 {
   const UNKNOWN_MEM_CHAT_ID = randomUUID();
-  pool.chatSessions.set(UNKNOWN_MEM_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'dead-narrator' } });
+  pool.chatSessions.set(UNKNOWN_MEM_CHAT_ID, { user_id: USER, params: { profile: 'dead-narrator' } });
   seedMessages(UNKNOWN_MEM_CHAT_ID, 'UNKMEM', 12);
 
   const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
@@ -1815,8 +1723,8 @@ Duplicate of: Mira Vale`,
 {
   const MULTI_A = randomUUID();
   const MULTI_B = randomUUID();
-  pool.chatSessions.set(MULTI_A, { user_id: USER, archived_at: null });
-  pool.chatSessions.set(MULTI_B, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(MULTI_A, { user_id: USER });
+  pool.chatSessions.set(MULTI_B, { user_id: USER });
   seedMessages(MULTI_A, 'MULTA', 12);
   seedMessages(MULTI_B, 'MULTB', 12);
 
@@ -1837,7 +1745,7 @@ Duplicate of: Mira Vale`,
 {
   const ACTIVE_SIGNATURE = 'openai-compatible|sync-active-model|https://sync-active-fake.example';
   const SUPPRESSED_CHAT = randomUUID();
-  pool.chatSessions.set(SUPPRESSED_CHAT, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(SUPPRESSED_CHAT, { user_id: USER });
   seedMessages(SUPPRESSED_CHAT, 'SUPP', 12);
 
   backend.forceStatus = 404;
@@ -1872,7 +1780,7 @@ Duplicate of: Mira Vale`,
 // rate-limit/availability error can plausibly clear on its own. ---
 {
   const TRANSIENT_CHAT = randomUUID();
-  pool.chatSessions.set(TRANSIENT_CHAT, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(TRANSIENT_CHAT, { user_id: USER });
   seedMessages(TRANSIENT_CHAT, 'TRANS', 12);
 
   backend.forceStatus = 429;
@@ -1963,11 +1871,11 @@ Duplicate of: Mira Vale`,
 // chats both exercise this same classifier. ---
 {
   const TOOLFREE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(TOOLFREE_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(TOOLFREE_CHAT_ID, { user_id: USER });
   seedMessages(TOOLFREE_CHAT_ID, 'TOOLFREE', 12);
 
   const TOOLFREE_RP_ID = randomUUID();
-  pool.chatSessions.set(TOOLFREE_RP_ID, { user_id: USER, archived_at: null, kind: 'rp' });
+  pool.chatSessions.set(TOOLFREE_RP_ID, { user_id: USER, kind: 'rp' });
   seedMessages(TOOLFREE_RP_ID, 'TOOLFREE_RP', 12);
 
   embeddings.seen.length = 0;
@@ -2004,7 +1912,7 @@ Duplicate of: Mira Vale`,
   const chatEntryCount = (chatId) => [...pool.chatMemoryEntries.values()].filter((e) => e.chat_id === chatId).length;
 
   const DISTILL_CHAT_ID = randomUUID();
-  pool.chatSessions.set(DISTILL_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(DISTILL_CHAT_ID, { user_id: USER });
   seedMessages(DISTILL_CHAT_ID, 'DISTILL', 12);
 
   // Seed an existing digest (what an earlier sync would have stored) plus an omitted topic that
@@ -2066,7 +1974,7 @@ A new backup strategy was being planned around off-site replication.`;
 
   // --- NO CHANGES NEEDED: no digest writes, but the sync still succeeds ---
   const NOOP_CHAT_ID = randomUUID();
-  pool.chatSessions.set(NOOP_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(NOOP_CHAT_ID, { user_id: USER });
   seedMessages(NOOP_CHAT_ID, 'NOOP', 12);
   pool.chatMemoryEntries.set(`${NOOP_CHAT_ID}::server_upgrade`, {
     chat_id: NOOP_CHAT_ID,
@@ -2085,7 +1993,7 @@ A new backup strategy was being planned around off-site replication.`;
 
   // --- malformed distill text: whole-stage failure, no partial writes, no advanced boundary ---
   const BAD_DISTILL_CHAT_ID = randomUUID();
-  pool.chatSessions.set(BAD_DISTILL_CHAT_ID, { user_id: USER, archived_at: null });
+  pool.chatSessions.set(BAD_DISTILL_CHAT_ID, { user_id: USER });
   seedMessages(BAD_DISTILL_CHAT_ID, 'BADDIST', 12);
   pool.chatMemoryEntries.set(`${BAD_DISTILL_CHAT_ID}::server_upgrade`, {
     chat_id: BAD_DISTILL_CHAT_ID,

@@ -62,10 +62,10 @@
  * serialization for the same race, in case the in-memory guard is ever bypassed (a second
  * process, a future caller); the unique constraint remains the last-resort backstop.
  *
- * The connection this pipeline's calls run through, and each of the six prompts, are read live
+ * The connection this pipeline's calls run through, and each of the five prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
- * chat_memory_distill_prompt/chat_memory_household_memory_prompt/chat_memory_bridge_prompt/
+ * chat_memory_distill_prompt/chat_memory_bridge_prompt/
  * chat_memory_world_curator_prompt/chat_memory_people_curator_prompt) — a Settings-tab change
  * takes effect on the very next tick, no restart. The connection half is resolved exclusively
  * through resolveChatMemoryLlm() (this file's shared resolver, reused by eagerChunkSync.ts and
@@ -103,9 +103,6 @@
  * runChatMemorySyncTick(deps) — one poll cycle, exported so verify scripts can drive it directly.
  *   Resolves all settings (including the connection) once per tick; excludes permanently-failing
  *   chats while suppression is active.
- * archiveChatMemory(deps, userId, chatId, chatTitle) — the end-of-chat long-term-memory
- *   extraction, called by server/httpServer.ts's archive_chat route once chatSessions.ts's
- *   archiveChat has stamped archived_at
  *
  * Permanent-failure suppression (bi_principles.md §11 follow-up, migration 0127): a sync pass that
  * fails with a permanent error — a 400/401/403/404 HTTP status, or a real-but-unusable response
@@ -147,7 +144,6 @@ import { toPgVectorLiteral } from '../util/pgvector.js';
 import { chunkChatTranscript, DEFAULT_CHUNK_PAIRS, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
 import { distillChatMemory, type ChatMemoryEntryDraft } from '../io/chatMemory/distillChatMemory.js';
-import { classifyHouseholdMemory } from '../io/chatMemory/classifyHouseholdMemory.js';
 import { bridgeChatMemory } from '../io/chatMemory/bridgeChatMemory.js';
 import { curateWorldMemory } from '../io/chatMemory/curateWorldMemory.js';
 import { curatePeople } from '../io/chatMemory/curatePeople.js';
@@ -284,7 +280,6 @@ interface SyncSettings {
   profileSignature: string;
   chunkSummaryPrompt: string | undefined;
   distillPrompt: string | undefined;
-  householdMemoryPrompt: string | undefined;
   bridgePrompt: string | undefined;
   worldCuratorPrompt: string | undefined;
   peopleCuratorPrompt: string | undefined;
@@ -352,7 +347,6 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     chunkPairsRaw,
     chunkSummaryPrompt,
     distillPrompt,
-    householdMemoryPrompt,
     bridgePrompt,
     worldCuratorPrompt,
     peopleCuratorPrompt,
@@ -364,7 +358,6 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
     deps.settings.get('chat_memory_distill_prompt'),
-    deps.settings.get('chat_memory_household_memory_prompt'),
     deps.settings.get('chat_memory_bridge_prompt'),
     deps.settings.get('chat_memory_world_curator_prompt'),
     deps.settings.get('chat_memory_people_curator_prompt'),
@@ -395,7 +388,6 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettin
     profileSignature: chatMemoryProfileSignature(profile),
     chunkSummaryPrompt: chunkSummaryPrompt || undefined,
     distillPrompt: distillPrompt || undefined,
-    householdMemoryPrompt: householdMemoryPrompt || undefined,
     bridgePrompt: bridgePrompt || undefined,
     worldCuratorPrompt: worldCuratorPrompt || undefined,
     peopleCuratorPrompt: peopleCuratorPrompt || undefined,
@@ -420,9 +412,6 @@ async function findDueChats(
     // candidate filter only — runOneChatSync's own JS-side slicing (message_id-tiebreak-aware,
     // matching io/chatSessions.ts's own ordering) is the authoritative source of what actually gets
     // archived, and simply no-ops if this filter ever over-selects a chat that isn't really due.
-    // archived_at excludes an already-archived chat from ongoing rolling sync entirely — its
-    // history is done changing.
-    //
     // Permanent-failure suppression (bi_principles.md §11 follow-up, migration 0127): a chat whose
     // last attempt was a permanent failure (400/401/403/404, or a malformed/empty response) under
     // the SAME connection signature (chat_memory_profile/active-connection identity) is excluded
@@ -439,8 +428,7 @@ async function findDueChats(
          and sp.ordinal = (select max(ordinal) from chat_sync_points where chat_id = cs.chat_id and closed_at is not null)
        left join chat_messages anchor on anchor.message_id = sp.last_message_id
        left join chat_memory_sync_status st on st.chat_id = cs.chat_id
-       where cs.archived_at is null
-         and (
+       where (
            select count(*) from chat_messages m
            where m.chat_id = cs.chat_id and (anchor.created_at is null or m.created_at > anchor.created_at)
          ) >= $1
@@ -1140,42 +1128,4 @@ export function startChatMemorySyncLoop(deps: ChatMemorySyncDeps): void {
   };
   tick();
   setInterval(tick, POLL_INTERVAL_MS).unref();
-}
-
-/**
- * The end-of-chat long-term-memory extraction — one judgment call over the whole chat's digest,
- * triggered by server/httpServer.ts's archive_chat route immediately after chatSessions.ts's
- * archiveChat stamps archived_at. Not part of the rolling poll tick above: this fires exactly
- * once, on an explicit signal, never inferred from idle time (bb_principles.md §3).
- */
-export async function archiveChatMemory(deps: ChatMemorySyncDeps, userId: string, chatId: string, chatTitle: string): Promise<void> {
-  const sync = await resolveSyncSettings(deps);
-  await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-    deps.db.withUserScope(userId, async (session) => {
-      const entries = await session.query<ExistingEntryRow>(
-        'select topic_key, content from chat_memory_entries where chat_id = $1 order by updated_at',
-        [chatId],
-      );
-      const tail = await session.query<{ role: 'user' | 'assistant'; content: string }>(
-        'select role, content from chat_messages where chat_id = $1 order by created_at desc, message_id desc limit 20',
-        [chatId],
-      );
-      const digest = [
-        `Chat: ${chatTitle}`,
-        entries.length ? `Key ideas:\n${entries.map((e) => `- ${e.content}`).join('\n')}` : 'Key ideas: (none recorded)',
-        `Most recent messages (newest first):\n${tail.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')}`,
-      ].join('\n\n');
-
-      const memories = await withCallLabel('sync:household-memory', () =>
-        classifyHouseholdMemory(sync.llm, digest, sync.householdMemoryPrompt),
-      );
-      for (const content of memories) {
-        await session.query(
-          `insert into household_memory (user_id, source_chat_id, content, source) values ($1, $2, $3, 'inferred')`,
-          [userId, chatId, content],
-        );
-      }
-      log.info('chat-memory archive: extracted long-term memories', { chatId, count: memories.length });
-    }),
-  );
 }

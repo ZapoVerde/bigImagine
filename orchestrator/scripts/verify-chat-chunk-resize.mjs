@@ -66,10 +66,10 @@ function createFakePool() {
           }
 
           // runChatChunkResize's chat enumeration (withSystemScope).
-          if (sql.includes('from chat_sessions where archived_at is null')) {
+          if (sql.includes('from chat_sessions order by chat_id')) {
             const rows = [];
             for (const [chatId, sess] of chatSessions) {
-              if (!sess.archived_at) rows.push({ chat_id: chatId, user_id: sess.user_id });
+              rows.push({ chat_id: chatId, user_id: sess.user_id });
             }
             return { rows };
           }
@@ -261,7 +261,6 @@ const CHAT_ID = randomUUID();
 const pool = createFakePool();
 pool.chatSessions.set(CHAT_ID, {
   user_id: USER,
-  archived_at: null,
   // Pure test bookkeeping — the narrator/generation profile this legacy RP chat points at a dead
   // model. The resize pass must NEVER read it (the fake pool throws on any params->>'profile'
   // query), and must regenerate the archive through chat_memory_profile instead.
@@ -347,7 +346,7 @@ function summarizeCalls() {
   pool.resizeStatus.chats_done = 0;
 
   const ACTIVE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(ACTIVE_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'dead-narrator' } });
+  pool.chatSessions.set(ACTIVE_CHAT_ID, { user_id: USER, params: { profile: 'dead-narrator' } });
   const activeMsgs = [];
   for (let i = 1; i <= 12; i++) {
     activeMsgs.push({

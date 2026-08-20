@@ -44,7 +44,7 @@
  * (recall_chat_history/recall_canon_facts included). Auto-recall is unaffected — it's server-
  * side injection into the stack (io/chatMemory/recallForPrompt.ts), never a model tool call.
  *
- * forkChat/archiveChat (db/migrations/0040_chat_branching.sql, docs/chat-memory.md): a fork is a
+ * forkChat (db/migrations/0040_chat_branching.sql, docs/chat-memory.md): a fork is a
  * new chat_sessions row, constructed correct from birth rather than detected-and-healed —
  * messages up to and including forkFromMessageId are copied under fresh message_ids (message_id
  * is a global PK, so the parent's own rows can't be reused), and only the chat_sync_points/
@@ -58,10 +58,7 @@
  * user's explicit call — a fork always gets its own chat_id and a full content dup, not a
  * point-in-time slice), status/proposed_at/approved_at preserved as-is; anchor_message_id remaps
  * through the same idMap as the copied messages, or nulls out if that turn wasn't copied
- * (db/migrations/0058_canon_facts_chat_scoped.sql). archiveChat only stamps
- * archived_at — orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory (triggered by
- * server/httpServer.ts right after) is what actually runs the end-of-chat long-term-memory
- * extraction; this store has no LLM/embeddings access to do that itself.
+ * (db/migrations/0058_canon_facts_chat_scoped.sql).
  *
  * @api-declaration
  * createChatSessionStore(db) -> ChatSessionStore
@@ -96,7 +93,6 @@
  *     sync loop's status record (chat_memory_sync_status, bi_principles.md §11): last
  *     attempt/status/error, last success, chunks/entries added, canon counts, and
  *     unsynced-vs-due message counts. Undefined only if the chat doesn't exist.
- *   .archiveChat(userId, chatId) — stamps archived_at (now), or undefined if not found
  *   .listFolders / .createFolder / .updateFolder / .deleteFolder — folder CRUD; deleting a
  *     folder cascades to child folders, chats fall back to no-folder (on delete set null)
  *
@@ -139,13 +135,9 @@ export interface ChatSessionRow {
    *  provenance/display ("forked from {parent title} at this point"). Never one of this chat's
    *  own message ids (those are freshly generated at fork time). */
   forkMessageId: string | null;
-  /** Set once, explicitly, via archiveChat — the "this chat is done" signal
-   *  (docs/bb_principles.md §3) that triggers chatMemorySync.ts's end-of-chat long-term-memory
-   *  extraction. Null means still ongoing (eligible for rolling sync). */
-  archivedAt: string | null;
   /** Set once at creation, never patched afterward (db/migrations/0049_chat_kind.sql) — 'rp' chats
-   *  get no household_memory read/write (httpServer.ts's buildChatMemorySystemPrompt and archive
-   *  route) and start with DEFAULT_RP_TOOLS ([]) rather than null, keeping roleplay
+   *  get no household_memory read/write (httpServer.ts's buildChatMemorySystemPrompt)
+   *  and start with DEFAULT_RP_TOOLS ([]) rather than null, keeping roleplay
    *  isolated from household assistant behavior by construction rather than by a checkbox someone
    *  has to remember to set — the empty list itself is the isolation (no tool calls at all). */
   kind: 'chat' | 'rp';
@@ -330,7 +322,6 @@ export interface ChatLineageNode {
   folderId: string | null;
   parentChatId: string | null;
   forkMessageId: string | null;
-  archivedAt: string | null;
   kind: 'chat' | 'rp';
   createdAt: string;
   updatedAt: string;
@@ -469,10 +460,6 @@ export interface ChatSessionStore {
    *  and has no forks of its own still returns its single-node family (nothing to distinguish that
    *  from "loading" otherwise). Undefined only if chatId itself doesn't exist. */
   getLineage(userId: string, chatId: string): Promise<ChatLineageNode[] | undefined>;
-  /** Stamps archived_at (now) — the explicit end-of-chat signal. Undefined if not found. Does not
-   *  itself run the long-term-memory extraction; the caller (server/httpServer.ts) does that via
-   *  orchestrator/src/orchestrator/chatMemorySync.ts's archiveChatMemory once this returns. */
-  archiveChat(userId: string, chatId: string): Promise<ChatSessionRow | undefined>;
   listFolders(userId: string): Promise<FolderRow[]>;
   createFolder(userId: string, init: { name: string; parentId?: string }): Promise<FolderRow>;
   updateFolder(userId: string, folderId: string, patch: { name?: string; parentId?: string | null }): Promise<FolderRow | undefined>;
@@ -488,7 +475,6 @@ interface SessionDbRow {
   canvas_note_id: string | null;
   parent_chat_id: string | null;
   fork_message_id: string | null;
-  archived_at: string | null;
   kind: 'chat' | 'rp';
   character_id: string | null;
   prompt_stack_preset_id: string | null;
@@ -509,7 +495,6 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     canvasNoteId: row.canvas_note_id,
     parentChatId: row.parent_chat_id,
     forkMessageId: row.fork_message_id,
-    archivedAt: row.archived_at,
     kind: row.kind,
     characterId: row.character_id,
     promptStackPresetId: row.prompt_stack_preset_id,
@@ -522,7 +507,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, archived_at, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
 
 interface LineageDbRow {
   chat_id: string;
@@ -530,13 +515,12 @@ interface LineageDbRow {
   folder_id: string | null;
   parent_chat_id: string | null;
   fork_message_id: string | null;
-  archived_at: string | null;
   kind: 'chat' | 'rp';
   created_at: string;
   updated_at: string;
 }
 
-const LINEAGE_COLUMNS = 'chat_id, title, folder_id, parent_chat_id, fork_message_id, archived_at, kind, created_at, updated_at';
+const LINEAGE_COLUMNS = 'chat_id, title, folder_id, parent_chat_id, fork_message_id, kind, created_at, updated_at';
 
 function toLineageNode(row: LineageDbRow): ChatLineageNode {
   return {
@@ -545,7 +529,6 @@ function toLineageNode(row: LineageDbRow): ChatLineageNode {
     folderId: row.folder_id,
     parentChatId: row.parent_chat_id,
     forkMessageId: row.fork_message_id,
-    archivedAt: row.archived_at,
     kind: row.kind,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -1441,24 +1424,13 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
           `with recursive down as (
              select ${LINEAGE_COLUMNS} from chat_sessions where chat_id = $1
              union all
-             select cs.chat_id, cs.title, cs.folder_id, cs.parent_chat_id, cs.fork_message_id, cs.archived_at, cs.kind, cs.created_at, cs.updated_at
+              select cs.chat_id, cs.title, cs.folder_id, cs.parent_chat_id, cs.fork_message_id, cs.kind, cs.created_at, cs.updated_at
              from chat_sessions cs join down d on cs.parent_chat_id = d.chat_id
            )
            select * from down order by created_at`,
           [rootId],
         );
         return rows.map(toLineageNode);
-      });
-    },
-
-    async archiveChat(userId, chatId) {
-      return db.withUserScope(userId, async (session) => {
-        const rows = await session.query<SessionDbRow>(
-          `update chat_sessions set archived_at = now(), updated_at = now() where chat_id = $1
-           returning ${SESSION_COLUMNS}`,
-          [chatId],
-        );
-        return rows[0] ? toSessionRow(rows[0]) : undefined;
       });
     },
 

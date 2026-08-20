@@ -282,9 +282,6 @@ import { handleCharacterVisualStateEnabledGet, handleCharacterVisualStateEnabled
 export interface HttpServerDeps {
   llm: LlmProvider;
   db: PostgresClient;
-  /** Only used by the archive_chat route (chatMemorySync.ts's archiveChatMemory) — the end-of-chat
-   *  long-term-memory extraction needs to embed nothing itself, but chatMemorySync's shared
-   *  ChatMemorySyncDeps shape expects it, same reasoning as its own module preamble. */
   embeddings: EmbeddingProvider;
   tools: ToolRegistry;
   apiKeys: ApiKeyStore;

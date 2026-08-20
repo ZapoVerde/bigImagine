@@ -76,8 +76,6 @@ export interface ChatMemorySettings {
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;
   distillPromptIsDefault: boolean;
-  householdMemoryPrompt: string;
-  householdMemoryPromptIsDefault: boolean;
   bridgePrompt: string;
   bridgePromptIsDefault: boolean;
   worldCuratorPrompt: string;
@@ -158,7 +156,6 @@ export interface SetChatMemorySettingsBody {
   chunkPairs?: number;
   chunkSummaryPrompt?: string;
   distillPrompt?: string;
-  householdMemoryPrompt?: string;
   bridgePrompt?: string;
   worldCuratorPrompt?: string;
   peopleCuratorPrompt?: string;

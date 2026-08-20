@@ -16,7 +16,7 @@
  * getChatMemoryPromptSettings(store) — the full prompt set with an IsDefault flag per field,
  *   each defaulting to its built-in when unset
  * parseSetChatMemoryPromptSettingsBody(raw) — validates { chunk_summary_prompt?, distill_prompt?,
- *   household_memory_prompt?, bridge_prompt?, world_curator_prompt?, people_curator_prompt?,
+ *   bridge_prompt?, world_curator_prompt?, people_curator_prompt?,
  *   inject_bridge_prompt?, inject_plot_prompt?, inject_auto_recall_prompt?,
  *   inject_recent_history_prompt?, auto_recall_chunk_prompt?, auto_recall_lead_in_prompt?,
  *   inject_sync_summaries_prompt?, sync_summary_entry_prompt? }, at least one present; undefined on
@@ -37,7 +37,6 @@
 import type { OrchestratorSettingsStore } from '../../io/orchestratorSettings.js';
 import { DEFAULT_CHAT_CHUNK_SUMMARY_PROMPT } from '../../io/chatMemory/classifyChatChunk.js';
 import { DEFAULT_DISTILL_CHAT_MEMORY_PROMPT } from '../../io/chatMemory/distillChatMemory.js';
-import { DEFAULT_HOUSEHOLD_MEMORY_PROMPT } from '../../io/chatMemory/classifyHouseholdMemory.js';
 import { DEFAULT_BRIDGE_PROMPT } from '../../io/chatMemory/bridgeChatMemory.js';
 import { DEFAULT_WORLD_MEMORY_CURATOR_PROMPT } from '../../io/chatMemory/curateWorldMemory.js';
 import { DEFAULT_PEOPLE_CURATOR_PROMPT } from '../../io/chatMemory/curatePeople.js';
@@ -59,8 +58,6 @@ export interface ChatMemoryPromptSettings {
   chunkSummaryPromptIsDefault: boolean;
   distillPrompt: string;
   distillPromptIsDefault: boolean;
-  householdMemoryPrompt: string;
-  householdMemoryPromptIsDefault: boolean;
   bridgePrompt: string;
   bridgePromptIsDefault: boolean;
   worldCuratorPrompt: string;
@@ -101,7 +98,6 @@ export async function getChatMemoryPromptSettings(store: OrchestratorSettingsSto
   const [
     chunkSummaryPrompt,
     distillPrompt,
-    householdMemoryPrompt,
     bridgePrompt,
     worldCuratorPrompt,
     peopleCuratorPrompt,
@@ -116,7 +112,6 @@ export async function getChatMemoryPromptSettings(store: OrchestratorSettingsSto
   ] = await Promise.all([
     store.get('chat_memory_chunk_summary_prompt'),
     store.get('chat_memory_distill_prompt'),
-    store.get('chat_memory_household_memory_prompt'),
     store.get('chat_memory_bridge_prompt'),
     store.get('chat_memory_world_curator_prompt'),
     store.get('chat_memory_people_curator_prompt'),
@@ -134,8 +129,6 @@ export async function getChatMemoryPromptSettings(store: OrchestratorSettingsSto
     chunkSummaryPromptIsDefault: !chunkSummaryPrompt,
     distillPrompt: distillPrompt || DEFAULT_DISTILL_CHAT_MEMORY_PROMPT,
     distillPromptIsDefault: !distillPrompt,
-    householdMemoryPrompt: householdMemoryPrompt || DEFAULT_HOUSEHOLD_MEMORY_PROMPT,
-    householdMemoryPromptIsDefault: !householdMemoryPrompt,
     bridgePrompt: bridgePrompt || DEFAULT_BRIDGE_PROMPT,
     bridgePromptIsDefault: !bridgePrompt,
     worldCuratorPrompt: worldCuratorPrompt || DEFAULT_WORLD_MEMORY_CURATOR_PROMPT,
@@ -164,7 +157,6 @@ export async function getChatMemoryPromptSettings(store: OrchestratorSettingsSto
 export interface SetChatMemoryPromptSettingsBody {
   chunkSummaryPrompt?: string;
   distillPrompt?: string;
-  householdMemoryPrompt?: string;
   bridgePrompt?: string;
   worldCuratorPrompt?: string;
   peopleCuratorPrompt?: string;
@@ -189,7 +181,6 @@ export function parseSetChatMemoryPromptSettingsBody(raw: unknown): SetChatMemor
   const {
     chunk_summary_prompt,
     distill_prompt,
-    household_memory_prompt,
     bridge_prompt,
     world_curator_prompt,
     people_curator_prompt,
@@ -205,7 +196,6 @@ export function parseSetChatMemoryPromptSettingsBody(raw: unknown): SetChatMemor
   if (
     chunk_summary_prompt === undefined &&
     distill_prompt === undefined &&
-    household_memory_prompt === undefined &&
     bridge_prompt === undefined &&
     world_curator_prompt === undefined &&
     people_curator_prompt === undefined &&
@@ -222,7 +212,6 @@ export function parseSetChatMemoryPromptSettingsBody(raw: unknown): SetChatMemor
   }
   if (chunk_summary_prompt !== undefined && typeof chunk_summary_prompt !== 'string') return undefined;
   if (distill_prompt !== undefined && typeof distill_prompt !== 'string') return undefined;
-  if (household_memory_prompt !== undefined && typeof household_memory_prompt !== 'string') return undefined;
   if (bridge_prompt !== undefined && typeof bridge_prompt !== 'string') return undefined;
   if (world_curator_prompt !== undefined && typeof world_curator_prompt !== 'string') return undefined;
   if (people_curator_prompt !== undefined && typeof people_curator_prompt !== 'string') return undefined;
@@ -237,7 +226,6 @@ export function parseSetChatMemoryPromptSettingsBody(raw: unknown): SetChatMemor
   return {
     chunkSummaryPrompt: chunk_summary_prompt as string | undefined,
     distillPrompt: distill_prompt as string | undefined,
-    householdMemoryPrompt: household_memory_prompt as string | undefined,
     bridgePrompt: bridge_prompt as string | undefined,
     worldCuratorPrompt: world_curator_prompt as string | undefined,
     peopleCuratorPrompt: people_curator_prompt as string | undefined,
@@ -258,7 +246,6 @@ export function parseSetChatMemoryPromptSettingsBody(raw: unknown): SetChatMemor
 const PROMPT_WIRE_KEYS = [
   'chunk_summary_prompt',
   'distill_prompt',
-  'household_memory_prompt',
   'bridge_prompt',
   'world_curator_prompt',
   'people_curator_prompt',
@@ -281,7 +268,6 @@ export function hasChatMemoryPromptFields(raw: unknown): boolean {
 export async function setChatMemoryPromptSettings(store: OrchestratorSettingsStore, body: SetChatMemoryPromptSettingsBody): Promise<void> {
   if (body.chunkSummaryPrompt !== undefined) await store.set('chat_memory_chunk_summary_prompt', body.chunkSummaryPrompt);
   if (body.distillPrompt !== undefined) await store.set('chat_memory_distill_prompt', body.distillPrompt);
-  if (body.householdMemoryPrompt !== undefined) await store.set('chat_memory_household_memory_prompt', body.householdMemoryPrompt);
   if (body.bridgePrompt !== undefined) await store.set('chat_memory_bridge_prompt', body.bridgePrompt);
   if (body.worldCuratorPrompt !== undefined) await store.set('chat_memory_world_curator_prompt', body.worldCuratorPrompt);
   if (body.peopleCuratorPrompt !== undefined) await store.set('chat_memory_people_curator_prompt', body.peopleCuratorPrompt);

@@ -678,13 +678,6 @@ export function forkChat(
   });
 }
 
-/** Marks a chat as done — the explicit signal that triggers its end-of-chat long-term-memory
- *  extraction (docs/chat-memory.md, docs/bb_principles.md §3). The extraction itself runs
- *  server-side after this returns; there's nothing further for the caller to await. */
-export function archiveChat(chatId: string, apiKey: string | null): Promise<ChatSessionRow> {
-  return jsonRequest<ChatSessionRow>(`/v1/chats/${encodeURIComponent(chatId)}/archive`, apiKey, { method: 'POST' });
-}
-
 export async function listFolders(apiKey: string | null): Promise<Folder[]> {
   const body = await jsonRequest<{ folders: Folder[] }>('/v1/folders', apiKey);
   return body.folders;
