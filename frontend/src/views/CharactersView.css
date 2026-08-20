@@ -86,7 +86,36 @@
 
 .characters-list-header-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+.characters-sort-toggle {
+  display: inline-flex;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.characters-sort-toggle button {
+  border: 0;
+  min-height: 2.25rem;
+  padding: 0.25rem 0.5rem;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.characters-sort-toggle button + button {
+  border-left: 1px solid var(--color-border-subtle);
+}
+
+.characters-sort-toggle button.active {
+  background: var(--color-secondary);
+  color: var(--color-secondary-contrast);
+  font-weight: var(--font-weight-medium);
 }
 
 .characters-import-input {

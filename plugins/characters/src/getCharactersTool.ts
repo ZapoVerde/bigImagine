@@ -4,7 +4,8 @@
  * @architectural-role IO Wrapper — lists characters (summaries only)
  * @description
  * The read-back half of the data-only character slice (canonize-plan.md §8): returns character
- * ids and names so scenes can reference them (add_character_to_scene) and canon facts can link to
+ * ids, names, and creation timestamps so scenes can reference them (add_character_to_scene) and
+ * canon facts can link to
  * them (propose_canon_fact's linked_character_ids) without a separate Roster surface. Summary-only,
  * same shape as get_notes — persona/scenario/etc are the static creation fields and aren't needed
  * to pick an id.
@@ -42,13 +43,14 @@ import type { RegisteredTool } from '@bigbrain/orchestrator/tool-registry';
 interface CharacterRow {
   character_id: string;
   name: string;
+  created_at: Date;
 }
 
 export function createGetCharactersTool(): RegisteredTool {
   return {
     definition: {
       name: 'get_characters',
-      description: "List the user's characters (id and name only). Use the returned character ids to reference characters in scenes or canon facts.",
+      description: "List the user's characters (id, name, and creation time). Use the returned character ids to reference characters in scenes or canon facts.",
       parameters: {
         type: 'object',
         properties: {},
@@ -67,14 +69,14 @@ export function createGetCharactersTool(): RegisteredTool {
       // never has a character_chat_links row, so the link check alone excludes the card library.
       const rows = await ctx.db.query<CharacterRow>(
         castOnly
-          ? `select character_id, name from characters
+          ? `select character_id, name, created_at from characters
              where user_id = $1 and (
                status is not null and status <> 'inactive' and exists (
                  select 1 from character_chat_links where character_id = characters.character_id and chat_id = $2
                )
              )
              order by name`
-          : `select character_id, name from characters
+          : `select character_id, name, created_at from characters
              where user_id = $1 and (
                status is null or (
                  status <> 'inactive' and exists (
@@ -85,7 +87,7 @@ export function createGetCharactersTool(): RegisteredTool {
              order by name`,
         [ctx.userId, ctx.chatId ?? null],
       );
-      return rows.map((r) => ({ characterId: r.character_id, name: r.name }));
+      return rows.map((r) => ({ characterId: r.character_id, name: r.name, createdAt: r.created_at.toISOString() }));
     },
   };
 }

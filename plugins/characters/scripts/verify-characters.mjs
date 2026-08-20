@@ -80,6 +80,7 @@ function createFakePool() {
               spec_version: 'v2',
               source_json: null,
               avatar_path: null,
+              created_at: new Date(Date.parse('2026-08-20T00:00:00Z') + counter * 1000),
               status: null, // user-authored (create_character leaves the lifecycle column unset)
             };
             characters.push(row);
@@ -102,6 +103,7 @@ function createFakePool() {
               spec_version: specVersion,
               source_json: JSON.parse(sourceJson),
               avatar_path: avatarPath,
+              created_at: new Date(Date.parse('2026-08-20T00:00:00Z') + counter * 1000),
               status: null, // user-authored (import writes no status, matching the column default)
             };
             characters.push(row);
@@ -129,7 +131,7 @@ function createFakePool() {
           }
 
           // --- get_characters ---
-          if (sql.startsWith('select character_id, name from characters')) {
+          if (sql.startsWith('select character_id, name, created_at from characters')) {
             const [userId, chatId] = params;
             assert(scopedUserId === userId, 'get_characters is scoped to the requesting user');
             // db/migrations/0096 eligibility: user-authored (status null) is always eligible; an
@@ -149,7 +151,7 @@ function createFakePool() {
             const rows = characters
               .filter((c) => c.user_id === userId && eligible(c))
               .sort((a, b) => a.name.localeCompare(b.name))
-              .map((c) => ({ character_id: c.character_id, name: c.name }));
+              .map((c) => ({ character_id: c.character_id, name: c.name, created_at: c.created_at }));
             return { rows };
           }
 
@@ -176,7 +178,7 @@ function createFakePool() {
                   spec_version: row.spec_version,
                   has_avatar: row.avatar_path !== null,
                   has_source_json: row.source_json !== null,
-                  created_at: '2026-08-05T00:00:00Z',
+                  created_at: row.created_at,
                   updated_at: '2026-08-05T00:00:00Z',
                 },
               ],
@@ -458,6 +460,7 @@ const otherUsersChar = await db.withUserScope(otherUserId, (session) =>
 const all = await db.withUserScope(userId, (session) => getTool.handler({}, { userId, db: session }));
 assert(all.length === 2, "get_characters only returns the requesting user's characters");
 assert(all.every((c) => !('persona' in c)), 'get_characters summaries omit the static persona fields');
+assert(all.every((c) => typeof c.createdAt === 'string' && c.createdAt.length > 0), 'get_characters summaries include createdAt');
 assert(all[0].name === 'Bare', 'get_characters orders by name');
 
 // --- validation: empty name rejected before SQL ---
@@ -534,6 +537,10 @@ assert(notFoundDetail.found === false, "get_character can't see another user's c
   assert(
     castOnlyInChat.length === 1 && castOnlyInChat[0].characterId === transientChar.characterId,
     'castOnly: true surfaces only the chat-linked auto-registered character — user-authored cards and inactive rows are excluded',
+  );
+  assert(
+    typeof castOnlyInChat[0].createdAt === 'string' && castOnlyInChat[0].createdAt.length > 0,
+    'castOnly: true summaries include createdAt',
   );
 
   const castOnlyNoChat = await db.withUserScope(userId, (session) =>

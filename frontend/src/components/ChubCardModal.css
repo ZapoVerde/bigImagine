@@ -208,28 +208,3 @@
   color: var(--color-danger);
   font-size: var(--font-size-xs);
 }
-
-.chub-card-modal-download {
-  padding: 0.45rem 1rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid transparent;
-  background: var(--color-accent);
-  color: var(--color-accent-contrast);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-  cursor: pointer;
-}
-
-.chub-card-modal-download:hover:not(:disabled) {
-  background: var(--color-accent-hover);
-}
-
-.chub-card-modal-download:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.chub-card-modal-download-error {
-  color: var(--color-danger);
-  font-size: var(--font-size-xs);
-}

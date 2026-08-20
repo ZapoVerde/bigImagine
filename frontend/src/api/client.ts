@@ -1196,17 +1196,6 @@ export async function fetchChubCardDetail(fullPath: string, apiKey: string | nul
   return (await res.json()) as ChubCardDetail;
 }
 
-/** GET /v1/characters/chub-avatar?url= — same allowlisted-CDN proxy fetch as fetchChubAvatarUrl,
- *  but for the card PNG behind the modal's Download button, and throwing with the server's reason
- *  on failure (an explicit download deserves an explicit error, not a silent null). */
-export async function fetchChubCardPng(chubCardUrl: string, apiKey: string | null): Promise<Blob> {
-  const res = await fetch(`/v1/characters/chub-avatar?url=${encodeURIComponent(chubCardUrl)}`, {
-    headers: authHeaders(apiKey),
-  });
-  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
-  return res.blob();
-}
-
 /** pia_proxy_url (stacks/pia-proxy) — same no-restart, admin-only shape as timezone. */
 export async function adminGetPiaProxyUrl(adminKey: string | null): Promise<string | null> {
   const res = await fetch('/v1/admin/pia-proxy-settings', { headers: authHeaders(adminKey) });

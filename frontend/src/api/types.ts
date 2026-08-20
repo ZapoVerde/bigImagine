@@ -1200,6 +1200,7 @@ export interface ContextStackPreset {
 export interface CharacterSummary {
   characterId: string;
   name: string;
+  createdAt: string;
 }
 
 // plugins/characters/src/getCharacterTool.ts

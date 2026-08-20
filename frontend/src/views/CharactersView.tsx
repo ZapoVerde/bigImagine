@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from 'react';
 import {
   ApiError,
   callTool,
@@ -61,6 +61,7 @@ function draftFromDetail(detail: CharacterDetail): Draft {
 // setSelectedId wouldn't retrigger an effect.
 export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refreshKey }: CharactersViewProps) {
   const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
+  const [sortMode, setSortMode] = useState<'newest' | 'name'>('newest');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<CharacterDetail | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
@@ -76,6 +77,26 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
   // a counter (rather than a plain boolean) is the standard way to tell "left a child" from "left
   // the whole drop zone" without flicker.
   const dragCounter = useRef(0);
+
+  const sortedCharacters = useMemo(() => {
+    const arr = [...(characters ?? [])];
+    if (sortMode === 'newest') {
+      arr.sort(
+        (a, b) =>
+          b.createdAt.localeCompare(a.createdAt) ||
+          a.name.localeCompare(b.name) ||
+          a.characterId.localeCompare(b.characterId),
+      );
+    } else {
+      arr.sort(
+        (a, b) =>
+          a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) ||
+          b.createdAt.localeCompare(a.createdAt) ||
+          a.characterId.localeCompare(b.characterId),
+      );
+    }
+    return arr;
+  }, [characters, sortMode]);
 
   const refresh = useCallback(
     async (selectAfter?: string) => {
@@ -367,6 +388,24 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
         <div className="characters-list-header">
           <span>Cards</span>
           <div className="characters-list-header-actions">
+            <div className="characters-sort-toggle" role="group" aria-label="Sort cards">
+              <button
+                type="button"
+                className={sortMode === 'newest' ? 'active' : ''}
+                aria-pressed={sortMode === 'newest'}
+                onClick={() => setSortMode('newest')}
+              >
+                Latest
+              </button>
+              <button
+                type="button"
+                className={sortMode === 'name' ? 'active' : ''}
+                aria-pressed={sortMode === 'name'}
+                onClick={() => setSortMode('name')}
+              >
+                A–Z
+              </button>
+            </div>
             <button type="button" className="characters-import-btn" onClick={() => fileInputRef.current?.click()}>
               Import
             </button>
@@ -388,7 +427,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
           }}
         />
         {characters.length === 0 && <div className="empty-state">No cards yet &mdash; create one or import a card.</div>}
-        {characters.map((c) => (
+        {sortedCharacters.map((c) => (
           <div
             key={c.characterId}
             className={`characters-row${c.characterId === selectedId ? ' selected' : ''}`}

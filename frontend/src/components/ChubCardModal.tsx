@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { ApiError, fetchChubCardDetail, fetchChubCardPng } from '../api/client';
+import { ApiError, fetchChubCardDetail } from '../api/client';
 import type { ChubCardDetail, ChubCharacterSummary } from '../api/types';
 import { formatRelativeDate } from '../lib/formatRelativeDate';
 import ChubAvatarThumb from './ChubAvatarThumb';
@@ -44,11 +44,6 @@ function textareaRows(text: string): number {
   return Math.min(Math.max(text.split('\n').length, 2), 20);
 }
 
-function sanitizeFilename(name: string): string {
-  const cleaned = name.replace(/[^\w\- ]+/g, '_').trim().replace(/\s+/g, '_');
-  return cleaned.length > 0 ? cleaned : 'chub-card';
-}
-
 // One labeled, read-only text box for a detail field — "see all the details of it in various
 // text boxes" is exactly this. readOnly + value (not defaultValue) so a re-render with new
 // detail content always reflects it.
@@ -64,14 +59,11 @@ function FieldBox({ label, text }: { label: string; text: string }) {
 // The embiggened chub card: clicking a Browse Chub grid cell opens this overlay, which lazily
 // fetches the full detail (description + bespoke definition) through /v1/characters/chub-detail
 // and renders it as labeled text boxes, with an Import button (same per-card ImportState machine
-// as the grid cell — threading the same props, not a second state) and a Download button for the
-// card PNG itself (fetched through the same allowlisted chub-avatar proxy). Header/stats render
-// instantly from the grid card; only the body waits on the detail fetch.
+// as the grid cell — threading the same props, not a second state). Header/stats render instantly
+// from the grid card; only the body waits on the detail fetch.
 export default function ChubCardModal({ card, apiKey, importState, onImport, onClose }: ChubCardModalProps) {
   const [detail, setDetail] = useState<ChubCardDetail | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [downloadState, setDownloadState] = useState<'idle' | 'downloading' | 'error'>('idle');
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // Latest-ref pattern so the mount effect below can depend on nothing and still see the current
   // onClose — without it, BrowseChubView's inline arrow re-creates the prop each render and the
@@ -163,31 +155,6 @@ export default function ChubCardModal({ card, apiKey, importState, onImport, onC
       }
     : card;
 
-  async function onDownload() {
-    if (!detail?.maxResUrl) {
-      setDownloadState('error');
-      setDownloadError('This card has no downloadable PNG.');
-      return;
-    }
-    setDownloadState('downloading');
-    setDownloadError(null);
-    try {
-      const blob = await fetchChubCardPng(detail.maxResUrl, apiKey);
-      const blobUrl = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = blobUrl;
-      anchor.download = `${sanitizeFilename(detail.name || card.fullPath)}.png`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-      setDownloadState('idle');
-    } catch (err) {
-      setDownloadState('error');
-      setDownloadError(err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'download failed');
-    }
-  }
-
   const hasBodyContent =
     (detail?.description.trim().length ?? 0) > 0 || definitionFields.length > 0 || (detail?.topics.length ?? 0) > 0;
 
@@ -276,15 +243,6 @@ export default function ChubCardModal({ card, apiKey, importState, onImport, onC
             {(importState.status === 'idle' || importState.status === 'error') && 'Import'}
           </button>
           {importState.status === 'error' && <span className="chub-card-modal-import-error">{importState.message}</span>}
-          <button
-            type="button"
-            className="chub-card-modal-download"
-            disabled={downloadState === 'downloading' || !detail}
-            onClick={() => void onDownload()}
-          >
-            {downloadState === 'downloading' ? 'Downloading…' : '⬇ Download card'}
-          </button>
-          {downloadError && <span className="chub-card-modal-download-error">{downloadError}</span>}
         </footer>
       </div>
     </div>
