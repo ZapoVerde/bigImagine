@@ -102,14 +102,6 @@ function createFakePool() {
             return { rows: sess ? [{ kind: sess.kind ?? 'chat' }] : [] };
           }
 
-          // resolveSyncSettings's per-chat connection read (chatMemorySync.ts): which connection
-          // this chat is locked to (chat_sessions.params->>'profile'). null/undefined means "no
-          // override" → the sync falls back to the active connection, never another chat's.
-          if (sql.includes("params->>'profile'") && sql.includes('from chat_sessions')) {
-            const sess = chatSessions.get(params[0]);
-            return { rows: [{ profile: sess?.params?.profile ?? null }] };
-          }
-
           // The connection-backed sync llm is a gated openai-compatible provider, which meters
           // every complete() into llm_calls (io/llm/llmGate.ts) — swallowed here; the sync path
           // itself is what these tests are about, not the meter.
@@ -436,15 +428,18 @@ function createFakePool() {
   };
 }
 
-// --- The sync's llm now rides the chat's OWN connection (chatMemorySync.ts's resolveSyncSettings
-// builds a gated openai-compatible provider over the connection profile and calls it over HTTP) —
-// so the fake LLM seam moves into a mocked global fetch. The mock dispatches on the request's
-// forced tool_choice, records each request as the same { messages, options } shape the old fake
-// recorded (every llm.calls-based helper below is untouched), and returns the same turns. Two
+// --- The sync's llm rides the shared chat-memory connection (chatMemorySync.ts's
+// resolveChatMemoryLlm: chat_memory_profile when set, else the household's active connection —
+// never the chat's own params->>'profile') and calls it over HTTP — so the fake LLM seam moves
+// into a mocked global fetch. The mock dispatches on the request's forced tool_choice, records
+// each request as the same { messages, options } shape the old fake recorded (every llm.calls-based
+// helper below is untouched), and returns the same turns. Two
 // distinct fake endpoints exist so the lock can be proven: the active connection and the named one
 // a chat is locked to. ---
 const ACTIVE_FAKE_BASE = 'https://sync-active-fake.example';
 const NAMED_FAKE_BASE = 'https://sync-named-fake.example';
+const MEMORY_C_FAKE_BASE = 'https://sync-memory-c-fake.example';
+const MEMORY_D_FAKE_BASE = 'https://sync-memory-d-fake.example';
 
 function fakeSyncProfile(baseUrl, model) {
   return {
@@ -467,7 +462,10 @@ const llmConnections = {
     return fakeSyncProfile(ACTIVE_FAKE_BASE, 'sync-active-model');
   },
   async resolveByName(name) {
-    return name === 'sync-profile' ? fakeSyncProfile(NAMED_FAKE_BASE, 'sync-named-model') : undefined;
+    if (name === 'sync-profile') return fakeSyncProfile(NAMED_FAKE_BASE, 'sync-named-model');
+    if (name === 'memory-c') return fakeSyncProfile(MEMORY_C_FAKE_BASE, 'memory-c-model');
+    if (name === 'memory-d') return fakeSyncProfile(MEMORY_D_FAKE_BASE, 'memory-d-model');
+    return undefined;
   },
 };
 
@@ -494,9 +492,10 @@ function oaiToolResponse(name, args) {
 
 function installSyncFetchMock(backend) {
   const originalFetch = globalThis.fetch;
+  const knownBases = [ACTIVE_FAKE_BASE, NAMED_FAKE_BASE, MEMORY_C_FAKE_BASE, MEMORY_D_FAKE_BASE];
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    if (u === `${ACTIVE_FAKE_BASE}/chat/completions` || u === `${NAMED_FAKE_BASE}/chat/completions`) {
+    if (knownBases.includes(u.replace('/chat/completions', ''))) {
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
@@ -570,9 +569,9 @@ pool.chatSessions.set(NOT_DUE_CHAT_ID, { user_id: USER, archived_at: null });
 const db = createPostgresClient(pool);
 const backend = createFakeHttpBackend();
 installSyncFetchMock(backend);
-// deps.llm is now unused for real sync work — resolveSyncSettings swaps in a connection-backed
-// gated provider whenever a chat_id is involved. Kept as a shim so the llm.calls helpers below
-// read the HTTP backend's recorded requests unchanged.
+// deps.llm is unused for real sync work — resolveSyncSettings swaps in the shared
+// resolveChatMemoryLlm gated provider (chat_memory_profile or the active connection). Kept as a
+// shim so the llm.calls helpers below read the HTTP backend's recorded requests unchanged.
 const llm = { calls: backend.calls, name: 'fake-llm', supportsVision: false, complete: async () => { throw new Error('unused — sync llm comes from the connection provider'); } };
 const embeddings = createFakeEmbeddings();
 // live window 2 pairs (4 msgs), sync-every 2 pairs (4 msgs) -> due once 8 unsynced messages pile
@@ -1120,41 +1119,140 @@ assert(pool.chatMemorySyncStatus.get(NOT_DUE_CHAT_ID) === undefined, "a chat fin
   );
 }
 
-// --- The connection lock (chatMemorySync.ts's resolveSyncSettings): a chat's own connection rides
-// onto its sync — a chat locked to "sync-profile" syncs THROUGH that connection's endpoint, never
-// the active one. ---
+// --- The connection contract (chatMemorySync.ts's resolveChatMemoryLlm): a sync's connection
+// rides EXCLUSIVELY on the live chat_memory_profile setting — never on a chat's own
+// params->>'profile' (that is the narrator/generation connection, a different configuration
+// domain). With chat_memory_profile = 'sync-profile', an RP chat whose narrator profile names a
+// dead model still syncs through the memory connection: summarize, bridge, and curators alike.
+// This is the exact regression from the field — a legacy RP chat pointed at an obsolete narrator
+// model used to drag the whole memory pipeline onto that dead model, a ×1500 permanent 404 loop. ---
 {
   const LOCK_CHAT_ID = randomUUID();
-  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'sync-profile' } });
+  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, archived_at: null, kind: 'rp', params: { profile: 'obsolete-rp-model' } });
   seedMessages(LOCK_CHAT_ID, 'LOCK', 12);
 
+  await settings.set('chat_memory_profile', 'sync-profile');
   const activeBaseCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   await runChatMemorySyncTick(deps);
 
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
-  assert(namedCalls.length > 0, 'a chat locked to a named connection syncs THROUGH that connection');
-  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the locked sync never touches the active connection — chat and sync ride the same connection');
-  assert(pool.chatMemorySyncStatus.get(LOCK_CHAT_ID)?.last_status === 'ok', 'the named-connection sync still completes');
+  assert(
+    namedCalls.filter((c) => c.options.forceTool === 'summarize_chat_chunk').length === 2,
+    'with chat_memory_profile set, the rolling sync summarizes its chunks THROUGH that connection',
+  );
+  assert(
+    namedCalls.some((c) => c.options.forceTool === 'bridge_chat_memory'),
+    "the rp bridge also rides the chat_memory_profile connection, not the chat's narrator profile",
+  );
+  assert(
+    namedCalls.some((c) => c.options.forceTool === 'curate_people'),
+    'the people curator also rides the chat_memory_profile connection',
+  );
+  assert(
+    !namedCalls.some((c) => c.options.forceTool === 'distill_chat_memory'),
+    'an rp chat never runs the household distill lane',
+  );
+  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the chat_memory_profile sync never touches the active connection');
+  assert(pool.chatMemorySyncStatus.get(LOCK_CHAT_ID)?.last_status === 'ok', 'the chat_memory_profile sync still completes');
+  await settings.set('chat_memory_profile', undefined);
 }
 
-// --- The refusal: a chat locked to a connection that no longer exists must never silently sync on
-// another connection — that is the divergence this design forbids. The tick records the error and
-// leaves the backlog for the moment the chat's connection is restored. ---
+// --- The narrator profile is a different configuration domain: a chat whose params->>'profile'
+// names a connection that no longer exists must NOT error the sync — that profile is only ever the
+// interactive generation connection, and the chat-memory pipeline never reads it. With
+// chat_memory_profile unset, such a chat syncs normally via the active connection. ---
 {
   const REFUSE_CHAT_ID = randomUUID();
   pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'ghost-connection' } });
   seedMessages(REFUSE_CHAT_ID, 'REFUSE', 12);
 
-  const callsBefore = backend.calls.length;
-  const chunksBefore = pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length;
+  const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   await runChatMemorySyncTick(deps);
 
   const status = pool.chatMemorySyncStatus.get(REFUSE_CHAT_ID);
-  assert(status?.last_status === 'error', 'a chat locked to an unknown connection records a sync error — no silent fallback to another connection');
-  assert(status?.last_error?.includes('ghost-connection') && status?.last_error?.includes('refused'), 'the status row names the unknown connection and the refusal');
-  assert(backend.calls.length === callsBefore, 'the refused sync makes ZERO LLM calls — no other connection is ever used');
-  assert(pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length === chunksBefore, 'the refused sync persists no chunks');
+  assert(status?.last_status === 'ok', "a chat whose narrator profile names an unknown connection still syncs — the memory pipeline ignores the narrator profile");
+  assert(
+    backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length > activeCallsBefore,
+    "the sync ran through the active connection — the narrator profile never errored it and never influenced it",
+  );
+  assert(pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length > 0, 'the chat actually archived chunks');
+}
+
+// --- The narrator profile changing A → B must leave the memory connection untouched: a sync's
+// connection comes from chat_memory_profile alone, so editing a chat's narrator profile from one
+// model to another keeps the memory pipeline riding the same chat_memory_profile connection on
+// both sides of the edit. ---
+{
+  const NARR_CHAT_ID = randomUUID();
+  pool.chatSessions.set(NARR_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'narr-model-a' } });
+  seedMessages(NARR_CHAT_ID, 'NARR', 12);
+
+  const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  const namedCallsBefore = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', 'sync-profile');
+
+  await runChatMemorySyncTick(deps); // narrator profile: narr-model-a
+  const namedAfterA = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`).length;
+  assert(namedAfterA > namedCallsBefore, 'the first sync rides the chat_memory_profile connection');
+
+  pool.chatSessions.get(NARR_CHAT_ID).params = { profile: 'narr-model-b' }; // narrator edited A → B
+  seedMessages(NARR_CHAT_ID, 'NARR2', 12);
+  await runChatMemorySyncTick(deps); // still due after the edit
+  const namedAfterB = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`).length;
+  const activeCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', undefined);
+
+  assert(
+    namedAfterB > namedAfterA,
+    'editing the narrator profile A → B changes nothing for the memory pipeline — the second sync rides the same chat_memory_profile connection',
+  );
+  assert(activeCallsAfter === activeCallsBefore, 'neither sync ever touched the active connection — the memory connection is independent of the narrator profile');
+  assert(pool.chatMemorySyncStatus.get(NARR_CHAT_ID)?.last_status === 'ok', 'the chat whose narrator profile changed still syncs fine');
+}
+
+// --- Settings read live: changing chat_memory_profile from C → D takes effect on the very next
+// sync, no restart — the same "settings read live" contract every other chat-memory setting has
+// (docs/chat-memory.md's Settings section). ---
+{
+  const LIVE_CHAT_ID = randomUUID();
+  pool.chatSessions.set(LIVE_CHAT_ID, { user_id: USER, archived_at: null });
+  seedMessages(LIVE_CHAT_ID, 'LIVEC', 12);
+
+  await settings.set('chat_memory_profile', 'memory-c');
+  await runChatMemorySyncTick(deps);
+  const memoryCCalls = backend.calls.filter((c) => c.url === `${MEMORY_C_FAKE_BASE}/chat/completions`).length;
+  assert(memoryCCalls > 0, 'with chat_memory_profile = memory-c, the sync rides the memory-c connection');
+
+  seedMessages(LIVE_CHAT_ID, 'LIVED', 12);
+  await settings.set('chat_memory_profile', 'memory-d');
+  await runChatMemorySyncTick(deps);
+  const memoryDCalls = backend.calls.filter((c) => c.url === `${MEMORY_D_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', undefined);
+
+  assert(
+    memoryDCalls > 0,
+    'changing chat_memory_profile to memory-d takes effect on the very next sync — read live, no restart',
+  );
+}
+
+// --- The unknown chat_memory_profile fallback is a defined, logged policy (fall back to the
+// active connection), and it must never silently fall back to a chat's narrator profile instead. ---
+{
+  const UNKNOWN_MEM_CHAT_ID = randomUUID();
+  pool.chatSessions.set(UNKNOWN_MEM_CHAT_ID, { user_id: USER, archived_at: null, params: { profile: 'dead-narrator' } });
+  seedMessages(UNKNOWN_MEM_CHAT_ID, 'UNKMEM', 12);
+
+  const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', 'ghost-memory-connection');
+  await runChatMemorySyncTick(deps);
+  await settings.set('chat_memory_profile', undefined);
+
+  assert(
+    backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length > activeCallsBefore,
+    'an unknown chat_memory_profile falls back to the ACTIVE connection (logged), never to the chat narrator profile',
+  );
+  assert(pool.chatMemorySyncStatus.get(UNKNOWN_MEM_CHAT_ID)?.last_status === 'ok', 'the fallback sync still completes');
 }
 
 if (process.exitCode) {

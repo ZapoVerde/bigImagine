@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/chatMemorySync.ts
- * @stamp 2026-08-17
+ * @stamp 2026-08-20
  * @architectural-role Orchestrator — the rolling chat-summarization/RAG sync poll loop
  * @description
  * docs/chat-memory.md's sync pipeline. Lives in core, not plugins/chat-memory (which contributes
@@ -67,11 +67,15 @@
  * chat_memory_sync_every_pairs/chat_memory_digest_horizon_pairs/chat_memory_chunk_summary_prompt/
  * chat_memory_distill_prompt/chat_memory_household_memory_prompt/chat_memory_bridge_prompt/
  * chat_memory_world_curator_prompt/chat_memory_people_curator_prompt) — a Settings-tab change
- * takes effect on the very next tick, no restart, mirroring server/httpServer.ts's own per-chat
- * profile-override construction (createLlmProviderForProfile + createGatedLlmProvider) for the
- * "which connection" half. persona_name is also read live here, purely to resolve the bridge and
- * people-curator prompts' {{user}} macro (util/interpolateMacros.ts) the same way
- * SillyTavern-Canonize's own {{user}} resolves against the ST persona.
+ * takes effect on the very next tick, no restart. The connection half is resolved exclusively
+ * through resolveChatMemoryLlm() (this file's shared resolver, reused by eagerChunkSync.ts and
+ * chatChunkResize.ts): chat_memory_profile names the connection (createLlmProviderForProfile +
+ * createGatedLlmProvider, the same construction server/httpServer.ts uses for a per-chat override),
+ * falling back to the household's active connection when unset or unknown — never a chat's own
+ * params->>'profile' (that is the narrator/generation connection, a different configuration
+ * domain). persona_name is also read live here, purely to resolve the bridge and people-curator
+ * prompts' {{user}} macro (util/interpolateMacros.ts) the same way SillyTavern-Canonize's own
+ * {{user}} resolves against the ST persona.
  *
  * distillChatMemory's second argument is not just the chunk summaries this tick freshly produced —
  * it's the trailing chat_memory_digest_horizon_pairs' worth of chat_chunks.summary rows, oldest
@@ -81,6 +85,10 @@
  * source of continuity — see docs/chat-memory.md.
  *
  * @api-declaration
+ * resolveChatMemoryLlm(deps) — the shared chat-memory connection resolver (also used by
+ *   eagerChunkSync.ts and chatChunkResize.ts): reads the live chat_memory_profile setting and
+ *   returns a gated provider on that connection, falling back to the household's active connection
+ *   (resolved live) when unset or unknown. Never reads chat_sessions.params->>'profile'.
  * startChatMemorySyncLoop(deps) — begins polling every POLL_INTERVAL_MS
  * runChatMemorySyncTick(deps) — one poll cycle, exported so verify scripts can drive it directly
  * archiveChatMemory(deps, userId, chatId, chatTitle) — the end-of-chat long-term-memory
@@ -236,7 +244,33 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-async function resolveSyncSettings(deps: ChatMemorySyncDeps, userId: string | undefined, chatId?: string): Promise<SyncSettings> {
+/** The chat-memory pipeline's connection resolution, shared by this tick, the eager chunk path
+ *  (eagerChunkSync.ts), and the chunk-resize backfill (chatChunkResize.ts) — one policy so it
+ *  can never drift again. Every chat-memory LLM call resolves exclusively through the live
+ *  `chat_memory_profile` setting, never through a chat's own `params->>'profile'` (that is the
+ *  narrator/generation connection, a different configuration domain). An unset profile falls back
+ *  to the household's active connection, resolved live each call so a Settings-tab activation
+ *  switch takes effect without restart. A profile naming a connection that no longer exists logs
+ *  clearly and falls back to the active connection too — deliberately NOT the calling chat's
+ *  narrator profile. */
+export async function resolveChatMemoryLlm(deps: ChatMemorySyncDeps): Promise<LlmProvider> {
+  const profileName = await deps.settings.get('chat_memory_profile');
+  if (profileName) {
+    const profile = await deps.llmConnections.resolveByName(profileName);
+    if (profile) {
+      return createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
+    }
+    log.error(`chat-memory: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
+  }
+  const active = await deps.llmConnections.resolveActive();
+  if (active) {
+    return createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
+  }
+  log.error('chat-memory: no active LLM connection — falling back to the default provider');
+  return deps.llm;
+}
+
+async function resolveSyncSettings(deps: ChatMemorySyncDeps): Promise<SyncSettings> {
   const [
     livePairsRaw,
     syncEveryPairsRaw,
@@ -263,30 +297,10 @@ async function resolveSyncSettings(deps: ChatMemorySyncDeps, userId: string | un
     deps.settings.get('persona_name'),
   ]);
 
-  const chatProfile = chatId && userId
-    ? await deps.db.withUserScope(userId, async (session) => {
-        const rows = await session.query<{ profile: string | null }>(
-          `select params->>'profile' as profile from chat_sessions where chat_id = $1`,
-          [chatId],
-        );
-        return rows[0]?.profile ?? undefined;
-      })
-    : undefined;
-  const requestedProfile = chatProfile;
-  let llm = deps.llm;
-  if (chatId && !requestedProfile) {
-    const active = await deps.llmConnections.resolveActive();
-    if (!active) throw new Error(`chat ${chatId} has no selected connection and no active connection exists`);
-    llm = createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
-  }
-  if (requestedProfile) {
-    const profile = await deps.llmConnections.resolveByName(requestedProfile);
-    if (profile) {
-      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
-    } else {
-      throw new Error(`chat ${chatId} names unknown connection "${requestedProfile}"; sync refused to use another connection`);
-    }
-  }
+  // The whole pipeline's connection, resolved through the shared chat-memory resolver — read
+  // live every tick from chat_memory_profile, never from this chat's own params->>'profile' (that
+  // is the narrator/generation connection, a different configuration domain).
+  const llm = await resolveChatMemoryLlm(deps);
 
   const livePairs = toPositiveInt(livePairsRaw, DEFAULT_LIVE_WINDOW_PAIRS);
   const syncEveryPairs = toPositiveInt(syncEveryPairsRaw, DEFAULT_SYNC_EVERY_PAIRS);
@@ -879,13 +893,13 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
 }
 
 export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<void> {
-  const defaults = await resolveSyncSettings(deps, undefined);
+  const defaults = await resolveSyncSettings(deps);
   const users = await deps.db.withSystemScope((session) => session.query<UserRow>('select user_id from users'));
   for (const { user_id: userId } of users) {
     const due = await findDueChats(deps.db, userId, defaults.syncEveryMessages, defaults.liveWindowMessages);
     for (const chatId of due) {
       try {
-        const sync = await resolveSyncSettings(deps, userId, chatId);
+        const sync = await resolveSyncSettings(deps);
         const result = await runOneChatSync(deps, sync, userId, chatId);
         await recordSyncStatus(deps.db, userId, chatId, result);
       } catch (err) {
@@ -913,7 +927,7 @@ export function startChatMemorySyncLoop(deps: ChatMemorySyncDeps): void {
  * once, on an explicit signal, never inferred from idle time (bb_principles.md §3).
  */
 export async function archiveChatMemory(deps: ChatMemorySyncDeps, userId: string, chatId: string, chatTitle: string): Promise<void> {
-  const sync = await resolveSyncSettings(deps, userId, chatId);
+  const sync = await resolveSyncSettings(deps);
   await runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
     deps.db.withUserScope(userId, async (session) => {
       const entries = await session.query<ExistingEntryRow>(

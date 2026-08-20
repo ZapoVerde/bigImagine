@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/eagerChunkSync.ts
- * @stamp 2026-08-13
+ * @stamp 2026-08-20
  * @architectural-role IO Wrapper — the eager chat-memory chunk step (docs/plans/eager-chunk-sync-plan.md)
  * @description
  * The sync tick (chatMemorySync.ts) batches a due chat's chunking into the same transaction as its
@@ -39,19 +39,18 @@
  *   assertions:
  *     purity:          impure (Postgres IO, LLM IO via the gated provider, embeddings IO)
  *     state_ownership: []
- *     external_io:     [Postgres, the LLM via the gated provider it builds (same construction
- *                       resolveSyncSettings uses), the embeddings provider]
+ *     external_io:     [Postgres, the LLM via the gated provider it builds (the shared
+ *                       resolveChatMemoryLlm construction, resolved live from chat_memory_profile),
+ *                       the embeddings provider]
  */
 
 import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
-import { createLlmProviderForProfile } from '../io/llm/index.js';
-import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
 import { chunkChatTranscript, DEFAULT_CHUNK_PAIRS, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
-import { findTurnBoundaries, DEFAULT_LIVE_WINDOW_PAIRS, type ChatMemorySyncDeps } from './chatMemorySync.js';
+import { resolveChatMemoryLlm, findTurnBoundaries, DEFAULT_LIVE_WINDOW_PAIRS, type ChatMemorySyncDeps } from './chatMemorySync.js';
 
 /** Mirrors ChatMemorySyncDeps in full — chunk summarization is a mandatory, gated LLM call
  *  (`chat_chunks.summary` is `not null`), so this path can never skip or stub the provider. */
@@ -64,46 +63,27 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-/** Same live settings reads + gated-provider construction resolveSyncSettings (chatMemorySync.ts)
- *  does for the tick: chat_memory_profile names the chunk-summary connection (falling back to the
- *  household's active connection when unset or unknown), chat_memory_chunk_summary_prompt can
- *  override the built-in summarize prompt, chat_memory_live_window_pairs sets the live window, and
- *  chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md
+/** Same live settings reads + shared connection resolution as the tick (chatMemorySync.ts's
+ *  resolveChatMemoryLlm): chat_memory_profile names the chunk-summary connection (falling back to
+ *  the household's active connection when unset or unknown — never a chat's own
+ *  params->>'profile', which is the narrator/generation connection), chat_memory_chunk_summary_prompt
+ *  can override the built-in summarize prompt, chat_memory_live_window_pairs sets the live window,
+ *  and chat_memory_chunk_pairs sets the chunk size in turn-pairs (docs/plans/completed/chunk-size-resize-plan.md
  *  — fallback DEFAULT_CHUNK_PAIRS = today's 4-message chunk, so a changed size is a no-op until a
  *  value is saved). */
-async function resolveEagerLlm(deps: EagerChunkDeps, userId: string, chatId: string): Promise<{
+async function resolveEagerLlm(deps: EagerChunkDeps): Promise<{
   llm: LlmProvider;
   chunkSummaryPrompt: string | undefined;
   liveWindowPairs: number;
   pairsPerChunk: number;
 }> {
-  const [chatProfile, livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
-    deps.db.withUserScope(userId, async (session) => {
-      const rows = await session.query<{ profile: string | null }>(
-        `select params->>'profile' as profile from chat_sessions where chat_id = $1`,
-        [chatId],
-      );
-      return rows[0]?.profile ?? undefined;
-    }),
+  const [livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
     deps.settings.get('chat_memory_live_window_pairs'),
     deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
   ]);
 
-  let llm = deps.llm;
-  if (!chatProfile) {
-    const active = await deps.llmConnections.resolveActive();
-    if (!active) throw new Error(`chat ${chatId} has no selected connection and no active connection exists`);
-    llm = createGatedLlmProvider(createLlmProviderForProfile(active), deps.db, deps.settings, active);
-  }
-  if (chatProfile) {
-    const profile = await deps.llmConnections.resolveByName(chatProfile);
-    if (profile) {
-      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
-    } else {
-      throw new Error(`chat ${chatId} names unknown connection "${chatProfile}"; eager sync refused to use another connection`);
-    }
-  }
+  const llm = await resolveChatMemoryLlm(deps);
 
   return {
     llm,
@@ -127,7 +107,7 @@ async function resolveEagerLlm(deps: EagerChunkDeps, userId: string, chatId: str
  */
 export async function maybeEagerChunk(deps: EagerChunkDeps, userId: string, chatId: string): Promise<EagerChunkResult> {
   try {
-    const { llm, chunkSummaryPrompt, liveWindowPairs, pairsPerChunk } = await resolveEagerLlm(deps, userId, chatId);
+    const { llm, chunkSummaryPrompt, liveWindowPairs, pairsPerChunk } = await resolveEagerLlm(deps);
 
     // Phase 1 — unlocked, cheap pre-check. floor(messageCount / 2) is the turn-count estimate:
     // exact in every today-case (each turn is one user + one assistant message; a seeded

@@ -29,7 +29,7 @@ function createFakePool() {
   const chatMessages = []; // { message_id, chat_id, user_id, role, content, created_at }
   const chatSyncPoints = []; // { sync_id, chat_id, user_id, ordinal, last_message_id, closed_at }
   const chatChunks = []; // { chat_id, sync_id, user_id, ordinal, content, summary, vector_embed }
-  const chatSessions = new Map(); // chat_id -> { user_id, params } (resolveEagerLlm's connection read)
+  const chatSessions = new Map(); // chat_id -> { params } — pure test bookkeeping: the narrator profile the code under test must NEVER read
   let lockQueries = 0;
   let clock = 1000;
   const now = () => new Date((clock += 1000)).toISOString();
@@ -49,13 +49,6 @@ function createFakePool() {
           if (sql.includes('set_config')) {
             scopedUserId = params[0];
             return { rows: [] };
-          }
-
-          // resolveEagerLlm's per-chat connection read (eagerChunkSync.ts): which connection this
-          // chat is locked to. null/undefined means "no override" → the active connection.
-          if (sql.includes("params->>'profile'") && sql.includes('from chat_sessions')) {
-            const sess = chatSessions.get(params[0]);
-            return { rows: [{ profile: sess?.params?.profile ?? null }] };
           }
 
           // The connection-backed eager llm is a gated openai-compatible provider, which meters
@@ -153,14 +146,17 @@ function createFakePool() {
   };
 }
 
-// --- The eager llm rides the chat's OWN connection (eagerChunkSync.ts's resolveEagerLlm builds a
-// gated openai-compatible provider over the connection profile and calls it over HTTP) — so the
+// --- The eager llm rides the shared chat-memory connection (eagerChunkSync.ts's resolveEagerLlm
+// → chatMemorySync.ts's resolveChatMemoryLlm: chat_memory_profile when set, else the household's
+// active connection — never the chat's own params->>'profile') and calls it over HTTP — so the
 // fake LLM seam moves into a mocked global fetch. The mock dispatches on the request's forced
 // tool_choice, records each request as the same { messages, options } shape the old fake recorded,
 // and returns the same summarize_chat_chunk turn. Two distinct endpoints prove the lock: the
 // active connection and the named one a chat is locked to. ---
 const ACTIVE_FAKE_BASE = 'https://eager-active-fake.example';
 const NAMED_FAKE_BASE = 'https://eager-named-fake.example';
+const EAGER_C_FAKE_BASE = 'https://eager-memory-c-fake.example';
+const EAGER_D_FAKE_BASE = 'https://eager-memory-d-fake.example';
 
 function fakeEagerProfile(baseUrl, model) {
   return {
@@ -183,7 +179,10 @@ const llmConnections = {
     return fakeEagerProfile(ACTIVE_FAKE_BASE, 'eager-active-model');
   },
   async resolveByName(name) {
-    return name === 'eager-profile' ? fakeEagerProfile(NAMED_FAKE_BASE, 'eager-named-model') : undefined;
+    if (name === 'eager-profile') return fakeEagerProfile(NAMED_FAKE_BASE, 'eager-named-model');
+    if (name === 'eager-c') return fakeEagerProfile(EAGER_C_FAKE_BASE, 'eager-c-model');
+    if (name === 'eager-d') return fakeEagerProfile(EAGER_D_FAKE_BASE, 'eager-d-model');
+    return undefined;
   },
 };
 
@@ -210,9 +209,10 @@ function oaiToolResponse(name, args) {
 
 function installEagerFetchMock(backend) {
   const originalFetch = globalThis.fetch;
+  const knownBases = [ACTIVE_FAKE_BASE, NAMED_FAKE_BASE, EAGER_C_FAKE_BASE, EAGER_D_FAKE_BASE];
   globalThis.fetch = async (url, init) => {
     const u = String(url);
-    if (u === `${ACTIVE_FAKE_BASE}/chat/completions` || u === `${NAMED_FAKE_BASE}/chat/completions`) {
+    if (knownBases.includes(u.replace('/chat/completions', ''))) {
       const body = JSON.parse(init.body);
       const forceTool = body.tool_choice?.function?.name;
       backend.calls.push({ messages: body.messages, options: { forceTool, model: body.model }, url: u });
@@ -254,9 +254,9 @@ const pool = createFakePool();
 const db = createPostgresClient(pool);
 const backend = createFakeHttpBackend();
 installEagerFetchMock(backend);
-// deps.llm is unused for real eager work — resolveEagerLlm swaps in a connection-backed gated
-// provider whenever a chat_id is involved. Kept as a shim so summarizeCalls() reads the HTTP
-// backend's recorded requests unchanged.
+// deps.llm is unused for real eager work — resolveEagerLlm swaps in the shared
+// resolveChatMemoryLlm gated provider (chat_memory_profile or the active connection). Kept as a
+// shim so summarizeCalls() reads the HTTP backend's recorded requests unchanged.
 const llm = { calls: backend.calls, name: 'fake-llm', supportsVision: false, complete: async () => { throw new Error('unused — eager llm comes from the connection provider'); } };
 const embeddings = createFakeEmbeddings();
 // live window 2 pairs (4 messages) — one whole 2-pair chunk needs 2 eligible pairs, i.e. 4 turns.
@@ -443,39 +443,87 @@ let ONE_CHAT_ID;
   assert(pool.lockQueries() === locksBefore, 'the truncated no-op is caught by the cheap pre-check — no lock taken');
 }
 
-// --- The connection lock (eagerChunkSync.ts's resolveEagerLlm): a chat's own connection rides
-// onto its eager chunking — a chat locked to "eager-profile" summarizes through THAT connection's
-// endpoint, never the active one. ---
+// --- The connection contract (eagerChunkSync.ts's resolveEagerLlm → resolveChatMemoryLlm): eager
+// chunk summaries resolve EXCLUSIVELY through the live chat_memory_profile setting — never through
+// a chat's own params->>'profile' (the narrator/generation connection). With chat_memory_profile =
+// 'eager-profile', an RP chat whose narrator profile names a dead model still chunks through the
+// named memory connection, never the active one. This is the exact regression from the field: a
+// legacy RP chat's obsolete narrator model used to drag eager chunking onto that dead model. ---
 {
   const LOCK_CHAT_ID = randomUUID();
-  pool.chatSessions.set(LOCK_CHAT_ID, { user_id: USER, params: { profile: 'eager-profile' } });
+  pool.chatSessions.set(LOCK_CHAT_ID, { params: { profile: 'obsolete-rp-model' } });
   seedMessages(LOCK_CHAT_ID, 'ELOCK', 8);
 
+  await settings.set('chat_memory_profile', 'eager-profile');
   const activeBaseCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
   const result = await maybeEagerChunk(deps, USER, LOCK_CHAT_ID);
 
   const namedCalls = backend.calls.filter((c) => c.url === `${NAMED_FAKE_BASE}/chat/completions`);
   const activeBaseCallsAfter = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
-  assert(result.status === 'ok' && result.chunksAdded === 1, 'a chat locked to a named connection still chunks normally');
-  assert(namedCalls.length === 1, 'the locked chat summarizes through its own connection');
-  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the locked eager pass never touches the active connection');
+  assert(result.status === 'ok' && result.chunksAdded === 1, 'an eager pass chunks normally with chat_memory_profile set');
+  assert(namedCalls.length === 1, "the eager pass summarizes through the chat_memory_profile connection, not the chat's obsolete narrator profile");
+  assert(activeBaseCallsAfter === activeBaseCallsBefore, 'the eager pass never touches the active connection while chat_memory_profile is set');
+  await settings.set('chat_memory_profile', undefined);
 }
 
-// --- The refusal: a chat locked to a connection that no longer exists must never silently fall
-// back to another connection — the divergence this design forbids. resolveEagerLlm refuses before
-// any chunk work, and maybeEagerChunk resolves it as a noop, leaving the backlog to the tick. ---
+// --- The narrator profile is a different configuration domain: an unknown/dead
+// params->>'profile' must never error or influence eager chunking — with chat_memory_profile
+// unset, the pass rides the active connection normally. ---
 {
-  const REFUSE_CHAT_ID = randomUUID();
-  pool.chatSessions.set(REFUSE_CHAT_ID, { user_id: USER, params: { profile: 'ghost-connection' } });
-  seedMessages(REFUSE_CHAT_ID, 'EREFUSE', 8);
+  const NARR_CHAT_ID = randomUUID();
+  pool.chatSessions.set(NARR_CHAT_ID, { params: { profile: 'ghost-connection' } });
+  seedMessages(NARR_CHAT_ID, 'ENARR', 8);
 
-  const callsBefore = backend.calls.length;
-  const chunksBefore = pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length;
-  const result = await maybeEagerChunk(deps, USER, REFUSE_CHAT_ID);
+  const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  const result = await maybeEagerChunk(deps, USER, NARR_CHAT_ID);
 
-  assert(result.status === 'noop' && result.chunksAdded === 0, 'a chat locked to an unknown connection is a noop — never silently chunked via another connection');
-  assert(backend.calls.length === callsBefore, 'the refused eager pass makes ZERO LLM calls');
-  assert(pool.chatChunks.filter((c) => c.chat_id === REFUSE_CHAT_ID).length === chunksBefore, 'the refused eager pass writes no chunks');
+  assert(result.status === 'ok' && result.chunksAdded === 1, 'a chat whose narrator profile is unknown still chunks normally — the memory pipeline ignores the narrator profile');
+  assert(
+    backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length > activeCallsBefore,
+    'with chat_memory_profile unset, the eager pass rides the active connection — never the narrator profile',
+  );
+}
+
+// --- Settings read live: changing chat_memory_profile C → D takes effect on the very next eager
+// pass, no restart — the same "settings read live" contract the sync tick has. ---
+{
+  const LIVE_CHAT_ID = randomUUID();
+  seedMessages(LIVE_CHAT_ID, 'ELIVE', 8);
+
+  await settings.set('chat_memory_profile', 'eager-c');
+  const resultC = await maybeEagerChunk(deps, USER, LIVE_CHAT_ID);
+  const eagerCCalls = backend.calls.filter((c) => c.url === `${EAGER_C_FAKE_BASE}/chat/completions`).length;
+  assert(resultC.status === 'ok' && eagerCCalls > 0, 'with chat_memory_profile = eager-c, the eager pass rides the eager-c connection');
+
+  seedMessages(LIVE_CHAT_ID, 'ELIVE2', 8);
+  await settings.set('chat_memory_profile', 'eager-d');
+  const resultD = await maybeEagerChunk(deps, USER, LIVE_CHAT_ID);
+  const eagerDCalls = backend.calls.filter((c) => c.url === `${EAGER_D_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', undefined);
+
+  assert(
+    resultD.status === 'ok' && eagerDCalls > 0,
+    'changing chat_memory_profile to eager-d takes effect on the very next eager pass — read live, no restart',
+  );
+}
+
+// --- The unknown chat_memory_profile fallback is a defined, logged policy (fall back to the
+// active connection) — it must never silently fall back to a chat's narrator profile instead. ---
+{
+  const UNKNOWN_MEM_CHAT_ID = randomUUID();
+  pool.chatSessions.set(UNKNOWN_MEM_CHAT_ID, { params: { profile: 'dead-narrator' } });
+  seedMessages(UNKNOWN_MEM_CHAT_ID, 'EUNKMEM', 8);
+
+  const activeCallsBefore = backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length;
+  await settings.set('chat_memory_profile', 'ghost-memory-connection');
+  const result = await maybeEagerChunk(deps, USER, UNKNOWN_MEM_CHAT_ID);
+  await settings.set('chat_memory_profile', undefined);
+
+  assert(result.status === 'ok' && result.chunksAdded === 1, 'an unknown chat_memory_profile still chunks via the logged active-connection fallback');
+  assert(
+    backend.calls.filter((c) => c.url === `${ACTIVE_FAKE_BASE}/chat/completions`).length > activeCallsBefore,
+    'the unknown-memory-profile fallback rides the ACTIVE connection, never the chat narrator profile',
+  );
 }
 
 if (process.exitCode) {

@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/chatChunkResize.ts
- * @stamp 2026-08-13
+ * @stamp 2026-08-20
  * @architectural-role Orchestrator — the admin-triggered backfill that re-chunks every chat's
  *   archived history at the live chat_memory_chunk_pairs size (docs/plans/completed/chunk-size-resize-plan.md)
  * @description
@@ -42,20 +42,19 @@
  *   assertions:
  *     purity:          impure (Postgres IO, LLM IO via the gated provider, embeddings IO)
  *     state_ownership: []
- *     external_io:     [Postgres, the LLM via the gated provider it builds (same construction
- *                       resolveSyncSettings uses), the embeddings provider]
+ *     external_io:     [Postgres, the LLM via the gated provider it builds (the shared
+ *                       resolveChatMemoryLlm construction, resolved live from chat_memory_profile),
+ *                       the embeddings provider]
  */
 
 import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel } from '../io/llm/callContext.js';
-import { createLlmProviderForProfile } from '../io/llm/index.js';
-import { createGatedLlmProvider } from '../io/llm/llmGate.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { toPgVectorLiteral } from '../util/pgvector.js';
 import { chunkChatTranscript, DEFAULT_CHUNK_PAIRS, type ChatTranscriptMessage } from '../io/chatMemory/chunkChatTranscript.js';
 import { summarizeChatChunk } from '../io/chatMemory/classifyChatChunk.js';
-import { findTurnBoundaries, DEFAULT_LIVE_WINDOW_PAIRS, type ChatMemorySyncDeps } from './chatMemorySync.js';
+import { resolveChatMemoryLlm, findTurnBoundaries, DEFAULT_LIVE_WINDOW_PAIRS, type ChatMemorySyncDeps } from './chatMemorySync.js';
 
 /** Mirrors ChatMemorySyncDeps in full — chunk summarization is a mandatory LLM call and chunk
  *  embeddings are mandatory columns, so this path can never skip or stub either provider. */
@@ -98,31 +97,23 @@ function toPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-/** Same live settings reads + gated-provider construction resolveSyncSettings (chatMemorySync.ts)
- *  does for the tick — the pass regenerates summaries, so it must honor the household's
- *  chunk-summary connection, prompt, live window, and chunk size exactly as the tick would. */
+/** Same live settings reads + shared connection resolution as the tick (chatMemorySync.ts's
+ *  resolveChatMemoryLlm) — the pass regenerates summaries, so it must honor the household's
+ *  chunk-summary connection (chat_memory_profile, never a chat's own params->>'profile'), prompt,
+ *  live window, and chunk size exactly as the tick would. */
 async function resolveResizeSettings(deps: ChatChunkResizeDeps): Promise<{
   llm: LlmProvider;
   chunkSummaryPrompt: string | undefined;
   pairsPerChunk: number;
   liveWindowPairs: number;
 }> {
-  const [profileName, livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
-    deps.settings.get('chat_memory_profile'),
+  const [livePairsRaw, chunkPairsRaw, chunkSummaryPrompt] = await Promise.all([
     deps.settings.get('chat_memory_live_window_pairs'),
     deps.settings.get('chat_memory_chunk_pairs'),
     deps.settings.get('chat_memory_chunk_summary_prompt'),
   ]);
 
-  let llm = deps.llm;
-  if (profileName) {
-    const profile = await deps.llmConnections.resolveByName(profileName);
-    if (profile) {
-      llm = createGatedLlmProvider(createLlmProviderForProfile(profile), deps.db, deps.settings, profile);
-    } else {
-      log.error(`chat chunk resize: chat_memory_profile names unknown connection "${profileName}" — falling back to the active connection`);
-    }
-  }
+  const llm = await resolveChatMemoryLlm(deps);
 
   return {
     llm,
