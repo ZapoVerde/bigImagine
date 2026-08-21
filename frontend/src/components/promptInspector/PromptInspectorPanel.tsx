@@ -70,17 +70,19 @@ export default function PromptInspectorPanel({ apiKey, chatId, refreshToken, onC
   return (
     <div className={`prompt-inspector-panel${collapsed ? ' collapsed' : ''}`}>
       <div className="prompt-inspector-header">
-        <span className="prompt-inspector-title">Prompt Inspector</span>
-        <div className="prompt-inspector-header-actions">
-          <button
-            type="button"
-            className="prompt-inspector-collapse"
-            title={collapsed ? 'Expand prompt inspector' : 'Collapse prompt inspector'}
-            aria-expanded={!collapsed}
-            onClick={() => setCollapsed((c) => !c)}
-          >
+        <button
+          type="button"
+          className="prompt-inspector-collapse"
+          title={collapsed ? 'Expand prompt inspector' : 'Collapse prompt inspector'}
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((c) => !c)}
+        >
+          <span className="prompt-inspector-chevron" aria-hidden="true">
             {collapsed ? '▸' : '▾'}
-          </button>
+          </span>
+          <span className="prompt-inspector-title">Prompt Inspector</span>
+        </button>
+        <div className="prompt-inspector-header-actions">
           <button type="button" className="prompt-inspector-refresh" title="Re-fetch the current prompt" onClick={load} disabled={loading}>
             ↻
           </button>

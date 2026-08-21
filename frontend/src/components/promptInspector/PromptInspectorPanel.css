@@ -60,6 +60,22 @@
   cursor: pointer;
 }
 
+.prompt-inspector-collapse {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.4rem;
+  min-width: 0;
+  text-align: left;
+  font: inherit;
+}
+
+.prompt-inspector-chevron {
+  font-size: 0.65rem;
+  flex-shrink: 0;
+}
+
 .prompt-inspector-refresh:hover,
 .prompt-inspector-copy:hover,
 .prompt-inspector-collapse:hover {
@@ -263,6 +279,14 @@
   border-bottom: none;
 }
 
+.sidebar .prompt-inspector-collapse {
+  padding: 0.35rem 0.5rem;
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+}
+
 .sidebar .prompt-inspector-title {
   font-size: var(--font-size-xs, 0.72rem);
   font-weight: var(--font-weight-semibold);
@@ -436,4 +460,3 @@
   line-height: 1.5;
   padding: 0.1rem 0.2rem 0.2rem;
 }
-
