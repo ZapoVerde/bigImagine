@@ -2494,100 +2494,96 @@ export default function ChatView({
                 e.target.value = '';
               }}
             />
-            {/* RP chats attach from the ⋯ menu; on mobile that menu lives in this row (opposite
-                Send) instead of the header, so the row carries its own copy here. Non-RP chats
-                keep the paper clip. */}
-            {activeChat?.kind === 'rp' && (
-              <div className="chat-menu-wrap chat-menu-mobile" ref={chatMenuMobileRef}>
-                <button
-                  type="button"
-                  className="chat-menu-button"
-                  title="Chat menu"
-                  aria-haspopup="menu"
-                  aria-expanded={chatMenuOpen}
-                  onClick={() => setChatMenuOpen((v) => !v)}
-                >
-                  ⋯
-                </button>
-                {chatMenuOpen && (
-                  <div className="chat-menu" role="menu">
-                    {chatMenuItems}
-                  </div>
-                )}
+            <div className="chat-composer-shell">
+              {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this
+                  tab lost track of (resumingTurn) — typing into a conversation whose transcript is
+                  about to change under you is worse than waiting for the refresh. Also disabled
+                  while rolling-memory sync is blocking new turns (syncBlocked — the banner under
+                  the top bar explains; the server would 409 CHAT_SYNC_STALLED anyway). */}
+              <ChatComposer
+                ref={composerRef}
+                tabId={tabId}
+                disabled={resumingTurn || syncBlocked}
+                onSend={send}
+                onEmptyChange={onEmptyChange}
+              />
+              <div className="chat-composer-actions">
+                <div className="chat-composer-actions-left">
+                  {activeChat?.kind === 'rp' && (
+                    <button
+                      type="button"
+                      className="chat-composer-secondary chat-composer-sprite-toggle"
+                      title={spriteStageVisible ? 'Hide character sprites' : 'Show character sprites'}
+                      aria-label={spriteStageVisible ? 'Hide character sprites' : 'Show character sprites'}
+                      aria-pressed={spriteStageVisible}
+                      onClick={() => setSpriteStageVisible((v) => !v)}
+                    >
+                      <span aria-hidden="true">◐</span>
+                    </button>
+                  )}
+                  {activeChat?.kind !== 'rp' && (
+                    <button
+                      type="button"
+                      className="chat-composer-secondary chat-attach-button"
+                      title="Attach a file or image"
+                      aria-label="Attach a file or image"
+                      disabled={attaching}
+                      onClick={() => fileInputRef.current?.click()}
+                    >
+                      <span aria-hidden="true">📎</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="chat-composer-secondary chat-jump-bottom"
+                    title="Jump to bottom"
+                    aria-label="Jump to bottom"
+                    onClick={() => historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' })}
+                  >
+                    <span aria-hidden="true">↓</span>
+                  </button>
+                </div>
+                <div className="chat-composer-actions-right">
+                  {activeChat?.kind === 'rp' && (
+                    <div className="chat-menu-wrap chat-composer-menu-wrap" ref={chatMenuMobileRef}>
+                      <button
+                        type="button"
+                        className="chat-menu-button chat-composer-secondary"
+                        title="Chat menu"
+                        aria-label="Chat menu"
+                        aria-haspopup="menu"
+                        aria-expanded={chatMenuOpen}
+                        onClick={() => setChatMenuOpen((v) => !v)}
+                      >
+                        ⋯
+                      </button>
+                      {chatMenuOpen && (
+                        <div className="chat-menu" role="menu">
+                          {chatMenuItems}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className={`chat-composer-send chat-send-button${sending || swipeRegenerating ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
+                    disabled={
+                      !sending &&
+                      !swipeRegenerating &&
+                      !resumingTurn &&
+                      !syncBlocked &&
+                      (selectionMode ||
+                        (!resendMode() && !composerHasText && stagedFiles.length === 0 && stagedImages.length === 0))
+                    }
+                    title={sending || swipeRegenerating ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
+                    aria-label={sending || swipeRegenerating ? 'Stop generating' : resendMode() ? 'Resend your last message' : 'Send message'}
+                    onClick={() => (sending || swipeRegenerating ? void stopTurn() : void send())}
+                  >
+                    <span aria-hidden="true">{sending || swipeRegenerating ? '■' : resendMode() ? '↻' : '↑'}</span>
+                  </button>
+                </div>
               </div>
-            )}
-            {/* RP chats attach from the header ⋯ menu instead — the input row keeps just
-                the textarea + Send, with the paper clip reserved for non-RP chats. */}
-            {activeChat?.kind !== 'rp' && (
-              <button
-                type="button"
-                className="chat-attach-button"
-                title="Attach a file or image"
-                disabled={attaching}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                📎
-              </button>
-            )}
-            {activeChat?.kind === 'rp' && (
-              <button
-                type="button"
-                className="sprite-stage-toggle"
-                title={spriteStageVisible ? 'Hide character sprites' : 'Show character sprites'}
-                aria-pressed={spriteStageVisible}
-                onClick={() => setSpriteStageVisible((v) => !v)}
-              >
-                {spriteStageVisible ? 'Hide sprites' : 'Show sprites'}
-              </button>
-            )}
-            {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this
-                tab lost track of (resumingTurn) — typing into a conversation whose transcript is
-                about to change under you is worse than waiting for the refresh. Also disabled
-                while rolling-memory sync is blocking new turns (syncBlocked — the banner under
-                the top bar explains; the server would 409 CHAT_SYNC_STALLED anyway). */}
-            <ChatComposer
-              ref={composerRef}
-              tabId={tabId}
-              disabled={resumingTurn || syncBlocked}
-              onSend={send}
-              onEmptyChange={onEmptyChange}
-            />
-            {/* Mobile-only jump-to-bottom: hidden on desktop via CSS, but rendered always so
-                the row is identical in both breakpoints. Scrolls the history to its end. */}
-            <button
-              type="button"
-              className="chat-jump-bottom"
-              title="Jump to bottom"
-              onClick={() => historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' })}
-            >
-              ↓
-            </button>
-            <button
-              type="button"
-              className={`chat-send-button${sending || swipeRegenerating ? ' chat-send-stop' : ''}${resendMode() ? ' chat-send-resend' : ''}`}
-              disabled={
-                !sending &&
-                !swipeRegenerating &&
-                !resumingTurn &&
-                !syncBlocked &&
-                (selectionMode ||
-                  (!resendMode() && !composerHasText && stagedFiles.length === 0 && stagedImages.length === 0))
-              }
-              title={sending || swipeRegenerating ? 'Stop generating' : resendMode() ? 'Resend your last message' : undefined}
-              onClick={() => (sending || swipeRegenerating ? void stopTurn() : void send())}
-            >
-              {sending || swipeRegenerating ? (
-                <>
-                  <span className="chat-send-label">Stop</span>
-                  <span className="chat-send-icon" aria-hidden="true">■</span>
-                </>
-              ) : (
-                <>
-                  <span className="chat-send-label">{resendMode() ? 'Resend' : 'Send'}</span>
-                  <span className="chat-send-icon" aria-hidden="true">{resendMode() ? '↻' : '➤'}</span>
-                </>
-              )}
-            </button>
+            </div>
           </form>
         </div>
       </div>

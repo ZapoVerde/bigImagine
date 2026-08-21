@@ -1117,84 +1117,190 @@
 
 .chat-input {
   display: flex;
-  gap: 0.5rem;
-  padding: 0.8rem 1rem;
+  justify-content: center;
+  padding: 0.35rem 0 0.85rem;
+  background: transparent;
+  border: none;
 }
 
-.chat-input textarea {
-  flex: 1;
+/* Compact floating composer shell — one rounded surface containing textarea + controls.
+   Constrained desktop width (~53rem), centred, subtle panel surface, no strong permanent accent. */
+.chat-composer-shell {
+  width: calc(100% - 1.5rem);
+  max-width: 53rem;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.55rem 0.65rem 0.5rem;
+  background: var(--color-bg-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.14), 0 1px 3px rgba(0, 0, 0, 0.08);
+  box-sizing: border-box;
+}
+
+.chat-composer-shell:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-subtle), 0 4px 20px rgba(0, 0, 0, 0.14);
+}
+
+.chat-composer-shell textarea {
+  width: 100%;
+  border: none;
+  background: transparent;
+  padding: 0.3rem 0.15rem;
   font: inherit;
-  padding: 0.5rem;
+  font-size: var(--font-size-base);
+  line-height: 1.45;
+  color: var(--color-text-primary);
   resize: none;
+  outline: none;
+  box-shadow: none;
+  min-height: 1.45rem;
+  box-sizing: border-box;
 }
 
-.chat-input button {
-  padding: 0.5rem 1.2rem;
+.chat-composer-shell textarea::placeholder {
+  color: var(--color-text-muted);
+  opacity: 1;
+}
+
+.chat-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding-top: 0.15rem;
+}
+
+.chat-composer-actions-left,
+.chat-composer-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Common compact control sizing — approx 36px, muted secondary */
+.chat-composer-secondary {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.55rem;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.chat-composer-secondary:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-subtle);
+}
+
+.chat-composer-secondary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.chat-composer-sprite-toggle[aria-pressed="true"] {
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface);
+  border-color: var(--color-border);
+}
+
+.chat-composer-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.chat-composer-menu-wrap .chat-menu {
+  top: auto;
+  bottom: calc(100% + 0.45rem);
+  left: 0;
+  right: auto;
+}
+
+.chat-composer-menu-wrap .chat-menu-button {
+  font-size: 1.15rem;
+}
+
+/* Send — retains accent, fixed 36px slot so Stop swaps without reflow */
+.chat-composer-send {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.55rem;
+  border: 1px solid var(--color-accent);
   background: var(--color-accent);
   color: var(--color-accent-contrast);
-  border-color: var(--color-accent);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
 }
 
-.chat-input button:hover {
+.chat-composer-send:hover:not(:disabled) {
   background: var(--color-accent-hover);
   border-color: var(--color-accent-hover);
 }
 
-/* Resend state: the chat's last message is the user's own (its AI reply was deleted) and the
-   draft/staging are empty — the button lights up to signal pressing it re-runs that turn instead
-   of sending something new (see ChatView's resendMode()). */
-.chat-input button.chat-send-resend,
-.chat-input button.chat-send-resend:hover {
-  background: var(--color-accent);
-  border-color: var(--color-accent-hover);
-  box-shadow:
-    0 0 0 2px var(--color-accent-subtle),
-    0 0 14px var(--color-accent);
+.chat-composer-send:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
-/* Stop state: while a turn is in flight the button becomes Stop (ChatView.tsx) — danger-red so
-   it reads as "halt this", never as another Send. Same shape/size as Send, so the input row
-   doesn't shift when the button swaps. */
-.chat-input button.chat-send-stop,
-.chat-input button.chat-send-stop:hover {
-  background: var(--color-danger);
+.chat-composer-send.chat-send-stop {
+  background: var(--color-bg-surface);
+  color: var(--color-danger);
+  border-color: var(--color-border);
+}
+
+.chat-composer-send.chat-send-stop:hover:not(:disabled) {
+  background: var(--color-danger-bg);
   border-color: var(--color-danger);
-  box-shadow:
-    0 0 0 2px var(--color-danger-bg),
-    0 0 14px var(--color-danger);
+  color: var(--color-danger);
 }
 
-.chat-input button.chat-attach-button {
-  flex: 0 0 auto;
-  padding: 0.5rem 0.7rem;
-  background: var(--color-bg-panel);
-  color: var(--color-text-primary);
-  border-color: var(--color-border);
+.chat-composer-send.chat-send-resend {
+  box-shadow: 0 0 0 2px var(--color-accent-subtle);
 }
 
-.chat-input button.chat-attach-button:hover {
-  background: var(--color-hover-surface);
-  border-color: var(--color-border);
-}
-
-/* Mobile-only jump-to-bottom (ChatView renders it always; desktop hides it so the input row
-   is unchanged there). Same panel styling as the attach pill so it matches on mobile. */
-.chat-input button.chat-jump-bottom {
+/* Mobile-only jump-to-bottom — hidden desktop, visible inside shell on narrow screens */
+.chat-composer-shell .chat-jump-bottom {
   display: none;
-  flex: 0 0 auto;
-  padding: 0.5rem 0.7rem;
+}
+
+/* Staging + delete bars align with the centred shell so extra background stays visible */
+.chat-bottom-overlay .staging-bar,
+.chat-bottom-overlay .image-staging-bar,
+.chat-bottom-overlay .chat-delete-bar {
+  width: calc(100% - 1.5rem);
+  max-width: 53rem;
+  margin-inline: auto;
+  box-sizing: border-box;
+}
+
+.chat-bottom-overlay .staging-bar,
+.chat-bottom-overlay .image-staging-bar {
+  padding: 0.4rem 0 0;
+}
+
+.chat-bottom-overlay .chat-delete-bar {
   background: var(--color-bg-panel);
-  color: var(--color-text-primary);
-  border-color: var(--color-border);
-}
-
-.chat-input button.chat-jump-bottom:hover {
-  background: var(--color-hover-surface);
-  border-color: var(--color-border);
-}
-
-.chat-send-icon {
-  display: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 0.45rem 0.6rem;
 }
 
 /* Mobile: the clip + textarea + Send row (desktop's single line) leaves too little width for the
@@ -1210,87 +1316,24 @@
     height: 50vh;
   }
 
-  .chat-input {
-    flex-wrap: wrap;
-    row-gap: 0.5rem;
+  .chat-composer-shell {
+    width: calc(100% - 1rem);
+    padding: 0.5rem 0.6rem 0.45rem;
   }
 
-  .chat-input textarea {
-    order: 1;
-    flex: 1 1 100%;
+  .chat-bottom-overlay .staging-bar,
+  .chat-bottom-overlay .image-staging-bar,
+  .chat-bottom-overlay .chat-delete-bar {
+    width: calc(100% - 1rem);
   }
 
-  .chat-input button.chat-attach-button {
-    order: 3;
+  .chat-composer-shell .chat-jump-bottom {
+    display: inline-flex;
   }
 
-  .chat-input button.chat-jump-bottom {
-    order: 4;
-  }
-
-  .chat-input button.chat-send-button {
-    order: 5;
-    margin-left: auto;
-  }
-
-  .chat-input button.chat-attach-button,
-  .chat-input button.chat-jump-bottom,
-  .chat-input button.chat-send-button {
-    width: 2.5rem;
-    height: 2.5rem;
-    flex: 0 0 auto;
-    padding: 0;
-    border-radius: var(--radius-pill);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--font-size-lg);
-  }
-
-  /* The ⋯ chat menu relocates from the header into the input row on mobile (ChatView.tsx
-     renders a second copy there; one chatMenuOpen state serves both). The header's copy hides
-     and the row's takes the left slot opposite Send — same pill shape as attach/send — with the
-     popup opening upward since it now sits at the bottom of the screen. */
+  /* The header ⋯ menu is not used for RP chats (header hidden); keep hidden on mobile as before. */
   .chat-header .chat-menu-wrap {
     display: none;
-  }
-
-  .chat-input .chat-menu-mobile {
-    display: block;
-    order: 2;
-    position: relative;
-    z-index: 21;
-    flex: 0 0 auto;
-  }
-
-  .chat-input .chat-menu-mobile .chat-menu-button {
-    width: 2.5rem;
-    height: 2.5rem;
-    flex: 0 0 auto;
-    padding: 0;
-    border-radius: var(--radius-pill);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: var(--font-size-lg);
-    background: var(--color-bg-panel);
-    color: var(--color-text-primary);
-    border: 1px solid var(--color-border);
-  }
-
-  .chat-menu-mobile .chat-menu {
-    top: auto;
-    right: auto;
-    left: 0;
-    bottom: calc(100% + 0.35rem);
-  }
-
-  .chat-send-label {
-    display: none;
-  }
-
-  .chat-send-icon {
-    display: inline;
   }
 
   /* Mobile: square 2.5rem tap targets for the last-reply action bar — same hit area as the
@@ -1443,17 +1486,9 @@
   display: none;
 }
 
-/* RP desktop menu — header's copy is hidden (header itself hidden), so bottom mobile copy must be visible on desktop for RP */
+/* RP composer controls now live inside the floating shell — no extra desktop override needed. */
 .chat-main.rp .chat-menu-mobile {
   display: block;
-  order: 2;
-}
-
-.chat-main.rp .chat-menu-mobile .chat-menu {
-  top: auto;
-  bottom: calc(100% + 0.35rem);
-  left: 0;
-  right: auto;
 }
 
 .sprite-stage-toggle {

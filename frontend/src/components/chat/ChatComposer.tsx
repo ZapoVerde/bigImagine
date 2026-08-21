@@ -117,7 +117,7 @@ const ChatComposer = forwardRef<ChatComposerHandle, ChatComposerProps>(function 
         }
       }}
       placeholder="Message BigImagine…"
-      rows={2}
+      rows={1}
       autoFocus
       disabled={disabled}
     />
