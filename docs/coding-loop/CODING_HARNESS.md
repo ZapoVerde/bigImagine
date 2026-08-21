@@ -2,7 +2,7 @@
 
 > Purpose: execute one Implementation Plan task at a time without allowing architectural intent or acceptance criteria to drift during coding.
 >
-> The planning artifacts define **why**, **what**, and **in what order**. The coding harness materializes one frozen **Task Contract**, implements only that contract, verifies it deterministically, invokes independent review, repairs findings, then advances to the next ready task.
+> The planning artifacts define **why**, **what**, and **in what order**. The coding harness materializes one frozen **Task Contract**, implements only that contract, verifies it deterministically, invokes independent review, repairs findings, then advances. After every Implementation Plan phase, the completed tasks are reviewed together as an integrated capability before the next phase begins. After all phases pass, the completed product is reviewed against the original architectural intent.
 
 ## 1. Governing inputs
 
@@ -24,6 +24,7 @@ Select the next ready task from the Implementation Plan.
 A task is ready when:
 
 - all tasks listed as dependencies are complete;
+- any preceding phase review required by the Implementation Plan has passed;
 - its required repository state exists;
 - no unresolved planning deviation blocks it.
 
@@ -152,6 +153,8 @@ The Task Contract is derived from the selected Implementation Plan task. It is n
 
 Implement only the frozen Task Contract.
 
+Every changed file must be necessary for the task. Every material change inside those files must directly serve the task objective, acceptance criteria, required integration, or required verification.
+
 During implementation:
 
 - inspect surrounding code before editing;
@@ -159,7 +162,9 @@ During implementation:
 - keep collateral changes limited to what is necessary to satisfy the contract;
 - preserve stated compatibility behaviour;
 - do not pre-implement later tasks;
-- do not perform unrelated cleanup or refactors.
+- do not include unrelated fixes, cleanup, refactors, renames, or formatting churn.
+
+If repository reality requires a file or material change outside the frozen contract, stop and report the scope conflict rather than silently expanding the task.
 
 If implementation reveals a material conflict with the frozen contract, stop and record a Planning Deviation rather than silently changing the contract.
 
@@ -178,7 +183,7 @@ A task is not ready for independent review merely because the code compiles or t
 
 If deterministic verification fails, repair within the frozen contract and rerun verification before review.
 
-## 7. Independent review
+## 7. Independent task review
 
 Independent review is mandatory for every completed Task Contract.
 
@@ -193,13 +198,20 @@ The reviewer must independently inspect the repository and must not rely solely 
 
 The review question is:
 
-**Did this implementation satisfy the frozen Task Contract without introducing material regressions or violating its stated constraints?**
+**Did this implementation satisfy the frozen Task Contract precisely and without introducing material regressions?**
+
+The reviewer must explicitly check change precision:
+
+- every changed file is required by the Task Contract;
+- every material diff hunk directly serves the task;
+- unrelated fixes, cleanup, refactors, renames, or formatting churn are absent;
+- implementation did not expand scope without an approved contract correction or Planning Deviation.
 
 The reviewer must return one of:
 
 ### PASS
 
-No material contract failure found.
+No material contract failure or scope-precision failure found.
 
 ### FINDINGS
 
@@ -209,7 +221,8 @@ One or more concrete findings, each tied to:
 - Required Logical Change;
 - Verification Contract;
 - API Delta;
-- explicit constraint; or
+- explicit constraint;
+- scope-precision failure; or
 - material regression introduced by the task diff.
 
 Do not create findings for personal style preference, speculative future improvement, or work belonging to a later task.
@@ -238,35 +251,122 @@ A task is complete only when:
 - the Task Completion Boundary is reached;
 - no unresolved Planning Deviation remains.
 
-Only then mark the Implementation Plan task complete and select the next ready task.
+Only then mark the Implementation Plan task complete.
 
-## 10. Final integration gate
+If more tasks remain in the current phase, select the next ready task in that phase.
 
-After every task in the Implementation Plan has passed its Task Contract review, perform the plan's Final Integration Verification.
+If the completed task is the final task in its phase, perform the Phase Review before any task in the next phase begins.
 
-The integration reviewer receives:
+## 10. Phase review
+
+After every task in an Implementation Plan phase has passed its Task Contract review, review the phase as an integrated capability.
+
+The phase reviewer receives:
+
+1. `1_ARCHITECTURAL_REPORT.md`;
+2. `2_BLUEPRINT.md`;
+3. the current phase from `3_IMPLEMENTATION_PLAN.md`;
+4. completed task results and deterministic verification;
+5. the resulting integrated code and phase diff.
+
+The phase reviewer must establish:
+
+- the architectural intent relevant to this phase;
+- the capability the phase is expected to provide.
+
+Then trace the completed capability through the integrated implementation and check:
+
+- data and control flow across task boundaries;
+- interfaces between the completed pieces;
+- persistence and state assumptions;
+- error and fallback behaviour;
+- wiring between producers and consumers;
+- completeness against the phase objective and completion condition;
+- alignment with the relevant Architectural Report and Blueprint constraints;
+- whether every changed file and every material change contributes to the intended phase capability;
+- whether unrelated fixes, cleanup, or refactors were introduced across the phase;
+- whether the next phase can safely treat this capability as complete.
+
+Run additional targeted verification where it helps establish integrated behaviour.
+
+For each material issue report:
+
+- **Finding:** what is wrong;
+- **Impact:** why it matters to the phase capability or architectural intent;
+- **Required correction:** what must be true for the phase to pass.
+
+The phase reviewer returns one of:
+
+### PASS
+
+The phase delivers its intended capability, remains aligned with the architecture, and is a safe foundation for the next phase.
+
+### PASS WITH DEVIATIONS
+
+The phase delivers its intended capability and preserves architectural intent. Record the non-material implementation deviations before proceeding.
+
+### FAIL — IMPLEMENTATION
+
+The intended design remains sound, but the integrated implementation does not fully deliver the phase capability. Repair within the current phase, rerun affected verification and task review as needed, then repeat the Phase Review.
+
+### FAIL — PLANNING
+
+The review shows that the Architectural Report, Blueprint, or Implementation Plan does not correctly describe what is required. Record the planning issue and stop progression until planning is resolved.
+
+Only a passing Phase Review allows work to begin on the next phase.
+
+## 11. Final architectural review
+
+After every phase has passed its Phase Review, perform the plan's Final Integration Verification and review the completed product against the original architectural intent.
+
+The final reviewer receives:
 
 1. Architectural Report;
 2. finalized Blueprint;
 3. Implementation Plan;
 4. full implementation diff;
-5. final deterministic verification results.
+5. final deterministic verification results;
+6. recorded phase-review deviations.
 
-The final integration question is:
+The final review question is:
 
-**Did the completed implementation faithfully deliver the original architectural intent across the whole change?**
+**Does the completed product faithfully deliver the original architectural intent?**
 
-This gate does not replace task-level review.
+The reviewer must trace the Architectural Report's acceptance criteria and core constraints through the assembled implementation, including behaviour that spans multiple phases.
 
-## 11. Harness invariants
+The final review must also identify material changes that were not required by the planned feature, even when those changes are harmless or beneficial.
+
+The final reviewer returns one of:
+
+### PASS
+
+The completed product satisfies the architectural intent.
+
+### PASS WITH DEVIATIONS
+
+The completed product satisfies the architectural intent with documented non-material implementation deviations.
+
+### FAIL — IMPLEMENTATION
+
+The architecture remains sound, but the completed implementation does not fully satisfy it.
+
+### FAIL — PLANNING
+
+The completed implementation exposes a material flaw or omission in the planning artifacts that must return to planning.
+
+## 12. Harness invariants
 
 These rules are non-negotiable:
 
 - one frozen Task Contract per implementation task;
 - no coding before the Task Contract is materialized;
+- every material code change must directly serve the current Task Contract;
+- unrelated fixes, cleanup, and refactors do not hitchhike on task work;
 - no silent architectural drift;
 - no self-declared completion without deterministic verification;
 - independent review is required before task completion;
+- every completed phase requires an integrated Phase Review before the next phase begins;
 - review findings repair the implementation, not the contract;
 - later-task work is not pulled forward for convenience;
-- unresolved material conflicts return to planning rather than being improvised in code.
+- unresolved material conflicts return to planning rather than being improvised in code;
+- the completed product must pass final architectural review after all phases pass.
