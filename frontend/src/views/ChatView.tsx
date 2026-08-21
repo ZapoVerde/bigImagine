@@ -2226,6 +2226,7 @@ export default function ChatView({
         isLastAssistant={isLastAssistant}
         isLastUserMsg={isLastUserMsg}
         isOpeningGreeting={isOpeningGreeting}
+        canSwipe={activeChat?.kind !== 'rp' || i === messages.length - 1}
         selectionMode={selectionMode}
         selected={selectionStart !== null && i >= selectionStart}
         editing={editingId === m.messageId}
@@ -3083,5 +3084,3 @@ function LorebookSet({
     </details>
   );
 }
-
-

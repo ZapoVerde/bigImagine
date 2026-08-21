@@ -90,6 +90,8 @@ interface ChatMessageRowProps {
   /** A card's seeded greeting rather than an earlier LLM turn — Rerun must not offer to
    *  "regenerate" it the way a real reply would be. */
   isOpeningGreeting: boolean;
+  /** RP swipes are only valid while the assistant reply is the final message in the chat. */
+  canSwipe: boolean;
   selectionMode: boolean;
   selected: boolean;
   editing: boolean;
@@ -127,6 +129,7 @@ function ChatMessageRow({
   isLastAssistant,
   isLastUserMsg,
   isOpeningGreeting,
+  canSwipe,
   selectionMode,
   selected,
   editing,
@@ -238,7 +241,7 @@ function ChatMessageRow({
           {m.messageId && !selectionMode &&
             (isLastAssistant && m.role === 'assistant' ? (
               <div className="last-chat-actions" onClick={(e) => e.stopPropagation()}>
-                {!settled && hasPrevSwipe && (
+                {!settled && canSwipe && hasPrevSwipe && (
                   <button
                     type="button"
                     className="last-chat-arrow"
@@ -293,7 +296,7 @@ function ChatMessageRow({
                     [{m.swipes!.index + 1}/{m.swipes!.count}]
                   </span>
                 )}
-                {!settled && hasNextSwipe && (
+                {!settled && canSwipe && hasNextSwipe && (
                   <button
                     type="button"
                     className="last-chat-arrow"

@@ -69,7 +69,12 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
     case 'rp':
       content = props.activeChatId ? (
         <div className="sidebar-rp-sections">
-          <ChatSyncStatusPanel apiKey={props.apiKey} chatId={props.activeChatId} />
+          <details className="sidebar-rp-sync">
+            <summary className="sidebar-rp-sync-summary">Sync status</summary>
+            <div className="sidebar-rp-sync-content">
+              <ChatSyncStatusPanel apiKey={props.apiKey} chatId={props.activeChatId} />
+            </div>
+          </details>
           <PromptInspectorPanel apiKey={props.apiKey} chatId={props.activeChatId} refreshToken={props.promptRefreshToken} />
           {/* The snapshot is only shown when it belongs to THIS chat — a switched tab must never
               render one chat's chart under another chat's cost line. */}
