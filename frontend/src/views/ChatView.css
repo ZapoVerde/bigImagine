@@ -1507,8 +1507,7 @@
 
 .chat-main > .rp-floating-pill {
   top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 1rem;
   pointer-events: auto;
 }
 
