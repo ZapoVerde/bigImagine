@@ -8,6 +8,7 @@ import {
   renderBridge,
   renderPlotThreads,
   renderAutoRecall,
+  renderFact,
   renderSyncSummaries,
   renderFusedMemoryBlock,
   formatRecentHistoryTurns,
@@ -108,11 +109,49 @@ function assert(cond, message) {
   assert(out === '', 'empty plot renders empty');
 }
 
+// --- renderFact: single canon fact as a named record ---
+{
+  const out = renderFact({ category: 'concept', summary: 'The inheritance Bostaff stands to receive from his father...', detail: 'The Whitmore Inheritance' });
+  assert(
+    out === '<concept name="The Whitmore Inheritance">\nThe inheritance Bostaff stands to receive from his father...\n</concept>',
+    'a named fact renders as <category name="detail">summary</category>',
+  );
+}
+{
+  const out = renderFact({ category: 'person', summary: '## Appearance\n...\n\n## Personality\n...', detail: 'Hannah Whitmore' });
+  assert(
+    out === '<person name="Hannah Whitmore">\n## Appearance\n...\n\n## Personality\n...\n</person>',
+    'a Markdown-sectioned person card is reproduced byte-for-byte inside its named wrapper',
+  );
+}
+{
+  const out = renderFact({ category: 'place', summary: 'A crumbling watchtower overlooking the bay.', detail: 'The Old Watchtower' });
+  assert(out === '<place name="The Old Watchtower">\nA crumbling watchtower overlooking the bay.\n</place>', 'a place fact renders the same named way');
+}
+{
+  const out = renderFact({ category: 'plot', summary: 'The heist', detail: 'planned for Tuesday' });
+  assert(out === '<plot name="planned for Tuesday">\nThe heist\n</plot>', 'a plot-category fact (recallFactLane also returns these) renders the same named way, no special-casing');
+}
+{
+  const out = renderFact({ category: 'concept', summary: 'Old row, no name.', detail: '' });
+  assert(out === '<concept>\nOld row, no name.\n</concept>', 'a null/empty detail renders an unnamed wrapper, not a dropped fact or an invented name');
+}
+{
+  const out = renderFact({ category: 'concept', summary: 'x', detail: 'Tom & Jerry\'s "Shop" <sign>' });
+  assert(
+    out === '<concept name="Tom &amp; Jerry\'s &quot;Shop&quot; &lt;sign&gt;">\nx\n</concept>',
+    'ampersands/quotes/angle-brackets in the entry name are escaped in the attribute',
+  );
+}
+
 // --- renderAutoRecall: chunk blocks + facts through injection + chunk templates ---
 {
   const out = renderAutoRecall(
     [{ ordinal: 7, summary: 'turns 6-8', content: 'User: x\nAssistant: y' }],
-    [{ category: 'plot', summary: 'The key is in the vault' }],
+    [
+      { category: 'concept', summary: 'The inheritance remains Bostaff\'s leverage.', detail: 'The Whitmore Inheritance' },
+      { category: 'person', summary: 'Warm but guarded.', detail: 'Hannah Whitmore' },
+    ],
     DEFAULT_INJECT_AUTO_RECALL_PROMPT,
     DEFAULT_AUTO_RECALL_CHUNK_PROMPT,
     DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT,
@@ -124,7 +163,15 @@ function assert(cond, message) {
       !out.includes('<!--'),
     'default auto-recall chunk template is CNZ verbatim (<memory turns>) with the summary prefixed as [header] inside the block (rag-fetch.js:202), no HTML comment',
   );
-  assert(out.includes('- [plot] The key is in the vault'), 'facts render as bullet lines in the injection template');
+  assert(
+    out.includes('<concept name="The Whitmore Inheritance">\nThe inheritance remains Bostaff\'s leverage.\n</concept>') &&
+      out.includes('<person name="Hannah Whitmore">\nWarm but guarded.\n</person>'),
+    'facts render as named records, not [category] summary — detail bullets',
+  );
+  assert(
+    out.includes('</concept>\n\n<person'),
+    'multiple facts stay separated by a blank line',
+  );
 }
 {
   const out = renderAutoRecall([], [], DEFAULT_INJECT_AUTO_RECALL_PROMPT, DEFAULT_AUTO_RECALL_CHUNK_PROMPT, DEFAULT_AUTO_RECALL_LEAD_IN_PROMPT, '');

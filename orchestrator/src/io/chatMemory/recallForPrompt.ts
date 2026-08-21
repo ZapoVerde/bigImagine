@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/recallForPrompt.ts
- * @stamp 2026-08-17
+ * @stamp 2026-08-21
  * @architectural-role IO Wrapper — CNZ-style silent per-turn recall, injected at prompt assembly
  * @description
  * The read-path twin of the recall_chat_history / recall_canon_facts tools, but CNZ-shaped:
@@ -89,7 +89,7 @@ import type { OrchestratorSettingsStore } from '../orchestratorSettings.js';
 import type { DbSession } from '../postgres.js';
 import type { LlmMessage } from '../llm/types.js';
 import type { CutoffMode } from './recallCutoff.js';
-import type { PlotArcCard } from './memoryInjection.js';
+import { renderFact, type PlotArcCard } from './memoryInjection.js';
 import { recallChunkLane, type ChunkRow } from './recallChunkLane.js';
 import { recallFactLane, type CanonFactRow } from './recallFactLane.js';
 import { recallPlotLane } from './recallPlotLane.js';
@@ -238,8 +238,11 @@ export function buildAutoRecallQuery(messages: LlmMessage[], pairCount = AUTO_RE
 /** The legacy labeled block — byte-identical to the pre-split output for full chunks, so the
  *  deprecated memory_recall alias keeps its exact shape, with one addition: a lead-in entry
  *  (isLeadIn, produced by the recallForPrompt.ts merge — docs/plans/chunk-lead-in-context-plan.md)
- *  renders as its summary alone, no `<memory>` wrapper, since it carries no content. Exported for
- *  memoryInjection's fused renderer. */
+ *  renders as its summary alone, no `<memory>` wrapper, since it carries no content. Facts render
+ *  through the same renderFact (memoryInjection.ts) named-record wrapper renderAutoRecall uses —
+ *  the memory_recall preset (still the builtin "Standard" default, 0042_context_stack_presets.sql)
+ *  gets the same correctly-named facts as the newer auto_recall marker, not a second stale bullet
+ *  format. Exported for memoryInjection's fused renderer. */
 export function formatAutoRecallBlock(chunks: ChunkRow[], facts: CanonFactRow[]): string {
   const parts: string[] = [];
   if (chunks.length) {
@@ -255,11 +258,7 @@ export function formatAutoRecallBlock(chunks: ChunkRow[], facts: CanonFactRow[])
     );
   }
   if (facts.length) {
-    parts.push(
-      facts
-        .map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`)
-        .join('\n'),
-    );
+    parts.push(facts.map((f) => renderFact(f)).join('\n\n'));
   }
   return parts.length ? `Recalled from earlier in this conversation (archived):\n${parts.join('\n\n')}` : '';
 }

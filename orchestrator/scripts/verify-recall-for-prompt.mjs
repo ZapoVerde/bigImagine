@@ -200,8 +200,8 @@ function fakeSettings(value) {
     'chunk content is wrapped in a <memory turns> block with its ordinal',
   );
   assert(
-    block.includes('- [plot] the heist — planned for Tuesday') && block.includes('- [person] Mara'),
-    'canon facts render as [category] summary — detail bullets',
+    block.includes('<plot name="planned for Tuesday">\nthe heist\n</plot>') && block.includes('<person>\nMara\n</person>'),
+    'canon facts render as named records (renderFact) in the legacy memory_recall block too, not [category] summary — detail bullets — this is the builtin Standard preset\'s live path (0042_context_stack_presets.sql), not just the newer auto_recall marker',
   );
 }
 {
@@ -1072,7 +1072,7 @@ function countFactBullets(block) {
     [{ role: 'user', content: 'hi' }],
   );
   assert(block.includes('<memory turns="1">'), 'a plot-lane failure must not take the chunk lane down with it');
-  assert(block.includes('- [plot] fact summary'), 'a plot-lane failure must not take the fact lane down with it');
+  assert(block.includes('<plot>\nfact summary\n</plot>'), 'a plot-lane failure must not take the fact lane down with it');
 }
 {
   // The query vector is embedded exactly once per turn and shared across all three lanes —

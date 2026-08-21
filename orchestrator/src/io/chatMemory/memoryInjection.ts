@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/chatMemory/memoryInjection.ts
- * @stamp 2026-08-10
+ * @stamp 2026-08-21
  * @architectural-role Pure Functions — CNZ-style per-component memory injection templates
  * @description
  * The reader-side half of the RP memory split (the user's 2026-08-13 direction): instead of one
@@ -38,9 +38,17 @@
  * renderAutoRecall(chunks, facts, template, chunkTemplate, leadInTemplate, charName) -> string —
  *   chunk blocks rendered through the chunk template ({{text}}, {{turn_range}}, {{header}},
  *   {{char_name}}), lead-in entries through the lead-in template ({{text}} = summary alone),
- *   fact bullets appended as {{facts}}; the injection template receives {{text}} = chunk blocks,
- *   {{facts}} = fact bullets. Empty component => '' (so an enabled slot with no content emits
- *   nothing, same non-empty filter as every other marker).
+ *   named fact records (renderFact) appended as {{facts}}; the injection template receives
+ *   {{text}} = chunk blocks, {{facts}} = the fact records. Empty component => '' (so an enabled
+ *   slot with no content emits nothing, same non-empty filter as every other marker).
+ * renderFact(fact) -> string — a single canon_facts row as a named record: `<{{category}}
+ *   name="{{detail}}">\n{{summary}}\n</{{category}}>` (the curator write path stores the entry's
+ *   content in `summary` and its human-facing name in `detail` — chatMemorySync.ts's three
+ *   canon_facts inserts all embed `${name}\n${content}` and write `summary = content,
+ *   detail = name`, for every category including 'plot'). `detail` empty/absent => an unnamed
+ *   `<{{category}}>` wrapper, never a dropped fact or an invented name. Shared by renderAutoRecall
+ *   here and recallForPrompt.ts's formatAutoRecallBlock (the memory_recall preset's legacy fused
+ *   renderer) so a canon fact reads the same named way regardless of which preset is active.
  * renderSyncSummaries(rows, template, entryTemplate, chunkTemplate, charName) -> string — the
  *   sync_summaries component (docs/plans/completed/sync-summaries-plan.md): a bare row renders through
  *   the lightweight entry template ({{text}} = its summary); an inflated row (content attached
@@ -199,6 +207,23 @@ export interface FactRow {
   detail?: string | null;
 }
 
+function escapeFactName(name: string): string {
+  return name.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+/** A single canon fact as a named record — the entry's `detail` (its human-facing name, per the
+ *  curator write path — see this file's @api-declaration) becomes the wrapper's `name` attribute,
+ *  its `summary` (the entry's actual content) becomes the body, and its `category` becomes the
+ *  tag itself ('person' | 'place' | 'thing' | 'concept' | 'plot' — every value canon_facts.category
+ *  allows renders the same way, no special-casing). A missing/empty `detail` renders an unnamed
+ *  wrapper rather than dropping the fact or inventing a name — old rows predating this convention
+ *  stay readable. */
+export function renderFact(f: FactRow): string {
+  const tag = f.category;
+  const nameAttr = f.detail ? ` name="${escapeFactName(f.detail)}"` : '';
+  return `<${tag}${nameAttr}>\n${f.summary}\n</${tag}>`;
+}
+
 export function renderBridge(scene: string | undefined, events: string | undefined, template = DEFAULT_INJECT_BRIDGE_PROMPT): string {
   return interpolateMemoryTemplate(template, { scene: scene ?? '', events: events ?? '' });
 }
@@ -249,7 +274,7 @@ export function renderAutoRecall(
       });
     })
     .join('\n\n');
-  const factBlock = facts.map((f) => `- [${f.category}] ${f.summary}${f.detail ? ` — ${f.detail}` : ''}`).join('\n');
+  const factBlock = facts.map((f) => renderFact(f)).join('\n\n');
   return interpolateMemoryTemplate(template, { text, facts: factBlock });
 }
 

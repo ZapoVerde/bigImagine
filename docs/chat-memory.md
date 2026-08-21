@@ -228,8 +228,9 @@ recallForPrompt.ts`'s `buildAutoRecallParts`, the CNZ-style silent retrieval the
    first then scene prose, CNZ defaults.js:209-210), `plot_threads` (the approved plot arcs,
    wrapped per arc in canonize's `<{{arc_tag}}>…</{{arc_tag}}>` HTML blocks,
    DEFAULT_CNZ_PLOT_CHUNK_TEMPLATE), `auto_recall` (the CNZ RAG injection template verbatim plus
-   `<memory turns="…">` chunk blocks with the summary prefixed as `[header]`, and fact bullets
-   appended) — so a preset can order the three
+   `<memory turns="…">` chunk blocks with the summary prefixed as `[header]`, and canon facts
+   appended as named records — `<{{category}} name="…">summary</{{category}}>`, `renderFact` in
+   `memoryInjection.ts` — appended) — so a preset can order the three
    independently. Templates live in `io/chatMemory/memoryInjection.ts` and are exposed on the Rag
    page ("Retrieval" fieldset) with `{{scene}}`, `{{events}}`, `{{plot}}`, `{{text}}`, `{{facts}}`,
    `{{turn_range}}`, `{{header}}`, `{{char_name}}` variables and CNZ's `{{#if var}}…{{/if}}` blocks
