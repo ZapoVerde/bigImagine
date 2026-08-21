@@ -465,6 +465,7 @@ const VALID_FOOTER =
   assert(llm.calls.length === 0, 'footer inspection does not run during the stream');
   assert(!events.some((e) => e.kind === 'status' && e.region === 'footer'), 'no footer events before finishStream');
 
+  const beforeFooterLength = ctx.composed.length;
   const result = await finishStream(ctx, deps, ctx.composed, { userId: 'u1', chatId: 'c1', signal, onCleanupEvent: sink });
   assert(llm.calls.length === 1, 'the footer repair dispatches once, in finishStream');
   assert(
@@ -476,10 +477,12 @@ const VALID_FOOTER =
     'the footer pill lands on deployed after the repair',
   );
   const patch = events.find((e) => e.kind === 'patch' && e.region === 'footer');
-  const expectedEnd = ctx.composed.length - '<details><summary>▸</summary>\nthoughts\n</details>'.length;
-  assert(!!patch && patch.start === expectedEnd && patch.end === expectedEnd, 'the missing footer appends at the end of the text');
+  // Footer output is normalized to single <Details> wrapper (case-insensitive, whitespace-tolerant)
+  const normalizedFooter = '<Details>\n<summary>▸</summary>\nthoughts\n</Details>';
+  assert(!!patch && patch.start === beforeFooterLength && patch.end === beforeFooterLength, 'the missing footer appends at the end of the text');
+  assert(patch.replacement.includes('<Details>') && patch.replacement.includes('</Details>') && patch.replacement.includes('thoughts'), 'the footer patch carries the normalized footer');
   assert(
-    result.composed === `${VALID_HEADER}a clean body paragraph without a footer.\n<details><summary>▸</summary>\nthoughts\n</details>`,
+    result.composed === `${VALID_HEADER}a clean body paragraph without a footer.\n${normalizedFooter}`,
     'the composed text ends with the repaired footer',
   );
   assert(result.outcomes.find((o) => o.region === 'footer')?.changed === true, 'the footer outcome reports the repair as changed');

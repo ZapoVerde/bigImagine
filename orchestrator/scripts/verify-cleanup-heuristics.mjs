@@ -26,6 +26,7 @@ import {
   buildRepairPrompt,
   planCleanup,
   applyRepairSteps,
+  normalizeDetailsWrapper,
   DEFAULT_CLEANUP_CONFIG,
 } from '../dist/orchestrator/cleanupHeuristics.js';
 
@@ -328,11 +329,12 @@ const SLOP = [
   const hReplace = applyRepairSteps('[ Bad Header ]\nKael entered.', [{ kind: 'repair-header', span: { start: 0, end: '[ Bad Header ]\n'.length }, prompt: 'x' }], ['[ Night | The Keep ]\nPresent: Kael']);
   assert(hReplace === '[ Night | The Keep ]\nPresent: Kael\nKael entered.', 'executor: malformed-header repair replaces the broken first line');
 
-  // Footer append (suspected) vs replace (malformed).
+  // Footer append (suspected) vs replace (malformed) — now normalized to single <Details> wrapper.
+  const normalizedFooter = '<Details>\n<summary>▸</summary>\n<inner thoughts>\nKael:\nFine.\n</inner thoughts>\n</Details>';
   const fAppend = applyRepairSteps('Kael smiled.', [{ kind: 'repair-footer', span: { start: 12, end: 12 }, prompt: 'x' }], ['<details><summary>▸</summary>\n<inner thoughts>\nKael:\nFine.\n</inner thoughts>\n</details>']);
-  assert(fAppend === 'Kael smiled.\n\n<details><summary>▸</summary>\n<inner thoughts>\nKael:\nFine.\n</inner thoughts>\n</details>', 'executor: suspected-footer repair appends with a blank-line separator');
+  assert(fAppend === `Kael smiled.\n\n${normalizedFooter}`, 'executor: suspected-footer repair appends with a blank-line separator (normalized)');
   const fReplace = applyRepairSteps('Kael smiled.\n\n<details><summary>▸</summary>\nTrailing.', [{ kind: 'repair-footer', span: { start: 14, end: 'Kael smiled.\n\n<details><summary>▸</summary>\nTrailing.'.length }, prompt: 'x' }], ['<details><summary>▸</summary>\n<inner thoughts>\nKael:\nFine.\n</inner thoughts>\n</details>']);
-  assert(fReplace === 'Kael smiled.\n\n<details><summary>▸</summary>\n<inner thoughts>\nKael:\nFine.\n</inner thoughts>\n</details>', 'executor: malformed-footer repair replaces the broken block');
+  assert(fReplace === `Kael smiled.\n\n${normalizedFooter}`, 'executor: malformed-footer repair replaces the broken block (normalized)');
 
   // Fail-open: empty output leaves the region untouched.
   const noop = applyRepairSteps('Kael entered.', [{ kind: 'repair-header', span: { start: 0, end: 0 }, prompt: 'x' }], ['']);
@@ -362,6 +364,80 @@ const SLOP = [
     comboResult === '[ Night | The Keep ]\nPresent: Kael\nShe said something nice instead.\nMore text after.',
     'executor: a header repair and a later paragraph replacement in the same plan both apply intact (splice order is by span position, not step insertion order)',
   );
+}
+
+// --- normalizeDetailsWrapper (repeated <Details> per-character) ---------------------------------
+{
+  // already-correct single wrapper: remains semantically unchanged (content preserved, wrapped once)
+  const single = '<Details>\n<Kael>\nInner thoughts: calm\nExpression: calm\nOutfit:\n- Top: shirt\n</Kael>\n</Details>';
+  const normSingle = normalizeDetailsWrapper(single);
+  assert(normSingle === single, 'normalize: already-correct single wrapper preserved');
+
+  // case-insensitive handling: mixed-case tags normalize to canonical <Details> wrapper
+  const mixed = '<details>\n<Kael>content</Kael>\n</details>';
+  const normMixed = normalizeDetailsWrapper(mixed);
+  assert(normMixed === '<Details>\n<Kael>content</Kael>\n</Details>', 'normalize: lowercase details normalized to canonical case');
+  const upper = '<DETAILS>\n<Kael>content</Kael>\n</DETAILS>';
+  assert(normalizeDetailsWrapper(upper) === '<Details>\n<Kael>content</Kael>\n</Details>', 'normalize: uppercase DETAILS normalized');
+  const mixedCase = '<Details>\nA\n</Details>\n<details>\nB\n</details>';
+  const normMixedCase = normalizeDetailsWrapper(mixedCase);
+  assert(normMixedCase.startsWith('<Details>') && normMixedCase.endsWith('</Details>') && (normMixedCase.match(/<Details>/g) || []).length === 1, 'normalize: mixed-case wrappers handled case-insensitively');
+  assert(normMixedCase.includes('A') && normMixedCase.includes('B') && normMixedCase.indexOf('A') < normMixedCase.indexOf('B'), 'normalize: mixed-case wrappers preserve order');
+
+  // repeated wrapper per character (2 blocks) — the spec example
+  const repeatedTwo = `<Details>
+<Ava>
+Inner thoughts: A thought.
+Expression: calm
+Outfit:
+- Top: shirt
+</Ava>
+</Details>
+
+<Details>
+<Kai>
+Inner thoughts: Another.
+Expression: pleased
+Outfit:
+- Top: jacket
+</Kai>
+</Details>`;
+  const normTwo = normalizeDetailsWrapper(repeatedTwo);
+  assert(normTwo.startsWith('<Details>') && normTwo.endsWith('</Details>'), 'normalize: two wrappers -> single wrapper boundaries');
+  assert((normTwo.match(/<Details>/g) || []).length === 1 && (normTwo.match(/<\/Details>/g) || []).length === 1, 'normalize: two wrappers collapsed to exactly one pair');
+  assert(normTwo.indexOf('<Ava>') < normTwo.indexOf('<Kai>'), 'normalize: two wrappers preserve ordering');
+  assert(normTwo.includes('A thought') && normTwo.includes('Another'), 'normalize: two wrappers preserve content with no loss');
+
+  // three or more repeated wrappers
+  const repeatedThree = `<Details>\n<A>\nInner thoughts: a\nExpression: calm\nOutfit:\n- Top: a\n</A>\n</Details>\n\n<Details>\n<B>\nInner thoughts: b\nExpression: calm\nOutfit:\n- Top: b\n</B>\n</Details>\n\n<Details>\n<C>\nInner thoughts: c\nExpression: calm\nOutfit:\n- Top: c\n</C>\n</Details>`;
+  const normThree = normalizeDetailsWrapper(repeatedThree);
+  assert((normThree.match(/<Details>/g) || []).length === 1, 'normalize: three wrappers collapsed to one');
+  assert(normThree.indexOf('<A>') < normThree.indexOf('<B>') && normThree.indexOf('<B>') < normThree.indexOf('<C>'), 'normalize: three wrappers preserve ordering');
+  assert(normThree.includes('Inner thoughts: a') && normThree.includes('Inner thoughts: b') && normThree.includes('Inner thoughts: c'), 'normalize: three wrappers no loss');
+
+  // whitespace tolerance inside tag: "<Details >" and attributes
+  const spaced = '<Details >\n<Kael>content</Kael>\n</Details >';
+  assert(normalizeDetailsWrapper(spaced) === '<Details>\n<Kael>content</Kael>\n</Details>', 'normalize: whitespace inside tag tolerated');
+  const withAttr = '<details class="x">\n<Kael>content</Kael>\n</details>';
+  assert(normalizeDetailsWrapper(withAttr) === '<Details>\n<Kael>content</Kael>\n</Details>', 'normalize: attributes inside tag tolerated');
+
+  // mixed-case with whitespace and multiple
+  const mixedMulti = '<details>\nA\n</details>\n<DETAILS>\nB\n</DETAILS>\n<Details >\nC\n</Details>';
+  const normMixedMulti = normalizeDetailsWrapper(mixedMulti);
+  assert((normMixedMulti.match(/<Details>/g) || []).length === 1 && normMixedMulti.includes('A') && normMixedMulti.includes('B') && normMixedMulti.includes('C'), 'normalize: mixed-case multi wrappers collapsed');
+  assert(normMixedMulti.indexOf('A') < normMixedMulti.indexOf('B') && normMixedMulti.indexOf('B') < normMixedMulti.indexOf('C'), 'normalize: mixed-case multi preserves order');
+
+  // no loss or reordering: content between tags preserved exactly (including internal blank lines trimmed only at edges)
+  const withBlanks = '  \n  <Details>\n  content one  \n  </Details>  \n\n  <Details>\n  content two\n  </Details>  \n  ';
+  const normBlanks = normalizeDetailsWrapper(withBlanks);
+  assert(normBlanks.startsWith('<Details>') && normBlanks.endsWith('</Details>') && normBlanks.includes('content one') && normBlanks.includes('content two'), 'normalize: leading/trailing whitespace trimmed only at edges');
+  assert(normBlanks.indexOf('content one') < normBlanks.indexOf('content two'), 'normalize: content ordering preserved with trimming');
+
+  // executor integration: repeated wrappers via applyRepairSteps are normalized
+  const repeatedOutput = '<Details>\n<Ava>\nInner thoughts: x\nExpression: calm\nOutfit:\n- Top: shirt\n</Ava>\n</Details>\n\n<Details>\n<Kai>\nInner thoughts: y\nExpression: calm\nOutfit:\n- Top: shirt\n</Kai>\n</Details>';
+  const integrated = applyRepairSteps('Kael smiled.', [{ kind: 'repair-footer', span: { start: 12, end: 12 }, prompt: 'x' }], [repeatedOutput]);
+  assert((integrated.match(/<Details>/g) || []).length === 1 && (integrated.match(/<\/Details>/g) || []).length === 1, 'executor: repeated footer wrappers collapsed via applyRepairSteps');
+  assert(integrated.includes('<Ava>') && integrated.includes('<Kai>') && integrated.indexOf('<Ava>') < integrated.indexOf('<Kai>'), 'executor: repeated footer content ordering preserved');
 }
 
 // --- Defaults are self-consistent with the fixtures --------------------------------------------

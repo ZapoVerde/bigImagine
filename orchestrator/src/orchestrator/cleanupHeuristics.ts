@@ -59,6 +59,7 @@
  * buildRepairPrompt(template, vars)                  — repair prompt resolution: {{history, N}}/{{prev_turns, N}} via the resolveArg hook, {{message}} and {{user}} via snapshot
  * planCleanup(text, rules, header, footer, opts)     — the full decision: post-remove text + ordered RepairStep list + region statuses + invalid rules
  * applyRepairSteps(text, steps, outputs)             — pure executor: splices LLM outputs back (skip overlapping spans), header insert/replace, footer append/replace, llm-message terminal
+ * normalizeDetailsWrapper(text)                      — strip all <Details> tags and re-wrap once (footer normalization)
  * DEFAULT_CLEANUP_CONFIG                             — fallback header/footer regex+flags+prompt when a settings key is unset
  *
  * @contract
@@ -410,6 +411,33 @@ export function buildRepairPrompt(template: string, vars: RepairVars): string {
 }
 
 // ---------------------------------------------------------------------------
+// Footer Details wrapper normalization — tolerant of LLM per-character wrapping
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize repeated `<Details>` wrappers into exactly one pair.
+ *
+ * The LLM sometimes wraps each footer character block in its own
+ * `<Details>...</Details>` pair. The intended final shape is always
+ * exactly one opening `<Details>` at the start and one `</Details>` at
+ * the end with no intermediate tags. This helper:
+ *  1. Removes all existing opening and closing Details tags (case-insensitive,
+ *     tolerating ordinary whitespace/attributes inside the tag).
+ *  2. Preserves the content and ordering between those tags.
+ *  3. Trims only leading/trailing whitespace introduced by removal.
+ *  4. Wraps the result once with `<Details>` … `</Details>`.
+ *
+ * `<Details>` is only used for this footer feature, so no contextual
+ * protection is needed.
+ */
+export function normalizeDetailsWrapper(text: string): string {
+  const withoutTags = text.replace(/<\/?\s*details\b[^>]*>/gi, '');
+  const inner = withoutTags.trim();
+  if (inner === '') return '<Details>\n</Details>';
+  return `<Details>\n${inner}\n</Details>`;
+}
+
+// ---------------------------------------------------------------------------
 // Plan assembly + pure executor
 // ---------------------------------------------------------------------------
 
@@ -510,7 +538,7 @@ export function applyRepairSteps(text: string, steps: RepairStep[], outputs: Arr
       case 'repair-footer': {
         const appending = start === end;
         const sep = appending && text.length > 0 && !text.endsWith('\n') ? '\n\n' : '';
-        insert = (appending ? sep : '') + output.trim();
+        insert = (appending ? sep : '') + normalizeDetailsWrapper(output);
         break;
       }
       default:

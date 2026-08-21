@@ -65,6 +65,7 @@ import {
   inspectHeader,
   interpolateSlopPrompt,
   nextCompletedParagraph,
+  normalizeDetailsWrapper,
   type Paragraph,
   type RegionConfig,
   type RepairStep,
@@ -682,9 +683,10 @@ async function runFooterCheck(
   if (output && output.trim()) {
     // The same splice applyRepairSteps performs for repair-footer: 'missing'/'suspected' append
     // at the end with a blank-line separator; 'malformed' replaces the broken block in place.
+    // Normalize repeated <Details> wrappers (the LLM sometimes wraps each character block separately).
     const appending = span.start === span.end;
     const sep = appending && ctx.composed.length > 0 && !ctx.composed.endsWith('\n') ? '\n\n' : '';
-    const replacement = (appending ? sep : '') + output.trim();
+    const replacement = (appending ? sep : '') + normalizeDetailsWrapper(output);
     applyPatch(ctx, span.start, span.end, replacement);
     ctx.footerState = 'deployed';
     emitStatus(chatId, 'footer', 'deployed', onCleanupEvent);

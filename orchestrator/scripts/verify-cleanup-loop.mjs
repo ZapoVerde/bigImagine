@@ -596,7 +596,7 @@ const CLEAN_REPLY = `${VALID_HEADER}She met his gaze and refused to flinch.${VAL
 
   assert(llm.calls.length === 1, 'a reply with no inner-thought evidence fires exactly one footer repair');
   const current = pool.chatMessages.find((m) => m.message_id === message.message_id);
-  assert(current.content.includes('<details><summary>▸</summary>'), 'the fresh footer block is appended to the reply');
+  assert(current.content.includes('<Details>') && current.content.includes('</Details>') && current.content.includes('<summary>▸</summary>'), 'the fresh footer block is appended to the reply (normalized)');
   assert(current.content.startsWith(VALID_HEADER), 'the header survives the footer build');
   const footerJob = pool.jobs.find((j) => j.message_id === message.message_id && j.region === 'footer');
   assert(footerJob && footerJob.status === 'done' && footerJob.changed === true, 'the footer-build job is done+changed');

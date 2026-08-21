@@ -4492,7 +4492,7 @@ function reasoningFrameDelta(payload) {
       last.content.startsWith('[Late Evening') &&
         !last.content.includes('[Wandering hours later]') &&
         last.content.includes('Dust swirled') &&
-        last.content.endsWith('</details>'),
+        last.content.toLowerCase().endsWith('</details>'),
       'the persisted message is the composed text (repaired header + body + repaired footer)',
     );
     assert(
@@ -4538,7 +4538,7 @@ function reasoningFrameDelta(payload) {
       last.messageId === assistantMsg.messageId &&
         last.content.startsWith('[Late Evening') &&
         !last.content.includes('[The rain falls]') &&
-        last.content.endsWith('</details>'),
+        last.content.toLowerCase().endsWith('</details>'),
       'the swipe regenerated message is rewritten to the composed text',
     );
     assert(
