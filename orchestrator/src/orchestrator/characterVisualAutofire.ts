@@ -59,7 +59,8 @@
 
 import { createHash } from 'node:crypto';
 import { log } from '../io/logger.js';
-import { createImageGenProvider } from '../io/imageGen/index.js';
+import { generateImageWithReference } from '../io/imageGen/index.js';
+import { postProcessCharacterImage } from './characterImagePostProcess.js';
 import type { LlmProvider } from '../io/llm/types.js';
 import { compileTemplate } from '../portraits/composer.js';
 import { getPromptableLayers, loadLayerManifest } from '../portraits/layerStack.js';
@@ -94,8 +95,9 @@ function combinationKey(
   characterId: string,
   outfitKey: string,
   expressionKey: string,
+  bgrmApplied: boolean,
 ): string {
-  return [userId, chatId, characterId, outfitKey, expressionKey].join(KEY_SEP);
+  return [userId, chatId, characterId, outfitKey, expressionKey, bgrmApplied ? '1' : '0'].join(KEY_SEP);
 }
 
 interface SubjectVisualRow {
@@ -126,6 +128,7 @@ interface VisualStateRow {
 interface CombinationRow {
   combination_id: string;
   image_url: string | null;
+  bgrm_applied: boolean;
 }
 
 /** The outfit fields → the Outfit layer's slot map, `none` (and blank) omitted — the "no
@@ -168,7 +171,8 @@ export async function renderCharacterVisualCombination(
 ): Promise<void> {
   const outfitKey = normalizeOutfitKey(outfit);
   const expressionKey = normalizeExpression(expressionWord);
-  const key = combinationKey(userId, chatId, characterId, outfitKey, expressionKey);
+  const bgrmEnabled = (await deps.settings.get('character_visual_bgrm_enabled').catch(() => null)) === 'true';
+  const key = combinationKey(userId, chatId, characterId, outfitKey, expressionKey, bgrmEnabled);
 
   // 1. In-flight guard — one render per exact combination at a time, so overlapping triggers
   //    (the post-turn fire and a deferred cleanup-path fire on the same turn) never double-spend
@@ -184,9 +188,10 @@ export async function renderCharacterVisualCombination(
     //    image for this exact outfit+expression already exists, zero provider cost.
     const cached = await deps.db.withUserScope(userId, (session) =>
       session.query<CombinationRow>(
-        `select combination_id, image_url from character_visual_combinations
-         where user_id = $1 and chat_id = $2 and character_id = $3 and outfit_key = $4 and expression_key = $5`,
-        [userId, chatId, characterId, outfitKey, expressionKey],
+        `select combination_id, image_url, bgrm_applied from character_visual_combinations
+         where user_id = $1 and chat_id = $2 and character_id = $3 and outfit_key = $4 and expression_key = $5
+           and bgrm_applied = $6`,
+        [userId, chatId, characterId, outfitKey, expressionKey, bgrmEnabled],
       ),
     );
     if (cached[0]) {
@@ -197,6 +202,19 @@ export async function renderCharacterVisualCombination(
         combinationId: cached[0].combination_id,
       });
       return;
+    }
+
+    let rawSource: string | undefined;
+    if (bgrmEnabled) {
+      const rawRows = await deps.db.withUserScope(userId, (session) =>
+        session.query<CombinationRow>(
+          `select combination_id, image_url, bgrm_applied from character_visual_combinations
+           where user_id = $1 and chat_id = $2 and character_id = $3 and outfit_key = $4 and expression_key = $5
+             and bgrm_applied = false`,
+          [userId, chatId, characterId, outfitKey, expressionKey],
+        ),
+      );
+      rawSource = rawRows[0]?.image_url ?? undefined;
     }
 
     // 3. Drop check — a miss spends a render only when this trigger is still the character's
@@ -345,8 +363,8 @@ export async function renderCharacterVisualCombination(
     const parentDetails = buildParentDetails(entities, promptableLayers);
     const composedPrompt = compileTemplate(template, parent.slots, manifest.layers, parentDetails);
 
-    const profile = await deps.imageConnections.resolveActive('portrait');
-    if (!profile) {
+    const profile = rawSource ? undefined : await deps.imageConnections.resolveActive('portrait');
+    if (!rawSource && !profile) {
       log.warn('characterVisualAutofire: no active portrait image connection configured, aborting render', {
         userId,
         chatId,
@@ -356,21 +374,33 @@ export async function renderCharacterVisualCombination(
     }
 
     let imageUrl: string;
+    let bgrmApplied = false;
     try {
-      imageUrl = (await createImageGenProvider(profile).generate({
+      const generated = rawSource
+        ? { imageUrl: rawSource }
+        : await generateImageWithReference(profile!, {
         prompt: composedPrompt,
-        negativePrompt: profile.masterNegativePrompt ?? '',
-        model: profile.model,
-        apiKey: profile.apiKey,
-        baseUrl: profile.baseUrl,
-        width: profile.width,
-        height: profile.height,
-        seed: profile.seed,
-        steps: profile.samplingSteps,
-        cfgScale: profile.cfgScale,
-        samplerName: profile.samplerName,
-        workflowParameters: profile.workflowParameters,
-      })) as string;
+        negativePrompt: profile!.masterNegativePrompt ?? '',
+        model: profile!.model,
+        apiKey: profile!.apiKey,
+        baseUrl: profile!.baseUrl,
+        width: profile!.width,
+        height: profile!.height,
+        seed: profile!.seed,
+        steps: profile!.samplingSteps,
+        cfgScale: profile!.cfgScale,
+        samplerName: profile!.samplerName,
+        workflowParameters: profile!.workflowParameters,
+        });
+      const bgrmProfile = bgrmEnabled
+        ? await deps.imageConnections.resolveActive('bgrm').catch((error) => {
+            log.warn('characterVisualAutofire: BGRM profile resolution failed; using raw image', { error });
+            return undefined;
+          })
+        : undefined;
+      const processed = await postProcessCharacterImage(generated, bgrmProfile);
+      imageUrl = processed.imageUrl;
+      bgrmApplied = processed.bgrmApplied;
     } catch (err) {
       // 9. Provider failure — fail-open, no combination row written: the exact same trigger next
       //    time attempts again rather than caching a failure (plan §Edge Cases).
@@ -383,14 +413,15 @@ export async function renderCharacterVisualCombination(
       return;
     }
 
+    if (rawSource && !bgrmApplied) return;
     await deps.db.withUserScope(userId, (session) =>
       session.query(
         `insert into character_visual_combinations
-           (user_id, chat_id, character_id, outfit_key, expression_key, image_url, composed_prompt)
-         values ($1, $2, $3, $4, $5, $6, $7)
-         on conflict (user_id, chat_id, character_id, outfit_key, expression_key)
+           (user_id, chat_id, character_id, outfit_key, expression_key, image_url, composed_prompt, bgrm_applied)
+         values ($1, $2, $3, $4, $5, $6, $7, $8)
+         on conflict (user_id, chat_id, character_id, outfit_key, expression_key, bgrm_applied)
            do update set image_url = excluded.image_url, composed_prompt = excluded.composed_prompt, updated_at = now()`,
-        [userId, chatId, characterId, outfitKey, expressionKey, imageUrl, composedPrompt],
+        [userId, chatId, characterId, outfitKey, expressionKey, imageUrl, composedPrompt, bgrmApplied],
       ),
     );
     log.info('characterVisualAutofire: combination rendered and cached', {

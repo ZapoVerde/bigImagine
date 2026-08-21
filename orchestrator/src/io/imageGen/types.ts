@@ -10,6 +10,7 @@
  *
  * @api-declaration
  * ImageGenRequest — prompt/negative/model/dimensions/seed/steps/cfg/sampler + provider bits
+ * GeneratedImage — generated CDN URL plus an optional provider-native reference
  *
  * @contract
  *   assertions:
@@ -36,4 +37,10 @@ export interface ImageGenRequest {
   cfgScale: number;
   samplerName: string | null;
   workflowParameters: Record<string, unknown> | null;
+}
+
+/** A generated image reference for consumers that may immediately post-process the asset. */
+export interface GeneratedImage {
+  imageUrl: string;
+  providerImageRef?: string;
 }

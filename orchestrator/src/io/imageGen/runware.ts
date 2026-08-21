@@ -19,6 +19,8 @@
  *
  * @api-declaration
  * generateRunwareImage(req: ImageGenRequest) -> Promise<string> — the Runware CDN image URL
+ * generateRunwareImageWithReference(req: ImageGenRequest) -> Promise<GeneratedImage> — URL and
+ *   the Runware image UUID when supplied
  *
  * @contract
  *   assertions:
@@ -29,11 +31,16 @@
 
 import { randomUUID } from 'node:crypto';
 import { fetchWithRetry } from '../httpRetry.js';
-import type { ImageGenRequest } from './types.js';
+import type { GeneratedImage, ImageGenRequest } from './types.js';
 
 const RUNWARE_ENDPOINT = 'https://api.runware.ai/v1';
 
 export async function generateRunwareImage(req: ImageGenRequest): Promise<string> {
+  const result = await generateRunwareImageWithReference(req);
+  return result.imageUrl;
+}
+
+export async function generateRunwareImageWithReference(req: ImageGenRequest): Promise<GeneratedImage> {
   if (!req.apiKey) throw new Error('runware: no API key configured for this connection');
   const taskUUID = randomUUID();
   const task: Record<string, unknown> = {
@@ -68,7 +75,13 @@ export async function generateRunwareImage(req: ImageGenRequest): Promise<string
     throw new Error(`runware: HTTP ${res.status}${detail ? ` — ${detail.slice(0, 300)}` : ''}`);
   }
   const parsed = (await res.json()) as {
-    data?: Array<{ taskUUID?: string; errorCode?: string; message?: string; imageURL?: string }>;
+    data?: Array<{
+      taskUUID?: string;
+      errorCode?: string;
+      message?: string;
+      imageURL?: string;
+      imageUUID?: string;
+    }>;
   };
   const rows = parsed.data ?? [];
   const taskResult = rows.find((r) => r.taskUUID === taskUUID) ?? rows[0];
@@ -77,5 +90,8 @@ export async function generateRunwareImage(req: ImageGenRequest): Promise<string
   }
   const imageUrl = taskResult?.imageURL;
   if (!imageUrl) throw new Error('runware: response contained no imageURL');
-  return imageUrl;
+  return {
+    imageUrl,
+    ...(taskResult?.imageUUID ? { providerImageRef: taskResult.imageUUID } : {}),
+  };
 }

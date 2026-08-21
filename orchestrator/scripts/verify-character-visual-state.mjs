@@ -19,6 +19,7 @@
 //     and the in-flight guard (a duplicate trigger never double-spends a provider call).
 
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { DEFAULT_CLEANUP_CONFIG, extractRegion } from '../dist/orchestrator/cleanupHeuristics.js';
 import { buildRepairPrompt } from '../dist/orchestrator/cleanupHeuristics.js';
@@ -34,6 +35,37 @@ import {
 } from '../dist/orchestrator/characterVisualStateParser.js';
 import { applyCharacterVisualState } from '../dist/orchestrator/characterVisualState.js';
 import { renderCharacterVisualCombination } from '../dist/orchestrator/characterVisualAutofire.js';
+import { SETTING_NAMES } from '../dist/io/orchestratorSettings.js';
+
+const bgrmMigration = readFileSync(new URL('../../db/migrations/0132_character_image_bgrm.sql', import.meta.url), 'utf8');
+
+// --- BGRM persistence boundary (migration 0132). ----------------------------------------------
+assert(SETTING_NAMES.includes('chat_memory_household_memory_prompt'), 'migration 0132: existing household-memory setting remains legal');
+assert(SETTING_NAMES.includes('portrait_bgrm_enabled') && SETTING_NAMES.includes('character_visual_bgrm_enabled'), 'migration 0132: both BGRM setting names are legal in the typed vocabulary');
+assert(bgrmMigration.includes('bgrm_applied boolean not null default false'), 'migration 0132: character combinations gain a default-off BGRM state');
+assert(bgrmMigration.includes('unique (user_id, chat_id, character_id, outfit_key, expression_key, bgrm_applied)'), 'migration 0132: cache uniqueness includes actual BGRM state');
+assert(!bgrmMigration.includes('insert into orchestrator_settings'), 'migration 0132: BGRM settings are not seeded');
+assert(!bgrmMigration.includes('location_image_combinations') && !bgrmMigration.includes('location_swipe_images'), 'migration 0132: location image persistence is unchanged');
+
+const legacyRows = [{ image_url: 'https://cdn.example/raw.png' }];
+const migratedRows = legacyRows.map((row) => ({ ...row, bgrm_applied: false }));
+assert(migratedRows[0].image_url === 'https://cdn.example/raw.png' && migratedRows[0].bgrm_applied === false, 'migration 0132: existing raw rows retain their URL and default to false');
+const rawVariant = ['user', 'chat', 'character', 'outfit', 'expression', false].join('|');
+const bgrmVariant = ['user', 'chat', 'character', 'outfit', 'expression', true].join('|');
+const identity = (row) => row.join('|');
+const migratedIdentities = new Set([rawVariant]);
+assert(rawVariant !== bgrmVariant, 'migration 0132: raw and BGRM variants have distinct cache identities');
+migratedIdentities.add(bgrmVariant);
+assert(migratedIdentities.size === 2, 'migration 0132: one raw and one BGRM variant can coexist');
+const duplicateIdentity = identity(['user', 'chat', 'character', 'outfit', 'expression', false]);
+assert(migratedIdentities.has(duplicateIdentity), 'migration 0132: duplicate rows with the same BGRM state target the same unique identity');
+let duplicateRejected = false;
+try {
+  if (migratedIdentities.has(duplicateIdentity)) throw new Error('unique violation');
+} catch {
+  duplicateRejected = true;
+}
+assert(duplicateRejected, 'migration 0132: duplicate rows with the same BGRM state are rejected by the modeled unique constraint');
 
 function assert(cond, message) {
   if (!cond) {
@@ -161,7 +193,7 @@ function createFakePool() {
   const events = []; // { user_id, chat_id, character_id, message_id, swipe_id, event_type, changed_fields, before_state, after_state }
   const subjectVisuals = []; // { user_id, character_id, slots, source_appearance_hash }
   const expressionDefs = []; // { user_id, word, slots }
-  const combinations = []; // { user_id, chat_id, character_id, outfit_key, expression_key, image_url, composed_prompt }
+  const combinations = []; // { user_id, chat_id, character_id, outfit_key, expression_key, image_url, composed_prompt, bgrm_applied }
   const entities = []; // { entity_id, user_id, layer_id, name, slots, template, details, updated_at }
 
   const eligibleCharacterIds = (userId, name, chatId) => {
@@ -285,17 +317,18 @@ function createFakePool() {
           }
 
           // --- Stage 4: combination cache lookup. ---
-          if (q.startsWith('select combination_id, image_url from character_visual_combinations')) {
-            const [userId, chatId, characterId, outfitKey, expressionKey] = params;
+          if (q.startsWith('select combination_id, image_url, bgrm_applied from character_visual_combinations')) {
+            const [userId, chatId, characterId, outfitKey, expressionKey, requestedBgrm] = params;
             const row = combinations.find(
               (c) =>
                 c.user_id === userId &&
                 c.chat_id === chatId &&
                 c.character_id === characterId &&
                 c.outfit_key === outfitKey &&
-                c.expression_key === expressionKey,
+                c.expression_key === expressionKey &&
+                (c.bgrm_applied ?? false) === (params.length === 6 ? requestedBgrm : false),
             );
-            return { rows: row ? [{ combination_id: row.combination_id, image_url: row.image_url }] : [] };
+            return { rows: row ? [{ combination_id: row.combination_id, image_url: row.image_url, bgrm_applied: row.bgrm_applied ?? false }] : [] };
           }
 
           // --- Stage 4: drop-check re-read of the current state. ---
@@ -384,14 +417,15 @@ function createFakePool() {
 
           // --- Stage 4: combination upsert. ---
           if (q.startsWith('insert into character_visual_combinations')) {
-            const [userId, chatId, characterId, outfitKey, expressionKey, imageUrl, composedPrompt] = params;
+            const [userId, chatId, characterId, outfitKey, expressionKey, imageUrl, composedPrompt, bgrmApplied] = params;
             const existing = combinations.find(
               (c) =>
                 c.user_id === userId &&
                 c.chat_id === chatId &&
                 c.character_id === characterId &&
                 c.outfit_key === outfitKey &&
-                c.expression_key === expressionKey,
+                c.expression_key === expressionKey &&
+                (c.bgrm_applied ?? false) === bgrmApplied,
             );
             const row = {
               combination_id: randomUUID(),
@@ -402,6 +436,7 @@ function createFakePool() {
               expression_key: expressionKey,
               image_url: imageUrl,
               composed_prompt: composedPrompt,
+              bgrm_applied: bgrmApplied ?? false,
             };
             if (existing) Object.assign(existing, row);
             else combinations.push(row);
@@ -1035,6 +1070,94 @@ const OUTFIT = { outerwear: 'leather jacket', top: 'white blouse', bottom: 'jean
   );
   assert(llm2.calls.length === 0, 'stage4: the same combination on the same character is a cache hit (dedupe)');
   assert(pool.combinations.length === 1, 'stage4: the dedupe upsert does not duplicate the row');
+}
+
+{
+  // BGRM upgrade: a raw cache row is the source, so no portrait generation is spent; the raw row
+  // remains and the transparent variant is added under its separate identity.
+  const pool = createFakePool();
+  seedAva(pool);
+  pool.states.push({ user_id: USER, chat_id: CHAT, character_id: AVA_ID, message_id: MSG, swipe_id: SWIPE, inner_thoughts: 'x', expression: 'composed', outerwear: 'leather jacket', top: 'white blouse', bottom: 'jeans', underwear_top: 'none', underwear_bottom: 'none', accessory: 'silver pendant' });
+  pool.combinations.push({ combination_id: randomUUID(), user_id: USER, chat_id: CHAT, character_id: AVA_ID, outfit_key: normalizeOutfitKey(OUTFIT), expression_key: 'composed', image_url: 'https://cdn.example/raw-character.png', composed_prompt: 'raw', bgrm_applied: false });
+  const portraitProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'portrait-key', model: 'runware/portrait' };
+  const bgrmProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'bgrm-key', model: 'runware/bgrm' };
+  const images = { resolveCalls: [], async resolveActive(purpose) { this.resolveCalls.push(purpose); return purpose === 'portrait' ? portraitProfile : purpose === 'bgrm' ? bgrmProfile : null; } };
+  const settings = { get: async (key) => key === 'character_visual_bgrm_enabled' ? 'true' : undefined, set: async () => {} };
+  const requests = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const task = JSON.parse(init.body)[0];
+    requests.push(task);
+    return task.taskType === 'imageInference'
+      ? { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/unexpected-generation.png', imageUUID: 'unexpected-uuid' }] }) }
+      : { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/transparent-character.png' }] }) };
+  };
+  try {
+    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert(requests.length === 1 && requests[0].taskType === 'removeBackground' && requests[0].inputs.image === 'https://cdn.example/raw-character.png', 'stage4 BGRM: raw cache URL reaches BGRM without generation');
+  assert(pool.combinations.length === 2 && pool.combinations.some((row) => row.bgrm_applied === false) && pool.combinations.some((row) => row.bgrm_applied === true), 'stage4 BGRM: raw and transparent variants coexist');
+}
+
+{
+  // Fresh Runware generation uses the native UUID immediately and persists the actual successful
+  // BGRM state. A later transparent hit must not resolve either provider again.
+  const pool = createFakePool();
+  seedAva(pool);
+  pool.states.push({ user_id: USER, chat_id: CHAT, character_id: AVA_ID, message_id: MSG, swipe_id: SWIPE, inner_thoughts: 'x', expression: 'composed', outerwear: 'leather jacket', top: 'white blouse', bottom: 'jeans', underwear_top: 'none', underwear_bottom: 'none', accessory: 'silver pendant' });
+  const portraitProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'portrait-key', model: 'runware/portrait' };
+  const bgrmProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'bgrm-key', model: 'runware/bgrm' };
+  const images = { resolveCalls: [], async resolveActive(purpose) { this.resolveCalls.push(purpose); return purpose === 'portrait' ? portraitProfile : purpose === 'bgrm' ? bgrmProfile : null; } };
+  const settings = { get: async (key) => key === 'character_visual_bgrm_enabled' ? 'true' : undefined, set: async () => {} };
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (_url, init) => {
+    const task = JSON.parse(init.body)[0];
+    requests.push(task);
+    return task.taskType === 'imageInference'
+      ? { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/raw-fresh.jpg', imageUUID: 'fresh-native-uuid' }] }) }
+      : { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/transparent-fresh.png' }] }) };
+  };
+  try {
+    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert(requests.length === 2 && requests[1].inputs.image === 'fresh-native-uuid', 'stage4 BGRM: fresh Runware generation forwards its native UUID');
+  assert(pool.combinations.length === 1 && pool.combinations[0].bgrm_applied === true && pool.combinations[0].image_url === 'https://cdn.example/transparent-fresh.png', 'stage4 BGRM: successful fresh render persists the transparent state');
+  const lookupCount = images.resolveCalls.length;
+  await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: { resolveActive: async () => { throw new Error('cache hit resolved a provider'); } } }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+  assert(pool.combinations.length === 1 && images.resolveCalls.length === lookupCount, 'stage4 BGRM: transparent cache hit avoids provider and BGRM calls');
+}
+
+{
+  // BGRM failure stores only raw; the next enabled request upgrades that cached raw URL without
+  // invoking portrait generation again.
+  const pool = createFakePool();
+  seedAva(pool);
+  pool.states.push({ user_id: USER, chat_id: CHAT, character_id: AVA_ID, message_id: MSG, swipe_id: SWIPE, inner_thoughts: 'x', expression: 'composed', outerwear: 'leather jacket', top: 'white blouse', bottom: 'jeans', underwear_top: 'none', underwear_bottom: 'none', accessory: 'silver pendant' });
+  const settings = { get: async (key) => key === 'character_visual_bgrm_enabled' ? 'true' : undefined, set: async () => {} };
+  const portraitProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'portrait-key', model: 'runware/portrait' };
+  const bgrmProfile = { ...POLLINATIONS_PROFILE, kind: 'runware', apiKey: 'bgrm-key', model: 'runware/bgrm' };
+  const images = { async resolveActive(purpose) { return purpose === 'portrait' ? portraitProfile : purpose === 'bgrm' ? bgrmProfile : null; } };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (_url, init) => {
+    const task = JSON.parse(init.body)[0];
+    if (task.taskType === 'imageInference') return { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/raw-retry.jpg', imageUUID: 'retry-native-uuid' }] }) };
+    return { ok: false, status: 503, text: async () => 'temporary failure' };
+  };
+  try {
+    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+    assert(pool.combinations.length === 1 && pool.combinations[0].bgrm_applied === false, 'stage4 BGRM: failure stores only a raw fallback');
+    const firstGenerationCount = pool.combinations.length;
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/transparent-retry.png' }] }) });
+    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+    assert(pool.combinations.length === 2 && pool.combinations.some((row) => row.bgrm_applied === true) && firstGenerationCount === 1, 'stage4 BGRM: a later enabled request retries from cached raw without a new generation');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 {

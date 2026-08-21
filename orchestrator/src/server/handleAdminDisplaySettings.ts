@@ -42,6 +42,7 @@ import {
 } from '../orchestrator/chatChunkResize.js';
 import {
   getCanonSettings,
+  getBgrmSettings,
   getCharacterSettings,
   getChatBackgroundSettings,
   getChatLegibilitySettings,
@@ -56,6 +57,7 @@ import {
   getPortraitBackgroundPromptsSettings,
   getPortraitSubjectDescriberSettings,
   parseSetCanonSettingsBody,
+  parseSetBgrmSettingsBody,
   parseSetCharacterSettingsBody,
   parseSetChatMemorySettingsBody,
   parseSetChatBackgroundSettingsBody,
@@ -67,6 +69,7 @@ import {
   parseSetPortraitSubjectDescriberSettingsBody,
   parseSetTimezoneBody,
   setCanonSettings,
+  setBgrmSettings,
   setCharacterSettings,
   setChatMemorySettings,
   setChatBackgroundSettings,
@@ -80,6 +83,27 @@ import {
 } from './adminServer.js';
 import { readJsonBody, sendJson } from './httpUtils.js';
 import type { HttpServerDeps } from './httpServer.js';
+
+export async function handleBgrmSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  sendJson(res, 200, await getBgrmSettings(deps.settings));
+}
+
+export async function handleBgrmSettingsSet(req: IncomingMessage, res: ServerResponse, deps: HttpServerDeps): Promise<void> {
+  let raw: unknown;
+  try {
+    raw = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: 'expected a JSON request body' });
+    return;
+  }
+  const parsed = parseSetBgrmSettingsBody(raw);
+  if (!parsed) {
+    sendJson(res, 400, { error: 'expected { portraitStudioEnabled?: boolean, characterAutofireEnabled?: boolean }' });
+    return;
+  }
+  await setBgrmSettings(deps.settings, parsed);
+  sendJson(res, 200, await getBgrmSettings(deps.settings));
+}
 
 export async function handleImageSettingsGet(res: ServerResponse, deps: HttpServerDeps): Promise<void> {
   sendJson(res, 200, await getImageSettings(deps.settings));

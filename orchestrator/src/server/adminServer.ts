@@ -83,6 +83,10 @@ export type { ChatBackgroundSettings, ChatBackgroundSettingsPatch, ChatLegibilit
 export { getCharacterSettings, parseSetCharacterSettingsBody, setCharacterSettings } from './admin/characterSettings.js';
 export type { CharacterSettings } from './admin/characterSettings.js';
 
+// --- Character-image BGRM settings (server/admin/bgrmSettings.ts) ---
+export { getBgrmSettings, parseSetBgrmSettingsBody, setBgrmSettings } from './admin/bgrmSettings.js';
+export type { BgrmSettings, BgrmSettingsPatch } from './admin/bgrmSettings.js';
+
 // --- Portrait/studio prompt settings (server/admin/portraitSettings.ts) ---
 export {
   getPortraitBackgroundPromptsSettings,

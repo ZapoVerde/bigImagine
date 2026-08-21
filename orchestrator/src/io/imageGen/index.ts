@@ -22,6 +22,7 @@
  * @api-declaration
  * createImageGenProvider(profile: ImageConnectionProfile) -> ImageGenProvider
  *   .generate(req: ImageGenRequest) -> Promise<string> — the CDN image URL for this request
+ * generateImageWithReference(profile, req) -> Promise<GeneratedImage> — URL and optional native ref
  *
  * @contract
  *   assertions:
@@ -35,8 +36,8 @@ import { generateComfyUiImage } from './comfyUi.js';
 import { generateFalAiImage } from './falAi.js';
 import { generateOpenAiImage } from './openaiImages.js';
 import { generatePollinationsImage } from './pollinations.js';
-import { generateRunwareImage } from './runware.js';
-import type { ImageGenRequest } from './types.js';
+import { generateRunwareImage, generateRunwareImageWithReference } from './runware.js';
+import type { GeneratedImage, ImageGenRequest } from './types.js';
 
 export interface ImageGenProvider {
   generate(req: ImageGenRequest): Promise<string>;
@@ -55,4 +56,13 @@ export function createImageGenProvider(profile: ImageConnectionProfile): ImageGe
     case 'openai-images':
       return { generate: (req) => generateOpenAiImage(req) };
   }
+}
+
+/** Generate through the provider-neutral detailed seam without changing legacy callers. */
+export async function generateImageWithReference(
+  profile: ImageConnectionProfile,
+  req: ImageGenRequest,
+): Promise<GeneratedImage> {
+  if (profile.kind === 'runware') return generateRunwareImageWithReference(req);
+  return { imageUrl: await createImageGenProvider(profile).generate(req) };
 }

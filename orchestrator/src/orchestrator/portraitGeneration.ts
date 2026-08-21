@@ -100,7 +100,9 @@ import { log } from '../io/logger.js';
 import { runWithCallContext, withCallLabel, withRoundId } from '../io/llm/callContext.js';
 import type { LlmMessage, LlmProvider, LlmTurn } from '../io/llm/types.js';
 import type { ImageConnectionProfile, ImageConnectionStore } from '../io/imageConnections.js';
-import { createImageGenProvider } from '../io/imageGen/index.js';
+import { generateImageWithReference } from '../io/imageGen/index.js';
+import type { ImageGenRequest } from '../io/imageGen/types.js';
+import { postProcessCharacterImage } from './characterImagePostProcess.js';
 import type { OrchestratorSettingsStore } from '../io/orchestratorSettings.js';
 import type { PostgresClient } from '../io/postgres.js';
 import { compileTemplate, type DetailsMap, type SlotMap } from '../portraits/composer.js';
@@ -113,6 +115,28 @@ export interface PortraitGenerationDeps {
   db: PostgresClient;
   settings: OrchestratorSettingsStore;
   imageConnections: ImageConnectionStore;
+}
+
+async function generatePortraitImage(
+  profile: ImageConnectionProfile,
+  bgrmProfile: ImageConnectionProfile | undefined,
+  request: ImageGenRequest,
+): Promise<string> {
+  const generated = await generateImageWithReference(profile, request);
+  return (await postProcessCharacterImage(generated, bgrmProfile)).imageUrl;
+}
+
+async function resolveBgrmProfile(
+  imageConnections: ImageConnectionStore,
+  enabled: boolean,
+): Promise<ImageConnectionProfile | undefined> {
+  if (!enabled) return undefined;
+  try {
+    return await imageConnections.resolveActive('bgrm');
+  } catch (error) {
+    log.warn('portraitGeneration: BGRM profile resolution failed; using raw image', { error });
+    return undefined;
+  }
 }
 
 export interface PortraitGenerationInput {
@@ -524,6 +548,8 @@ export async function runPortraitGenerationRound(
       log.warn('portraitGeneration: no active portrait image connection configured, aborting round', { subjectEntityId });
       return { ok: false, error: 'no_active_connection' };
     }
+    const bgrmEnabled = (await deps.settings.get('portrait_bgrm_enabled')) === 'true';
+    const bgrmProfile = await resolveBgrmProfile(deps.imageConnections, bgrmEnabled);
 
     const parent = buildParentChromosome(entities, layers);
     const parentDetails = buildParentDetails(entities, layers);
@@ -632,7 +658,7 @@ export async function runPortraitGenerationRound(
             log.warn('portraitGeneration: failed to begin image telemetry', { error: w });
             return null;
           });
-          const imageUrl = await createImageGenProvider(profile).generate({
+           const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
             prompt: composedPrompt,
             negativePrompt: [profile.masterNegativePrompt ?? '', chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
             model: profile.model,
@@ -649,7 +675,7 @@ export async function runPortraitGenerationRound(
             cfgScale: profile.cfgScale,
             samplerName: profile.samplerName,
             workflowParameters: profile.workflowParameters,
-          });
+           });
           if (imageCallId) {
             await finishImageCall(deps.db, userId, imageCallId, {
               status: 'succeeded',
@@ -828,6 +854,8 @@ export async function renderPortraitPreview(
       log.warn('portraitGeneration: preview aborted, no active portrait image connection configured', { userId });
       return { ok: false, error: 'no_active_connection' };
     }
+    const bgrmEnabled = (await deps.settings.get('portrait_bgrm_enabled')) === 'true';
+    const bgrmProfile = await resolveBgrmProfile(deps.imageConnections, bgrmEnabled);
 
     const parent = buildParentChromosome(entities, layers);
     const parentDetails = buildParentDetails(entities, layers);
@@ -835,7 +863,7 @@ export async function renderPortraitPreview(
     const composedPrompt = compileTemplate(template, parent.slots, manifest.layers, parentDetails);
 
     try {
-      const imageUrl = await createImageGenProvider(profile).generate({
+       const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
         prompt: composedPrompt,
         negativePrompt: profile.masterNegativePrompt ?? '',
         model: profile.model,
@@ -848,7 +876,7 @@ export async function renderPortraitPreview(
         cfgScale: profile.cfgScale,
         samplerName: profile.samplerName,
         workflowParameters: profile.workflowParameters,
-      });
+       });
       log.info('portraitGeneration: preview render succeeded', { userId });
       return { ok: true, imageUrl: imageUrl as string, composedPrompt };
     } catch (err) {
@@ -908,6 +936,8 @@ export async function retryPortraitCandidateRender(
 
     const profile = await deps.imageConnections.resolveActive('portrait');
     if (!profile) return { ok: false, error: 'no_active_connection' };
+    const bgrmEnabled = (await deps.settings.get('portrait_bgrm_enabled')) === 'true';
+    const bgrmProfile = await resolveBgrmProfile(deps.imageConnections, bgrmEnabled);
 
     const manifest = await loadLayerManifest({ settings: deps.settings });
     const styleEntityId = row.entity_ids?.style;
@@ -952,7 +982,7 @@ export async function retryPortraitCandidateRender(
     const renderStartedAt = Date.now();
 
     try {
-      const imageUrl = await createImageGenProvider(profile).generate({
+       const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
         prompt: composedPrompt,
         negativePrompt: [profile.masterNegativePrompt ?? '', row.chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
         model: profile.model,
@@ -965,7 +995,7 @@ export async function retryPortraitCandidateRender(
         cfgScale: profile.cfgScale,
         samplerName: profile.samplerName,
         workflowParameters: profile.workflowParameters,
-      });
+       });
       await deps.db.withUserScope(userId, (session) =>
         session.query(`update visual_candidates set image_url = $1 where candidate_id = $2 and user_id = $3`, [imageUrl, candidateId, userId]),
       );

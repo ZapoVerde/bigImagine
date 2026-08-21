@@ -291,6 +291,11 @@
  * (bi_principles.md §17): empty = the built-in default in describeStudioSlots.ts. Read live on
  * each entity create, no restart.
  *
+ * portrait_bgrm_enabled and character_visual_bgrm_enabled (migration 0132) are live-read,
+ * opt-in gates for Portrait Studio and RP character-image background removal respectively.
+ * Neither is seeded; an absent value means false. The active BGRM engine profile remains owned by
+ * the image-connections store.
+ *
  * @api-declaration
  * SETTING_NAMES — the fixed vocabulary (mirrors 0010's CHECK constraint)
  * createOrchestratorSettingsStore(db) -> OrchestratorSettingsStore
@@ -324,6 +329,7 @@ export const SETTING_NAMES = [
   'chat_memory_chunk_pairs',
   'chat_memory_chunk_summary_prompt',
   'chat_memory_distill_prompt',
+  'chat_memory_household_memory_prompt',
   'chat_memory_bridge_prompt',
   'chat_memory_world_curator_prompt',
   'chat_memory_people_curator_prompt',
@@ -401,6 +407,8 @@ export const SETTING_NAMES = [
   'portrait_llm_connection',
   'portrait_slot_bootstrap_prompt',
   'character_visual_state_enabled',
+  'portrait_bgrm_enabled',
+  'character_visual_bgrm_enabled',
 ] as const;
 export type SettingName = (typeof SETTING_NAMES)[number];
 

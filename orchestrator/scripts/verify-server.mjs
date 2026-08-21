@@ -2044,6 +2044,55 @@ assert(
   'POST /v1/admin/image-settings persists the template and reports it as non-default',
 );
 
+// --- Admin character-image BGRM settings routes (BGRM Task 2.2) -------------------------------
+
+const bgrmSettingsNoAuthRes = await fetch(`${base}/v1/admin/bgrm-settings`);
+assert(bgrmSettingsNoAuthRes.status === 401, 'GET /v1/admin/bgrm-settings with no auth header returns 401');
+
+const bgrmSettingsGetRes = await fetch(`${base}/v1/admin/bgrm-settings`, {
+  headers: { authorization: 'Bearer the-admin-key' },
+});
+const bgrmSettingsGetBody = await bgrmSettingsGetRes.json();
+assert(
+  bgrmSettingsGetRes.status === 200 &&
+    bgrmSettingsGetBody.portraitStudioEnabled === false &&
+    bgrmSettingsGetBody.characterAutofireEnabled === false,
+  'GET /v1/admin/bgrm-settings defaults both toggles to false',
+);
+
+const bgrmSettingsOneRes = await fetch(`${base}/v1/admin/bgrm-settings`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ portraitStudioEnabled: true }),
+});
+const bgrmSettingsOneBody = await bgrmSettingsOneRes.json();
+assert(
+  bgrmSettingsOneRes.status === 200 &&
+    bgrmSettingsOneBody.portraitStudioEnabled === true &&
+    bgrmSettingsOneBody.characterAutofireEnabled === false,
+  'POST /v1/admin/bgrm-settings updates one toggle without overwriting the other',
+);
+
+const bgrmSettingsInvalidRes = await fetch(`${base}/v1/admin/bgrm-settings`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ characterAutofireEnabled: 'true' }),
+});
+assert(bgrmSettingsInvalidRes.status === 400, 'POST /v1/admin/bgrm-settings rejects non-boolean values');
+
+const bgrmSettingsBothRes = await fetch(`${base}/v1/admin/bgrm-settings`, {
+  method: 'POST',
+  headers: { authorization: 'Bearer the-admin-key', 'content-type': 'application/json' },
+  body: JSON.stringify({ portraitStudioEnabled: false, characterAutofireEnabled: true }),
+});
+const bgrmSettingsBothBody = await bgrmSettingsBothRes.json();
+assert(
+  bgrmSettingsBothRes.status === 200 &&
+    bgrmSettingsBothBody.portraitStudioEnabled === false &&
+    bgrmSettingsBothBody.characterAutofireEnabled === true,
+  'POST /v1/admin/bgrm-settings updates both toggles',
+);
+
 // --- Admin location-render-status route (adminServer.ts getLocationRenderStatus) ---
 const rsNoAuthRes = await fetch(`${base}/v1/admin/location-render-status`);
 assert(rsNoAuthRes.status === 401, 'GET /v1/admin/location-render-status with no auth header returns 401');

@@ -55,6 +55,12 @@ export interface ScreenLockSettings {
   timeoutMinutes: number;
 }
 
+/** GET/POST /v1/admin/bgrm-settings — character-image BGRM feature gates. */
+export interface BgrmSettings {
+  portraitStudioEnabled: boolean;
+  characterAutofireEnabled: boolean;
+}
+
 // orchestrator/src/server/adminServer.ts getPersonaSettings() — '' means never set.
 export interface PersonaSettings {
   name: string;

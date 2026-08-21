@@ -21,6 +21,7 @@ import {
   adminSetTimezone,
 } from '../api/client';
 import { useAdminUnlock } from '../hooks/useAdminUnlock';
+import BgrmSettingsPanel from '../components/settings/BgrmSettingsPanel';
 import type { CharacterSettings, CredentialSummary, NotificationSettings, PersonaSettings, PortraitSubjectDescriberSettings, PortraitsEnabled, ScreenLockSettings } from '../api/types';
 import './SettingsView.css';
 
@@ -618,6 +619,8 @@ export default function SettingsView({ theme, onToggleTheme }: SettingsViewProps
         </button>
         <div className="status">{portraitsEnabledStatus}</div>
       </fieldset>
+
+      <BgrmSettingsPanel adminKey={adminKey} />
 
       <fieldset>
         <legend>Screen Lock</legend>

@@ -664,6 +664,145 @@ function conclusionTurn() {
   assert(new Set(pool.state.imageCalls.map((c) => c.candidate_id)).size === 2, 'generation: the two image calls link to two distinct candidates');
 }
 
+// --- Candidate rounds resolve BGRM once and post-process each successful candidate independently. --
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  let bgrmProfileLookups = 0;
+  const bgrmConnections = {
+    resolveActive: async (purpose) => {
+      if (purpose === 'bgrm') bgrmProfileLookups++;
+      return purpose === 'portrait' ? PROFILE : purpose === 'bgrm' ? bgrmProfile : null;
+    },
+  };
+  const originalFetch = globalThis.fetch;
+  let bgrmCalls = 0;
+  globalThis.fetch = async () => {
+    bgrmCalls++;
+    return { ok: true, json: async () => ({ data: [{ imageURL: `https://cdn.example/transparent-${bgrmCalls}.png` }] }) };
+  };
+  try {
+    seedEntities(pool.state);
+    const base = { name: 'fake-bgrm-round', supportsVision: false, async complete() { return candidateMarkdownTurn(); } };
+    const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+    const result = await runPortraitGenerationRound(
+      { db, settings, imageConnections: bgrmConnections },
+      gated,
+      USER,
+      { entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' }, goal: 'BGRM candidate round.' },
+    );
+    assert(result.ok && result.candidates?.every((candidate) => candidate.imageUrl?.startsWith('https://cdn.example/transparent-')), 'generation BGRM: every candidate uses the transparent URL');
+    assert(bgrmProfileLookups === 1 && bgrmCalls === 2 && pool.state.imageCalls.length === 2, 'generation BGRM: profile resolves once while candidate parallelism and render count remain unchanged');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- Candidate BGRM failure is independent of generation failure: raw candidates remain usable. --
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  const connections = { resolveActive: async (purpose) => (purpose === 'portrait' ? PROFILE : purpose === 'bgrm' ? bgrmProfile : null) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 503, text: async () => 'temporary failure' });
+  try {
+    seedEntities(pool.state);
+    const base = { name: 'fake-bgrm-failure-round', supportsVision: false, async complete() { return candidateMarkdownTurn(); } };
+    const gated = createGatedLlmProvider(base, db, settings, PROFILE);
+    const result = await runPortraitGenerationRound(
+      { db, settings, imageConnections: connections }, gated, USER,
+      { entityIds: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' }, goal: 'BGRM failure round.' },
+    );
+    assert(result.ok && result.candidates?.every((candidate) => candidate.imageUrl && !candidate.failed), 'generation BGRM: post-process failure keeps candidates successful with raw URLs');
+    assert(pool.state.imageCalls.every((call) => call.status === 'succeeded'), 'generation BGRM: post-process failure does not mark image calls failed');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- Runware portrait generation passes its native image UUID to BGRM, not the CDN URL. --------
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  const runwareProfile = { ...PROFILE, kind: 'runware', model: 'runware/portrait', apiKey: 'portrait-key' };
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  const connections = { resolveActive: async (purpose) => (purpose === 'portrait' ? runwareProfile : purpose === 'bgrm' ? bgrmProfile : null) };
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (_url, init) => {
+    const task = JSON.parse(init.body)[0];
+    requests.push(task);
+    return task.taskType === 'imageInference'
+      ? { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/runware-raw.jpg', imageUUID: 'runware-native-uuid' }] }) }
+      : { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/runware-transparent.png' }] }) };
+  };
+  try {
+    seedEntities(pool.state);
+    pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+    const preview = await renderPortraitPreview(
+      { db, settings, imageConnections: connections }, USER,
+      { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+    );
+    assert(preview.ok && preview.imageUrl === 'https://cdn.example/runware-transparent.png', 'preview BGRM: Runware generation uses the transparent result');
+    assert(requests[1]?.taskType === 'removeBackground' && requests[1].inputs.image === 'runware-native-uuid', 'preview BGRM: Runware native image UUID reaches background removal');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- Retry reads the current BGRM setting and preserves fail-open retry semantics. --------------
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  seedEntities(pool.state);
+  pool.state.candidates.push({
+    candidate_id: 'c-bgrm-retry', user_id: USER,
+    entity_ids: { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr' },
+    image_url: null, chromosome: { slots: { subject: {}, outfit: {}, style: {}, expression: {} } },
+  });
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  const connections = { resolveActive: async (purpose) => (purpose === 'portrait' ? PROFILE : purpose === 'bgrm' ? bgrmProfile : null) };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/retry-transparent.png' }] }) });
+  try {
+    const success = await retryPortraitCandidateRender({ db, settings, imageConnections: connections }, USER, 'c-bgrm-retry');
+    assert(success.ok && success.imageUrl === 'https://cdn.example/retry-transparent.png', 'retry BGRM: enabled retry stores the transparent URL');
+    globalThis.fetch = async () => ({ ok: false, status: 503, text: async () => 'temporary failure' });
+    const failure = await retryPortraitCandidateRender({ db, settings, imageConnections: connections }, USER, 'c-bgrm-retry');
+    assert(failure.ok && failure.imageUrl?.startsWith('https://image.pollinations.ai/'), 'retry BGRM: failure remains successful with the raw URL');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+// --- Disabled BGRM is a strict zero-call path. ------------------------------------------------
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings();
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+  let bgrmLookups = 0;
+  const disabledConnections = {
+    resolveActive: async (purpose) => {
+      if (purpose === 'bgrm') bgrmLookups++;
+      return purpose === 'portrait' ? PROFILE : null;
+    },
+  };
+  const preview = await renderPortraitPreview(
+    { db, settings, imageConnections: disabledConnections },
+    USER,
+    { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+  );
+  assert(preview.ok && bgrmLookups === 0, 'preview BGRM disabled: no BGRM profile lookup or post-process occurs');
+}
+
 // --- Parallel pull_wiki_entry calls in ONE turn (some providers batch tool calls) each get their
 // own tool response. Production regression: resolving only the first call and leaving a second
 // tool_call_id dangling in the next request caused a real 400 ("No tool output found for function
@@ -927,6 +1066,63 @@ function conclusionTurn() {
   assert(pool.state.candidates.length === 0, 'preview: writes no visual_candidates row — a preview is disposable, not a training record');
   assert(pool.state.llmCalls.length === 0, 'preview: makes no LLM call — no mutation step at all');
   assert(pool.state.rounds.length === 0, 'preview: creates no visual_rounds row — no telemetry ledger entry');
+}
+
+// --- BGRM is an optional post-process after the one portrait generation call. The fake Runware
+// response proves the generated URL is passed as the source, while the failure response proves a
+// successful preview keeps its raw URL and does not retry generation. --------------------------
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  const bgrmConnections = { resolveActive: async (purpose) => (purpose === 'portrait' ? PROFILE : purpose === 'bgrm' ? bgrmProfile : null) };
+  const originalFetch = globalThis.fetch;
+  let bgrmInput = null;
+  globalThis.fetch = async (_url, init) => {
+    bgrmInput = JSON.parse(init.body)[0].inputs.image;
+    return { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/transparent-preview.png' }] }) };
+  };
+  try {
+    const preview = await renderPortraitPreview(
+      { db, settings, imageConnections: bgrmConnections },
+      USER,
+      { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+    );
+    assert(preview.ok === true && preview.imageUrl === 'https://cdn.example/transparent-preview.png', 'preview BGRM: success returns the transparent URL');
+    assert(typeof bgrmInput === 'string' && bgrmInput.startsWith('https://image.pollinations.ai/'), 'preview BGRM: URL-only generation passes its URL to Runware');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+{
+  const pool = makeFakePool();
+  const db = createPostgresClient(pool);
+  const settings = makeSettings({ portrait_bgrm_enabled: 'true' });
+  seedEntities(pool.state);
+  pool.state.entities.push({ entity_id: 'e-fmt', user_id: USER, layer_id: 'format', name: 'Format', slots: {}, template: null, details: '', updated_at: 5 });
+  const bgrmProfile = { ...PROFILE, kind: 'runware', model: 'runware/bgrm', apiKey: 'bgrm-key' };
+  const bgrmConnections = { resolveActive: async (purpose) => (purpose === 'portrait' ? PROFILE : purpose === 'bgrm' ? bgrmProfile : null) };
+  const originalFetch = globalThis.fetch;
+  let bgrmCalls = 0;
+  globalThis.fetch = async () => {
+    bgrmCalls++;
+    return { ok: false, status: 503, text: async () => 'temporary failure' };
+  };
+  try {
+    const preview = await renderPortraitPreview(
+      { db, settings, imageConnections: bgrmConnections },
+      USER,
+      { subject: 'e-sub', outfit: 'e-out', style: 'e-style', expression: 'e-expr', format: 'e-fmt' },
+    );
+    assert(preview.ok === true && typeof preview.imageUrl === 'string' && preview.imageUrl.startsWith('https://image.pollinations.ai/'), 'preview BGRM: failure keeps the successful raw URL');
+    assert(bgrmCalls === 1, 'preview BGRM: one failed post-process never regenerates the image');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 // --- A named-but-missing entity is a caller bug, not a fallback case — the preview fails with a

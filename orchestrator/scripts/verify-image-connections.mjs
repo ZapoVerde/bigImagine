@@ -25,10 +25,29 @@ import { createFieldCipher } from '../dist/io/fieldCipher.js';
 import { createPostgresClient } from '../dist/io/postgres.js';
 import { createImageConnectionStore } from '../dist/io/imageConnections.js';
 import { generateLocationImage } from '../dist/orchestrator/generateLocationImage.js';
-import { generateRunwareImage } from '../dist/io/imageGen/runware.js';
+import { postProcessCharacterImage } from '../dist/orchestrator/characterImagePostProcess.js';
+import { generateImageWithReference } from '../dist/io/imageGen/index.js';
+import { generateRunwareImage, generateRunwareImageWithReference } from '../dist/io/imageGen/runware.js';
 import { removeBackground } from '../dist/io/imageGen/removeBackground.js';
 import { parseCreateImageConnectionBody, parseUpdateImageConnectionBody, testImageConnection } from '../dist/server/adminServer.js';
 import { createOrchestratorSettingsStore } from '../dist/io/orchestratorSettings.js';
+
+const bgrmProfile = {
+  kind: 'runware',
+  model: 'runware:112@10',
+  apiKey: 'bgrm-test-key',
+  baseUrl: null,
+  width: 1024,
+  height: 1024,
+  samplingSteps: 30,
+  cfgScale: 7,
+  samplerName: null,
+  masterPositiveStylePrefix: null,
+  masterNegativePrompt: null,
+  workflowParameters: null,
+  purpose: 'bgrm',
+  seed: null,
+};
 
 function assert(cond, message) {
   if (!cond) {
@@ -427,7 +446,7 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
       ok: true,
       status: 200,
       text: async () => '',
-      json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://cdn.runware.ai/img/abc.jpg' }] }),
+       json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://cdn.runware.ai/img/abc.jpg', imageUUID: 'runware-image-abc' }] }),
     };
   };
   try {
@@ -460,9 +479,51 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
       'the runware adapter sends seed, numberResults, a URL output type and checkNSFW=false (Canvalyze\'s proven base task)');
     assert(task.apiKey === undefined, 'the runware adapter never puts the apiKey in the body (it lives in the Bearer header)');
     assert(task.taskUUID && task.taskUUID.length > 0, 'the runware adapter gives each task a taskUUID for response correlation');
+
+    const detailed = await generateRunwareImageWithReference({
+      prompt: 'a harbor at dusk',
+      negativePrompt: 'blurry',
+      model: 'runware:z-image@turbo',
+      apiKey: 'sk-rw-test',
+      baseUrl: null,
+      width: 1344,
+      height: 768,
+      seed: 42,
+      steps: 8,
+      cfgScale: 7,
+      samplerName: 'Euler a',
+      workflowParameters: null,
+    });
+    assert(
+      detailed.imageUrl === 'https://cdn.runware.ai/img/abc.jpg' && detailed.providerImageRef === 'runware-image-abc',
+      'the detailed Runware adapter preserves the generated URL and provider image UUID',
+    );
   } finally {
     global.fetch = realFetch;
   }
+}
+
+// --- provider-neutral detailed generation: URL-only providers expose no fabricated native ref ---
+{
+  const detailed = await generateImageWithReference(
+    { kind: 'pollinations', apiKey: 'poll-token', model: 'flux', width: 512, height: 512 },
+    {
+      prompt: 'a harbor at dusk',
+      negativePrompt: '',
+      model: 'flux',
+      apiKey: 'poll-token',
+      baseUrl: null,
+      width: 512,
+      height: 512,
+      seed: null,
+      steps: 0,
+      cfgScale: 0,
+      samplerName: null,
+      workflowParameters: null,
+    },
+  );
+  assert(typeof detailed.imageUrl === 'string' && detailed.imageUrl.includes('pollinations.ai'), 'the detailed non-Runware path returns a generated URL');
+  assert(detailed.providerImageRef === undefined, 'the detailed non-Runware path does not fabricate a provider-native reference');
 }
 
 // --- io/imageGen/removeBackground.ts: URL and UUID references stay unchanged and are never fetched ---
@@ -492,6 +553,55 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
 
     await removeBackground({ image: '11111111-2222-3333-4444-555555555555', model: 'runware:112@10', apiKey: 'test-key' });
     assert(JSON.parse(captured.init.body)[0].inputs.image === '11111111-2222-3333-4444-555555555555' && calls === 2, 'the BGRM adapter forwards a Runware UUID unchanged without an extra source fetch');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// --- shared character-image BGRM post-processing: reference selection and fail-open behavior ---
+{
+  const realFetch = global.fetch;
+  let calls = 0;
+  let captured;
+  global.fetch = async (url, init) => {
+    calls += 1;
+    captured = { url, init };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://runware.test/character-transparent.png' }] }),
+    };
+  };
+  try {
+    const urlResult = await postProcessCharacterImage({ imageUrl: 'https://example.test/character.jpg' }, bgrmProfile);
+    assert(urlResult.imageUrl === 'https://runware.test/character-transparent.png' && urlResult.bgrmApplied === true, 'character BGRM success returns the transparent URL and applied state');
+    assert(JSON.parse(captured.init.body)[0].inputs.image === 'https://example.test/character.jpg', 'character BGRM sends a URL-only source unchanged');
+
+    const refResult = await postProcessCharacterImage({ imageUrl: 'https://example.test/character.jpg', providerImageRef: 'runware-character-123' }, bgrmProfile);
+    assert(refResult.bgrmApplied === true && JSON.parse(captured.init.body)[0].inputs.image === 'runware-character-123', 'character BGRM prefers the provider-native reference');
+    assert(calls === 2, 'successful character BGRM performs one provider call per source');
+
+    calls = 0;
+    const noProfile = await postProcessCharacterImage({ imageUrl: 'https://example.test/raw.jpg' });
+    assert(noProfile.imageUrl === 'https://example.test/raw.jpg' && noProfile.bgrmApplied === false && calls === 0, 'missing BGRM profile falls back without a provider call');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// --- shared character-image BGRM post-processing: provider failure remains fail-open ---
+{
+  const realFetch = global.fetch;
+  let calls = 0;
+  global.fetch = async () => {
+    calls += 1;
+    return { ok: true, status: 200, text: async () => '', json: async () => ({ data: [] }) };
+  };
+  try {
+    const result = await postProcessCharacterImage({ imageUrl: 'https://example.test/raw-fallback.jpg' }, bgrmProfile);
+    assert(result.imageUrl === 'https://example.test/raw-fallback.jpg' && result.bgrmApplied === false, 'BGRM failure returns the original generated URL');
+    assert(calls === 1, 'BGRM failure performs one BGRM call and does not trigger image generation');
   } finally {
     global.fetch = realFetch;
   }

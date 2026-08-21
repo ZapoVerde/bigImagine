@@ -197,6 +197,8 @@ import {
 import {
   handleCanonSettingsGet,
   handleCanonSettingsSet,
+  handleBgrmSettingsGet,
+  handleBgrmSettingsSet,
   handleChatBackgroundSettingsSet,
   handleChatLegibilitySettingsSet,
   handleChatMemorySettingsGet,
@@ -634,6 +636,8 @@ const routes: Route[] = [
   { method: 'GET', path: '/v1/admin/location-render-status', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLocationRenderStatusGet(res, deps); }) },
   { method: 'GET', path: '/v1/admin/canon-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCanonSettingsGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/canon-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCanonSettingsSet(req, res, deps); }) },
+  { method: 'GET', path: '/v1/admin/bgrm-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleBgrmSettingsGet(res, deps); }) },
+  { method: 'POST', path: '/v1/admin/bgrm-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleBgrmSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/cleanup-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCleanupSettingsGet(res, deps); }) },
   { method: 'POST', path: '/v1/admin/cleanup-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleCleanupSettingsSet(req, res, deps); }) },
   { method: 'GET', path: '/v1/admin/lorebook-settings', run: async (req, res, deps) => withAdmin(req, res, deps, async () => { await handleLorebookSettingsGet(res, deps); }) },

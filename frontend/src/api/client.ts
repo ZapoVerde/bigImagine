@@ -38,6 +38,7 @@ import type {
   ChatBackgroundSettings,
   ChatLegibilitySettings,
   ChatLegibilitySettingsPatch,
+  BgrmSettings,
   ImportedCharacter,
   LlmCallStatRow,
   LlmConnectionSummary,
@@ -938,6 +939,19 @@ export async function adminTestImageConnection(id: string, adminKey: string | nu
  *  template means "use the built-in default" (bi_principles.md §17). */
 export async function adminGetImageSettings(adminKey: string | null): Promise<ImageSettings> {
   return jsonRequest<ImageSettings>('/v1/admin/image-settings', adminKey);
+}
+
+/** GET /v1/admin/bgrm-settings — independent character-image BGRM feature gates. */
+export function adminGetBgrmSettings(adminKey: string | null): Promise<BgrmSettings> {
+  return jsonRequest<BgrmSettings>('/v1/admin/bgrm-settings', adminKey);
+}
+
+/** POST /v1/admin/bgrm-settings — strict partial update; returns the complete settings object. */
+export function adminSetBgrmSettings(
+  patch: Partial<BgrmSettings>,
+  adminKey: string | null,
+): Promise<BgrmSettings> {
+  return jsonRequest<BgrmSettings>('/v1/admin/bgrm-settings', adminKey, { method: 'POST', body: patch });
 }
 
 export function adminSetImageSettings(
