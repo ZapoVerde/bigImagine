@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/orchestrator/chatMemorySync.ts
- * @stamp 2026-08-20
+ * @stamp 2026-08-21
  * @architectural-role Orchestrator — the rolling chat-summarization/RAG sync poll loop
  * @description
  * docs/chat-memory.md's sync pipeline. Lives in core, not plugins/chat-memory (which contributes
@@ -17,34 +17,43 @@
  * messages, past its live window, than chat_memory_sync_every_pairs allows" rather than a
  * next_run_at timestamp.
  *
- * One sync pass, per chat, does everything in a single withUserScope transaction: promote that
- * chat's 'proposed' canon_facts to 'approved' (the settling-window auto-approve — see
- * plugins/canonize/src/proposeCanonFactTool.ts), settle the transient locations/characters the
- * post-cleanup scraper anchored to the archived messages (docs/plans/vistalyze_integration/segway.md
- * §2.5: active-swipe rows promote to 'permanent', alternate-swipe rows demote to 'inactive'),
- * chunk the newly-archived messages
- * (chunkChatTranscript.ts), summarize+embed each chunk (classifyChatChunk.ts + the embeddings
- * provider) — always, for both chat kinds, since chat_chunks/recall_chat_history is the one lane
- * that's already correctly RAG-only and needs no divergence — then branch on chat_sessions.kind:
- * a 'chat' (household) chat distills its "key ideas" digest (distillChatMemory.ts) against its own
- * existing entries, unchanged; an 'rp' chat instead runs the hookseeker-parity bridge
- * (bridgeChatMemory.ts) against the RAW toArchive transcript (never a summary-of-summary), writing
- * an evolving SCENE + EVENTS text block to chat_memory_entries (topic_key 'scene'/'events') and
- * arc-tagged plot developments as 'proposed' canon_facts rows. An 'rp' chat also runs two more
- * periodic curators every tick, over the same raw transcript: curateWorldMemory.ts (place/thing/
- * concept) and curatePeople.ts (person) — both ported from CNZ the same way the bridge was, both
- * proposing entity_key-tagged canon_facts rows (db/migrations/0064_canon_facts_entity_key.sql).
- * Either branch then writes the chat_chunks rows tied to one chat_sync_points row — created fresh
- * when the eager chunk path hasn't already opened one, reused-and-closed when it has
- * (docs/plans/eager-chunk-sync-plan.md: an eager chunk pass opens a `closed_at`-null point the
- * moment a pair rolls off the live window; this tick consolidates the open point's block and
- * closes it). A
- * mid-pipeline failure rolls the whole transaction back, canon-fact promotion included — the
- * previous sync point is untouched, and the next poll tick just retries from there (self-healing,
- * same "advance state, don't double-count" caution agentRoutineDispatch.ts's own doc explains, just
- * via ROLLBACK instead of an explicit ordering trick). Plot/world/people facts proposed this
- * tick get no special-cased approval — they settle through the exact same promote_canon_facts step,
- * on the chat's next tick, as every other canon fact.
+ * One sync pass, per chat, runs in three phases — a read transaction, an unguarded LLM/embeddings
+ * phase, then a write transaction — deliberately never one single transaction spanning the LLM
+ * calls (see the 2026-08-21 note below for why). Phase 1 promotes that chat's 'proposed'
+ * canon_facts to 'approved' (the settling-window auto-approve — see
+ * plugins/canonize/src/proposeCanonFactTool.ts) and reads everything the rest of the pass needs:
+ * the unsynced messages, the chunk-eligibility check (bailing out with 'skipped' here, before any
+ * LLM call, if there isn't a full chunk's worth to archive yet), and — branching on
+ * chat_sessions.kind — whichever prior chat_memory_entries/canon_facts rows the bridge or curators
+ * need as context. Phase 2 makes every slow external call this pass needs, chunk summarization
+ * (classifyChatChunk.ts) and embeddings always, then either distillChatMemory.ts's flat "key
+ * ideas" digest for a 'chat' (household) chat, or — for an 'rp' chat — the hookseeker-parity
+ * bridge (bridgeChatMemory.ts, fed the RAW toArchive transcript, never a summary-of-summary) plus
+ * the two periodic curators, curateWorldMemory.ts (place/thing/concept) and curatePeople.ts
+ * (person), all three ported from CNZ. Phase 3 writes what phase 2 computed: the chat_chunks rows
+ * tied to one chat_sync_points row (created fresh when the eager chunk path hasn't already opened
+ * one, reused-and-closed when it has — docs/plans/eager-chunk-sync-plan.md), the bridge's SCENE +
+ * EVENTS block and arc-tagged plot developments, or the curators' entity_key-tagged canon_facts
+ * rows (db/migrations/0064_canon_facts_entity_key.sql), settling transient locations/characters
+ * along the way (docs/plans/vistalyze_integration/segway.md §2.5). A failure in any phase leaves
+ * the previous sync point untouched — phase 1/3 roll back their own (write-light) transaction, and
+ * a phase-2 failure never opened phase 3's transaction at all — so the next poll tick just retries
+ * from there, same "advance state, don't double-count" self-healing agentRoutineDispatch.ts's own
+ * doc explains. Plot/world/people facts proposed this tick get no special-cased approval — they
+ * settle through the exact same promote_canon_facts step, on the chat's next tick, as every other
+ * canon fact.
+ *
+ * Phases 1 and 3 are deliberately separate transactions, not one transaction wrapping all three
+ * phases (2026-08-21, replacing the original single-withUserScope design): index.ts's Pool sets
+ * idle_in_transaction_session_timeout=60s specifically so a hung upstream call can't wedge the
+ * connection pool (see index.ts's own comment on the 2026-08-17 524 incident) — but a slow-not-hung
+ * bridge/curator call (an OpenRouter provider rejecting on content moderation, falling back, then
+ * retrying a stale keep-alive socket, all real and observed 2026-08-21) can and did exceed 60s
+ * while the old design held one transaction open across it. Postgres killed the connection
+ * server-side, and the write immediately after (upsert_bridge) is what actually threw — a
+ * misleading error location, since the real fault was the LLM call several steps earlier, not the
+ * write itself. With phases 1/3 holding a transaction only across fast DB-only work, and phase 2
+ * holding none at all, the timeout can no longer fire mid-pass.
  *
  * Every attempt (ok, skipped, or error-with-which-step) is also recorded into
  * chat_memory_sync_status, one upserted row per chat, through a separate transaction from the
@@ -60,7 +69,11 @@
  * 2026-08-09 ("sync_point: duplicate key value violates unique constraint
  * chat_sync_points_chat_id_ordinal_key"). The per-chat pg_advisory_xact_lock is the DB-side
  * serialization for the same race, in case the in-memory guard is ever bypassed (a second
- * process, a future caller); the unique constraint remains the last-resort backstop.
+ * process, a future caller); the unique constraint remains the last-resort backstop. Taken once per
+ * transaction, so phase 1 and phase 3 (chatMemorySync.ts's read/write split) each acquire it fresh
+ * rather than holding it across phase 2's LLM calls — inFlightSyncs already excludes every other
+ * caller in this same process for the pass's full duration regardless, so the lock's only job is
+ * guarding the hypothetical second process, same as before the split.
  *
  * The connection this pipeline's calls run through, and each of the five prompts, are read live
  * every tick from io/orchestratorSettings.ts (chat_memory_profile/chat_memory_live_window_pairs/
@@ -606,6 +619,31 @@ function entityKeyFor(category: string, name: string): string {
   return `${category}:${slug || 'unnamed'}`;
 }
 
+type ChatChunk = ReturnType<typeof chunkChatTranscript>[number];
+type BridgeResult = Awaited<ReturnType<typeof bridgeChatMemory>>;
+type WorldMemoryEntry = Awaited<ReturnType<typeof curateWorldMemory>>[number];
+type PeopleEntry = Awaited<ReturnType<typeof curatePeople>>[number];
+
+interface ChatSyncReadState {
+  skip: false;
+  kind: 'chat' | 'rp';
+  chunks: ChatChunk[];
+  toArchive: ChatTranscriptMessage[];
+  toArchiveRows: { message_id: string; role: 'user' | 'assistant'; content: string; active_swipe_id: string | null }[];
+  openPoint: { sync_id: string; last_message_id: string; ordinal: number } | undefined;
+  lastSyncedOrdinal: number | undefined;
+  // rp-only
+  transcriptText: string;
+  previousOutput: string;
+  existingThreads: string;
+  worldExistingBlock: string;
+  worldCategoryByName: Map<string, string>;
+  peopleExistingBlock: string;
+  // chat-only
+  distillDrafts: ChatMemoryEntryDraft[];
+  oldHorizonSummaries: string[];
+}
+
 async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, userId: string, chatId: string): Promise<SyncResult> {
   // In-flight guard: at most one sync pass per chat at a time. Skip, don't queue — see
   // inFlightSyncs' own doc (and cleanupLoop.ts's inFlightRepairs, the same fix on the cleanup
@@ -616,8 +654,10 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
     return { status: 'skipped' };
   }
   inFlightSyncs.add(chatId);
-  return runWithCallContext({ taskId: chatId, kind: 'system', userId }, () =>
-    deps.db.withUserScope(userId, async (session): Promise<SyncResult> => {
+  return runWithCallContext({ taskId: chatId, kind: 'system', userId }, async (): Promise<SyncResult> => {
+    // Phase 1: fast DB-only reads (plus the always-runs canon-fact promotion), inside one short
+    // transaction. Nothing here waits on an LLM or embeddings call.
+    const state = await deps.db.withUserScope(userId, async (session): Promise<ChatSyncReadState | { skip: true }> => {
       // Per-chat advisory lock: serializes same-chat passes at the DB even if the in-memory
       // guard above is ever bypassed (a second orchestrator process, a future caller). First
       // statement of the transaction, so a concurrent pass blocks HERE before any read — under
@@ -630,9 +670,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       // proposal goes live. Runs first, unconditionally for any chat this function is called for
       // — not gated behind the chunk-eligibility check below, so a quiet chat with only a couple
       // of proposed facts still gets them promoted on schedule instead of waiting on enough new
-      // messages to trigger a real chunking pass. Same transaction as the rest of the tick: a
-      // failure later in this function rolls the promotion back too, and the (idempotent) retry
-      // next tick picks it back up.
+      // messages to trigger a real chunking pass. This still commits even when the eligibility
+      // check below returns 'skip' — only a throw (a real read failure) rolls it back, and the
+      // (idempotent) retry next tick picks that back up.
       const promoted = await step('promote_canon_facts', () =>
         session.query<{ fact_id: string }>(
           `update canon_facts set status = 'approved', approved_at = now()
@@ -694,7 +734,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
       const turnsToArchive = eligibleTurns - (eligibleTurns % pairsPerChunk);
       if (turnsToArchive < pairsPerChunk) {
         log.info('chat-memory sync: nothing eligible to archive yet, skipping', { chatId, unsynced: unsynced.length });
-        return { status: 'skipped' };
+        return { skip: true };
       }
       // The message right before the (turnsToArchive)-th unsynced turn boundary — everything up to
       // there (including the leading greeting, if any) archives; everything from there on stays live.
@@ -722,14 +762,241 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             }))
           : toArchive;
 
+      const chunks = await step('chunk', async () => {
+        const [existingChunkCount] = await session.query<{ n: string }>(
+          'select count(*)::text as n from chat_chunks where chat_id = $1',
+          [chatId],
+        );
+        const startOrdinal = Number(existingChunkCount?.n ?? '0');
+        return chunkChatTranscript(chunkInput, startOrdinal, pairsPerChunk * 2);
+      });
+
+      // The two lanes diverge here — a 'chat' (household) chat gets the flat key-ideas digest
+      // (distillChatMemory.ts, fed only the compressed chunk summaries above); an 'rp' chat gets
+      // the hookseeker-parity bridge (bridgeChatMemory.ts, fed the RAW toArchive transcript
+      // directly, never a summary-of-summary). The two prompts/topic_key vocabularies are mutually
+      // exclusive per chat, selected once by chat_sessions.kind — see this file's own header doc.
+      // Everything each branch's phase-2 LLM call needs is read here, in phase 1, so phase 2 never
+      // has to reopen a transaction just to fetch prompt context.
+      if (kind === 'rp') {
+        // Shared by the bridge and both curator calls in phase 2 — one raw transcript of this sync
+        // window's toArchive messages, never a summary-of-summary, same "read the real thing every
+        // time" property as the bridge's own doc explains.
+        const transcriptText = toArchive.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
+
+        const previousRows = await session.query<{ topic_key: string; content: string }>(
+          `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
+          [chatId],
+        );
+        const previousScene = previousRows.find((r) => r.topic_key === 'scene')?.content ?? '';
+        const previousEvents = previousRows.find((r) => r.topic_key === 'events')?.content ?? '';
+        // Reconstructs CNZ's own "PREVIOUS OUTPUT" shape (an EVENTS table followed by a SCENE
+        // block) — the bridge's own PART 1/PART 2 instructions read this back as one blob, the
+        // same way its live output looked the sync before.
+        const previousOutput = previousScene || previousEvents ? `EVENTS:\n${previousEvents}\n\nSCENE:\n${previousScene}` : '';
+
+        // Latest-approved-per-arc_tag, mirroring recallCanonFactsTool.ts's own dedup query — every
+        // plot arc_tag is unique by the canon_facts table's own CHECK, so no coalesce needed here.
+        const openThreadRows = await session.query<{ arc_tag: string; summary: string; detail: string }>(
+          `select distinct on (arc_tag) arc_tag, summary, detail
+           from canon_facts
+           where chat_id = $1 and category = 'plot' and status = 'approved'
+           order by arc_tag, proposed_at desc`,
+          [chatId],
+        );
+        const existingThreads = openThreadRows.map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`).join('\n');
+
+        // The two periodic curators (place/thing/concept, and person) run every tick alongside the
+        // bridge, over the same transcriptText — CNZ's own real per-cycle cost, not a simplification.
+        // Both propose 'proposed' canon_facts rows keyed by entity_key (db/migrations/
+        // 0064_canon_facts_entity_key.sql), settling through this function's own promote_canon_facts
+        // step next tick, zero special-casing, same as the bridge's plot entries.
+        const worldExistingRows = await session.query<{ category: string; detail: string; summary: string }>(
+          `select distinct on (entity_key) category, detail, summary
+           from canon_facts
+           where chat_id = $1 and category in ('place', 'thing', 'concept') and status = 'approved'
+           order by entity_key, proposed_at desc`,
+          [chatId],
+        );
+        const worldExistingBlock = worldExistingRows.map((r) => `**${r.detail}**\n${r.summary}\n#${r.category}`).join('\n\n');
+        // A 'duplicate' action carries no category of its own — it's flagging an *existing* entry
+        // as redundant, so its category comes from that row, not the model.
+        const worldCategoryByName = new Map(worldExistingRows.map((r) => [r.detail.trim().toLowerCase(), r.category]));
+
+        const peopleExistingRows = await session.query<{ detail: string; summary: string }>(
+          `select distinct on (entity_key) detail, summary
+           from canon_facts
+           where chat_id = $1 and category = 'person' and status = 'approved'
+           order by entity_key, proposed_at desc`,
+          [chatId],
+        );
+        const peopleExistingBlock = peopleExistingRows.map((r) => `**${r.detail}**\n${r.summary}`).join('\n\n');
+
+        return {
+          skip: false,
+          kind,
+          chunks,
+          toArchive,
+          toArchiveRows,
+          openPoint,
+          lastSyncedOrdinal: lastSynced[0]?.ordinal,
+          transcriptText,
+          previousOutput,
+          existingThreads,
+          worldExistingBlock,
+          worldCategoryByName,
+          peopleExistingBlock,
+          distillDrafts: [],
+          oldHorizonSummaries: [],
+        };
+      }
+
+      const existingEntries = await session.query<ExistingEntryRow>(
+        'select topic_key, content from chat_memory_entries where chat_id = $1',
+        [chatId],
+      );
+      const distillDrafts: ChatMemoryEntryDraft[] = existingEntries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
+
+      // Widen beyond just this tick's brand-new chunks: the trailing digest-horizon of
+      // chat_chunks.summary (oldest first), so a cross-sync-boundary idea gets more than one
+      // chunk's worth of chance to register before it ages out — this platform's analogue of
+      // Canonize's own bridge-summary horizon re-read. The original single-transaction design
+      // re-read this from chat_chunks AFTER insert_chunks had already written this tick's own new
+      // chunks into the same transaction, so the horizon always included them for free. Now that
+      // insert_chunks runs in phase 3, after phase 2's distill LLM call, this tick's own chunks
+      // don't exist in the table yet when this read happens — so this reads only the OLDER
+      // trailing window here; phase 2 appends this tick's freshly-computed summaries (from
+      // summarize_embed) and re-windows to digestHorizonChunks, reproducing exactly what the
+      // post-insert re-read used to produce.
+      const oldHorizonRows = await session.query<{ summary: string }>(
+        'select summary from chat_chunks where chat_id = $1 order by ordinal desc limit $2',
+        [chatId, sync.digestHorizonChunks],
+      );
+      const oldHorizonSummaries = oldHorizonRows.map((r) => r.summary).reverse();
+
+      return {
+        skip: false,
+        kind,
+        chunks,
+        toArchive,
+        toArchiveRows,
+        openPoint,
+        lastSyncedOrdinal: lastSynced[0]?.ordinal,
+        transcriptText: '',
+        previousOutput: '',
+        existingThreads: '',
+        worldExistingBlock: '',
+        worldCategoryByName: new Map(),
+        peopleExistingBlock: '',
+        distillDrafts,
+        oldHorizonSummaries,
+      };
+    });
+
+    if (state.skip) {
+      return { status: 'skipped' };
+    }
+
+    // Phase 2: every slow external call this pass needs (LLM completions, embeddings) —
+    // deliberately outside any open transaction. See this file's 2026-08-21 header note: a DB
+    // session held across one of these calls is exactly what tripped index.ts's
+    // idle_in_transaction_session_timeout=60s when an OpenRouter fallback/retry pushed a single
+    // call past a minute. Phase 1 already read everything this phase needs; phase 3 only writes
+    // what this phase computes.
+    const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
+      const summaries = await withCallLabel('sync:chunk-summary', () =>
+        Promise.all(state.chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt))),
+      );
+      const vectors = await deps.embeddings.embed(state.chunks.map((c) => c.content));
+      // Stage 5 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the header
+      // lane — embed each chunk's summary too, into chat_chunks.summary_vector_embed
+      // (migration 0094). recallForPrompt.ts's chunk path fuses the content and summary lanes
+      // with best-of scoring + Canonize's 1.08× dual-confirmation bonus. Chunks written
+      // before 0094 have a NULL summary_vector_embed and stay content-lane-only.
+      const summaryVectors = await deps.embeddings.embed(summaries);
+      return { summaries, vectors, summaryVectors };
+    });
+
+    let bridgeResult: (BridgeResult & { plotEntries: (BridgeResult['plotEntries'][number] & { vectorLiteral: string })[] }) | undefined;
+    let worldMemoryEntries: (WorldMemoryEntry & { resolvedCategory: string | null; resolvedContent: string | null; vectorLiteral: string | null })[] | undefined;
+    let peopleEntries: (PeopleEntry & { resolvedContent: string | null; vectorLiteral: string | null })[] | undefined;
+    let distillUpdates: Awaited<ReturnType<typeof distillChatMemory>> | undefined;
+
+    if (state.kind === 'rp') {
+      const raw = await step('bridge', () =>
+        withCallLabel('sync:bridge', () =>
+          bridgeChatMemory(sync.llm, state.transcriptText, state.previousOutput, state.existingThreads, sync.personaName, sync.bridgePrompt),
+        ),
+      );
+      // Proposed, not approved — these go through the exact same settling-window auto-approve
+      // (this function's own promote_canon_facts step, next tick) as every other canon fact, no
+      // special-casing. summary carries the actual 2-4 sentence development (what
+      // recall_canon_facts/CanonQueueView show as the fact itself); detail carries the bridge's
+      // vivid entry name (a scannable label, secondary).
+      const plotEntries = await Promise.all(
+        raw.plotEntries.map(async (entry) => {
+          const [vector] = await deps.embeddings.embed([`${entry.name}\n${entry.content}`]);
+          return { ...entry, vectorLiteral: toPgVectorLiteral(vector!) };
+        }),
+      );
+      bridgeResult = { ...raw, plotEntries };
+
+      const worldRaw = await step('curate_world_memory', () =>
+        withCallLabel('sync:world-memory', () =>
+          curateWorldMemory(sync.llm, state.transcriptText, state.worldExistingBlock, sync.worldCuratorPrompt),
+        ),
+      );
+      worldMemoryEntries = await Promise.all(
+        worldRaw.map(async (entry) => {
+          const resolvedCategory = entry.action === 'duplicate' ? (state.worldCategoryByName.get(entry.name.trim().toLowerCase()) ?? null) : entry.category;
+          const resolvedContent = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
+          if (!resolvedCategory || !resolvedContent) {
+            log.error('chat-memory sync: world-memory curator entry missing category/content, skipping', { chatId, entry });
+            return { ...entry, resolvedCategory: null, resolvedContent: null, vectorLiteral: null };
+          }
+          const [vector] = await deps.embeddings.embed([`${entry.name}\n${resolvedContent}`]);
+          return { ...entry, resolvedCategory, resolvedContent, vectorLiteral: toPgVectorLiteral(vector!) };
+        }),
+      );
+
+      const peopleRaw = await step('curate_people', () =>
+        withCallLabel('sync:people', () =>
+          curatePeople(sync.llm, state.transcriptText, state.peopleExistingBlock, sync.personaName, sync.peopleCuratorPrompt),
+        ),
+      );
+      peopleEntries = await Promise.all(
+        peopleRaw.map(async (entry) => {
+          const resolvedContent = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
+          if (!resolvedContent) {
+            log.error('chat-memory sync: people curator entry missing content, skipping', { chatId, entry });
+            return { ...entry, resolvedContent: null, vectorLiteral: null };
+          }
+          const [vector] = await deps.embeddings.embed([`${entry.name}\n${resolvedContent}`]);
+          return { ...entry, resolvedContent, vectorLiteral: toPgVectorLiteral(vector!) };
+        }),
+      );
+    } else {
+      // Re-window onto this tick's own freshly-computed chunk summaries — see phase 1's
+      // oldHorizonSummaries comment for why this can't just be a DB re-read anymore.
+      const horizonSummaries = [...state.oldHorizonSummaries, ...summaries].slice(-sync.digestHorizonChunks);
+      distillUpdates = await step('distill', () =>
+        withCallLabel('sync:distill', () => distillChatMemory(sync.llm, state.distillDrafts, horizonSummaries, sync.distillPrompt)),
+      );
+    }
+
+    // Phase 3: writes only, inside a second short transaction. Everything here is fast, local
+    // Postgres work — nothing awaits an external call, so this can never trip the
+    // idle-in-transaction timeout phase 1/2's split exists to avoid.
+    return deps.db.withUserScope(userId, async (session): Promise<SyncResult> => {
+      await session.query('select pg_advisory_xact_lock(hashtext($1))', [chatId]);
+
       // docs/plans/vistalyze_integration/segway.md §2.5 (location_status.md §3 Steps 1-2, generalized to
       // characters): the transient location/character rows the post-cleanup scraper anchored to
-      // the messages leaving the live window settle here, in the same tick that already
-      // auto-approves canon facts. Continuing play on a swipe is the user's explicit signal that
-      // its timeline happened (bi_principles.md §3), so the active swipe's rows promote to
-      // permanent and every alternate swipe's rows demote to inactive — never deleted. A message
-      // with no active swipe (e.g. a greeting inserted outside the scrape path) anchors nothing,
-      // so it's a no-op.
+      // the messages leaving the live window settle here. Continuing play on a swipe is the user's
+      // explicit signal that its timeline happened (bi_principles.md §3), so the active swipe's
+      // rows promote to permanent and every alternate swipe's rows demote to inactive — never
+      // deleted. A message with no active swipe (e.g. a greeting inserted outside the scrape path)
+      // anchors nothing, so it's a no-op.
       //
       // db/migrations/0096: anchor_swipe_id now lives on location_chat_links/character_chat_links,
       // not on the row itself, and promotion must NOT clear it (that used to sever the row's only
@@ -749,7 +1016,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         let promotedCharacters = 0;
         let demotedLocations = 0;
         let demotedCharacters = 0;
-        for (const m of toArchiveRows) {
+        for (const m of state.toArchiveRows) {
           if (!m.active_swipe_id) continue;
           const promotedLoc = await session.query<{ location_id: string }>(
             `update locations set status = 'permanent', updated_at = now()
@@ -803,46 +1070,23 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         }
       });
 
-      const chunks = await step('chunk', async () => {
-        const [existingChunkCount] = await session.query<{ n: string }>(
-          'select count(*)::text as n from chat_chunks where chat_id = $1',
-          [chatId],
-        );
-        const startOrdinal = Number(existingChunkCount?.n ?? '0');
-        return chunkChatTranscript(chunkInput, startOrdinal, pairsPerChunk * 2);
-      });
-
-      const { summaries, vectors, summaryVectors } = await step('summarize_embed', async () => {
-        const summaries = await withCallLabel('sync:chunk-summary', () =>
-          Promise.all(chunks.map((c) => summarizeChatChunk(sync.llm, c.content, sync.chunkSummaryPrompt))),
-        );
-        const vectors = await deps.embeddings.embed(chunks.map((c) => c.content));
-        // Stage 5 of the CNZ retrieval port (docs/plans/completed/rag-dynamic-cutoff-plan.md): the header
-        // lane — embed each chunk's summary too, into chat_chunks.summary_vector_embed
-        // (migration 0094). recallForPrompt.ts's chunk path fuses the content and summary lanes
-        // with best-of scoring + Canonize's 1.08× dual-confirmation bonus. Chunks written
-        // before 0094 have a NULL summary_vector_embed and stay content-lane-only.
-        const summaryVectors = await deps.embeddings.embed(summaries);
-        return { summaries, vectors, summaryVectors };
-      });
-
-      const nextOrdinal = (lastSynced[0]?.ordinal ?? -1) + 1;
+      const nextOrdinal = (state.lastSyncedOrdinal ?? -1) + 1;
       const syncId = await step('sync_point', async () => {
-        if (openPoint) {
+        if (state.openPoint) {
           // Reuse-then-close: the point eager chunking opened gets this tick's own consolidation
           // boundary (archiveEnd) and closes. The last_message_id update only runs on this reuse
           // path — the fresh insert below already lands the final value, and writing it on a
           // no-op would risk tripping chat_sync_points' unique (chat_id, last_message_id).
           await session.query('update chat_sync_points set last_message_id = $2, closed_at = now() where sync_id = $1', [
-            openPoint.sync_id,
-            toArchive[toArchive.length - 1]!.messageId,
+            state.openPoint.sync_id,
+            state.toArchive[state.toArchive.length - 1]!.messageId,
           ]);
-          return openPoint.sync_id;
+          return state.openPoint.sync_id;
         }
         const [syncPoint] = await session.query<{ sync_id: string }>(
           `insert into chat_sync_points (chat_id, user_id, ordinal, last_message_id, closed_at) values ($1, $2, $3, $4, now())
            returning sync_id`,
-          [chatId, userId, nextOrdinal, toArchive[toArchive.length - 1]!.messageId],
+          [chatId, userId, nextOrdinal, state.toArchive[state.toArchive.length - 1]!.messageId],
         );
         return syncPoint!.sync_id;
       });
@@ -858,7 +1102,7 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           [chatId],
         );
         let parentChunkId: string | null = prevChunk?.chunk_id ?? null;
-        for (const [i, chunk] of chunks.entries()) {
+        for (const [i, chunk] of state.chunks.entries()) {
           const [inserted]: { chunk_id: string }[] = await session.query<{ chunk_id: string }>(
             `insert into chat_chunks (chat_id, sync_id, user_id, ordinal, content, summary, vector_embed, summary_vector_embed, parent_chunk_id)
              values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -869,150 +1113,53 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         }
       });
 
-      // The two lanes diverge here — a 'chat' (household) chat gets the flat key-ideas digest
-      // (distillChatMemory.ts, fed only the compressed chunk summaries above); an 'rp' chat gets
-      // the hookseeker-parity bridge (bridgeChatMemory.ts, fed the RAW toArchive transcript
-      // directly, never a summary-of-summary). The two prompts/topic_key vocabularies are mutually
-      // exclusive per chat, selected once by chat_sessions.kind — see this file's own header doc.
-      if (kind === 'rp') {
-        // Shared by the bridge and both curator calls below — one raw transcript of this sync
-        // window's toArchive messages, never a summary-of-summary, same "read the real thing every
-        // time" property as the bridge's own doc explains.
-        const transcriptText = toArchive.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n');
-
-        const bridgeResult = await step('bridge', async () => {
-          const previousRows = await session.query<{ topic_key: string; content: string }>(
-            `select topic_key, content from chat_memory_entries where chat_id = $1 and topic_key in ('scene', 'events')`,
-            [chatId],
-          );
-          const previousScene = previousRows.find((r) => r.topic_key === 'scene')?.content ?? '';
-          const previousEvents = previousRows.find((r) => r.topic_key === 'events')?.content ?? '';
-          // Reconstructs CNZ's own "PREVIOUS OUTPUT" shape (an EVENTS table followed by a SCENE
-          // block) — the bridge's own PART 1/PART 2 instructions read this back as one blob, the
-          // same way its live output looked the sync before.
-          const previousOutput = previousScene || previousEvents ? `EVENTS:\n${previousEvents}\n\nSCENE:\n${previousScene}` : '';
-
-          // Latest-approved-per-arc_tag, mirroring recallCanonFactsTool.ts's own dedup query — every
-          // plot arc_tag is unique by the canon_facts table's own CHECK, so no coalesce needed here.
-          const openThreadRows = await session.query<{ arc_tag: string; summary: string; detail: string }>(
-            `select distinct on (arc_tag) arc_tag, summary, detail
-             from canon_facts
-             where chat_id = $1 and category = 'plot' and status = 'approved'
-             order by arc_tag, proposed_at desc`,
-            [chatId],
-          );
-          const existingThreads = openThreadRows
-            .map((r) => `- #${r.arc_tag}: ${r.summary}${r.detail ? ` — ${r.detail}` : ''}`)
-            .join('\n');
-
-          return withCallLabel('sync:bridge', () =>
-            bridgeChatMemory(sync.llm, transcriptText, previousOutput, existingThreads, sync.personaName, sync.bridgePrompt),
-          );
-        });
-
+      if (state.kind === 'rp') {
         await step('upsert_bridge', async () => {
           await session.query(
             `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
              values ($1, $2, $3, 'scene', $4)
              on conflict (chat_id, topic_key) do update set
                sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
-            [chatId, syncId, userId, bridgeResult.scene],
+            [chatId, syncId, userId, bridgeResult!.scene],
           );
           await session.query(
             `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
              values ($1, $2, $3, 'events', $4)
              on conflict (chat_id, topic_key) do update set
                sync_id = excluded.sync_id, content = excluded.content, updated_at = now()`,
-            [chatId, syncId, userId, bridgeResult.events],
+            [chatId, syncId, userId, bridgeResult!.events],
           );
-          // Proposed, not approved — these go through the exact same settling-window auto-approve
-          // (this function's own promote_canon_facts step, next tick) as every other canon fact, no
-          // special-casing. summary carries the actual 2-4 sentence development (what
-          // recall_canon_facts/CanonQueueView show as the fact itself); detail carries the bridge's
-          // vivid entry name (a scannable label, secondary).
-          for (const entry of bridgeResult.plotEntries) {
-            const [vector] = await deps.embeddings.embed([`${entry.name}\n${entry.content}`]);
+          for (const entry of bridgeResult!.plotEntries) {
             await session.query(
               `insert into canon_facts (user_id, category, arc_tag, summary, detail, vector_embed, chat_id, sync_id)
                values ($1, 'plot', $2, $3, $4, $5, $6, $7)`,
-              [userId, entry.arcTag, entry.content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
+              [userId, entry.arcTag, entry.content, entry.name, entry.vectorLiteral, chatId, syncId],
             );
           }
           // The fully-rendered bridge prompt this pass actually sent the model (0079): the sync
           // point is inserted before the bridge runs (entries need its id), so the prompt lands
           // as an UPDATE on the same transaction — a rollback takes both together.
-          await session.query('update chat_sync_points set bridge_prompt = $2 where sync_id = $1', [
-            syncId,
-            bridgeResult.prompt,
-          ]);
-        });
-
-        // The two periodic curators (place/thing/concept, and person) run every tick alongside the
-        // bridge, over the same transcriptText — CNZ's own real per-cycle cost, not a simplification.
-        // Both propose 'proposed' canon_facts rows keyed by entity_key (db/migrations/
-        // 0064_canon_facts_entity_key.sql), settling through this function's own promote_canon_facts
-        // step next tick, zero special-casing, same as the bridge's plot entries above.
-        const worldMemoryResult = await step('curate_world_memory', async () => {
-          const existingRows = await session.query<{ category: string; detail: string; summary: string }>(
-            `select distinct on (entity_key) category, detail, summary
-             from canon_facts
-             where chat_id = $1 and category in ('place', 'thing', 'concept') and status = 'approved'
-             order by entity_key, proposed_at desc`,
-            [chatId],
-          );
-          const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}\n#${r.category}`).join('\n\n');
-          const entries = await withCallLabel('sync:world-memory', () =>
-            curateWorldMemory(sync.llm, transcriptText, existingBlock, sync.worldCuratorPrompt),
-          );
-          return { entries, existingRows };
+          await session.query('update chat_sync_points set bridge_prompt = $2 where sync_id = $1', [syncId, bridgeResult!.prompt]);
         });
 
         await step('upsert_world_memory', async () => {
-          // A 'duplicate' action carries no category of its own — it's flagging an *existing* entry
-          // (one of existingRows) as redundant, so its category comes from that row, not the model.
-          const categoryByName = new Map(worldMemoryResult.existingRows.map((r) => [r.detail.trim().toLowerCase(), r.category]));
-          for (const entry of worldMemoryResult.entries) {
-            const category = entry.action === 'duplicate' ? categoryByName.get(entry.name.trim().toLowerCase()) : entry.category;
-            const content = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
-            if (!category || !content) {
-              log.error('chat-memory sync: world-memory curator entry missing category/content, skipping', { chatId, entry });
-              continue;
-            }
-            const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
+          for (const entry of worldMemoryEntries!) {
+            if (!entry.vectorLiteral) continue; // already logged as skipped in phase 2
             await session.query(
               `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id, sync_id)
                values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-              [userId, category, entityKeyFor(category, entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
+              [userId, entry.resolvedCategory, entityKeyFor(entry.resolvedCategory!, entry.name), entry.resolvedContent, entry.name, entry.vectorLiteral, chatId, syncId],
             );
           }
         });
 
-        const peopleResult = await step('curate_people', async () => {
-          const existingRows = await session.query<{ detail: string; summary: string }>(
-            `select distinct on (entity_key) detail, summary
-             from canon_facts
-             where chat_id = $1 and category = 'person' and status = 'approved'
-             order by entity_key, proposed_at desc`,
-            [chatId],
-          );
-          const existingBlock = existingRows.map((r) => `**${r.detail}**\n${r.summary}`).join('\n\n');
-          return withCallLabel('sync:people', () =>
-            curatePeople(sync.llm, transcriptText, existingBlock, sync.personaName, sync.peopleCuratorPrompt),
-          );
-        });
-
         await step('upsert_people', async () => {
-          for (const entry of peopleResult) {
-            const content = entry.action === 'duplicate' ? `Duplicate of ${entry.duplicateOf ?? 'another entry'}.` : entry.content;
-            if (!content) {
-              log.error('chat-memory sync: people curator entry missing content, skipping', { chatId, entry });
-              continue;
-            }
-            const [vector] = await deps.embeddings.embed([`${entry.name}\n${content}`]);
+          for (const entry of peopleEntries!) {
+            if (!entry.vectorLiteral) continue; // already logged as skipped in phase 2
             await session.query(
               `insert into canon_facts (user_id, category, entity_key, summary, detail, vector_embed, chat_id, sync_id)
                values ($1, 'person', $2, $3, $4, $5, $6, $7)`,
-              [userId, entityKeyFor('person', entry.name), content, entry.name, toPgVectorLiteral(vector!), chatId, syncId],
+              [userId, entityKeyFor('person', entry.name), entry.resolvedContent, entry.name, entry.vectorLiteral, chatId, syncId],
             );
             // character-appearance-field-plan.md: the curator-side half of the frozen-once-set
             // rule — a non-empty `appearance` from this entry writes back onto the matching
@@ -1021,7 +1168,9 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
             // alone — bi_principles.md §3). The lookup is a plain exact case-insensitive name
             // match: a miss (the curator's strict two-word naming diverging from the scraped
             // row's name) just skips the write-back for this tick, never blocks or fails the
-            // sync. The write is a no-op idempotent check every tick either way.
+            // sync. The write is a no-op idempotent check every tick either way. Read fresh here
+            // (not in phase 1) so it reflects the row's current state at write time, not a
+            // snapshot from before phase 2's LLM calls.
             const appearance = entry.appearance?.trim();
             if (appearance) {
               const [charRow] = await session.query<{ character_id: string; appearance: string }>(
@@ -1045,41 +1194,23 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
           }
         });
 
-        const entriesUpdated = 2 + bridgeResult.plotEntries.length + worldMemoryResult.entries.length + peopleResult.length;
+        // Counts every curator-returned entry, same as the pre-split code — including one skipped
+        // for missing category/content (logged in phase 2, never written here). Matches the
+        // established chat_memory_sync_status.last_entries_updated semantics; not a "rows actually
+        // written" count.
+        const entriesUpdated = 2 + bridgeResult!.plotEntries.length + worldMemoryEntries!.length + peopleEntries!.length;
         log.info('chat-memory sync: bridged rp chat', {
           chatId,
-          chunksAdded: chunks.length,
-          plotEntries: bridgeResult.plotEntries.length,
-          worldMemoryEntries: worldMemoryResult.entries.length,
-          peopleEntries: peopleResult.length,
+          chunksAdded: state.chunks.length,
+          plotEntries: bridgeResult!.plotEntries.length,
+          worldMemoryEntries: worldMemoryEntries!.length,
+          peopleEntries: peopleEntries!.length,
         });
-        return { status: 'ok', chunksAdded: chunks.length, entriesUpdated };
+        return { status: 'ok', chunksAdded: state.chunks.length, entriesUpdated };
       }
 
-      const updates = await step('distill', async () => {
-        const existingEntries = await session.query<ExistingEntryRow>(
-          'select topic_key, content from chat_memory_entries where chat_id = $1',
-          [chatId],
-        );
-        const drafts: ChatMemoryEntryDraft[] = existingEntries.map((e) => ({ topicKey: e.topic_key, content: e.content }));
-
-        // Widen beyond just this tick's brand-new chunks: re-read the trailing digest-horizon of
-        // chat_chunks.summary (oldest first), so a cross-sync-boundary idea gets more than one
-        // chunk's worth of chance to register before it ages out — this platform's analogue of
-        // Canonize's own bridge-summary horizon re-read.
-        const horizonRows = await session.query<{ summary: string }>(
-          'select summary from chat_chunks where chat_id = $1 order by ordinal desc limit $2',
-          [chatId, sync.digestHorizonChunks],
-        );
-        const horizonSummaries = horizonRows.map((r) => r.summary).reverse();
-
-        return withCallLabel('sync:distill', () =>
-          distillChatMemory(sync.llm, drafts, horizonSummaries, sync.distillPrompt),
-        );
-      });
-
       await step('upsert_entries', async () => {
-        for (const entry of updates) {
+        for (const entry of distillUpdates!) {
           await session.query(
             `insert into chat_memory_entries (chat_id, sync_id, user_id, topic_key, content)
              values ($1, $2, $3, $4, $5)
@@ -1090,14 +1221,14 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
         }
       });
 
-      log.info('chat-memory sync: synced chat', { chatId, chunksAdded: chunks.length, entriesUpdated: updates.length });
-      return { status: 'ok', chunksAdded: chunks.length, entriesUpdated: updates.length };
-    }),
-  ).finally(() => {
+      log.info('chat-memory sync: synced chat', { chatId, chunksAdded: state.chunks.length, entriesUpdated: distillUpdates!.length });
+      return { status: 'ok', chunksAdded: state.chunks.length, entriesUpdated: distillUpdates!.length };
+    });
+  }).finally(() => {
     // The guard is per chat: drop it once the pass is done, whatever happened (committed, skipped
-    // after the eligibility check, or the transaction rolled back mid-pipeline). A chat whose
-    // pass left work uncovered is legitimately picked up by the next tick — but as a new pass,
-    // not as a parallel twin of this one.
+    // after the eligibility check, or a phase rolled back). A chat whose pass left work uncovered
+    // is legitimately picked up by the next tick — but as a new pass, not as a parallel twin of
+    // this one.
     inFlightSyncs.delete(chatId);
   });
 }
