@@ -187,6 +187,8 @@ export interface StoredChatMessage {
   role: 'user' | 'assistant';
   content: string;
   createdAt: string;
+  /** The currently active swipe's id for this message, when swipes exist — needed for RP sprite history (rp-sprite-stage AC-25). Undefined when no swipe history (content is the only version). */
+  activeSwipeId?: string;
   /** Display-only macro-resolved copy of `content` (docs/plans/prompt-macros.md's Stage 1), attached by
    *  server/httpServer.ts's GET /v1/chats/:id (and the swipe routes) for 'rp' chats whose stored
    *  text contains `{{...}}` tokens — chiefly a character's seeded greeting, which
@@ -660,6 +662,7 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
               swipes: swipeRows
                 ? { index: swipeRows.findIndex((s) => s.swipe_id === m.active_swipe_id), count: swipeRows.length }
                 : undefined,
+              activeSwipeId: m.active_swipe_id ?? undefined,
             };
           }),
           syncBoundary,

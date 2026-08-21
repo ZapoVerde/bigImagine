@@ -343,16 +343,14 @@ body {
   overflow: auto;
 }
 
-/* studio-character-bridge-plan.md Part E — the rp view container hosts ActivePortrait above
-   ChatView: flex column so the box takes its own row and the chat (height: 100% by default)
-   shrinks to fill the rest instead of overflowing the container. */
+/* RP Sprite Stage — ActivePortrait removed; view-container-rp no longer needs flex column for portrait row. Keep minimal. */
 .view-container-rp {
   display: flex;
   flex-direction: column;
 }
 
 .view-container-rp > .chat-view {
-  height: auto;
+  height: 100%;
   flex: 1;
   min-height: 0;
 }

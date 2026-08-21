@@ -21,7 +21,6 @@ import LocationsView from './views/LocationsView';
 import CanonQueueView from './views/CanonQueueView';
 import CharactersView from './views/CharactersView';
 import ChatView from './views/ChatView';
-import ActivePortrait from './components/chat/ActivePortrait';
 import CleanupView from './views/CleanupView';
 import ConnectionsView from './views/ConnectionsView';
 import PortraitStudioView from './views/PortraitStudioView';
@@ -295,9 +294,7 @@ export default function App() {
               />
             )}
             {tab.type === 'rp' && (
-              <>
-                {tab.chatId && portraitsEnabled !== false && <ActivePortrait apiKey={apiKey} chatId={tab.chatId} sceneId={activeSceneId} />}
-                <ChatView
+              <ChatView
                   apiKey={apiKey}
                   tabId={tab.id}
                   chatId={tab.chatId}
@@ -314,7 +311,6 @@ export default function App() {
                   onTurnSnapshot={tab.id === activeTabId ? setTurnSnapshot : undefined}
                   onSceneIdChange={tab.id === activeTabId ? setActiveSceneId : undefined}
                 />
-              </>
             )}
             {tab.type === 'notes' && (
               <NotesView

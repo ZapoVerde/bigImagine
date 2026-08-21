@@ -1,0 +1,93 @@
+.sprite-stage {
+  position: relative;
+  width: 100%;
+  min-height: 120px;
+  max-height: 60vh;
+  overflow: hidden;
+  background: transparent;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.sprite-stage__slots {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 8px;
+}
+
+.sprite-stage--one .sprite-stage__slots {
+  justify-content: center;
+}
+
+.sprite-stage--two .sprite-stage__slots {
+  justify-content: space-between;
+  padding: 0 12px;
+}
+
+.sprite-stage--three .sprite-stage__slots {
+  justify-content: space-between;
+}
+
+.sprite-stage__slot {
+  flex: 1 1 0;
+  max-width: 33%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 0;
+  position: relative;
+}
+
+.sprite-stage--one .sprite-stage__slot {
+  max-width: 48%;
+  align-items: center;
+}
+
+.sprite-stage--two .sprite-stage__slot {
+  max-width: 44%;
+}
+
+.sprite-stage__img {
+  width: 100%;
+  height: auto;
+  max-height: 100%;
+  object-fit: contain;
+  object-position: bottom center;
+  display: block;
+  pointer-events: none;
+  user-select: none;
+}
+
+.sprite-stage__name {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-top: 2px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.sprite-stage--empty,
+.sprite-stage--error {
+  min-height: 0;
+  height: 0;
+}
+
+@media (max-width: 640px) {
+  .sprite-stage {
+    min-height: 96px;
+  }
+  .sprite-stage__slots {
+    gap: 4px;
+    padding: 0 4px;
+  }
+}

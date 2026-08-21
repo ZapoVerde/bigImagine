@@ -1,4 +1,5 @@
 import type {
+  CharacterSpriteState,
   ChatCompletionResponse,
   StreamingTerminalFrame,
   ChatDetail,
@@ -1859,4 +1860,18 @@ export function retryPortraitCandidate(
  *  a 404 means the round isn't yours or doesn't exist. */
 export function fetchPortraitRoundTelemetry(roundId: string, apiKey: string | null): Promise<PortraitRoundTelemetry> {
   return jsonRequest<PortraitRoundTelemetry>(`/v1/portraits/rounds/${encodeURIComponent(roundId)}/telemetry`, apiKey, { method: 'GET' });
+}
+
+/** GET /v1/chats/:chatId/character-sprites — RP Sprite Stage presentation (rp-sprite-stage). */
+export async function getChatCharacterSprites(
+  chatId: string,
+  apiKey: string | null,
+  opts?: { selectedSwipeId?: string | null; selectedMessageId?: string | null },
+): Promise<CharacterSpriteState[]> {
+  const params = new URLSearchParams();
+  if (opts?.selectedSwipeId) params.set('selectedSwipeId', opts.selectedSwipeId);
+  if (opts?.selectedMessageId) params.set('selectedMessageId', opts.selectedMessageId);
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const body = await jsonRequest<{ sprites: CharacterSpriteState[] }>(`/v1/chats/${encodeURIComponent(chatId)}/character-sprites${query}`, apiKey);
+  return body.sprites;
 }

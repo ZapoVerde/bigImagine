@@ -280,6 +280,7 @@ import {
 } from './portraitRoutes.js';
 import { handlePortraitRoundTelemetry } from './portraitTelemetryRoutes.js';
 import { handleCharacterVisualStateEnabledGet, handleCharacterVisualStateEnabledSet } from './characterVisualState.js';
+import { handleChatCharacterSprites } from './characterSpriteState.js';
 
 export interface HttpServerDeps {
   llm: LlmProvider;
@@ -569,6 +570,20 @@ const routes: Route[] = [
   { method: 'GET', prefix: true, path: '/v1/characters/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       await handleCharacterExportRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
     }) },
+
+  // ---- Character Sprite Stage (RP) — read-only presentation of cached visual combinations ----
+  { method: 'GET', prefix: true, path: '/v1/chats/', run: async (req, res, deps) => {
+      const url = new URL(req.url!, 'http://placeholder');
+      if (!url.pathname.endsWith('/character-sprites')) {
+        return withUser(req, res, deps, async (userId) => {
+          await handleChatRoutes(req, res, deps, userId, url);
+        });
+      }
+      return withUser(req, res, deps, async (userId) => {
+        await handleChatCharacterSprites(req, res, deps, userId, url);
+      });
+    }
+  },
 
   // ---- Chats / folders / location image notify (any method — the CRUD handlers dispatch on it) ----
   { method: '*', family: '/v1/chats', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {

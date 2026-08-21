@@ -60,6 +60,7 @@ import PinnedNotesDrawer from '../components/PinnedNotesDrawer';
 import ChatMessageRow from '../components/chat/ChatMessageRow';
 import ChatComposer, { type ChatComposerHandle } from '../components/chat/ChatComposer';
 import { useEdgeSwipe } from '../hooks/useEdgeSwipe';
+import SpriteStage from '../components/chat/SpriteStage';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
@@ -153,6 +154,7 @@ export interface DisplayMessage {
   /** Swipe capability on the last LLM response — present only once this message has been
    *  regenerated at least once. See api/types.ts's StoredChatMessage for the shape. */
   swipes?: { index: number; count: number };
+  activeSwipeId?: string;
   /** The turn's reasoning block (docs/plans/reasoning-blocks-plan.md) — the de-tagged span the
    *  model produced between the configured tag pair; present only when the turn produced one,
    *  per swipe variant. See StoredChatMessage.reasoning. */
@@ -485,6 +487,110 @@ export default function ChatView({
   // standalone ChatSyncStatusPanel (the same panel the settings rail embeds).
   const [syncHealth, setSyncHealth] = useState<ChatSyncHealth | null>(null);
   const [syncStatusOpen, setSyncStatusOpen] = useState(false);
+
+  // RP Sprite Stage persisted visibility + ratio (AC-02, AC-08) — presentation-only
+  const [spriteStageVisible, setSpriteStageVisible] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem('rp_sprite_stage_visible');
+      return v === null ? true : v === 'true';
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('rp_sprite_stage_visible', String(spriteStageVisible));
+    } catch {}
+  }, [spriteStageVisible]);
+  const [spriteStageRatio, setSpriteStageRatio] = useState<number>(() => {
+    try {
+      const v = localStorage.getItem('rp_sprite_stage_ratio');
+      const n = v ? parseFloat(v) : NaN;
+      if (Number.isFinite(n)) return Math.min(0.6, Math.max(0.2, n));
+      return 0.33;
+    } catch {
+      return 0.33;
+    }
+  });
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const onResize = () => {
+      const viewportH = vv.height;
+      const windowH = window.innerHeight;
+      const keyboardOpen = viewportH < windowH * 0.75;
+      setIsKeyboardOpen(keyboardOpen);
+    };
+    vv.addEventListener('resize', onResize);
+    return () => vv.removeEventListener('resize', onResize);
+  }, [active]);
+  const effectiveStageRatio = isKeyboardOpen ? Math.min(spriteStageRatio, 0.25) : spriteStageRatio;
+
+  const isDraggingStageRef = useRef(false);
+  const isKeyboardOpenRef = useRef(false);
+  useEffect(() => {
+    isKeyboardOpenRef.current = isKeyboardOpen;
+  }, [isKeyboardOpen]);
+  const handleStageDividerPointerDown = useCallback((e: React.PointerEvent) => {
+    if (isKeyboardOpenRef.current) return;
+    if (!chatMainRef.current) return;
+    isDraggingStageRef.current = true;
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = chatMainRef.current.querySelector<HTMLElement>('.rp-sprite-stage-container')?.offsetHeight ?? 220;
+    const avail = chatMainRef.current.clientHeight;
+    const onMove = (ev: PointerEvent) => {
+      if (!isDraggingStageRef.current || !chatMainRef.current) return;
+      const dy = ev.clientY - startY;
+      const newHeight = Math.min(avail * 0.6, Math.max(avail * 0.2, startHeight + dy));
+      const ratio = Math.min(0.6, Math.max(0.2, newHeight / avail));
+      const el = chatMainRef.current.querySelector<HTMLElement>('.rp-sprite-stage-container');
+      if (el) el.style.height = `${ratio * 100}%`;
+      (chatMainRef.current as unknown as { _pendingRatio?: number })._pendingRatio = ratio;
+    };
+    const onUp = () => {
+      isDraggingStageRef.current = false;
+      (e.target as Element).releasePointerCapture?.(e.pointerId);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      const pending = (chatMainRef.current as unknown as { _pendingRatio?: number })._pendingRatio;
+      if (pending !== undefined) {
+        const clamped = Math.min(0.6, Math.max(0.2, pending));
+        setSpriteStageRatio(clamped);
+        try {
+          localStorage.setItem('rp_sprite_stage_ratio', String(clamped));
+        } catch {}
+      }
+      const el = chatMainRef.current?.querySelector<HTMLElement>('.rp-sprite-stage-container');
+      if (el) el.style.height = '';
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }, []);
+  const [spriteRefreshToken, setSpriteRefreshToken] = useState(0);
+  // Bump sprite refresh after completed turns (messages length changes) and after swipe actions
+  useEffect(() => {
+    if (activeChat?.kind === 'rp') setSpriteRefreshToken((n) => n + 1);
+  }, [messages.length, activeChat?.kind]);
+  const selectedSpriteSwipe = useMemo(() => {
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    return {
+      swipeId: lastAssistant?.activeSwipeId ?? null,
+      messageId: lastAssistant?.messageId ?? null,
+    };
+  }, [messages]);
+  // Also bump on swipe id change (same length, different variant)
+  useEffect(() => {
+    if (activeChat?.kind === 'rp' && (selectedSpriteSwipe.swipeId || selectedSpriteSwipe.messageId)) {
+      setSpriteRefreshToken((n) => n + 1);
+    }
+  }, [selectedSpriteSwipe.swipeId, selectedSpriteSwipe.messageId, activeChat?.kind]);
+  // Sprite refresh exposed via spriteRefreshToken bump (messages.length effect covers most cases)
   // The blocking truth as a plain boolean so send() and the composer's disabled prop read the
   // same value. true exactly when the server is refusing new turns with 409 CHAT_SYNC_STALLED.
   const syncBlocked = syncHealth?.blocking === true;
@@ -714,7 +820,7 @@ export default function ChatView({
     getChat(chatId, apiKey)
       .then((detail) => {
         setActiveChat(detail.session);
-        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+        setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning, activeSwipeId: m.activeSwipeId })));
         setSyncBoundary(detail.syncBoundary);
         setRevealedSyncCount(0);
         pendingInitialScrollRef.current = true;
@@ -983,7 +1089,7 @@ export default function ChatView({
   // a tool's focusHint — shows up without a separate request.
   async function refreshActiveMessages(chatId: string) {
     const detail = await getChat(chatId, apiKey);
-    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning })));
+    setMessages(detail.messages.map((m) => ({ messageId: m.messageId, role: m.role, content: m.content, resolvedContent: m.resolvedContent, swipes: m.swipes, reasoning: m.reasoning, activeSwipeId: m.activeSwipeId })));
     // Boundary advance (docs/plans/rp-sync-boundary-rollout-plan.md): a background sync may have
     // consolidated part of the live tail since the last render, so the refreshed boundary's
     // anchor moves up and the collapsed region grows. Revealed pages whose sync is no longer in
@@ -2135,7 +2241,7 @@ export default function ChatView({
       style={{ ...chatBgStyle, ...legStyle }}
       data-legibility={legibilityFlags}
     >
-      <div className="chat-main" ref={chatMainRef}>
+      <div className={`chat-main${activeChat?.kind === 'rp' ? ' rp' : ''}`} ref={chatMainRef}>
         {error && <div className="error-banner">{error}</div>}
 
         {bgUrl && (
@@ -2163,51 +2269,30 @@ export default function ChatView({
           </>
         )}
 
-        <div className="chat-top-bar">
-          <div className="chat-header">
-            <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
-            {activeChat?.kind === 'rp' && activeChat.cleanupEnabledAt && (
-              // The subloop just reported the newest message settled — the cleaned rewrite is
-              // already in the DB, so re-fetch the chat to surface it straightaway instead of
-              // making the reader refresh. Guarded against a chat switch (chatIdRef) and
-              // deferred past an in-flight send (the send's own refresh would race it).
-              <CleanupStatusPill
-                apiKey={apiKey}
-                chatId={activeChat.chatId}
-                liveStatus={cleanupLive}
-                onSettled={() => {
-                  const id = activeChat.chatId;
-                  if (chatIdRef.current !== id) return;
-                  if (sendingRef.current) {
-                    deferredCleanupSettleRef.current = id;
-                    return;
-                  }
-                  void refreshActiveMessages(id).catch(() => {
-                    // Best-effort — a failed settle refresh leaves the poll tick to handle it.
-                  });
-                }}
-              />
-            )}
-            {activeChat?.kind === 'rp' ? (
-              <div className="chat-menu-wrap" ref={chatMenuRef}>
-                <button
-                  type="button"
-                  className="chat-menu-button"
-                  title="Chat menu"
-                  aria-haspopup="menu"
-                  aria-expanded={chatMenuOpen}
-                  onClick={() => setChatMenuOpen((v) => !v)}
-                >
-                  ⋯
-                </button>
-                {chatMenuOpen && (
-                  <div className="chat-menu" role="menu">
-                    {chatMenuItems}
-                  </div>
-                )}
-              </div>
-            ) : (
-              activeChat && (
+        {activeChat?.kind !== 'rp' && (
+          <div className="chat-top-bar">
+            <div className="chat-header">
+              <span className="chat-title">{activeChat?.title ?? 'New chat'}</span>
+              {false ? (
+                <div className="chat-menu-wrap" ref={chatMenuRef}>
+                  <button
+                    type="button"
+                    className="chat-menu-button"
+                    title="Chat menu"
+                    aria-haspopup="menu"
+                    aria-expanded={chatMenuOpen}
+                    onClick={() => setChatMenuOpen((v) => !v)}
+                  >
+                    ⋯
+                  </button>
+                  {chatMenuOpen && (
+                    <div className="chat-menu" role="menu">
+                      {chatMenuItems}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                activeChat && (
                 <button
                   type="button"
                   className="chat-branch-map-summon"
@@ -2229,6 +2314,7 @@ export default function ChatView({
             )}
           </div>
         </div>
+        )}
 
         {/* Rolling-memory sync warning/block banner (RP chats only): sits directly under the top
             bar so a sync problem is the first thing visible, not buried below the composer.
@@ -2237,6 +2323,24 @@ export default function ChatView({
             back until turnsUntilBlock has counted down to half of syncEveryPairs — the banner
             shouldn't fire the moment sync merely falls due, only once it's meaningfully behind.
             "View sync status" opens the standalone ChatSyncStatusPanel overlay. */}
+        {activeChat?.kind === 'rp' && activeChat.cleanupEnabledAt && (
+          <div className="rp-floating-pill">
+            <CleanupStatusPill
+              apiKey={apiKey}
+              chatId={activeChat.chatId}
+              liveStatus={cleanupLive}
+              onSettled={() => {
+                const id = activeChat.chatId;
+                if (chatIdRef.current !== id) return;
+                if (sendingRef.current) {
+                  deferredCleanupSettleRef.current = id;
+                  return;
+                }
+                void refreshActiveMessages(id).catch(() => {});
+              }}
+            />
+          </div>
+        )}
         {activeChat?.kind === 'rp' && syncHealth && showSyncBanner && (
           <div
             className={`chat-sync-banner chat-sync-banner-${syncHealth.state}`}
@@ -2271,6 +2375,28 @@ export default function ChatView({
               View sync status
             </button>
           </div>
+        )}
+
+        {activeChat?.kind === 'rp' && spriteStageVisible && chatId && (
+          <>
+            <div className="rp-sprite-stage-container" style={{ height: `${effectiveStageRatio * 100}%` }}>
+              <SpriteStage
+                apiKey={apiKey}
+                chatId={chatId}
+                refreshToken={spriteRefreshToken}
+                active={active}
+                selectedSwipeId={selectedSpriteSwipe.swipeId}
+                selectedMessageId={selectedSpriteSwipe.messageId}
+              />
+            </div>
+            <div
+              className="sprite-stage-divider"
+              role="separator"
+              aria-orientation="horizontal"
+              onPointerDown={handleStageDividerPointerDown}
+              title="Drag to resize sprites"
+            />
+          </>
         )}
 
         <div className="chat-history" ref={historyRef} onScroll={handleHistoryScroll} onTouchStart={handleHistoryTouchStart} onTouchEnd={handleHistoryTouchEnd} onTouchCancel={handleHistoryTouchEnd}>
@@ -2401,6 +2527,17 @@ export default function ChatView({
                 onClick={() => fileInputRef.current?.click()}
               >
                 📎
+              </button>
+            )}
+            {activeChat?.kind === 'rp' && (
+              <button
+                type="button"
+                className="sprite-stage-toggle"
+                title={spriteStageVisible ? 'Hide character sprites' : 'Show character sprites'}
+                aria-pressed={spriteStageVisible}
+                onClick={() => setSpriteStageVisible((v) => !v)}
+              >
+                {spriteStageVisible ? 'Hide sprites' : 'Show sprites'}
               </button>
             )}
             {/* Robust-chat-turns plan: the composer is disabled while catching up to a turn this

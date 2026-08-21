@@ -959,6 +959,8 @@ export interface StoredChatMessage {
    *  last LLM response). index is its current position among stored variants (0-based); count is
    *  how many exist. Undefined means never swiped — content is the only version. */
   swipes?: { index: number; count: number };
+  /** The currently active swipe's id for this message, when swipes exist — needed for RP sprite history (AC-25). Undefined when no swipe history. */
+  activeSwipeId?: string;
   /** The turn's reasoning block (docs/plans/reasoning-blocks-plan.md): the de-tagged span between
    *  the configured open/close tag pair, persisted by the server when the turn produced one.
    *  Present only then (absent = no span, never an empty string) — the message never renders the
@@ -1696,6 +1698,15 @@ export interface PortraitRoundTotals {
   llmDurationMs: number;
   imageDurationMs: number;
   wallClockDurationMs: number;
+}
+
+// GET /v1/chats/:chatId/character-sprites — RP Sprite Stage presentation rows (rp-sprite-stage).
+export interface CharacterSpriteState {
+  characterId: string;
+  name: string;
+  presenceOrder: number;
+  imageUrl: string | null;
+  expression: string | null;
 }
 
 /** GET /v1/portraits/rounds/:roundId/telemetry response — the durable per-round receipt: every
