@@ -175,6 +175,48 @@
   padding-top: 0.6rem;
 }
 
+.chat-sync-history-header {
+  display: flex;
+  align-items: center;
+  padding: 0.25rem 0.5rem;
+}
+
+.chat-sync-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font: inherit;
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  padding: 0.35rem 0.5rem;
+}
+
+.chat-sync-history-toggle:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+}
+
+.chat-sync-history-toggle .chat-sync-history-chevron {
+  font-size: 0.65rem;
+  flex-shrink: 0;
+  width: auto;
+}
+
+.chat-sync-history-count {
+  color: var(--color-text-faint);
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  margin-left: 0.15rem;
+}
+
 .chat-sync-history-title {
   font-size: var(--font-size-sm);
   font-weight: var(--font-weight-semibold);

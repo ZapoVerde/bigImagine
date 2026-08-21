@@ -2889,11 +2889,15 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks,
         </div>
       </details>
 
-      {session?.kind === 'rp' && session && (
-        <CastSection apiKey={apiKey} chatId={session.chatId} sceneId={session.sceneId} />
+      {session?.kind === 'rp' && (
+        <details className="chat-settings-set" open>
+          <summary className="chat-settings-set-summary">Characters</summary>
+          <div className="chat-settings-set-body">
+            {session && <CastSection apiKey={apiKey} chatId={session.chatId} sceneId={session.sceneId} />}
+            <CharacterVisualStateToggle />
+          </div>
+        </details>
       )}
-
-      {session?.kind === 'rp' && <CharacterVisualStateToggle />}
 
       <LegibilityMenu settings={legSettings} onChange={onLegChange} />
 

@@ -255,9 +255,22 @@
   box-shadow: none;
 }
 
-/* Collapsed: stop claiming the drawer column's leftover space so the Timing section (a flex
-   sibling, sidebar-rp-sections) sits directly under this header instead of at the bottom of a
-   flex:1 gap. Only relevant inside the sidebar mount — the standalone panel never collapses. */
+/* Left-drawer alignment: Prompt Inspector, Timing and Sync History share the same header
+   language in the RP drawer (Sidebar). The standalone panel keeps its large title, but inside
+   the sidebar it drops to the tiny uppercase label used by Timing/Cast/Sync History. */
+.sidebar .prompt-inspector-header {
+  padding: 0.25rem 0.5rem;
+  border-bottom: none;
+}
+
+.sidebar .prompt-inspector-title {
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
 .sidebar .prompt-inspector-panel.collapsed {
   flex: none;
   min-height: auto;

@@ -158,6 +158,7 @@ function SyncStatusBody({
 // exactly "touched by this sync"), the canon-fact proposals it wrote, and the fully-rendered
 // bridge prompt it sent the model (null for non-rp chats and pre-0079 syncs).
 function SyncHistory({ chatId, apiKey, syncs }: { chatId: string; apiKey: string | null; syncs: ChatSyncStatus['syncs'] }) {
+  const [collapsed, setCollapsed] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [details, setDetails] = useState<Map<string, ChatSyncInspection>>(new Map());
   const [errors, setErrors] = useState<Map<string, string>>(new Map());
@@ -205,18 +206,50 @@ function SyncHistory({ chatId, apiKey, syncs }: { chatId: string; apiKey: string
   if (syncs.length === 0) {
     return (
       <div className="chat-sync-history">
-        <div className="chat-sync-history-title">Sync history</div>
-        <div className="chat-sync-status-note">
-          No sync passes yet — this chat's rolling memory sync hasn't produced a sync point.
+        <div className="chat-sync-history-header">
+          <button
+            type="button"
+            className="chat-sync-history-toggle"
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((c) => !c)}
+            title={collapsed ? 'Expand sync history' : 'Collapse sync history'}
+          >
+            <span className="chat-sync-history-chevron" aria-hidden>
+              {collapsed ? '▸' : '▾'}
+            </span>
+            <span>Sync history</span>
+          </button>
         </div>
+        {!collapsed && (
+          <div className="chat-sync-status-note">
+            No sync passes yet — this chat's rolling memory sync hasn't produced a sync point.
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="chat-sync-history">
-      <div className="chat-sync-history-title">Sync history</div>
-      <ul className="chat-sync-history-list">
+      <div className="chat-sync-history-header">
+        <button
+          type="button"
+          className="chat-sync-history-toggle"
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Expand sync history' : 'Collapse sync history'}
+        >
+          <span className="chat-sync-history-chevron" aria-hidden>
+            {collapsed ? '▸' : '▾'}
+          </span>
+          <span>Sync history</span>
+          <span className="chat-sync-history-count" aria-hidden>
+            ({syncs.length})
+          </span>
+        </button>
+      </div>
+      {!collapsed && (
+        <ul className="chat-sync-history-list">
         {syncs.map((sync) => {
           const isOpen = expanded.has(sync.syncId);
           return (
@@ -241,6 +274,7 @@ function SyncHistory({ chatId, apiKey, syncs }: { chatId: string; apiKey: string
           );
         })}
       </ul>
+      )}
     </div>
   );
 }
