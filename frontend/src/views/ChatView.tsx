@@ -32,7 +32,6 @@ import { ADMIN_API_KEY_STORAGE_KEY } from '../api/authStorage';
 import { TurnTimeline, type TimelineOutcome } from '../lib/turnTimeline';
 import type { TurnSnapshot } from '../lib/turnTimelineReport';
 import type {
-  ApplyPromptStackToChatResult,
   ChatBackgroundSettings,
   ChatDetail,
   ChatLegibilitySettings,
@@ -61,6 +60,8 @@ import ChatMessageRow from '../components/chat/ChatMessageRow';
 import ChatComposer, { type ChatComposerHandle } from '../components/chat/ChatComposer';
 import { useEdgeSwipe } from '../hooks/useEdgeSwipe';
 import SpriteStage from '../components/chat/SpriteStage';
+import CastSection from '../components/sidebar/CastSection';
+import CharacterVisualStateToggle from '../components/sidebar/CharacterVisualStateToggle';
 import './ChatView.css';
 
 // GitHub's git-branch octicon (Primer) — the branch-map toggle icon. Inline SVG so it inherits
@@ -1637,13 +1638,15 @@ export default function ChatView({
    *  new turn settles (its location + render), then the refresh swaps in the replacement;
    *  a failure restores the swiped-from background. Plain prev/next cycling between stored
    *  variants never reverts — the location state doesn't change. */
-  async function swipe(messageId: string, direction: 'prev' | 'next') {
+  async function swipe(messageId: string, direction: 'prev' | 'next' | 'regenerate') {
     if (!activeChat || sending || swipingId) return;
     setError(null);
     setSwipingId(messageId);
-    const msg = messages.find((m) => m.messageId === messageId);
-    const hasMoreSwipesAhead = !!msg?.swipes && msg.swipes.index < msg.swipes.count - 1;
-    const willRegenerate = direction === 'next' && !hasMoreSwipesAhead;
+    const willRegenerate = direction === 'regenerate' || (() => {
+      const msg = messages.find((m) => m.messageId === messageId);
+      const hasMoreSwipesAhead = !!msg?.swipes && msg.swipes.index < msg.swipes.count - 1;
+      return direction === 'next' && !hasMoreSwipesAhead;
+    })();
     setSwipeRegenerating(willRegenerate);
     const swipedFrom = locationImage;
     const prevImage = bgPreviousRef.current;
@@ -1695,7 +1698,7 @@ export default function ChatView({
         result = await swipeMessage(
           activeChat.chatId,
           messageId,
-          'next',
+          direction === 'regenerate' ? 'regenerate' : 'next',
           apiKey,
           (delta) => {
             // Turn-timing recorder: every content delta marks the first/last-token window.
@@ -1744,7 +1747,8 @@ export default function ChatView({
         }
         reportTurnSnapshot(swipeTimeline, activeChat.chatId);
       } else {
-        result = await swipeMessage(activeChat.chatId, messageId, direction, apiKey);
+        const swipeDir = direction === 'regenerate' ? 'regenerate' : direction;
+        result = await swipeMessage(activeChat.chatId, messageId, swipeDir as 'prev' | 'next' | 'regenerate', apiKey);
       }
       if ('message' in result) {
         if (abortedStream) {
@@ -2100,7 +2104,7 @@ export default function ChatView({
   const toggleMessageActionsRef = useRef(toggleMessageActions);
   toggleMessageActionsRef.current = toggleMessageActions;
 
-  const stableSwipe = useCallback((messageId: string, direction: 'prev' | 'next') => swipeRef.current(messageId, direction), []);
+  const stableSwipe = useCallback((messageId: string, direction: 'prev' | 'next' | 'regenerate') => swipeRef.current(messageId, direction as 'prev' | 'next' | 'regenerate'), []);
   const stableStartEdit = useCallback((messageId: string, content: string) => startEditRef.current(messageId, content), []);
   const stableCancelEdit = useCallback(() => cancelEditRef.current(), []);
   const stableSubmitEdit = useCallback((inPlace: boolean) => submitEditRef.current(inPlace), []);
@@ -2700,7 +2704,6 @@ export default function ChatView({
         </div>
         {!settingsCollapsed && (
           <div className="chat-settings-rail-content">
-            <LegibilityMenu settings={legSettings} onChange={setLegSettings} />
             <ChatSettings
               key={activeChat?.chatId}
               apiKey={apiKey}
@@ -2710,6 +2713,8 @@ export default function ChatView({
               onOpenLorebooks={onOpenLorebooks}
               refreshToken={messages.length}
               onSave={saveSettings}
+              legSettings={legSettings}
+              onLegChange={setLegSettings}
             />
           </div>
         )}
@@ -2745,12 +2750,14 @@ interface ChatSettingsProps {
     cleanup_preset_id?: string | null;
     cleanup_enabled_at?: string | null;
   }) => Promise<void>;
+  legSettings: ChatLegibilitySettings | null;
+  onLegChange: (next: ChatLegibilitySettings) => void;
 }
 
 // session is null until the chat's first message is sent (it's created lazily) — every field
 // below just falls back to an empty/default draft in that case. Saving while null hands the
 // draft patch back up to ChatView, which applies it right after the chat is actually created.
-function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks, refreshToken, onSave }: ChatSettingsProps) {
+function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks, refreshToken, onSave, legSettings, onLegChange }: ChatSettingsProps) {
   const [title, setTitle] = useState(session?.title ?? 'New chat');
   const [system, setSystem] = useState(session?.params.system ?? '');
   const [temperature, setTemperature] = useState(session?.params.temperature?.toString() ?? '');
@@ -2824,13 +2831,6 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks,
     }
   }
 
-  // Prompt-stack picker — the same get_context_stack_presets list backs the RP-only Prompt
-  // stack selector below. (The old Cleanup Preset selector is gone — cleanup is now the async
-  // heuristic subloop, toggled per chat below and configured on the Cleanup page.)
-  const [stacks, setStacks] = useState<ContextStackPreset[]>([]);
-  const [selectedStackId, setSelectedStackId] = useState(session?.promptStackPresetId ?? '');
-  const [applyingStack, setApplyingStack] = useState(false);
-  const [stackError, setStackError] = useState('');
   // The async heuristic cleanup subloop toggle. Enabled if either the new timestamp switch or a
   // legacy preset id is set (a pre-migration chat that had a cleanup preset is still being
   // cleaned by the inline pass until this is touched — saving the toggle migrates it: enabling
@@ -2838,36 +2838,6 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks,
   const [cleanupEnabled, setCleanupEnabled] = useState(
     session?.cleanupEnabledAt != null || session?.cleanupPresetId != null,
   );
-
-  useEffect(() => {
-    if (!session) return;
-    callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey)
-      .then(setStacks)
-      .catch((err) => setStackError(err instanceof ApiError ? err.message : 'failed to load prompt stacks'));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.chatId]);
-
-  // Only updates the local system-prompt textarea from the tool's response — the tool has already
-  // persisted params.system (and prompt_stack_preset_id) server-side, same as
-  // apply_character_to_chat does, so no extra onSave call is needed here.
-  async function applyStack() {
-    if (!session || !selectedStackId) return;
-    setApplyingStack(true);
-    setStackError('');
-    try {
-      const result = await callTool<ApplyPromptStackToChatResult>(
-        'apply_prompt_stack_to_chat',
-        { chatId: session.chatId, presetId: selectedStackId },
-        apiKey,
-      );
-      if (result.applied) setSystem(result.systemText);
-      else setStackError(result.reason);
-    } catch (err) {
-      setStackError(err instanceof ApiError ? err.message : 'failed to apply prompt stack');
-    } finally {
-      setApplyingStack(false);
-    }
-  }
 
   function toggleTool(name: string) {
     const next = new Set(selectedTools);
@@ -2919,6 +2889,46 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks,
         </div>
       </details>
 
+      {session?.kind === 'rp' && session && (
+        <CastSection apiKey={apiKey} chatId={session.chatId} sceneId={session.sceneId} />
+      )}
+
+      {session?.kind === 'rp' && <CharacterVisualStateToggle />}
+
+      <LegibilityMenu settings={legSettings} onChange={onLegChange} />
+
+      <details className="chat-settings-set" open>
+        <summary className="chat-settings-set-summary">Connection</summary>
+        <div className="chat-settings-set-body">
+          <select aria-label="Connection" value={profile} onChange={(e) => setProfile(e.target.value)}>
+            <option value="">
+              (household default{activeConnection ? ` — ${activeConnection.name}` : ''})
+            </option>
+            {connections.map((c) => (
+              <option key={c.name} value={c.name}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <span className="model-connection-note">Household default set in the Connections tab; this only affects this chat.</span>
+          <span className="model-connection-note">
+            {effectiveConnection
+              ? `This connection runs on ${effectiveConnection.model} — change it in the Connections tab.`
+              : 'No connections configured yet.'}
+          </span>
+          {modelsError && <div className="error-banner">{modelsError}</div>}
+        </div>
+      </details>
+
+      {session && (
+        <LorebookSet
+          apiKey={apiKey}
+          session={session}
+          refreshToken={refreshToken}
+          onOpenLorebooks={onOpenLorebooks}
+        />
+      )}
+
       {session?.kind !== 'rp' && (
         <details className="chat-settings-set">
           <summary className="chat-settings-set-summary">Instruction sets</summary>
@@ -2946,69 +2956,11 @@ function ChatSettings({ apiKey, session, folders, allToolNames, onOpenLorebooks,
         </details>
       )}
 
-      {session && (
-        <LorebookSet
-          apiKey={apiKey}
-          session={session}
-          refreshToken={refreshToken}
-          onOpenLorebooks={onOpenLorebooks}
-        />
-      )}
-
-      {session?.kind === 'rp' ? (
-        // RP chats: the model just executes its prompt stack, which owns the system prompt — no
-        // hand-edited field. In its place: the collapsible sync status readout.
-        <ChatSyncSet apiKey={apiKey} session={session} />
-      ) : (
+      {session?.kind !== 'rp' && (
         <details className="chat-settings-set" open>
           <summary className="chat-settings-set-summary">System prompt</summary>
           <div className="chat-settings-set-body">
             <textarea aria-label="System prompt" value={system} onChange={(e) => setSystem(e.target.value)} rows={5} placeholder="(none)" />
-          </div>
-        </details>
-      )}
-
-      <details className="chat-settings-set" open>
-        <summary className="chat-settings-set-summary">Connection</summary>
-        <div className="chat-settings-set-body">
-          <select aria-label="Connection" value={profile} onChange={(e) => setProfile(e.target.value)}>
-            <option value="">
-              (household default{activeConnection ? ` — ${activeConnection.name}` : ''})
-            </option>
-            {connections.map((c) => (
-              <option key={c.name} value={c.name}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          <span className="model-connection-note">Household default set in the Connections tab; this only affects this chat.</span>
-          <span className="model-connection-note">
-            {effectiveConnection
-              ? `This connection runs on ${effectiveConnection.model} — change it in the Connections tab.`
-              : 'No connections configured yet.'}
-          </span>
-          {modelsError && <div className="error-banner">{modelsError}</div>}
-        </div>
-      </details>
-
-      {session?.kind === 'rp' && (
-        <details className="chat-settings-set">
-          <summary className="chat-settings-set-summary">Prompt stack</summary>
-          <div className="chat-settings-set-body">
-            <select aria-label="Prompt stack" value={selectedStackId} onChange={(e) => setSelectedStackId(e.target.value)}>
-              <option value="">(none)</option>
-              {stacks.map((s) => (
-                <option key={s.presetId} value={s.presetId}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-            <div className="settings-actions">
-              <button type="button" onClick={applyStack} disabled={!selectedStackId || applyingStack}>
-                {applyingStack ? 'Applying…' : 'Apply'}
-              </button>
-            </div>
-            {stackError && <div className="error-banner">{stackError}</div>}
           </div>
         </details>
       )}
@@ -3128,24 +3080,4 @@ function LorebookSet({
   );
 }
 
-// The drawer's collapsible sync display (RP chats only) — the readout that used to open from the
-// ⋯ menu as a floating panel, now embedded as a set in the chat settings rail. The panel body is
-// mounted lazily, only while the set is open, so a collapsed set never keeps the 30s poll
-// running; expanding it remounts and refetches fresh.
-function ChatSyncSet({ apiKey, session }: { apiKey: string | null; session: ChatSessionRow }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <details
-      className="chat-settings-set"
-      open={open}
-      onToggle={(e) => setOpen(e.currentTarget.open)}
-    >
-      <summary className="chat-settings-set-summary">Sync status</summary>
-      {open && (
-        <div className="chat-settings-set-body">
-          <ChatSyncStatusPanel apiKey={apiKey} chatId={session.chatId} />
-        </div>
-      )}
-    </details>
-  );
-}
+

@@ -3,13 +3,12 @@ import type { TabType } from '../../hooks/useTabs';
 import type { TurnSnapshot } from '../../lib/turnTimelineReport';
 import ChatBrowser from './ChatBrowser';
 import NotesBrowser from './NotesBrowser';
-import CastSection from './CastSection';
-import CharacterVisualStateToggle from './CharacterVisualStateToggle';
 import PortraitConnectionPanel from './PortraitConnectionPanel';
 import PortraitPromptsPanel from './PortraitPromptsPanel';
 import PromptInspectorPanel from '../promptInspector/PromptInspectorPanel';
 import TurnDrawerSection from '../timeline/TurnDrawerSection';
 import PortraitTelemetryPanel from '../portraits/PortraitTelemetryPanel';
+import ChatSyncStatusPanel from '../chatSyncStatus/ChatSyncStatusPanel';
 import './Sidebar.css';
 
 interface SidebarProps {
@@ -70,12 +69,7 @@ export default function Sidebar({ collapsed, onToggleCollapsed, ...props }: Side
     case 'rp':
       content = props.activeChatId ? (
         <div className="sidebar-rp-sections">
-          {/* character-visual-state-plan.md's kill switch, default off — placed first so it's
-              always visible without opening a section, regardless of which chat is active. */}
-          <CharacterVisualStateToggle />
-          {/* rp-cast-infrastructure-plan.md Part C: the chat's known cast with live presence —
-              the actual feature of this plan, so it defaults expanded (unlike Timing below). */}
-          <CastSection apiKey={props.apiKey} chatId={props.activeChatId} sceneId={props.activeSceneId ?? null} />
+          <ChatSyncStatusPanel apiKey={props.apiKey} chatId={props.activeChatId} />
           <PromptInspectorPanel apiKey={props.apiKey} chatId={props.activeChatId} refreshToken={props.promptRefreshToken} />
           {/* The snapshot is only shown when it belongs to THIS chat — a switched tab must never
               render one chat's chart under another chat's cost line. */}

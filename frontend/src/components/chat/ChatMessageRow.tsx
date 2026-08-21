@@ -38,6 +38,46 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import type { DisplayMessage } from '../../views/ChatView';
 import { GitBranchIcon } from '../../views/ChatView';
 
+export function EditIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M11 4H4a1 1 0 00-1 1v14a1 1 0 001 1h14a1 1 0 001-1v-7" />
+      <path d="M18.5 2.5a2.12 2.12 0 013 3L11 15l-4 1 1-4 10.5-10.5z" />
+    </svg>
+  );
+}
+
+export function TrashIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="1em"
+      height="1em"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+    </svg>
+  );
+}
+
 interface ChatMessageRowProps {
   message: DisplayMessage;
   index: number;
@@ -62,7 +102,7 @@ interface ChatMessageRowProps {
   actionsVisible: boolean;
   onToggleActions: (messageId: string | undefined) => void;
   onToggleSelect: (index: number) => void;
-  onSwipe: (messageId: string, direction: 'prev' | 'next') => void;
+  onSwipe: (messageId: string, direction: 'prev' | 'next' | 'regenerate') => void;
   onStartEdit: (messageId: string, content: string) => void;
   onForkFrom: (messageId: string) => void;
   onRemoveMessage: (messageId: string) => void;
@@ -113,7 +153,7 @@ function ChatMessageRow({
   const hasPrevSwipe = !!m.swipes && m.swipes.index > 0;
   const hasNextSwipe = !!m.swipes && hasMoreSwipesAhead;
   const showCounter = !!m.swipes && m.swipes.count > 1;
-  const showRerun = !isOpeningGreeting && !hasMoreSwipesAhead;
+  const showRegenerate = !isOpeningGreeting && !settled;
 
   return (
     <div
@@ -203,28 +243,33 @@ function ChatMessageRow({
                     type="button"
                     className="last-chat-arrow"
                     title="Previous reply"
+                    aria-label="Previous reply"
                     disabled={busy}
                     onClick={() => onSwipe(m.messageId!, 'prev')}
                   >
                     ‹
                   </button>
                 )}
-                {!settled && <button
-                  type="button"
-                  className="last-chat-icon"
-                  title="Edit this reply — rewrite the text in place, the original stays one ‹ away"
-                  disabled={busy}
-                  onClick={() => onStartEdit(m.messageId!, m.content)}
-                >
-                  ✏️
-                </button>}
-                {!settled && showRerun && (
+                {!settled && (
                   <button
                     type="button"
                     className="last-chat-icon"
-                    title="Regenerate this reply"
+                    title="Edit"
+                    aria-label="Edit"
                     disabled={busy}
-                    onClick={() => onSwipe(m.messageId!, 'next')}
+                    onClick={() => onStartEdit(m.messageId!, m.content)}
+                  >
+                    <EditIcon />
+                  </button>
+                )}
+                {showRegenerate && (
+                  <button
+                    type="button"
+                    className="last-chat-icon"
+                    title="Generate new reply"
+                    aria-label="Generate new reply"
+                    disabled={busy}
+                    onClick={() => onSwipe(m.messageId!, 'regenerate')}
                   >
                     {swipingId === m.messageId ? '…' : '↻'}
                   </button>
@@ -233,13 +278,14 @@ function ChatMessageRow({
                   type="button"
                   className="last-chat-icon"
                   title="Branch a new chat from this point, leaving this one untouched"
+                  aria-label="Branch chat"
                   onClick={() => onForkFrom(m.messageId!)}
                 >
                   <GitBranchIcon />
                 </button>
                 {!settled && (
-                  <button type="button" className="last-chat-icon" title="Delete" onClick={() => onRemoveMessage(m.messageId!)}>
-                    🗑
+                  <button type="button" className="last-chat-icon" title="Delete" aria-label="Delete" onClick={() => onRemoveMessage(m.messageId!)}>
+                    <TrashIcon />
                   </button>
                 )}
                 {showCounter && (
@@ -252,24 +298,61 @@ function ChatMessageRow({
                     type="button"
                     className="last-chat-arrow"
                     title="Next reply"
+                    aria-label="Next reply"
                     disabled={busy}
                     onClick={() => onSwipe(m.messageId!, 'next')}
                   >
                     ›
                   </button>
                 )}
-                {settled && <button type="button" className="last-chat-icon" title="Delete this and everything after" onClick={() => onTruncateFrom(m.messageId!)}>Delete from here</button>}
+                {settled && (
+                  <button type="button" className="last-chat-icon" title="Delete this and everything after" aria-label="Delete from here" onClick={() => onTruncateFrom(m.messageId!)}>
+                    <TrashIcon />
+                  </button>
+                )}
               </div>
             ) : (
               <div className="message-actions" onClick={(e) => e.stopPropagation()}>
-                {!settled && <button onClick={() => onStartEdit(m.messageId!, m.content)}>Edit</button>}
-                <button onClick={() => onForkFrom(m.messageId!)} title="Branch a new chat from this point, leaving this one untouched">
-                  Fork from here
+                {!settled && (
+                  <button
+                    type="button"
+                    className="last-chat-icon"
+                    title="Edit"
+                    aria-label="Edit"
+                    onClick={() => onStartEdit(m.messageId!, m.content)}
+                  >
+                    <EditIcon />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="last-chat-icon"
+                  title="Branch a new chat from this point, leaving this one untouched"
+                  aria-label="Branch chat"
+                  onClick={() => onForkFrom(m.messageId!)}
+                >
+                  <GitBranchIcon />
                 </button>
                 {settled ? (
-                  <button onClick={() => onTruncateFrom(m.messageId!)}>Delete from here</button>
+                  <button
+                    type="button"
+                    className="last-chat-icon"
+                    title="Delete this and everything after"
+                    aria-label="Delete from here"
+                    onClick={() => onTruncateFrom(m.messageId!)}
+                  >
+                    <TrashIcon />
+                  </button>
                 ) : (
-                  <button onClick={() => onRemoveMessage(m.messageId!)}>Delete</button>
+                  <button
+                    type="button"
+                    className="last-chat-icon"
+                    title="Delete"
+                    aria-label="Delete"
+                    onClick={() => onRemoveMessage(m.messageId!)}
+                  >
+                    <TrashIcon />
+                  </button>
                 )}
               </div>
             ))}

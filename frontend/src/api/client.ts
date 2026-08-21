@@ -636,7 +636,7 @@ export type SwipeResult = { message: StoredChatMessage } | { status: 'no_earlier
 export async function swipeMessage(
   chatId: string,
   messageId: string,
-  direction: 'prev' | 'next',
+  direction: 'prev' | 'next' | 'regenerate',
   apiKey: string | null,
   onDelta?: (textDelta: string) => void,
   onTerminalFrame?: (frame: StreamingTerminalFrame) => void,

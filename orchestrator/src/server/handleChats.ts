@@ -471,8 +471,8 @@ export async function handleChatRoutes(
     if (segments.length === 4 && segments[3] === 'swipe' && req.method === 'POST') {
       const body = await readJsonBody(req);
       const direction = (body as Record<string, unknown>)?.direction;
-      if (direction !== 'prev' && direction !== 'next') {
-        sendJson(res, 400, { error: 'expected { direction: "prev" | "next" }' });
+      if (direction !== 'prev' && direction !== 'next' && direction !== 'regenerate') {
+        sendJson(res, 400, { error: 'expected { direction: "prev" | "next" | "regenerate" }' });
         return;
       }
       // rp-streaming-plan.md: the swipe route accepts the same optional stream flag the completions
@@ -492,27 +492,33 @@ export async function handleChatRoutes(
       }
       if (await rejectSettledMessageMutation(deps, userId, chatId, messageId, res)) return;
 
-      const cycled = await deps.chats.cycleSwipe(userId, chatId, messageId, direction);
-      if (cycled.status === 'not_found') {
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      if (cycled.status === 'switched') {
-        sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, cycled.message) });
-        // endpoint.md §5.1.8's "restart bg discovery on return": cycling made a different swipe
-        // active — if its location has no rendered image yet (a pass dropped by the earlier
-        // swipe, or never run), fire the cache-first generation pass; if it has one, the
-        // per-swipe association makes the read a reuse, no provider call. No-op when the image
-        // exists or a render is already in flight.
-        void ensureActiveLocationImage(deps, userId, chatId);
-        return;
-      }
-      if (cycled.status === 'no_earlier_swipe') {
-        sendJson(res, 200, { status: 'no_earlier_swipe' });
-        return;
+      // Regenerate from any swipe (RP Chat tidy-up §4): 'regenerate' always appends a new variant
+      // regardless of which swipe is currently displayed — it must not replace/insert/truncate.
+      // 'next'/'prev' keep their existing cycle semantics; only 'regenerate' bypasses the cycle.
+      if (direction !== 'regenerate') {
+        const cycled = await deps.chats.cycleSwipe(userId, chatId, messageId, direction);
+        if (cycled.status === 'not_found') {
+          sendJson(res, 404, { error: 'not found' });
+          return;
+        }
+        if (cycled.status === 'switched') {
+          sendJson(res, 200, { message: await decorateMessageForDisplay(deps.db, deps.settings, userId, detail.session, cycled.message) });
+          // endpoint.md §5.1.8's "restart bg discovery on return": cycling made a different swipe
+          // active — if its location has no rendered image yet (a pass dropped by the earlier
+          // swipe, or never run), fire the cache-first generation pass; if it has one, the
+          // per-swipe association makes the read a reuse, no provider call. No-op when the image
+          // exists or a render is already in flight.
+          void ensureActiveLocationImage(deps, userId, chatId);
+          return;
+        }
+        if (cycled.status === 'no_earlier_swipe') {
+          sendJson(res, 200, { status: 'no_earlier_swipe' });
+          return;
+        }
       }
       // needs_regenerate: 'next' past the newest stored variant — this is "Rerun" (this module's
-      // own preamble on the swipe route). Except when this message is the chat's only message: that
+      // own preamble on the swipe route). 'regenerate' is the same but forced from any index.
+      // Except when this message is the chat's only message: that
       // means it's the seeded opening greeting (applyCharacterToChatTool.ts only ever seeds one when
       // the chat has zero prior messages) and its "variants" are a card's pre-written
       // alternate_greetings, not an earlier LLM turn — there is no prior user message to regenerate a
