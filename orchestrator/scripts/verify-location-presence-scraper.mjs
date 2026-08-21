@@ -48,8 +48,11 @@ function createFakePool() {
   // an auto-registered row is eligible only when linked to this chat and not demoted.
   const eligibleLocation = (l, chatId) =>
     l.status === null || (l.status !== 'inactive' && locationChatLinks.some((link) => link.location_id === l.location_id && link.chat_id === chatId));
+  // RP invariant (fix: Present is sole authority): a character is eligible only when linked
+  // to this chat and not inactive. User-authored (status null) is NOT an alternative match
+  // path, and no cross-chat persona/avatar carry is performed.
   const eligibleCharacter = (c, chatId) =>
-    c.status === null || (c.status !== 'inactive' && characterChatLinks.some((link) => link.character_id === c.character_id && link.chat_id === chatId));
+    c.status !== null && c.status !== 'inactive' && characterChatLinks.some((link) => link.character_id === c.character_id && link.chat_id === chatId);
 
   return {
     locations,
@@ -204,28 +207,22 @@ function createFakePool() {
             return { rows: [] };
           }
 
-          // §4.4 character match (eligible rows only) / re-anchor / auto-register.
+          // §4.4 character match — strict chat-linked only (RP invariant)
           if (sql.startsWith('select character_id, status from characters')) {
             const [userId, name, chatId] = params;
             const eligible = characters.filter((c) => c.user_id === userId && c.name === name && eligibleCharacter(c, chatId));
             eligible.sort((a, b) => {
-              if ((a.status === null) !== (b.status === null)) return a.status === null ? -1 : 1;
               if ((a.status === 'permanent') !== (b.status === 'permanent')) return a.status === 'permanent' ? -1 : 1;
               return a.character_id.localeCompare(b.character_id);
             });
             const row = eligible[0];
             return { rows: row ? [{ character_id: row.character_id, status: row.status }] : [] };
           }
-          // rp-cast-infrastructure-plan.md A1: the mint-path persona carry-forward — the most
-          // recent same-named row with a real persona (any status, any chat), copied onto the
-          // new transient row so a character who appeared before keeps their persona.
+          // Removed: rp-cast-infrastructure-plan.md A1 persona/avatar carry-forward.
+          // The resolver no longer queries for prior persona — newly minted RP characters
+          // are always blank ('' / null) so the describer pipeline populates them.
           if (sql.startsWith('select persona, avatar_path from characters')) {
-            const [userId, name] = params;
-            const withPersona = characters
-              .filter((c) => c.user_id === userId && c.name === name && (c.persona ?? '') !== '')
-              .sort((a, b) => b.created_at.localeCompare(a.created_at));
-            const row = withPersona[0];
-            return { rows: row ? [{ persona: row.persona, avatar_path: row.avatar_path ?? null }] : [] };
+            throw new Error(`fake pool: unexpected persona carry query after RP invariant fix: ${sql}`);
           }
           if (sql.startsWith('update character_chat_links set anchor_swipe_id')) {
             const [swipeId, characterId, chatId] = params;
@@ -234,7 +231,15 @@ function createFakePool() {
             return { rows: [] };
           }
           if (sql.startsWith('insert into characters')) {
-            const [userId, name, persona, avatarPath] = params;
+            // New RP invariant mint is blank (only userId, name); keep legacy 4-param support for other callers
+            let userId, name, persona, avatarPath;
+            if (params.length === 2) {
+              [userId, name] = params;
+              persona = '';
+              avatarPath = null;
+            } else {
+              [userId, name, persona, avatarPath] = params;
+            }
             const row = { character_id: randomUUID(), user_id: userId, name, persona: persona ?? '', avatar_path: avatarPath ?? null, status: 'transient', created_at: now() };
             characters.push(row);
             return { rows: [{ character_id: row.character_id }] };
@@ -387,11 +392,9 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   assert(order2.join(',') === 'Talfryn,Mair', 'presence_order: a replaced roster rewrites the indexes (Talfryn now 0, Mair 1)');
 }
 
-// --- scrapeTurnPresence: A1 persona carry-forward ------------------------------------------------
-// rp-cast-infrastructure-plan.md A1: a minted character row carries the most recent same-named
-// prior row's persona/avatar_path forward (any status, any chat — a persona is identity, not
-// timeline state), so a character who appeared before gets their real persona back, and the
-// describer's skip rule (describeCharacter.ts) sees the carried persona as already-described.
+// --- scrapeTurnPresence: no persona/avatar carry-forward (RP invariant) ------------------------
+// Minted RP characters are always blank ('' / null) — no carry from prior same-named rows
+// in other chats or with different status. The describer populates them fresh.
 {
   const pool = poolWithActiveSwipe(createFakePool());
   const prior = {
@@ -401,10 +404,9 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     persona: 'A sharp-eyed harbormaster with a salt-cured coat.',
     avatar_path: '/avatars/seraphina.png',
     created_at: '2026-01-02T00:00:00.000Z',
-    status: 'inactive', // demoted alternate timeline — still carries persona (not chat-scoped)
+    status: 'inactive',
   };
   pool.characters.push(prior);
-  // A different chat's row of the same name, newer but persona-less — must NOT win the carry.
   pool.characters.push({
     character_id: randomUUID(),
     user_id: USER,
@@ -423,11 +425,11 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     (c) => c.name === 'Seraphina' && pool.characterChatLinks.some((l) => l.character_id === c.character_id && l.chat_id === CHAT),
   );
   assert(!!minted, 'Seraphina is freshly auto-registered (the prior rows are not eligible for THIS chat)');
-  assert(minted.persona === 'A sharp-eyed harbormaster with a salt-cured coat.', 'the minted row carries the prior same-named row\'s persona (A1 carry-forward)');
-  assert(minted.avatar_path === '/avatars/seraphina.png', 'the minted row carries the prior row\'s avatar_path');
+  assert(minted.persona === '', 'the minted row does NOT carry prior persona — blank so describer can populate');
+  assert(minted.avatar_path === null, 'the minted row does NOT carry prior avatar_path — blank');
 }
 
-// --- scrapeTurnPresence: revisit reuses eligible rows ---------------------------------------------
+// --- scrapeTurnPresence: revisit reuses eligible rows (locations still eligible, characters strict) --
 {
   const pool = poolWithActiveSwipe(createFakePool());
   const tavern = {
@@ -436,16 +438,16 @@ const FAKE_SETTINGS = { get: async () => 'false' };
     name: 'The Drunken Kraken - Main Hall',
     visual_description: 'A dim, smoky tavern.',
     environment: { weather: 'clear' },
-    status: null, // user-authored (create_location writes status = null; always cross-chat eligible)
+    status: null, // user-authored location (create_location writes status = null; still eligible via eligibleClause)
   };
   const mair = {
     character_id: 'bbbbbbbb-0000-0000-0000-000000000002',
     user_id: USER,
     name: 'Mair',
-    persona: '',
-    avatar_path: null,
+    persona: 'card persona should not leak',
+    avatar_path: '/avatars/card.png',
     created_at: '2026-01-01T00:00:00.000Z',
-    status: null, // user-authored character
+    status: null, // user-authored / card-backed character — NOT eligible for Present: (RP invariant)
   };
   pool.locations.push(tavern);
   pool.characters.push(mair);
@@ -464,11 +466,11 @@ const FAKE_SETTINGS = { get: async () => 'false' };
   assert(pool.locations.length === 1 && pool.locations[0].environment.weather === 'clear', 'a user-authored location is matched, not duplicated');
   assert(pool.locations[0].environment.time_of_day === 'Late Evening', 'a matched location\'s environment is refreshed from the header');
   assert(pool.scenes.length === 1, 'the existing (chat, location) scene is reused, not duplicated');
-  assert(pool.characters.length === 2, 'the user-authored character is matched; only Seraphina is auto-registered');
-  assert(
-    pool.presence.some((p) => p.character_id === mair.character_id) && pool.presence.length === 2,
-    'the matched user-authored character is in the replaced presence roster',
-  );
+  // RP invariant: card/user-authored Mair is NOT matched — a new RP Mair is minted for this chat
+  assert(pool.characters.length === 3, 'the user-authored character is NOT matched; Mair and Seraphina are both freshly minted as RP characters');
+  const rpMair = pool.characters.find((c) => c.name === 'Mair' && c.character_id !== mair.character_id && pool.characterChatLinks.some((l) => l.character_id === c.character_id));
+  assert(!!rpMair && rpMair.persona === '' && rpMair.avatar_path === null, 'the minted RP Mair is blank — no persona/avatar carry from card');
+  assert(!pool.presence.some((p) => p.character_id === mair.character_id) && pool.presence.length === 2, 'the card Mair is NOT in presence; the new RP Mair is');
   assert(pool.locationChatLinks.length === 0, 'a user-authored (status null) location never gets a chat link row');
 }
 
@@ -707,6 +709,80 @@ Present: Seraphina`;
   const afterReplaceSceneId = pool.chatSessions.get(CHAT).scene_id;
   assert(afterReplaceSceneId !== afterExtendSceneId, 'a swipe regeneration still stamps the regenerated turn\'s scene');
   assert(pool.chatSessions.get(CHAT).previous_scene_id === 'scene-tavern', 'a swipe regeneration never advances previous_scene_id — the revert target survives the swipe chain (§5.1.8)');
+}
+
+// --- RP invariant: Present is sole authority (Sydney regression suite) ---------------------------
+{
+  // 1) Card Sydney exists, Present: Sydney -> new chat-linked RP Sydney is minted, card untouched, in presence & cast
+  const pool = poolWithActiveSwipe(createFakePool());
+  const cardSydney = {
+    character_id: randomUUID(),
+    user_id: USER,
+    name: 'Sydney',
+    persona: 'Card persona that must not leak',
+    avatar_path: '/avatars/card-sydney.png',
+    created_at: '2026-01-01T00:00:00.000Z',
+    status: null,
+  };
+  pool.characters.push(cardSydney);
+  const db = createPostgresClient(pool);
+  const ensure = fakeEnsureActiveSwipe(pool);
+  const header = `[ Morning | Thursday, July 1, 2026 AD | The Harbor - Docks ]
+Present: Sydney`;
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure.fn }, USER, CHAT, MSG, header);
+  assert(pool.characters.length === 2, 'RP Sydney: card exists, Present Sydney mints a new RP character (card not reused)');
+  const rpSydney = pool.characters.find((c) => c.name === 'Sydney' && c.character_id !== cardSydney.character_id);
+  assert(!!rpSydney, 'RP Sydney: minted character exists');
+  assert(rpSydney.persona === '' && rpSydney.avatar_path === null, 'RP Sydney: blank persona/avatar, no carry from card');
+  assert(cardSydney.persona === 'Card persona that must not leak', 'RP Sydney: card Sydney is untouched');
+  assert(pool.characterChatLinks.some((l) => l.character_id === rpSydney.character_id && l.chat_id === CHAT), 'RP Sydney: minted character is linked to this chat');
+  assert(pool.presence.some((p) => p.character_id === rpSydney.character_id), 'RP Sydney: placed in scene presence');
+  assert(!pool.presence.some((p) => p.character_id === cardSydney.character_id), 'RP Sydney: card not in presence');
+
+  // 2) Present Sydney on next turn -> existing chat-linked Sydney is reused, no duplicate
+  const MSG2 = randomUUID();
+  const SWIPE2 = randomUUID();
+  pool.chatMessages.push({ message_id: MSG2, chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: SWIPE2 });
+  const ensure2 = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure2.fn }, USER, CHAT, MSG2, header);
+  assert(pool.characters.length === 2, 'RP Sydney reuse: no duplicate minted on second Present: Sydney');
+  const again = pool.characters.find((c) => c.name === 'Sydney' && pool.characterChatLinks.some((l) => l.character_id === c.character_id && l.chat_id === CHAT));
+  assert(again.character_id === rpSydney.character_id, 'RP Sydney reuse: same chat-linked character is reused');
+  assert(pool.presence.length === 1 && pool.presence[0].character_id === rpSydney.character_id, 'RP Sydney reuse: presence still points to same RP character');
+
+  // 3) Another chat already has RP Sydney, Present Sydney in this chat -> new Sydney minted for this chat
+  const pool2 = poolWithActiveSwipe(createFakePool());
+  const otherChatSydney = {
+    character_id: randomUUID(),
+    user_id: USER,
+    name: 'Sydney',
+    persona: 'Other chat persona',
+    avatar_path: '/avatars/other.png',
+    created_at: '2026-01-01T00:00:00.000Z',
+    status: 'transient',
+  };
+  pool2.characters.push(otherChatSydney);
+  pool2.characterChatLinks.push({ character_id: otherChatSydney.character_id, chat_id: OTHER_CHAT, anchor_swipe_id: randomUUID() });
+  const db2 = createPostgresClient(pool2);
+  await scrapeTurnPresence({ db: db2, settings: FAKE_SETTINGS, ensureActiveSwipe: fakeEnsureActiveSwipe(pool2).fn }, USER, CHAT, MSG, header);
+  assert(pool2.characters.length === 2, 'cross-chat isolation: new Sydney minted for this chat, other chat Sydney not reused');
+  const thisChatSydney = pool2.characters.find((c) => c.name === 'Sydney' && c.character_id !== otherChatSydney.character_id);
+  assert(!!thisChatSydney && thisChatSydney.persona === '' && thisChatSydney.avatar_path === null, 'cross-chat: minted Sydney is blank, no persona from other chat');
+  assert(pool2.characterChatLinks.some((l) => l.character_id === thisChatSydney.character_id && l.chat_id === CHAT), 'cross-chat: minted Sydney linked to this chat only');
+  assert(!pool2.presence.some((p) => p.character_id === otherChatSydney.character_id), 'cross-chat: other chat Sydney not in presence');
+
+  // 4) Sydney disappears from Present -> removed from presence but remains in cast
+  const emptyPresentHeader = `[ Morning | Thursday, July 1, 2026 AD | The Harbor - Docks ]
+Present:`;
+  const MSG3 = randomUUID();
+  const SWIPE3 = randomUUID();
+  // reuse pool from step 1/2 which already has rpSydney in cast
+  pool.chatMessages.push({ message_id: MSG3, chat_id: CHAT, user_id: USER, role: 'assistant', content: 'x', active_swipe_id: SWIPE3 });
+  const ensure3 = fakeEnsureActiveSwipe(pool);
+  await scrapeTurnPresence({ db, settings: FAKE_SETTINGS, ensureActiveSwipe: ensure3.fn }, USER, CHAT, MSG3, emptyPresentHeader);
+  assert(pool.presence.length === 0, 'Sydney absent from Present: removed from current scene presence');
+  assert(pool.characterChatLinks.some((l) => l.character_id === rpSydney.character_id && l.chat_id === CHAT), 'Sydney remains in chat cast (character_chat_links) even when absent from Present:');
+  assert(pool.characters.some((c) => c.character_id === rpSydney.character_id), 'Sydney character row still exists when absent from presence');
 }
 
 // --- Fail-open 1: DB failure never throws --------------------------------------------------------

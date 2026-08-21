@@ -27,10 +27,13 @@
  * still this chat's — `status` is a sync-progress marker only, never a cross-chat visibility
  * signal) when the turn exits the live window or demote it to `inactive` (never delete) when an
  * alternate swipe wins instead — and io/chatSessions.ts's forkChat can link it onto a forked
- * branch. All lookups here are filtered to eligible rows only (linked to *this* chat and not
+ * branch. Location lookups are filtered to eligible rows (linked to *this* chat and not
  * `inactive`, or — user-authored — `status is null`), so a name match can never resurrect a
- * different chat's same-named row, and a row with no chat link left cascades away on its own
- * (the link table's cleanup trigger).
+ * different chat's same-named row. Character (`Present:`) lookups are strictly chat-scoped
+ * (linked to *this* chat via `character_chat_links` and `status <> 'inactive'` only — no
+ * `status is null` fallback, no cross-chat/cross-card persona carry), so a card-backed or
+ * other-chat character can never satisfy a `Present:` name. A row with no chat link left
+ * cascades away on its own (the link table's cleanup trigger).
  *
  * Fail-open (segway.md §1): this module never throws. A missing header, a missing swipe anchor,
  * or any DB failure logs and returns, leaving the turn untouched. Both call sites
@@ -466,17 +469,18 @@ async function resolveScene(
   return sceneId;
 }
 
-/** segway.md §4.4: resolve-or-auto-register each `Present:` name. A user-authored character
- *  (status null) or an eligible transient/permanent one is matched by exact name (matches are
- *  ordered user-authored first, then permanent, then transient, with a stable id tiebreak, so a
- *  same-named roster resolves deterministically); a matched transient character is re-anchored
- *  to this turn's swipe, same "continued presence follows the live timeline" rule as locations.
- *  Anything else becomes a placeholder identity — transient, anchored to this turn — but carrying
- *  the most recent same-named prior row's real `persona`/`avatar_path` forward when one exists
- *  (A1 of rp-cast-infrastructure-plan.md: the same-phase parity location parity as
- *  resolveOrCreateLocationRow's same-place carry — a character who appeared before, anywhere,
- *  gets their real persona back instead of a blank stub). The carry is deliberately not
- *  chat-scoped (any prior row, any status): a persona is identity, not timeline state. */
+/** segway.md §4.4: resolve-or-auto-register each `Present:` name — RP invariant:
+ *  every name in Present: must resolve to exactly one character in THIS chat's roster.
+ *  Lookup is strictly chat-scoped: only characters already linked to this chat via
+ *  character_chat_links and not inactive are eligible. No other source participates:
+ *  card name, global/user-authored rows (status null), same-named characters from other
+ *  chats, and chat_sessions.character_id are all irrelevant. A matched chat-linked
+ *  transient/permanent character is recalled (transient is re-anchored to this turn's
+ *  swipe, same live-timeline rule as locations). No match → mint a genuinely new
+ *  transient RP character with blank persona/avatar (so the describer pipeline can
+ *  populate it) and link it to this chat. No persona/avatar carry-forward from any
+ *  same-named row, including cards or other chats. Present: controls current presence;
+ *  character_chat_links records the accumulated cast. */
 async function resolvePresentCharacters(
   session: DbSession,
   userId: string,
@@ -488,8 +492,10 @@ async function resolvePresentCharacters(
   for (const name of names) {
     const matched = await session.query<{ character_id: string; status: string | null }>(
       `select character_id, status from characters
-       where user_id = $1 and name = $2 and ${eligibleClause('character_id', 'character_chat_links', '$3', 'characters')}
-       order by (status is null) desc, (status = 'permanent') desc, character_id`,
+       where user_id = $1 and name = $2 and status <> 'inactive' and exists (
+         select 1 from character_chat_links where character_chat_links.character_id = characters.character_id and character_chat_links.chat_id = $3
+       )
+       order by (status = 'permanent') desc, character_id`,
       [userId, name, chatId],
     );
     if (matched[0]) {
@@ -505,21 +511,10 @@ async function resolvePresentCharacters(
       }
       continue;
     }
-    // A1 carry-forward: the most recent same-named row with a real persona (any status, any
-    // chat — a persona is identity, not timeline state). The describer's skip rule
-    // (describeCharacter.ts) sees a carried persona as "already described" — no duplicate LLM
-    // call for a character who was fleshed out before.
-    const [prior] = await session.query<{ persona: string; avatar_path: string | null }>(
-      `select persona, avatar_path from characters
-       where user_id = $1 and name = $2 and persona <> ''
-       order by created_at desc, character_id
-       limit 1`,
-      [userId, name],
-    );
     const [created] = await session.query<{ character_id: string }>(
       `insert into characters (user_id, name, persona, avatar_path, status)
-       values ($1, $2, $3, $4, 'transient') returning character_id`,
-      [userId, name, prior?.persona ?? '', prior?.avatar_path ?? null],
+       values ($1, $2, '', null, 'transient') returning character_id`,
+      [userId, name],
     );
     await session.query('insert into character_chat_links (character_id, chat_id, anchor_swipe_id) values ($1, $2, $3)', [
       created!.character_id,
