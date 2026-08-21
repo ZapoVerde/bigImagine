@@ -317,7 +317,7 @@ function createFakePool() {
           }
 
           // --- Stage 4: combination cache lookup. ---
-          if (q.startsWith('select combination_id, image_url, bgrm_applied from character_visual_combinations')) {
+          if (q.startsWith('select combination_id, image_url, composed_prompt, bgrm_applied from character_visual_combinations')) {
             const [userId, chatId, characterId, outfitKey, expressionKey, requestedBgrm] = params;
             const row = combinations.find(
               (c) =>
@@ -328,7 +328,7 @@ function createFakePool() {
                 c.expression_key === expressionKey &&
                 (c.bgrm_applied ?? false) === (params.length === 6 ? requestedBgrm : false),
             );
-            return { rows: row ? [{ combination_id: row.combination_id, image_url: row.image_url, bgrm_applied: row.bgrm_applied ?? false }] : [] };
+            return { rows: row ? [{ combination_id: row.combination_id, image_url: row.image_url, composed_prompt: row.composed_prompt ?? '', bgrm_applied: row.bgrm_applied ?? false }] : [] };
           }
 
           // --- Stage 4: drop-check re-read of the current state. ---
@@ -1092,11 +1092,14 @@ const OUTFIT = { outerwear: 'leather jacket', top: 'white blouse', bottom: 'jean
       ? { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/unexpected-generation.png', imageUUID: 'unexpected-uuid' }] }) }
       : { ok: true, json: async () => ({ data: [{ imageURL: 'https://cdn.example/transparent-character.png' }] }) };
   };
+  const llm = mintingLlm();
   try {
-    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, mintingLlm(), USER, CHAT, AVA_ID, OUTFIT, 'composed');
+    await renderCharacterVisualCombination({ db: createPostgresClient(pool), settings, imageConnections: images }, llm, USER, CHAT, AVA_ID, OUTFIT, 'composed');
   } finally {
     globalThis.fetch = originalFetch;
   }
+  assert(llm.calls.length === 0, 'stage4 BGRM: raw-cache upgrade skips subject/expression minting');
+  assert(images.resolveCalls.length === 1 && images.resolveCalls[0] === 'bgrm', 'stage4 BGRM: raw-cache upgrade resolves only the BGRM profile');
   assert(requests.length === 1 && requests[0].taskType === 'removeBackground' && requests[0].inputs.image === 'https://cdn.example/raw-character.png', 'stage4 BGRM: raw cache URL reaches BGRM without generation');
   assert(pool.combinations.length === 2 && pool.combinations.some((row) => row.bgrm_applied === false) && pool.combinations.some((row) => row.bgrm_applied === true), 'stage4 BGRM: raw and transparent variants coexist');
 }

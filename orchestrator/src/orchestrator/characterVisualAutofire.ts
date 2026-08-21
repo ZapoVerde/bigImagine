@@ -128,6 +128,7 @@ interface VisualStateRow {
 interface CombinationRow {
   combination_id: string;
   image_url: string | null;
+  composed_prompt?: string;
   bgrm_applied: boolean;
 }
 
@@ -188,7 +189,7 @@ export async function renderCharacterVisualCombination(
     //    image for this exact outfit+expression already exists, zero provider cost.
     const cached = await deps.db.withUserScope(userId, (session) =>
       session.query<CombinationRow>(
-        `select combination_id, image_url, bgrm_applied from character_visual_combinations
+        `select combination_id, image_url, composed_prompt, bgrm_applied from character_visual_combinations
          where user_id = $1 and chat_id = $2 and character_id = $3 and outfit_key = $4 and expression_key = $5
            and bgrm_applied = $6`,
         [userId, chatId, characterId, outfitKey, expressionKey, bgrmEnabled],
@@ -205,16 +206,18 @@ export async function renderCharacterVisualCombination(
     }
 
     let rawSource: string | undefined;
+    let rawComposedPrompt = '';
     if (bgrmEnabled) {
       const rawRows = await deps.db.withUserScope(userId, (session) =>
         session.query<CombinationRow>(
-          `select combination_id, image_url, bgrm_applied from character_visual_combinations
+          `select combination_id, image_url, composed_prompt, bgrm_applied from character_visual_combinations
            where user_id = $1 and chat_id = $2 and character_id = $3 and outfit_key = $4 and expression_key = $5
              and bgrm_applied = false`,
           [userId, chatId, characterId, outfitKey, expressionKey],
         ),
       );
       rawSource = rawRows[0]?.image_url ?? undefined;
+      rawComposedPrompt = rawRows[0]?.composed_prompt ?? '';
     }
 
     // 3. Drop check — a miss spends a render only when this trigger is still the character's
@@ -231,6 +234,29 @@ export async function renderCharacterVisualCombination(
     const state = stateRows[0];
     if (!state || state.expression !== expressionKey || normalizeOutfitKey(outfitFieldsFrom(state)) !== outfitKey) {
       log.info('characterVisualAutofire: trigger stale, dropping render', { userId, chatId, characterId });
+      return;
+    }
+
+    const bgrmProfile = bgrmEnabled
+      ? await deps.imageConnections.resolveActive('bgrm').catch((error) => {
+          log.warn('characterVisualAutofire: BGRM profile resolution failed; using raw image', { error });
+          return undefined;
+        })
+      : undefined;
+    if (rawSource) {
+      const processed = await postProcessCharacterImage({ imageUrl: rawSource }, bgrmProfile, true);
+      if (!processed.bgrmApplied) return;
+      await deps.db.withUserScope(userId, (session) =>
+        session.query(
+          `insert into character_visual_combinations
+             (user_id, chat_id, character_id, outfit_key, expression_key, image_url, composed_prompt, bgrm_applied)
+           values ($1, $2, $3, $4, $5, $6, $7, $8)
+           on conflict (user_id, chat_id, character_id, outfit_key, expression_key, bgrm_applied)
+             do update set image_url = excluded.image_url, composed_prompt = excluded.composed_prompt, updated_at = now()`,
+          [userId, chatId, characterId, outfitKey, expressionKey, processed.imageUrl, rawComposedPrompt, true],
+        ),
+      );
+      log.info('characterVisualAutofire: raw combination upgraded with BGRM', { userId, chatId, characterId });
       return;
     }
 
@@ -363,8 +389,8 @@ export async function renderCharacterVisualCombination(
     const parentDetails = buildParentDetails(entities, promptableLayers);
     const composedPrompt = compileTemplate(template, parent.slots, manifest.layers, parentDetails);
 
-    const profile = rawSource ? undefined : await deps.imageConnections.resolveActive('portrait');
-    if (!rawSource && !profile) {
+    const profile = await deps.imageConnections.resolveActive('portrait');
+    if (!profile) {
       log.warn('characterVisualAutofire: no active portrait image connection configured, aborting render', {
         userId,
         chatId,
@@ -392,13 +418,7 @@ export async function renderCharacterVisualCombination(
         samplerName: profile!.samplerName,
         workflowParameters: profile!.workflowParameters,
         });
-      const bgrmProfile = bgrmEnabled
-        ? await deps.imageConnections.resolveActive('bgrm').catch((error) => {
-            log.warn('characterVisualAutofire: BGRM profile resolution failed; using raw image', { error });
-            return undefined;
-          })
-        : undefined;
-      const processed = await postProcessCharacterImage(generated, bgrmProfile);
+      const processed = await postProcessCharacterImage(generated, bgrmProfile, bgrmEnabled);
       imageUrl = processed.imageUrl;
       bgrmApplied = processed.bgrmApplied;
     } catch (err) {

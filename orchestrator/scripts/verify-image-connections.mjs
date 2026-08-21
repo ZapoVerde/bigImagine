@@ -583,8 +583,10 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
     assert(calls === 2, 'successful character BGRM performs one provider call per source');
 
     calls = 0;
-    const noProfile = await postProcessCharacterImage({ imageUrl: 'https://example.test/raw.jpg' });
-    assert(noProfile.imageUrl === 'https://example.test/raw.jpg' && noProfile.bgrmApplied === false && calls === 0, 'missing BGRM profile falls back without a provider call');
+    const disabled = await postProcessCharacterImage({ imageUrl: 'https://example.test/raw.jpg' }, undefined, false);
+    assert(disabled.imageUrl === 'https://example.test/raw.jpg' && disabled.bgrmApplied === false && calls === 0, 'disabled BGRM uses the raw image without a provider call');
+    const noProfile = await postProcessCharacterImage({ imageUrl: 'https://example.test/raw.jpg' }, undefined, true);
+    assert(noProfile.imageUrl === 'https://example.test/raw.jpg' && noProfile.bgrmApplied === false && calls === 0, 'enabled BGRM without a profile falls back without a provider call');
   } finally {
     global.fetch = realFetch;
   }

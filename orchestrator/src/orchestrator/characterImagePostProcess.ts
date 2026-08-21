@@ -8,7 +8,7 @@
  * standalone removeBackground IO adapter, and surface settings remain with their callers.
  *
  * @api-declaration
- * postProcessCharacterImage(generated, bgrmProfile?) -> Promise<CharacterImagePostProcessResult>
+ * postProcessCharacterImage(generated, bgrmProfile?, bgrmEnabled?) -> Promise<CharacterImagePostProcessResult>
  *
  * @contract
  *   assertions:
@@ -30,7 +30,10 @@ export interface CharacterImagePostProcessResult {
 export async function postProcessCharacterImage(
   generated: GeneratedImage,
   bgrmProfile?: ImageConnectionProfile,
+  bgrmEnabled = true,
 ): Promise<CharacterImagePostProcessResult> {
+  if (!bgrmEnabled) return { imageUrl: generated.imageUrl, bgrmApplied: false };
+
   if (!bgrmProfile?.apiKey?.trim() || !bgrmProfile.model.trim() || bgrmProfile.kind !== 'runware') {
     log.warn('character image BGRM unavailable; using generated image', {
       reason: !bgrmProfile ? 'no_active_profile' : 'incomplete_or_unsupported_profile',

@@ -120,10 +120,11 @@ export interface PortraitGenerationDeps {
 async function generatePortraitImage(
   profile: ImageConnectionProfile,
   bgrmProfile: ImageConnectionProfile | undefined,
+  bgrmEnabled: boolean,
   request: ImageGenRequest,
 ): Promise<string> {
   const generated = await generateImageWithReference(profile, request);
-  return (await postProcessCharacterImage(generated, bgrmProfile)).imageUrl;
+  return (await postProcessCharacterImage(generated, bgrmProfile, bgrmEnabled)).imageUrl;
 }
 
 async function resolveBgrmProfile(
@@ -658,7 +659,7 @@ export async function runPortraitGenerationRound(
             log.warn('portraitGeneration: failed to begin image telemetry', { error: w });
             return null;
           });
-           const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
+           const imageUrl = await generatePortraitImage(profile, bgrmProfile, bgrmEnabled, {
             prompt: composedPrompt,
             negativePrompt: [profile.masterNegativePrompt ?? '', chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
             model: profile.model,
@@ -863,7 +864,7 @@ export async function renderPortraitPreview(
     const composedPrompt = compileTemplate(template, parent.slots, manifest.layers, parentDetails);
 
     try {
-       const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
+        const imageUrl = await generatePortraitImage(profile, bgrmProfile, bgrmEnabled, {
         prompt: composedPrompt,
         negativePrompt: profile.masterNegativePrompt ?? '',
         model: profile.model,
@@ -982,7 +983,7 @@ export async function retryPortraitCandidateRender(
     const renderStartedAt = Date.now();
 
     try {
-       const imageUrl = await generatePortraitImage(profile, bgrmProfile, {
+        const imageUrl = await generatePortraitImage(profile, bgrmProfile, bgrmEnabled, {
         prompt: composedPrompt,
         negativePrompt: [profile.masterNegativePrompt ?? '', row.chromosome.negative_prompt ?? ''].filter((s) => s !== '').join(', '),
         model: profile.model,
