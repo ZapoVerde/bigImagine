@@ -300,9 +300,9 @@ export interface ImageConnectionSummary {
   workflowParameters: Record<string, unknown> | null;
   isActive: boolean;
   updatedAt: string;
-  /** migration 0105: 'background' (the Vistalyze location renders) or 'portrait' (the Portrait
-   *  Studio's candidate renders) — the active row is enforced per purpose, one each. */
-  purpose: 'background' | 'portrait';
+  /** migration 0105: 'background' (location renders), 'portrait' (Portrait Studio candidates),
+   *  or 'bgrm' (Runware background removal) — one active row is enforced per purpose. */
+  purpose: 'background' | 'portrait' | 'bgrm';
   /** migration 0123: fixed generation seed forwarded on every render through this connection;
    *  null (default) leaves the provider's own random seed untouched. Portrait Studio's two render
    *  call sites read this; location renders use their own separate fixed-seed mechanism. */
@@ -326,7 +326,7 @@ export interface CreateImageConnectionInput {
   masterNegativePrompt?: string;
   workflowParameters?: Record<string, unknown>;
   /** Defaults to 'background' when omitted. */
-  purpose?: 'background' | 'portrait';
+  purpose?: 'background' | 'portrait' | 'bgrm';
   /** Omit for random (the default). */
   seed?: number | null;
 }
@@ -350,7 +350,7 @@ export interface UpdateImageConnectionInput {
   masterNegativePrompt?: string | null;
   workflowParameters?: Record<string, unknown> | null;
   /** Omit to leave the connection's purpose unchanged. */
-  purpose?: 'background' | 'portrait';
+  purpose?: 'background' | 'portrait' | 'bgrm';
   /** Omit to leave the stored seed unchanged; null explicitly clears it back to random. */
   seed?: number | null;
 }

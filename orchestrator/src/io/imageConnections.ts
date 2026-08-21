@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/io/imageConnections.ts
- * @stamp 2026-08-13
+ * @stamp 2026-08-21
  * @architectural-role IO Wrapper — DB-backed, admin-managed image generation connection registry
  * @description
  * Backs the Vistalyze image-generation subsystem's Connections Tab section
@@ -19,7 +19,7 @@
  *
  * is_active is enforced to at most one row *per purpose* by 0105's partial unique index
  * (image_connections_one_active_per_purpose, the 0068 index rebuilt scoped to (purpose) where
- * is_active — a background and a portrait connection can be active simultaneously, one each,
+ * is_active — a background, portrait, and BGRM connection can be active simultaneously, one each,
  * db/migrations/0105_visual_studio.sql); activate() uses the same sequential-statement-within-one-
  * transaction shape llmConnections.ts's activate() settles on (a single writable-CTE statement
  * hits the partial unique index because both sub-updates run against the same snapshot), scoped
@@ -61,7 +61,7 @@ import type { FieldCipher } from './fieldCipher.js';
 import type { PostgresClient } from './postgres.js';
 
 /** The redacted row shape — never exposes the API key in any form, only whether one is set. */
-export type ImageConnectionPurpose = 'background' | 'portrait';
+export type ImageConnectionPurpose = 'background' | 'portrait' | 'bgrm';
 
 export interface ImageConnectionRow {
   id: string;
@@ -130,8 +130,8 @@ export interface ImageConnectionInit {
   masterPositiveStylePrefix?: string;
   masterNegativePrompt?: string;
   workflowParameters?: Record<string, unknown>;
-  /** Optional — defaults to 'background'; 'portrait' marks the connection for the Portrait
-   *  Studio's candidate renders (migration 0105's purpose split). */
+  /** Optional — defaults to 'background'; 'portrait' marks Portrait Studio candidates and 'bgrm'
+   *  marks the Runware background-removal connection (migration 0105's purpose split). */
   purpose?: ImageConnectionPurpose;
   /** Optional — omitted/undefined means null (random), same as every other optional Init field. */
   seed?: number | null;

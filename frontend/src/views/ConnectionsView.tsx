@@ -241,9 +241,15 @@ export default function ConnectionsView() {
               {c.isActive && (
                 <span
                   className="connections-row-badge connections-row-badge-active"
-                  title={c.purpose === 'portrait' ? 'active — Portrait image connection' : 'active — Background image connection'}
+                  title={
+                    c.purpose === 'portrait'
+                      ? 'active — Portrait image connection'
+                      : c.purpose === 'bgrm'
+                        ? 'active — Background removal connection'
+                        : 'active — Background image connection'
+                  }
                 >
-                  {c.purpose === 'portrait' ? '(prt)' : '(bg)'}
+                  {c.purpose === 'portrait' ? '(prt)' : c.purpose === 'bgrm' ? '(brm)' : '(bg)'}
                 </span>
               )}
             </div>

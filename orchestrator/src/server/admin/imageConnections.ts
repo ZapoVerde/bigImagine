@@ -1,6 +1,6 @@
 /**
  * @file orchestrator/src/server/admin/imageConnections.ts
- * @stamp 2026-08-20
+ * @stamp 2026-08-21
  * @architectural-role Pure Function (request parsing) + IO Wrapper (connection-store IO + one-off
  * provider calls) — the same dual-role split the original adminServer.ts image-connections block
  * used; moved here verbatim as part of the adminServer domain split
@@ -74,7 +74,7 @@ function isImageKind(value: unknown): value is ImageConnectionKind {
 }
 
 function isImagePurpose(value: unknown): value is ImageConnectionPurpose {
-  return value === 'background' || value === 'portrait';
+  return value === 'background' || value === 'portrait' || value === 'bgrm';
 }
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
@@ -105,6 +105,7 @@ export function parseCreateImageConnectionBody(raw: unknown): ImageConnectionIni
   if (typeof model !== 'string' || !model) return undefined;
   if (apiKey !== undefined && (typeof apiKey !== 'string' || !apiKey)) return undefined;
   if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
+  if (purpose === 'bgrm' && kind !== 'runware') return undefined;
   if (baseUrl !== undefined && typeof baseUrl !== 'string') return undefined;
   if (seed !== undefined && seed !== null && (typeof seed !== 'number' || !Number.isInteger(seed))) return undefined;
   if (width !== undefined && (typeof width !== 'number' || !Number.isInteger(width) || width < 64 || width > 8192)) {
@@ -166,6 +167,7 @@ export function parseUpdateImageConnectionBody(raw: unknown): ImageConnectionPat
   if (kind !== undefined && !isImageKind(kind)) return undefined;
   if (model !== undefined && (typeof model !== 'string' || !model)) return undefined;
   if (purpose !== undefined && !isImagePurpose(purpose)) return undefined;
+  if (purpose === 'bgrm' && kind !== undefined && kind !== 'runware') return undefined;
   if (seed !== undefined && seed !== null && (typeof seed !== 'number' || !Number.isInteger(seed))) return undefined;
   // apiKey undefined leaves the stored key untouched; empty string is rejected (there's no
   // "clear the key" — keyless connections are created without one, not rotated to nothing).

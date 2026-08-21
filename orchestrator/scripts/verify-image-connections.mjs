@@ -26,7 +26,8 @@ import { createPostgresClient } from '../dist/io/postgres.js';
 import { createImageConnectionStore } from '../dist/io/imageConnections.js';
 import { generateLocationImage } from '../dist/orchestrator/generateLocationImage.js';
 import { generateRunwareImage } from '../dist/io/imageGen/runware.js';
-import { testImageConnection } from '../dist/server/adminServer.js';
+import { removeBackground } from '../dist/io/imageGen/removeBackground.js';
+import { parseCreateImageConnectionBody, parseUpdateImageConnectionBody, testImageConnection } from '../dist/server/adminServer.js';
 import { createOrchestratorSettingsStore } from '../dist/io/orchestratorSettings.js';
 
 function assert(cond, message) {
@@ -337,6 +338,55 @@ assert(
   'exactly one active portrait row after the switch',
 );
 
+// --- BGRM purpose: independent activation and decrypted Runware profile ---
+const bgrmA = await imageConnections.create({
+  name: 'runware-bgrm-a',
+  kind: 'runware',
+  model: 'runware:112@10',
+  apiKey: 'sk-rmbg-a',
+  purpose: 'bgrm',
+});
+const bgrmB = await imageConnections.create({
+  name: 'runware-bgrm-b',
+  kind: 'runware',
+  model: 'runware:113@1',
+  apiKey: 'sk-rmbg-b',
+  purpose: 'bgrm',
+});
+assert(
+  parseCreateImageConnectionBody({ name: 'bad-bgrm', kind: 'pollinations', model: 'flux', purpose: 'bgrm' }) === undefined,
+  'the admin parser rejects a non-Runware BGRM create request',
+);
+assert(
+  parseUpdateImageConnectionBody({ kind: 'fal-ai', purpose: 'bgrm' }) === undefined,
+  'the admin parser rejects an explicitly contradictory BGRM patch',
+);
+assert(bgrmA.purpose === 'bgrm', 'create persists the bgrm purpose');
+await imageConnections.activate(bgrmA.id);
+assert(
+  (await imageConnections.resolveActive('bgrm'))?.kind === 'runware' &&
+    (await imageConnections.resolveActive('bgrm'))?.purpose === 'bgrm' &&
+    (await imageConnections.resolveActive('bgrm'))?.model === 'runware:112@10' &&
+    (await imageConnections.resolveActive('bgrm'))?.apiKey === 'sk-rmbg-a',
+  "resolveActive('bgrm') returns the active decrypted Runware profile",
+);
+assert(
+  (await imageConnections.resolveActive())?.apiKey === 'sk-runware-secret' &&
+    (await imageConnections.resolveActive('portrait'))?.apiKey === 'sk-pt-b',
+  'activating BGRM leaves the active background and portrait rows untouched',
+);
+await imageConnections.activate(bgrmB.id);
+assert(
+  (await imageConnections.resolveActive('bgrm'))?.apiKey === 'sk-rmbg-b' &&
+    pool.imageConnections.filter((c) => c.purpose === 'bgrm' && c.is_active).length === 1,
+  'activating a second BGRM row demotes only the first BGRM row',
+);
+assert(
+  pool.imageConnections.filter((c) => c.is_active && c.purpose === 'background').length === 1 &&
+    pool.imageConnections.filter((c) => c.is_active && c.purpose === 'portrait').length === 1,
+  'background, portrait, and BGRM rows can all be active simultaneously',
+);
+
 // --- seed (migration 0123): stored/round-tripped as a number despite the bigint-as-string
 // boundary, null clears it back to random, and a patch omitting it leaves the value untouched. ---
 const seeded = await imageConnections.create({ name: 'seeded-conn', kind: 'pollinations', model: 'flux', apiKey: 'sk-seed', seed: 424242 });
@@ -410,6 +460,81 @@ assert((await imageConnections.remove('missing')) === 'not_found', 'remove of an
       'the runware adapter sends seed, numberResults, a URL output type and checkNSFW=false (Canvalyze\'s proven base task)');
     assert(task.apiKey === undefined, 'the runware adapter never puts the apiKey in the body (it lives in the Bearer header)');
     assert(task.taskUUID && task.taskUUID.length > 0, 'the runware adapter gives each task a taskUUID for response correlation');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// --- io/imageGen/removeBackground.ts: URL and UUID references stay unchanged and are never fetched ---
+{
+  const realFetch = global.fetch;
+  let calls = 0;
+  let captured;
+  global.fetch = async (url, init) => {
+    calls += 1;
+    captured = { url, init };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ data: [{ taskUUID: JSON.parse(init.body)[0].taskUUID, imageURL: 'https://runware.test/transparent.png' }] }),
+    };
+  };
+  try {
+    const result = await removeBackground({ image: 'https://example.test/generated.jpg', model: 'runware:112@10', apiKey: 'test-key' });
+    const sent = JSON.parse(captured.init.body);
+    const task = sent[0];
+    assert(captured.url === 'https://api.runware.ai/v1' && captured.init.method === 'POST', 'the BGRM adapter POSTs the Runware endpoint');
+    assert(captured.init.headers.authorization === 'Bearer test-key', 'the BGRM adapter authenticates with a Bearer header');
+    assert(Array.isArray(sent) && sent.length === 1 && task.taskType === 'removeBackground', 'the BGRM adapter sends one removeBackground task');
+    assert(task.model === 'runware:112@10' && task.inputs.image === 'https://example.test/generated.jpg' && task.outputFormat === 'PNG', 'the BGRM adapter forwards the URL reference unchanged as PNG');
+    assert(result.imageUrl === 'https://runware.test/transparent.png' && calls === 1, 'the BGRM adapter returns imageURL with only the Runware request');
+
+    await removeBackground({ image: '11111111-2222-3333-4444-555555555555', model: 'runware:112@10', apiKey: 'test-key' });
+    assert(JSON.parse(captured.init.body)[0].inputs.image === '11111111-2222-3333-4444-555555555555' && calls === 2, 'the BGRM adapter forwards a Runware UUID unchanged without an extra source fetch');
+  } finally {
+    global.fetch = realFetch;
+  }
+}
+
+// --- removeBackground error contract ---
+{
+  let threw = false;
+  try {
+    await removeBackground({ image: 'x', model: 'runware:112@10', apiKey: '  ' });
+  } catch (e) {
+    threw = /no API key/.test(e.message);
+  }
+  assert(threw, 'the BGRM adapter rejects a missing API key');
+
+  const realFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: false, status: 401, text: async () => 'unauthorized' });
+    threw = false;
+    try {
+      await removeBackground({ image: 'x', model: 'runware:112@10', apiKey: 'k' });
+    } catch (e) {
+      threw = /HTTP 401/.test(e.message);
+    }
+    assert(threw, 'the BGRM adapter rejects an HTTP failure');
+
+    global.fetch = async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ taskUUID: 't', errorCode: 'BAD_IMAGE', message: 'invalid image' }] }) });
+    threw = false;
+    try {
+      await removeBackground({ image: 'x', model: 'runware:112@10', apiKey: 'k' });
+    } catch (e) {
+      threw = /BAD_IMAGE/.test(e.message);
+    }
+    assert(threw, 'the BGRM adapter surfaces a Runware task error');
+
+    global.fetch = async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({ data: [{ taskUUID: 't' }] }) });
+    threw = false;
+    try {
+      await removeBackground({ image: 'x', model: 'runware:112@10', apiKey: 'k' });
+    } catch (e) {
+      threw = /no imageURL/.test(e.message);
+    }
+    assert(threw, 'the BGRM adapter rejects a response without imageURL');
   } finally {
     global.fetch = realFetch;
   }

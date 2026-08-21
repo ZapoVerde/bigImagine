@@ -313,6 +313,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             <select
               value={draft.kind}
               onChange={(e) => setDraft((d) => ({ ...d, kind: e.target.value as Draft['kind'] }))}
+              disabled={draft.purpose === 'bgrm'}
             >
               <option value="pollinations">Pollinations</option>
               <option value="runware">Runware</option>
@@ -326,10 +327,17 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             Purpose
             <select
               value={draft.purpose}
-              onChange={(e) => setDraft((d) => ({ ...d, purpose: e.target.value as Draft['purpose'] }))}
+              onChange={(e) =>
+                setDraft((d) => ({
+                  ...d,
+                  purpose: e.target.value as Draft['purpose'],
+                  ...(e.target.value === 'bgrm' ? { kind: 'runware' as Draft['kind'] } : {}),
+                }))
+              }
             >
               <option value="background">Background — location renders</option>
               <option value="portrait">Portrait — Portrait Studio candidates</option>
+              <option value="bgrm">Background removal</option>
             </select>
           </label>
 
@@ -338,7 +346,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             <input
               value={draft.model}
               onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
-              placeholder={draft.kind === 'pollinations' ? 'e.g. flux' : draft.kind === 'runware' ? 'e.g. runware:100@1' : 'e.g. fal-ai/z-image/turbo'}
+              placeholder={draft.purpose === 'bgrm' ? 'e.g. runware:112@10' : draft.kind === 'pollinations' ? 'e.g. flux' : draft.kind === 'runware' ? 'e.g. runware:100@1' : 'e.g. fal-ai/z-image/turbo'}
             />
           </label>
 
@@ -363,7 +371,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             </label>
           )}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Width
             <input
               type="number"
@@ -372,9 +380,9 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               value={draft.width}
               onChange={(e) => setDraft((d) => ({ ...d, width: e.target.value }))}
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Height
             <input
               type="number"
@@ -383,9 +391,9 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               value={draft.height}
               onChange={(e) => setDraft((d) => ({ ...d, height: e.target.value }))}
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Sampling steps
             <input
               type="number"
@@ -393,9 +401,9 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               value={draft.samplingSteps}
               onChange={(e) => setDraft((d) => ({ ...d, samplingSteps: e.target.value }))}
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             CFG scale
             <input
               type="number"
@@ -404,27 +412,27 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               value={draft.cfgScale}
               onChange={(e) => setDraft((d) => ({ ...d, cfgScale: e.target.value }))}
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Sampler name
             <input
               value={draft.samplerName}
               onChange={(e) => setDraft((d) => ({ ...d, samplerName: e.target.value }))}
               placeholder="e.g. euler (optional)"
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Seed
             <input
               value={draft.seed}
               onChange={(e) => setDraft((d) => ({ ...d, seed: e.target.value }))}
               placeholder="blank = random (default)"
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Master positive style prefix
             <textarea
               value={draft.masterPositiveStylePrefix}
@@ -432,9 +440,9 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               rows={2}
               placeholder="Prepend to every prompt through this connection (optional)"
             />
-          </label>
+          </label>}
 
-          <label>
+          {draft.purpose !== 'bgrm' && <label>
             Master negative prompt
             <textarea
               value={draft.masterNegativePrompt}
@@ -442,7 +450,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
               rows={2}
               placeholder="Negative prompt constraints (optional)"
             />
-          </label>
+          </label>}
 
           {draft.kind === 'comfyui' && (
             <label>
@@ -460,7 +468,7 @@ export default function ImageConnectionEditor({ selected, isNew, adminKey, onRef
             <button onClick={save} disabled={!dirty || saving}>
               {saving ? 'Saving…' : isNew ? 'Create connection' : 'Save changes'}
             </button>
-            {!isNew && (
+            {!isNew && draft.purpose !== 'bgrm' && (
               <button
                 type="button"
                 className="connections-test-btn"
