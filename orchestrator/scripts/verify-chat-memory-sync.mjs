@@ -1879,7 +1879,6 @@ Duplicate of: Mira Vale`,
   seedMessages(TOOLFREE_RP_ID, 'TOOLFREE_RP', 12);
 
   embeddings.seen.length = 0;
-  const summarizeCallsBefore = summarizeCalls().length;
   await runChatMemorySyncTick(deps);
 
   for (const chatId of [TOOLFREE_CHAT_ID, TOOLFREE_RP_ID]) {
@@ -1895,7 +1894,13 @@ Duplicate of: Mira Vale`,
     );
   }
 
-  const tfSummarizeCalls = summarizeCalls().slice(summarizeCallsBefore);
+  // Scoped by the two seeded tags themselves, not by a "nothing else lands in this window since a
+  // snapshot" assumption — llmGate.ts's retry-with-backoff runs each Promise.all'd chunk summarize
+  // call independently, so a sibling call from an unrelated slow-retrying chat elsewhere in the
+  // suite can in principle still be in flight and land its (harmless, unawaited-by-anything) call
+  // in whatever window happens to be open when it finally resolves. Scoping by content is exact
+  // regardless of what else is coincidentally in flight.
+  const tfSummarizeCalls = summarizeCalls().filter((c) => c.messages.some((m) => m.role === 'user' && m.content.includes('TOOLFREE')));
   assert(tfSummarizeCalls.length === 4, 'the tick summarized every chunk (2 per chat) through the tool-free completion');
   assert(
     tfSummarizeCalls.every((c) => c.tools === undefined && c.options.forceTool === undefined),

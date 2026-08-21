@@ -175,6 +175,18 @@ const DEFAULT_DIGEST_HORIZON_PAIRS = 24; // smaller than Canonize's 40 — chat_
  *  suppression immediately regardless of this window — see isPermanentFailureSuppressed. */
 const PERMANENT_FAILURE_RETRY_MS = 30 * 60_000;
 
+/** Minimum gap between launching one due chat's sync pass and the next, within the same tick
+ *  (2026-08-21). Each chat's phase 2 fires several LLM/embeddings calls; several chats launched in
+ *  the same instant means several providers each see a burst of simultaneous requests at once,
+ *  which real-world OpenRouter/DeepSeek traffic has shown to trigger rejections/throttling that a
+ *  spread-out request rate doesn't. This only staggers *launch* time — passes still run
+ *  concurrently once started, each with its own phase 1/2/3 lifecycle and in-flight guard. */
+const CHAT_SYNC_LAUNCH_STAGGER_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** chatIds whose sync pass is currently running. The poll tick fires every POLL_INTERVAL_MS while
  *  a single pass can take minutes of LLM round-trips, and a chat stays 'due' to every tick until
  *  its pass commits — so without this guard each overlapping tick launches a parallel sync pass
@@ -1233,6 +1245,34 @@ async function runOneChatSync(deps: ChatMemorySyncDeps, sync: SyncSettings, user
   });
 }
 
+async function syncChatAndRecordStatus(deps: ChatMemorySyncDeps, defaults: SyncSettings, userId: string, chatId: string): Promise<void> {
+  try {
+    const result = await runOneChatSync(deps, defaults, userId, chatId);
+    await recordSyncStatus(deps.db, userId, chatId, result);
+  } catch (err) {
+    log.error('chat-memory sync: sync failed for one chat, will retry next tick', { chatId, err });
+    const step = err instanceof SyncStepError ? err.step : 'unknown';
+    const message = err instanceof Error ? err.message : String(err);
+    const kind = classifyLlmFailure(err);
+    // SyncStepError.cause carries whatever step() actually threw — when that's a
+    // LlmOutputParseError (a bridge/distill/curator/chunk-summary parse failure), thread its
+    // prompt name and the model's raw reply through onto the status row unchanged, so the
+    // review panel's error-detail modal can show exactly what the model said.
+    const cause = err instanceof SyncStepError ? err.cause : err;
+    const promptName = cause instanceof LlmOutputParseError ? cause.promptName : null;
+    const llmReply = cause instanceof LlmOutputParseError ? cause.rawReply : null;
+    await recordSyncStatus(deps.db, userId, chatId, {
+      status: 'error',
+      step,
+      error: message,
+      kind,
+      signature: defaults.profileSignature,
+      promptName,
+      llmReply,
+    });
+  }
+}
+
 export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<void> {
   // Settings (including the pipeline's connection) are resolved ONCE per tick and shared by every
   // due chat — previously each chat re-resolved them inside the loop, so N due chats paid N
@@ -1240,6 +1280,18 @@ export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<v
   // with each other if a Settings-tab edit landed mid-tick.
   const defaults = await resolveSyncSettings(deps);
   const users = await deps.db.withSystemScope((session) => session.query<UserRow>('select user_id from users'));
+
+  // Every due chat this tick, across every user, flattened before any pass launches — different
+  // chats share no lock or transaction (each gets its own advisory lock and its own phase 1/3
+  // transactions), so nothing stops them running concurrently rather than one-at-a-time. With
+  // phase 2's LLM/embeddings calls now able to take minutes (2026-08-21's read/LLM/write split),
+  // a sequential loop meant chat N didn't even start until chats 1..N-1 fully finished — a busy
+  // tick with several due chats could take many minutes to get to the last one. Launches are
+  // still staggered by CHAT_SYNC_LAUNCH_STAGGER_MS (not fired in the same instant): real
+  // OpenRouter/DeepSeek traffic has shown providers reject/throttle a burst of simultaneous
+  // requests that a spread-out rate sails through — this stays a "don't fire at once" guard, not
+  // a "run one at a time" guard.
+  const toSync: { userId: string; chatId: string }[] = [];
   for (const { user_id: userId } of users) {
     // findDueChats also applies permanent-failure suppression (migration 0127): a chat whose last
     // attempt was a permanent failure under the current connection signature is excluded from the
@@ -1247,33 +1299,16 @@ export async function runChatMemorySyncTick(deps: ChatMemorySyncDeps): Promise<v
     // "No endpoints found for <model>" 404 no longer re-fires once per 30s tick forever.
     const due = await findDueChats(deps.db, userId, defaults.syncEveryMessages, defaults.liveWindowMessages, defaults.profileSignature);
     for (const chatId of due) {
-      try {
-        const result = await runOneChatSync(deps, defaults, userId, chatId);
-        await recordSyncStatus(deps.db, userId, chatId, result);
-      } catch (err) {
-        log.error('chat-memory sync: sync failed for one chat, will retry next tick', { chatId, err });
-        const step = err instanceof SyncStepError ? err.step : 'unknown';
-        const message = err instanceof Error ? err.message : String(err);
-        const kind = classifyLlmFailure(err);
-        // SyncStepError.cause carries whatever step() actually threw — when that's a
-        // LlmOutputParseError (a bridge/distill/curator/chunk-summary parse failure), thread its
-        // prompt name and the model's raw reply through onto the status row unchanged, so the
-        // review panel's error-detail modal can show exactly what the model said.
-        const cause = err instanceof SyncStepError ? err.cause : err;
-        const promptName = cause instanceof LlmOutputParseError ? cause.promptName : null;
-        const llmReply = cause instanceof LlmOutputParseError ? cause.rawReply : null;
-        await recordSyncStatus(deps.db, userId, chatId, {
-          status: 'error',
-          step,
-          error: message,
-          kind,
-          signature: defaults.profileSignature,
-          promptName,
-          llmReply,
-        });
-      }
+      toSync.push({ userId, chatId });
     }
   }
+
+  await Promise.allSettled(
+    toSync.map(async ({ userId, chatId }, i) => {
+      if (i > 0) await sleep(i * CHAT_SYNC_LAUNCH_STAGGER_MS);
+      await syncChatAndRecordStatus(deps, defaults, userId, chatId);
+    }),
+  );
 }
 
 export function startChatMemorySyncLoop(deps: ChatMemorySyncDeps): void {
