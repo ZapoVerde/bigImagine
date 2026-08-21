@@ -126,7 +126,7 @@ export default function TurnDrawerSection({ apiKey, chatId, snapshot }: TurnDraw
   const report = snapshot ? buildTurnTimelineReport(snapshot) : visibleRow ? buildTurnTimelineReport(visibleRow) : null;
 
   return (
-    <section className="turn-drawer-section">
+    <section className={`turn-drawer-section${collapsed ? ' collapsed' : ''}`}>
       <div className="turn-drawer-header">
         <button
           type="button"

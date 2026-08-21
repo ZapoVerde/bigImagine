@@ -112,6 +112,22 @@
   overflow: hidden;
 }
 
+/* Keep the rail ordinary: every closed section is a compact bar at the top, while expanded
+   sections follow underneath in document order. This avoids distributing collapsed bars around
+   the inspector's flexible content. */
+.sidebar-rp-sections > .sidebar-rp-sync,
+.sidebar-rp-sections > .prompt-inspector-panel.collapsed,
+.sidebar-rp-sections > .turn-drawer-section.collapsed {
+  order: 0;
+  flex-shrink: 0;
+}
+
+.sidebar-rp-sections > .sidebar-rp-sync[open],
+.sidebar-rp-sections > .prompt-inspector-panel:not(.collapsed),
+.sidebar-rp-sections > .turn-drawer-section:not(.collapsed) {
+  order: 1;
+}
+
 /* RP sync status is opt-in in the left drawer; its own Sync history subsection remains
    independently collapsible inside this closed-by-default section. */
 .sidebar-rp-sync {
