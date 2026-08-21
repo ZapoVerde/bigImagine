@@ -281,6 +281,7 @@ import {
 import { handlePortraitRoundTelemetry } from './portraitTelemetryRoutes.js';
 import { handleCharacterVisualStateEnabledGet, handleCharacterVisualStateEnabledSet } from './characterVisualState.js';
 import { handleChatCharacterSprites } from './characterSpriteState.js';
+import { handleChatCharacterSpritesRefresh } from './characterSpriteRefresh.js';
 
 export interface HttpServerDeps {
   llm: LlmProvider;
@@ -571,16 +572,21 @@ const routes: Route[] = [
       await handleCharacterExportRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
     }) },
 
-  // ---- Character Sprite Stage (RP) — read-only presentation of cached visual combinations ----
-  { method: 'GET', prefix: true, path: '/v1/chats/', run: async (req, res, deps) => {
+  // ---- Character Sprite Stage (RP) — read-only + Cast Refresh (POST /v1/chats/:id/character-sprites/refresh) ----
+  { method: '*', prefix: true, path: '/v1/chats/', run: async (req, res, deps) => {
       const url = new URL(req.url!, 'http://placeholder');
-      if (!url.pathname.endsWith('/character-sprites')) {
+      if (url.pathname.endsWith('/character-sprites/refresh')) {
         return withUser(req, res, deps, async (userId) => {
-          await handleChatRoutes(req, res, deps, userId, url);
+          await handleChatCharacterSpritesRefresh(req, res, deps, userId, url);
+        });
+      }
+      if (url.pathname.endsWith('/character-sprites')) {
+        return withUser(req, res, deps, async (userId) => {
+          await handleChatCharacterSprites(req, res, deps, userId, url);
         });
       }
       return withUser(req, res, deps, async (userId) => {
-        await handleChatCharacterSprites(req, res, deps, userId, url);
+        await handleChatRoutes(req, res, deps, userId, url);
       });
     }
   },

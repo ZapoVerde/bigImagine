@@ -36,7 +36,7 @@
  */
 
 import { useEffect, useState } from 'react';
-import { ApiError, callTool, sendCastCharacterToStudio } from '../../api/client';
+import { ApiError, callTool, refreshChatCharacterSprites, sendCastCharacterToStudio } from '../../api/client';
 import type { CharacterSummary } from '../../api/types';
 import CharacterAvatarThumb from '../CharacterAvatarThumb';
 import './CastSection.css';
@@ -79,6 +79,10 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
   const [removingId, setRemovingId] = useState<string | null>(null);
   const [removeMessage, setRemoveMessage] = useState<{ id: string; text: string; ok: boolean } | null>(null);
   const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null);
+  // Cast Refresh Imagery — deterministic retry control (required behaviour)
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'done' | 'partial' | 'failed'>('idle');
+  const [refreshMessage, setRefreshMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (collapsed) return;
@@ -171,6 +175,46 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
     }
   }
 
+  async function handleRefreshImagery() {
+    if (refreshing) return;
+    setRefreshing(true);
+    setRefreshStatus('idle');
+    setRefreshMessage(null);
+    try {
+      const { results } = await refreshChatCharacterSprites(chatId, apiKey);
+      const failed = results.filter((r) => r.status === 'failed');
+      const ok = results.filter((r) => r.status !== 'failed');
+      if (results.length === 0) {
+        setRefreshStatus('done');
+        setRefreshMessage('No present characters to refresh.');
+      } else if (failed.length === 0) {
+        setRefreshStatus('done');
+        setRefreshMessage(`Refreshed ${ok.length} character${ok.length === 1 ? '' : 's'}.`);
+      } else if (ok.length === 0) {
+        setRefreshStatus('failed');
+        setRefreshMessage(failed[0]?.reason ?? 'Refresh failed.');
+      } else {
+        setRefreshStatus('partial');
+        setRefreshMessage(`${ok.length} ok, ${failed.length} failed — ${failed[0]?.reason ?? ''}`.trim());
+      }
+      // Cause SpriteStage to immediately re-fetch rather than wait for its poll interval
+      window.dispatchEvent(new CustomEvent('bigimagine:sprite-refresh', { detail: { chatId } }));
+      window.setTimeout(() => {
+        setRefreshStatus('idle');
+        setRefreshMessage(null);
+      }, 4000);
+    } catch (err) {
+      setRefreshStatus('failed');
+      setRefreshMessage(err instanceof ApiError ? err.message : 'Refresh failed.');
+      window.setTimeout(() => {
+        setRefreshStatus('idle');
+        setRefreshMessage(null);
+      }, 4000);
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   return (
     <section className="cast-section">
       <div className="cast-header">
@@ -184,6 +228,23 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
           <span className="cast-chevron">{collapsed ? '▸' : '▾'}</span>
           <span>Cast</span>
         </button>
+        <button
+          type="button"
+          className={`cast-refresh-btn${refreshing ? ' refreshing' : ''}${refreshStatus !== 'idle' ? ` ${refreshStatus}` : ''}`}
+          aria-label="Refresh imagery"
+          title={
+            refreshing
+              ? 'Refreshing imagery…'
+              : refreshMessage ?? 'Refresh imagery — retry missing portraits for present characters'
+          }
+          disabled={refreshing}
+          onClick={() => void handleRefreshImagery()}
+        >
+          <span aria-hidden="true" className="cast-refresh-icon">
+            {refreshing ? '◌' : refreshStatus === 'done' ? '✓' : refreshStatus === 'failed' || refreshStatus === 'partial' ? '⚠' : '↻'}
+          </span>
+        </button>
+        {refreshMessage && <span className={`cast-refresh-status ${refreshStatus}`}>{refreshMessage}</span>}
       </div>
       {!collapsed && (
         <div className="cast-content">

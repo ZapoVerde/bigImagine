@@ -1875,3 +1875,21 @@ export async function getChatCharacterSprites(
   const body = await jsonRequest<{ sprites: CharacterSpriteState[] }>(`/v1/chats/${encodeURIComponent(chatId)}/character-sprites${query}`, apiKey);
   return body.sprites;
 }
+
+/** POST /v1/chats/:chatId/character-sprites/refresh — Cast Refresh Imagery (deterministic retry). */
+export interface RefreshCharacterSpriteResult {
+  characterId: string;
+  name: string;
+  status: 'reused' | 'generated' | 'recovered' | 'failed';
+  imageUrl: string | null;
+  reason?: string;
+}
+export async function refreshChatCharacterSprites(
+  chatId: string,
+  apiKey: string | null,
+): Promise<{ results: RefreshCharacterSpriteResult[] }> {
+  return jsonRequest<{ results: RefreshCharacterSpriteResult[] }>(`/v1/chats/${encodeURIComponent(chatId)}/character-sprites/refresh`, apiKey, {
+    method: 'POST',
+    body: {},
+  });
+}

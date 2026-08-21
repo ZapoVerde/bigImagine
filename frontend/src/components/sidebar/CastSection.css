@@ -12,6 +12,7 @@
 .cast-header {
   display: flex;
   align-items: center;
+  gap: 0.3rem;
   padding: 0.25rem 0.5rem;
 }
 
@@ -187,4 +188,62 @@
 .cast-presence.on {
   background: var(--color-accent, #2e9e5b);
   border-color: var(--color-accent, #2e9e5b);
+}
+
+/* Cast Refresh Imagery — discreet icon button in the header (required behaviour). */
+.cast-refresh-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.cast-refresh-btn:hover:not(:disabled) {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+  border-color: var(--color-border-strong);
+}
+.cast-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.cast-refresh-btn.refreshing .cast-refresh-icon {
+  display: inline-block;
+  animation: cast-refresh-spin 0.9s linear infinite;
+}
+.cast-refresh-btn.done {
+  color: var(--color-accent, #2e9e5b);
+}
+.cast-refresh-btn.failed,
+.cast-refresh-btn.partial {
+  color: var(--color-danger);
+}
+@keyframes cast-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+.cast-refresh-status {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-xs, 0.68rem);
+  color: var(--color-text-muted);
+}
+.cast-refresh-status.done {
+  color: var(--color-accent, #2e9e5b);
+}
+.cast-refresh-status.failed,
+.cast-refresh-status.partial {
+  color: var(--color-danger);
 }

@@ -577,6 +577,17 @@ export default function ChatView({
   useEffect(() => {
     if (activeChat?.kind === 'rp') setSpriteRefreshToken((n) => n + 1);
   }, [messages.length, activeChat?.kind]);
+  // Cast Refresh Imagery: explicit invalidation from CastSection's refresh control (§Required Behaviour)
+  useEffect(() => {
+    const onSpriteRefresh = (e: Event) => {
+      const detail = (e as CustomEvent<{ chatId?: string }>).detail;
+      if (!activeChat || activeChat.kind !== 'rp') return;
+      if (detail?.chatId && detail.chatId !== chatId) return;
+      setSpriteRefreshToken((n) => n + 1);
+    };
+    window.addEventListener('bigimagine:sprite-refresh', onSpriteRefresh as EventListener);
+    return () => window.removeEventListener('bigimagine:sprite-refresh', onSpriteRefresh as EventListener);
+  }, [activeChat, chatId]);
   const selectedSpriteSwipe = useMemo(() => {
     const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
     return {
