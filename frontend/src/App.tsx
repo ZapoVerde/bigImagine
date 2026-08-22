@@ -24,6 +24,7 @@ import ChatView from './views/ChatView';
 import CleanupView from './views/CleanupView';
 import ConnectionsView from './views/ConnectionsView';
 import PortraitStudioView from './views/PortraitStudioView';
+import PortraitSettingsView from './views/PortraitSettingsView';
 import DocumentsView from './views/DocumentsView';
 import NotesView from './views/NotesView';
 import PromptStacksView from './views/PromptStacksView';
@@ -91,7 +92,7 @@ export default function App() {
   // auth resolves — null until the first fetch lands, then the live boolean. Unset behaves as
   // enabled (the feature predates the switch); a fetch failure fails open to enabled, matching
   // every other settings key's default shape. No polling: a manual page reload picks up an
-  // admin's change, same as the other household toggles here. Drives the Portraits entry in the
+  // admin's change, same as the other household toggles here. Drives the Studio entry in the
   // picker/nav, the PortraitStudioView mount, and the ActivePortrait box.
   const [portraitsEnabled, setPortraitsEnabled] = useState<boolean | null>(null);
 
@@ -336,7 +337,7 @@ export default function App() {
             {tab.type === 'portraits' &&
               (portraitsEnabled === false ? (
                 <div className="blank-tab disabled-pane">
-                  <div className="disabled-pane-note">Portrait Studio is disabled — enable it in Settings.</div>
+                  <div className="disabled-pane-note">Studio is disabled — enable it in Portraits.</div>
                 </div>
               ) : (
                 <PortraitStudioView
@@ -347,6 +348,7 @@ export default function App() {
                   }}
                 />
               ))}
+            {tab.type === 'portrait-settings' && <PortraitSettingsView />}
             {tab.type === 'cleanup' && <CleanupView apiKey={apiKey} />}
             {tab.type === 'backgrounds' && <BackgroundsView />}
             {tab.type === 'locations' && <LocationsView />}

@@ -5,7 +5,7 @@ type PickableType = 'chat' | SummonableType;
 
 interface TypePickerProps {
   onPick: (type: PickableType) => void;
-  /** portrait-chain-hardening-plan.md: false hides the Portraits entry (the household kill
+  /** portrait-chain-hardening-plan.md: false hides the Studio entry (the household kill
    *  switch is off); absent/true shows it. */
   portraitsEnabled?: boolean;
 }
@@ -19,7 +19,8 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'browse-chub', label: 'Browse Chub' },
   { type: 'settings', label: 'Settings' },
   { type: 'connections', label: 'Connections' },
-  { type: 'portraits', label: 'Portraits' },
+  { type: 'portraits', label: 'Studio' },
+  { type: 'portrait-settings', label: 'Portraits' },
   { type: 'canon', label: 'Canon' },
   { type: 'rag', label: 'RAG' },
   { type: 'reviewpanel', label: 'Review Panel' },

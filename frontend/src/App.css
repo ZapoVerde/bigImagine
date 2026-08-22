@@ -370,7 +370,7 @@ body {
   flex: 1;
 }
 
-/* portrait-chain-hardening-plan.md: the placeholder an already-open Portraits tab shows when the
+/* portrait-chain-hardening-plan.md: the placeholder an already-open Studio tab shows when the
    household kill switch is off — never a silent blank pane. */
 .disabled-pane {
   align-items: center;

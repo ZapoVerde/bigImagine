@@ -19,7 +19,8 @@ export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'rag', label: 'RAG', icon: '🧠' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },
   { type: 'connections', label: 'Connections', icon: '🔌' },
-  { type: 'portraits', label: 'Portraits', icon: '🎨' },
+  { type: 'portraits', label: 'Studio', icon: '🎨' },
+  { type: 'portrait-settings', label: 'Portraits', icon: '🖼️' },
   { type: 'cleanup', label: 'Cleanup', icon: '🧹' },
   { type: 'locations', label: 'Locations', icon: '📍' },
   { type: 'lorebooks', label: 'Lorebooks', icon: '📖' },
@@ -31,7 +32,7 @@ interface AppNavDrawerProps {
   open: boolean;
   onClose: () => void;
   onNavigate: (type: SummonableType) => void;
-  /** portrait-chain-hardening-plan.md: false hides the Portraits entry (the household kill
+  /** portrait-chain-hardening-plan.md: false hides the Studio entry (the household kill
    *  switch is off); absent/true shows it. */
   portraitsEnabled?: boolean;
 }
