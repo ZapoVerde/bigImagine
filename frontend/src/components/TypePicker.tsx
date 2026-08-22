@@ -15,7 +15,7 @@ const OPTIONS: { type: PickableType; label: string }[] = [
   { type: 'notes', label: 'Notes' },
   { type: 'documents', label: 'Documents' },
   { type: 'promptstacks', label: 'Prompt Stacks' },
-  { type: 'characters', label: 'Cards' },
+  { type: 'cards', label: 'Cards' },
   { type: 'browse-chub', label: 'Browse Chub' },
   { type: 'settings', label: 'Settings' },
   { type: 'connections', label: 'Connections' },

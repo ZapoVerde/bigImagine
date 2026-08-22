@@ -40,6 +40,7 @@ import type {
   ChatLegibilitySettings,
   ChatLegibilitySettingsPatch,
   BgrmSettings,
+  ImportedCard,
   ImportedCharacter,
   LlmCallStatRow,
   LlmConnectionSummary,
@@ -1193,6 +1194,50 @@ export async function fetchCharacterAvatarUrl(characterId: string, apiKey: strin
  *  as a character with no avatar. */
 export async function fetchChubAvatarUrl(chubAvatarUrl: string, apiKey: string | null): Promise<string | null> {
   const res = await fetch(`/v1/characters/chub-avatar?url=${encodeURIComponent(chubAvatarUrl)}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) return null;
+  const blob = await res.blob();
+  return URL.createObjectURL(blob);
+}
+
+/** POST /v1/cards/import — Card-scoped file import (CardSummary/CardDetail ownership).
+ *  `content-type` omitted for the same reason uploadAttachment omits it: FormData needs the
+ *  browser to set its own multipart boundary. */
+export async function importCard(file: File, apiKey: string | null): Promise<ImportedCard> {
+  const form = new FormData();
+  form.append('file', file, file.name);
+  const res = await fetch('/v1/cards/import', {
+    method: 'POST',
+    headers: authHeaders(apiKey),
+    body: form,
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  return res.json() as Promise<ImportedCard>;
+}
+
+/** GET /v1/cards/:id/export.{png,json} — Card-scoped export, same authenticated-blob
+ *  download shape as exportCharacterCard. */
+export async function exportCard(cardId: string, format: 'png' | 'json', apiKey: string | null): Promise<void> {
+  const res = await fetch(`/v1/cards/${encodeURIComponent(cardId)}/export.${format}`, {
+    headers: authHeaders(apiKey),
+  });
+  if (!res.ok) throw new ApiError(res.status, await parseErrorBody(res));
+  const disposition = res.headers.get('content-disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? `card.${format}`;
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(objectUrl);
+}
+
+/** GET /v1/cards/:id/avatar — Card-owned imported media, same object-URL lifecycle as
+ *  fetchCharacterAvatarUrl. Null when the Card has no avatar. */
+export async function fetchCardAvatarUrl(cardId: string, apiKey: string | null): Promise<string | null> {
+  const res = await fetch(`/v1/cards/${encodeURIComponent(cardId)}/avatar`, {
     headers: authHeaders(apiKey),
   });
   if (!res.ok) return null;

@@ -1218,7 +1218,8 @@ export interface CharacterSummary {
   createdAt: string;
 }
 
-// plugins/characters/src/getCharacterTool.ts
+// plugins/characters/src/getCharacterTool.ts — runtime Characters only. Reusable Cards
+// use the CardSummary/CardDetail shapes below (plugins/cards), not this type.
 export type CharacterDetail =
   | { found: false; characterId: string }
   | {
@@ -1238,8 +1239,49 @@ export type CharacterDetail =
       updatedAt: string;
     };
 
+// plugins/cards/src/getCardsTool.ts — canonical Cards list-pane row shape.
+export interface CardSummary {
+  cardId: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  hasAvatar: boolean;
+}
+
+// plugins/cards/src/getCardTool.ts — canonical Card detail shape.
+export type CardDetail =
+  | { found: false; cardId: string }
+  | {
+      found: true;
+      cardId: string;
+      name: string;
+      persona: string;
+      appearance: string;
+      scenario: string;
+      systemPrompt: string;
+      exampleDialogue: string;
+      greetings: string[];
+      specVersion: 'v2' | 'v3';
+      hasAvatar: boolean;
+      hasSourceJson: boolean;
+      createdAt: string;
+      updatedAt: string;
+    };
+
+// POST /v1/cards/import's response shape (handleCardImport.ts, relaying
+// plugins/cards/src/importCardTool.ts's return value).
+export interface ImportedCard {
+  cardId: string;
+  name: string;
+  specVersion: 'v2' | 'v3';
+  hasAvatar: boolean;
+  /** Number of lorebook entries imported from the card's embedded `character_book` (0 when none). */
+  lorebookEntriesImported: number;
+}
+
 // POST /v1/characters/import's response shape (handleCharacterImport.ts, relaying
 // plugins/characters/src/importCharacterCardTool.ts's return value).
+// Legacy Card path — new code should use ImportedCard / /v1/cards/import.
 export interface ImportedCharacter {
   characterId: string;
   name: string;

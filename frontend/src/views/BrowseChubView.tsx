@@ -121,7 +121,7 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
       setError(null);
       try {
         const searchResult = await callTool<ChubSearchResult>(
-          'search_chub_characters',
+          'search_chub_cards',
           {
             query: searchQuery || undefined,
             page: searchPage,
@@ -240,7 +240,7 @@ export default function BrowseChubView({ apiKey, onCardImported }: BrowseChubVie
   async function importCharacter(fullPath: string) {
     setImportStates((prev) => ({ ...prev, [fullPath]: { status: 'importing' } }));
     try {
-      const imported = await callTool<ImportedChubCharacter>('import_character_card_from_url', { url: fullPath }, apiKey);
+      const imported = await callTool<ImportedChubCharacter>('import_card_from_url', { url: fullPath }, apiKey);
       setImportStates((prev) => ({
         ...prev,
         [fullPath]: { status: 'imported', lorebookEntriesImported: imported.lorebookEntriesImported },

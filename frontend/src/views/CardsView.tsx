@@ -3,26 +3,18 @@ import {
   ApiError,
   callTool,
   createChat,
-  exportCharacterCard,
-  importCharacterCard,
+  exportCard,
+  importCard,
   updateChat,
 } from '../api/client';
-import type { CharacterDetail, CharacterSummary, ContextStackPreset } from '../api/types';
-import CharacterAvatarThumb from '../components/CharacterAvatarThumb';
-import './CharactersView.css';
+import type { CardDetail, CardSummary, ContextStackPreset } from '../api/types';
+import CardAvatarThumb from '../components/CardAvatarThumb';
+import './CardsView.css';
 
-interface CharactersViewProps {
+interface CardsViewProps {
   apiKey: string | null;
-  /** RP always opens with a real chatId already created below — the roster starts roleplay
-   *  sessions only, never plain chats. */
-  /** Opens (or focuses, if already open) an RP chat tab — wired to useTabs' openRp, which keeps
-   *  RP chat a single slot: opening another RP chat replaces the existing one in place. */
   onOpenRp: (chatId: string, title?: string) => void;
-  /** A character was deleted and its chats purged server-side — these are the deleted chat ids,
-   *  so the app can close any open tabs for them and drop them from the history browsers. */
   onChatsDeleted?: (chatIds: string[]) => void;
-  /** Bumped (App.tsx) whenever a card is imported from chub elsewhere, so this roster re-fetches
-   *  and shows it without a manual reload. Same pattern as ChatBrowser's refreshKey. */
   refreshKey: number;
 }
 
@@ -38,7 +30,7 @@ interface Draft {
 
 const BLANK_DRAFT: Draft = { name: '', persona: '', appearance: '', scenario: '', systemPrompt: '', exampleDialogue: '', greetings: [] };
 
-function draftFromDetail(detail: CharacterDetail): Draft {
+function draftFromDetail(detail: CardDetail): Draft {
   if (!detail.found) return BLANK_DRAFT;
   return {
     name: detail.name,
@@ -51,19 +43,11 @@ function draftFromDetail(detail: CharacterDetail): Draft {
   };
 }
 
-// The Character Roster (plan: "loading a card, saving a card, exporting a card, picking a card"):
-// a mobile master-detail picker cloned from PromptStacksView's own shape (list pane + detail pane,
-// mobileShowEditor toggling which one shows below the phone-width breakpoint). Unlike
-// PromptStacksView, the list only carries id+name (get_characters is summary-only), so picking a
-// row fetches the full detail separately via get_character — loadDetail() below is called
-// explicitly wherever the selection changes, rather than driven off a useEffect keyed on
-// selectedId, since saving an *already-selected* character needs a fresh fetch too and a same-value
-// setSelectedId wouldn't retrigger an effect.
-export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refreshKey }: CharactersViewProps) {
-  const [characters, setCharacters] = useState<CharacterSummary[] | null>(null);
+export default function CardsView({ apiKey, onOpenRp, onChatsDeleted, refreshKey }: CardsViewProps) {
+  const [cards, setCards] = useState<CardSummary[] | null>(null);
   const [sortMode, setSortMode] = useState<'newest' | 'name'>('newest');
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<CharacterDetail | null>(null);
+  const [detail, setDetail] = useState<CardDetail | null>(null);
   const [creatingNew, setCreatingNew] = useState(false);
   const [draft, setDraft] = useState<Draft>(BLANK_DRAFT);
   const [error, setError] = useState<string | null>(null);
@@ -73,36 +57,33 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
   const [mobileShowEditor, setMobileShowEditor] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  // dragenter/dragleave fire on every child boundary crossing, not just the container's own edge —
-  // a counter (rather than a plain boolean) is the standard way to tell "left a child" from "left
-  // the whole drop zone" without flicker.
   const dragCounter = useRef(0);
 
-  const sortedCharacters = useMemo(() => {
-    const arr = [...(characters ?? [])];
+  const sortedCards = useMemo(() => {
+    const arr = [...(cards ?? [])];
     if (sortMode === 'newest') {
       arr.sort(
         (a, b) =>
           b.createdAt.localeCompare(a.createdAt) ||
           a.name.localeCompare(b.name) ||
-          a.characterId.localeCompare(b.characterId),
+          a.cardId.localeCompare(b.cardId),
       );
     } else {
       arr.sort(
         (a, b) =>
           a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) ||
           b.createdAt.localeCompare(a.createdAt) ||
-          a.characterId.localeCompare(b.characterId),
+          a.cardId.localeCompare(b.cardId),
       );
     }
     return arr;
-  }, [characters, sortMode]);
+  }, [cards, sortMode]);
 
   const refresh = useCallback(
     async (selectAfter?: string) => {
       try {
-        const result = await callTool<CharacterSummary[]>('get_characters', {}, apiKey);
-        setCharacters(result);
+        const result = await callTool<CardSummary[]>('get_cards', {}, apiKey);
+        setCards(result);
         setError(null);
       } catch (err) {
         setError(err instanceof ApiError ? err.message : 'failed to load cards');
@@ -116,7 +97,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     async (id: string) => {
       setDetail(null);
       try {
-        const result = await callTool<CharacterDetail>('get_character', { characterId: id }, apiKey);
+        const result = await callTool<CardDetail>('get_card', { cardId: id }, apiKey);
         setDetail(result);
         setDraft(draftFromDetail(result));
       } catch (err) {
@@ -128,10 +109,9 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
 
   useEffect(() => {
     void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiKey, refreshKey]);
 
-  function selectCharacter(id: string) {
+  function selectCard(id: string) {
     setSelectedId(id);
     setCreatingNew(false);
     setMobileShowEditor(true);
@@ -187,7 +167,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
 
   async function save() {
     if (!draft.name.trim()) {
-      setError('A character needs a name.');
+      setError('A card needs a name.');
       return;
     }
     const greetings = draft.greetings.map((g) => g.trim()).filter((g) => g.length > 0);
@@ -195,8 +175,8 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     setError(null);
     try {
       if (creatingNew) {
-        const created = await callTool<{ characterId: string; name: string }>(
-          'create_character',
+        const created = await callTool<{ cardId: string; name: string }>(
+          'create_card',
           {
             name: draft.name.trim(),
             persona: draft.persona,
@@ -209,13 +189,13 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
           apiKey,
         );
         setCreatingNew(false);
-        await refresh(created.characterId);
-        await loadDetail(created.characterId);
+        await refresh(created.cardId);
+        await loadDetail(created.cardId);
       } else if (detail?.found) {
         await callTool(
-          'update_character',
+          'update_card',
           {
-            characterId: detail.characterId,
+            cardId: detail.cardId,
             name: draft.name.trim(),
             persona: draft.persona,
             appearance: draft.appearance,
@@ -226,8 +206,8 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
           },
           apiKey,
         );
-        await refresh(detail.characterId);
-        await loadDetail(detail.characterId);
+        await refresh(detail.cardId);
+        await loadDetail(detail.cardId);
       }
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2000);
@@ -238,17 +218,15 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     }
   }
 
-  async function removeCharacter() {
+  async function removeCard() {
     if (!detail?.found) return;
     if (!window.confirm(`Delete "${detail.name}"? This can't be undone.`)) return;
     try {
       const result = await callTool<{ deleted: boolean; deletedChatIds?: string[] }>(
-        'delete_character',
-        { characterId: detail.characterId },
+        'delete_card',
+        { cardId: detail.cardId },
         apiKey,
       );
-      // The server purged the character's chats with it (they're unusable without the persona);
-      // tell the app so it closes any open tabs for them and refreshes the history browsers.
       onChatsDeleted?.(result.deletedChatIds ?? []);
       setSelectedId(null);
       setDetail(null);
@@ -262,23 +240,20 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
   async function doExport(format: 'png' | 'json') {
     if (!detail?.found) return;
     try {
-      await exportCharacterCard(detail.characterId, format, apiKey);
+      await exportCard(detail.cardId, format, apiKey);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to export card');
     }
   }
 
-  // Shared by the file-picker input and drag-and-drop: imports each file in turn (a card PNG or
-  // JSON per drop is normal, so this is a sequence, not a single import) and lands on whichever one
-  // imported last, since selecting all of them at once isn't a thing this editor supports.
   async function handleImportFiles(files: File[]) {
     setError(null);
     let lastImportedId: string | null = null;
     const failures: string[] = [];
     for (const file of files) {
       try {
-        const imported = await importCharacterCard(file, apiKey);
-        lastImportedId = imported.characterId;
+        const imported = await importCard(file, apiKey);
+        lastImportedId = imported.cardId;
       } catch (err) {
         failures.push(`${file.name}: ${err instanceof ApiError ? err.message : 'failed to import'}`);
       }
@@ -320,22 +295,13 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     if (files.length > 0) await handleImportFiles(files);
   }
 
-  // Creates a kind: 'rp' chat (db/migrations/0049_chat_kind.sql) — the only kind a character
-  // starts from here now. The created chat runs with no tools at all (DEFAULT_RP_TOOLS = [],
-  // 2026-08-10 — the RP model just executes its prompt stack) and no household_memory leakage by
-  // construction (chatSessions.ts), and opens into its own RP sidebar
-  // section/tab type rather than the general chat one. The Prompt Stack picker itself still lives
-  // in the RP chat's own settings panel once it's open — this just auto-applies whichever preset
-  // the user has marked default (migration 0061), the same explicit signal a manual Apply click
-  // would send, so a fresh RP chat doesn't start with no stack at all unless the user genuinely
-  // has no default set.
   async function startRp() {
     if (!detail?.found) return;
     setStartingRp(true);
     setError(null);
     try {
       const chat = await createChat(apiKey, { title: detail.name, kind: 'rp' });
-      await callTool('apply_card_to_chat', { cardId: detail.characterId, chatId: chat.chatId }, apiKey);
+      await callTool('apply_card_to_chat', { cardId: detail.cardId, chatId: chat.chatId }, apiKey);
       await applyDefaultStack(chat.chatId);
       onOpenRp(chat.chatId, detail.name);
     } catch (err) {
@@ -345,13 +311,6 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     }
   }
 
-  // Best-effort — same "won't block on this" shape removePreset's delete_prompt_preset call uses:
-  // a missing or failed default stack shouldn't stop the RP chat from opening, just leave it with
-  // no system prompt yet (the same state it started in before this feature existed). Applies the
-  // user's named default prompt stack (migration 0061, apply_prompt_stack_to_chat), and enables
-  // the async heuristic cleanup subloop — the cleanup shape (header/footer/antislop) is RP-only
-  // by design, so every new RP chat opts in at creation, stamped at now() so the subloop only
-  // ever touches messages that land after this point. Either can fail independently.
   async function applyDefaultStack(chatId: string) {
     try {
       const stacks = await callTool<ContextStackPreset[]>('get_context_stack_presets', {}, apiKey);
@@ -365,7 +324,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     }
   }
 
-  if (characters === null) {
+  if (cards === null) {
     return <div className="characters-view loading">Loading cards&hellip;</div>;
   }
 
@@ -426,14 +385,14 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
             if (files.length > 0) void handleImportFiles(files);
           }}
         />
-        {characters.length === 0 && <div className="empty-state">No cards yet &mdash; create one or import a card.</div>}
-        {sortedCharacters.map((c) => (
+        {cards.length === 0 && <div className="empty-state">No cards yet &mdash; create one or import a card.</div>}
+        {sortedCards.map((c) => (
           <div
-            key={c.characterId}
-            className={`characters-row${c.characterId === selectedId ? ' selected' : ''}`}
-            onClick={() => selectCharacter(c.characterId)}
+            key={c.cardId}
+            className={`characters-row${c.cardId === selectedId ? ' selected' : ''}`}
+            onClick={() => selectCard(c.cardId)}
           >
-            <CharacterAvatarThumb characterId={c.characterId} apiKey={apiKey} className="characters-row-avatar" />
+            <CardAvatarThumb cardId={c.cardId} apiKey={apiKey} className="characters-row-avatar" />
             <span className="characters-row-name">{c.name}</span>
           </div>
         ))}
@@ -454,7 +413,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
           <>
             <div className="characters-editor-header">
               {!creatingNew && detail?.found && (
-                <CharacterAvatarThumb characterId={detail.characterId} apiKey={apiKey} className="characters-editor-avatar" />
+                <CardAvatarThumb cardId={detail.cardId} apiKey={apiKey} className="characters-editor-avatar" />
               )}
               <input
                 className="characters-name-input"
@@ -463,7 +422,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
                 placeholder="Character name"
               />
               {!creatingNew && detail?.found && (
-                <button type="button" className="characters-delete-btn" onClick={removeCharacter}>
+                <button type="button" className="characters-delete-btn" onClick={removeCard}>
                   Delete
                 </button>
               )}

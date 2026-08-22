@@ -13,6 +13,7 @@ export type TabType =
   | 'reviewpanel'
   | 'promptstacks'
   | 'characters'
+  | 'cards'
   | 'browse-chub'
   | 'cleanup'
   | 'backgrounds'
@@ -47,6 +48,7 @@ const SUMMON_LABELS: Record<SummonableType, string> = {
   reviewpanel: 'Review Panel',
   promptstacks: 'Prompt Stacks',
   characters: 'Cards',
+  cards: 'Cards',
   'browse-chub': 'Browse Chub',
   cleanup: 'Cleanup',
   backgrounds: 'Backgrounds',
@@ -66,16 +68,29 @@ interface TabsState {
   activeTabId: string | null;
 }
 
+function normalizeTabType(type: TabType): TabType {
+  return type === 'characters' ? 'cards' : type;
+}
+
 function loadInitial(): TabsState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<TabsState>;
       if (Array.isArray(parsed.tabs) && parsed.tabs.length > 0) {
-        const activeTabId = parsed.tabs.some((t) => t.id === parsed.activeTabId)
+        const tabs = (parsed.tabs as TabInstance[]).map((t) => ({ ...t, type: normalizeTabType(t.type as TabType) }));
+        // Deduplicate singleton card tabs that may have duplicated via legacy 'characters' + 'cards'
+        const seen = new Set<string>();
+        const deduped = tabs.filter((t) => {
+          if (t.type !== 'cards') return true;
+          if (seen.has('cards')) return false;
+          seen.add('cards');
+          return true;
+        });
+        const activeTabId = deduped.some((t) => t.id === parsed.activeTabId)
           ? (parsed.activeTabId as string)
-          : parsed.tabs[0]!.id;
-        return { tabs: parsed.tabs, activeTabId };
+          : deduped[0]!.id;
+        return { tabs: deduped, activeTabId };
       }
     }
   } catch {

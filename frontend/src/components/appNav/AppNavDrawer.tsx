@@ -14,7 +14,7 @@ export interface AppNavOption {
 export const APP_NAV_OPTIONS: AppNavOption[] = [
   { type: 'notes', label: 'Notes', icon: '📝' },
   { type: 'documents', label: 'Documents', icon: '📄' },
-  { type: 'characters', label: 'Cards', icon: '🎭' },
+  { type: 'cards', label: 'Cards', icon: '🎭' },
   { type: 'browse-chub', label: 'Browse Chub', icon: '🔍' },
   { type: 'rag', label: 'RAG', icon: '🧠' },
   { type: 'promptstacks', label: 'Prompt Stacks', icon: '🧩' },

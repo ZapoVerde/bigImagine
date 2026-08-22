@@ -19,7 +19,7 @@ import BrowseChubView from './views/BrowseChubView';
 import BackgroundsView from './views/BackgroundsView';
 import LocationsView from './views/LocationsView';
 import CanonQueueView from './views/CanonQueueView';
-import CharactersView from './views/CharactersView';
+import CardsView from './views/CardsView';
 import ChatView from './views/ChatView';
 import CleanupView from './views/CleanupView';
 import ConnectionsView from './views/ConnectionsView';
@@ -38,7 +38,7 @@ const BACKUP_WARNING_DISMISSED_KEY = 'bb_backup_warning_dismissed';
 
 // Tabs whose sidebar actually renders content (Sidebar.tsx's switch). Every other tab gets an
 // empty drawer, so neither the grip nor the edge swipe is offered there.
-const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'characters', 'notes', 'portraits']);
+const SIDEBAR_CONTENT_TABS = new Set<TabType>(['chat', 'rp', 'cards', 'characters', 'notes', 'portraits']);
 
 type AuthState =
   | { mode: 'checking' }
@@ -107,10 +107,10 @@ export default function App() {
   // history browsers (which list those chats) re-fetch and drop them.
   const [chatsRefreshKey, setChatsRefreshKey] = useState(0);
 
-  // Bumped when a card is imported from chub (BrowseChubView), so the CharactersView roster —
+  // Bumped when a card is imported from chub (BrowseChubView), so the CardsView roster —
   // which otherwise only fetches once on mount — re-fetches and shows it without a reload.
   // Same pattern as chatsRefreshKey/notesRefreshKey.
-  const [charactersRefreshKey, setCharactersRefreshKey] = useState(0);
+  const [cardsRefreshKey, setCardsRefreshKey] = useState(0);
 
   // Mobile chat only: the top bars (TabStrip + TimerStrip + the chat header) collapse up when the
   // user scrolls down the chat history and come back on scroll-up or a pull-down at the top —
@@ -326,11 +326,11 @@ export default function App() {
             {tab.type === 'rag' && <RagView />}
             {tab.type === 'lorebooks' && <LorebooksView />}
             {tab.type === 'promptstacks' && <PromptStacksView apiKey={apiKey} />}
-            {tab.type === 'characters' && (
-              <CharactersView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} refreshKey={charactersRefreshKey} />
+            {(tab.type === 'characters' || tab.type === 'cards') && (
+              <CardsView apiKey={apiKey} onOpenRp={openRp} onChatsDeleted={handleChatsDeleted} refreshKey={cardsRefreshKey} />
             )}
             {tab.type === 'browse-chub' && (
-              <BrowseChubView apiKey={apiKey} onCardImported={() => setCharactersRefreshKey((k) => k + 1)} />
+              <BrowseChubView apiKey={apiKey} onCardImported={() => setCardsRefreshKey((k) => k + 1)} />
             )}
             {tab.type === 'settings' && <SettingsView theme={theme} onToggleTheme={toggleTheme} />}
             {tab.type === 'connections' && <ConnectionsView />}

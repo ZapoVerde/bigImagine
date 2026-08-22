@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react';
 import { fetchCharacterAvatarUrl } from '../api/client';
 
+// Runtime Character thumbnail — the Cast/character_chat_links surface, not the reusable
+// Card library. Card avatars use CardAvatarThumb (/v1/cards/:id/avatar) instead.
+
 interface CharacterAvatarThumbProps {
   characterId: string;
   apiKey: string | null;
