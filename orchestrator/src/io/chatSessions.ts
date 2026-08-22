@@ -483,7 +483,6 @@ interface SessionDbRow {
   fork_message_id: string | null;
   kind: 'chat' | 'rp';
   card_id: string | null;
-  character_id: string | null;
   prompt_stack_preset_id: string | null;
   cleanup_preset_id: string | null;
   cleanup_enabled_at: string | null;
@@ -504,7 +503,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     forkMessageId: row.fork_message_id,
     kind: row.kind,
     cardId: row.card_id,
-    characterId: row.character_id,
+    characterId: null,
     promptStackPresetId: row.prompt_stack_preset_id,
     cleanupPresetId: row.cleanup_preset_id,
     cleanupEnabledAt: row.cleanup_enabled_at,
@@ -515,7 +514,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, kind, card_id, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, kind, card_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
 
 interface LineageDbRow {
   chat_id: string;
@@ -1172,8 +1171,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         const newRows = await session.query<SessionDbRow>(
           `insert into chat_sessions
-             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, card_id, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, card_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
@@ -1185,7 +1184,6 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             forkFromMessageId,
              parent.kind,
              parent.cardId,
-             parent.characterId,
             parent.promptStackPresetId,
             parent.cleanupPresetId,
             parent.cleanupEnabledAt,

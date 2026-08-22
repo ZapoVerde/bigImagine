@@ -1959,13 +1959,13 @@ export default function ChatView({
    *  points, canon facts (0058) and scenes (0067) all cascade with the row, and App closes its
    *  tab (onChatsDeleted). The new chat is created first, so a failed delete can never leave the
    *  user with nothing — worst case the old chat survives and an error is shown. */
-  async function restartChat() {
-    if (!activeChat?.characterId) return;
+   async function restartChat() {
+    if (!activeChat?.cardId) return;
     setRestarting(true);
     setError(null);
     try {
       const chat = await createChat(apiKey, { title: activeChat.title, kind: 'rp' });
-      await callTool('apply_card_to_chat', { cardId: activeChat.characterId, chatId: chat.chatId }, apiKey);
+      await callTool('apply_card_to_chat', { cardId: activeChat.cardId, chatId: chat.chatId }, apiKey);
       await applyDefaultStack(chat.chatId);
       if (restartDeleteOld) {
         await deleteChat(activeChat.chatId, apiKey);
@@ -2042,11 +2042,11 @@ export default function ChatView({
         type="button"
         role="menuitem"
         title={
-          activeChat?.characterId
-            ? 'Start a fresh chat with this character'
-            : 'No character attached to this chat'
+          activeChat?.cardId
+            ? 'Start a fresh chat with this card'
+            : 'No card attached to this chat'
         }
-        disabled={!activeChat?.characterId || sending || restarting}
+        disabled={!activeChat?.cardId || sending || restarting}
         onClick={() => {
           setRestartDeleteOld(false);
           setRestartOpen(true);
@@ -2645,7 +2645,7 @@ export default function ChatView({
         </div>
       )}
 
-      {restartOpen && activeChat?.characterId && (
+      {restartOpen && activeChat?.cardId && (
         <div
           className="chat-restart-dialog"
           role="dialog"

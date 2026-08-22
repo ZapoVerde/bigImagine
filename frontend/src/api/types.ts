@@ -516,7 +516,9 @@ export interface ChatSessionRow {
    *  model just executes its prompt stack) — see orchestrator/src/io/chatSessions.ts; the
    *  server re-enforces zero tools per rp turn regardless of this column. */
   kind: 'chat' | 'rp';
-  /** Which character this chat is playing, if any — set by apply_character_to_chat. */
+  /** Canonical Card for this chat's RP source material. Null for a chat never linked to a Card. */
+  cardId: string | null;
+  /** @deprecated legacy source Card via characters — always null after the Cards cutover; use cardId. */
   characterId: string | null;
   /** The scene_id cache pointer (segway.md §2.2) — which scene this chat's story currently
    *  stands in, stamped by the post-turn scraper. Backend has always sent it (chatSessions.ts's

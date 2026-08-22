@@ -24,13 +24,6 @@ interface CharacterDetailRow {
   name: string;
   persona: string;
   appearance: string;
-  scenario: string;
-  system_prompt: string;
-  example_dialogue: string;
-  greetings: string[];
-  spec_version: string;
-  has_avatar: boolean;
-  has_source_json: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -60,9 +53,7 @@ export function createGetCharacterTool(): RegisteredTool {
       }
       if (!ctx.chatId) return { found: false, characterId: args.characterId };
       const rows = await ctx.db.query<CharacterDetailRow>(
-        `select character_id, name, persona, appearance, scenario, system_prompt, example_dialogue, greetings,
-                spec_version, avatar_path is not null as has_avatar, source_json is not null as has_source_json,
-                created_at, updated_at
+        `select character_id, name, persona, appearance, created_at, updated_at
          from characters where character_id = $1 and user_id = $2 and status is not null and status <> 'inactive' and exists (
            select 1 from character_chat_links where character_id = characters.character_id and chat_id = $3
          )`,
@@ -76,13 +67,13 @@ export function createGetCharacterTool(): RegisteredTool {
         name: row.name,
         persona: row.persona,
         appearance: row.appearance,
-        scenario: row.scenario,
-        systemPrompt: row.system_prompt,
-        exampleDialogue: row.example_dialogue,
-        greetings: row.greetings,
-        specVersion: row.spec_version,
-        hasAvatar: row.has_avatar,
-        hasSourceJson: row.has_source_json,
+        scenario: '',
+        systemPrompt: '',
+        exampleDialogue: '',
+        greetings: [],
+        specVersion: 'v2' as const,
+        hasAvatar: false,
+        hasSourceJson: false,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };

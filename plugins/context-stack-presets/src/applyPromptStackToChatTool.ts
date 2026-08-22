@@ -85,8 +85,8 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
         throw new Error('apply_prompt_stack_to_chat requires chatId: string and presetId: string');
       }
 
-      const chatRows = await ctx.db.query<{ params: Record<string, unknown> | null; card_id: string | null; character_id: string | null }>(
-        'select params, card_id, character_id from chat_sessions where chat_id = $1 and user_id = $2',
+      const chatRows = await ctx.db.query<{ params: Record<string, unknown> | null; card_id: string | null }>(
+        'select params, card_id from chat_sessions where chat_id = $1 and user_id = $2',
         [args.chatId, ctx.userId],
       );
       const chat = chatRows[0];
@@ -120,12 +120,6 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
           [chat.card_id, ctx.userId],
         );
         card = cardRows[0];
-      } else if (chat.character_id) {
-        const characterRows = await ctx.db.query<CardFieldsRow>(
-          'select system_prompt, persona, scenario, example_dialogue, greetings from characters where character_id = $1 and user_id = $2',
-          [chat.character_id, ctx.userId],
-        );
-        card = characterRows[0];
       }
 
       let persona: string | undefined;

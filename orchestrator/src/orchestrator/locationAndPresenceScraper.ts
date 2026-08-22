@@ -512,8 +512,8 @@ async function resolvePresentCharacters(
       continue;
     }
     const [created] = await session.query<{ character_id: string }>(
-      `insert into characters (user_id, name, persona, avatar_path, status)
-       values ($1, $2, '', null, 'transient') returning character_id`,
+      `insert into characters (user_id, name, persona, status)
+       values ($1, $2, '', 'transient') returning character_id`,
       [userId, name],
     );
     await session.query('insert into character_chat_links (character_id, chat_id, anchor_swipe_id) values ($1, $2, $3)', [

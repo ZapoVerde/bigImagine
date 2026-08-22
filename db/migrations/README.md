@@ -593,3 +593,9 @@ Already applied by hand, not run automatically (see the file for the exact comma
   `lorebook_card_links` while retaining the legacy rows/column/links for consumer cutover. Apply
   by hand with:
   `docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0133_cards_runtime_characters_foundation.sql`.
+- `0134_destructive_cards_cutover.sql` — destructive cutover for the same split
+  (`docs/plans/cards-runtime-characters/3_IMPLEMENTATION_PLAN.md` §4.2). Removes legacy
+  Card rows from `characters`, drops `chat_sessions.character_id`, removes Card-only columns
+  from `characters`, and tightens runtime status constraints. Fails fast if any Card row
+  lacks a canonical counterpart. Apply by hand with:
+  `docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0134_destructive_cards_cutover.sql`.

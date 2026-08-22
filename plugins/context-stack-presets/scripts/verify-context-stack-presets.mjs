@@ -38,6 +38,7 @@ function createFakePool() {
   const presets = [];
   const slots = [];
   const characters = [];
+  const cards = [];
   const chatSessions = [];
   const chatMessages = [];
   // users has no RLS of its own (0002's own comment) — just a plain array, one row per known test
@@ -69,6 +70,7 @@ function createFakePool() {
     presets,
     slots,
     characters,
+    cards,
     chatSessions,
     chatMessages,
     users,
@@ -197,23 +199,23 @@ function createFakePool() {
             return { rows: [{ preset_id: deleted.preset_id }] };
           }
 
-          if (sql.startsWith('select params, card_id, character_id from chat_sessions')) {
+          if (sql.startsWith('select params, card_id from chat_sessions')) {
             const [chatId, userId] = params;
             const chat = chatSessions.find((c) => c.chat_id === chatId && c.user_id === userId);
-            return { rows: chat ? [{ params: chat.params, card_id: chat.card_id ?? null, character_id: chat.character_id }] : [] };
+            return { rows: chat ? [{ params: chat.params, card_id: chat.card_id ?? null }] : [] };
           }
 
-          if (sql.startsWith('select system_prompt, persona, scenario, example_dialogue, greetings from characters')) {
-            const [characterId, userId] = params;
-            const character = characters.find((c) => c.character_id === characterId && c.user_id === userId);
+          if (sql.startsWith('select system_prompt, persona, scenario, example_dialogue, greetings from cards')) {
+            const [cardId, userId] = params;
+            const card = cards.find((c) => c.card_id === cardId && c.user_id === userId);
             return {
-              rows: character
+              rows: card
                 ? [{
-                    system_prompt: character.system_prompt,
-                    persona: character.persona,
-                    scenario: character.scenario,
-                    example_dialogue: character.example_dialogue,
-                    greetings: character.greetings,
+                    system_prompt: card.system_prompt,
+                    persona: card.persona,
+                    scenario: card.scenario,
+                    example_dialogue: card.example_dialogue,
+                    greetings: card.greetings,
                   }]
                 : [],
             };
@@ -373,8 +375,8 @@ const presetWithPersona = await db.withUserScope(userId, (session) =>
   ),
 );
 
-pool.characters.push({
-  character_id: 'char-1',
+pool.cards.push({
+  card_id: 'card-1',
   user_id: userId,
   system_prompt: 'You are a helpful narrator.',
   persona: 'A grizzled tavern keeper.',
@@ -382,7 +384,7 @@ pool.characters.push({
   example_dialogue: '',
   greetings: ['Welcome, traveler.'],
 });
-pool.chatSessions.push({ chat_id: 'chat-1', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+pool.chatSessions.push({ chat_id: 'chat-1', user_id: userId, card_id: 'card-1', params: {}, prompt_stack_preset_id: null });
 
 const appliedNoPersona = await db.withUserScope(userId, (session) =>
   applyTool.handler({ chatId: 'chat-1', presetId: presetWithPersona.presetId }, { userId, db: session }),
@@ -400,7 +402,7 @@ assert(reapplied.greetingInserted === false, 'apply_prompt_stack_to_chat does no
 
 await fakeSettings.set('persona_name', 'Jeremy');
 await fakeSettings.set('persona_description', 'A software engineer who likes concise answers.');
-pool.chatSessions.push({ chat_id: 'chat-2', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+pool.chatSessions.push({ chat_id: 'chat-2', user_id: userId, card_id: 'card-1', params: {}, prompt_stack_preset_id: null });
 
 const appliedWithPersona = await db.withUserScope(userId, (session) =>
   applyTool.handler({ chatId: 'chat-2', presetId: presetWithPersona.presetId }, { userId, db: session }),
@@ -432,7 +434,7 @@ assert(
   readBack.find((p) => p.presetId === presetWithTags.presetId)?.slots.every((s) => s.tagEnabled === true),
   'get_context_stack_presets round-trips tagEnabled — load→edit→save cannot silently drop the toggle',
 );
-pool.chatSessions.push({ chat_id: 'chat-3', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+pool.chatSessions.push({ chat_id: 'chat-3', user_id: userId, card_id: 'card-1', params: {}, prompt_stack_preset_id: null });
 const appliedTagged = await db.withUserScope(userId, (session) =>
   applyTool.handler({ chatId: 'chat-3', presetId: presetWithTags.presetId }, { userId, db: session }),
 );
@@ -477,7 +479,7 @@ assert(
   groupedReadBack.find((p) => p.presetId === groupedPreset.presetId)?.slots[1].groupName === 'World Info',
   'get_context_stack_presets round-trips groupName — load→edit→save cannot silently drop a group',
 );
-pool.chatSessions.push({ chat_id: 'chat-4', user_id: userId, character_id: 'char-1', params: {}, prompt_stack_preset_id: null });
+pool.chatSessions.push({ chat_id: 'chat-4', user_id: userId, card_id: 'card-1', params: {}, prompt_stack_preset_id: null });
 const appliedGrouped = await db.withUserScope(userId, (session) =>
   applyTool.handler({ chatId: 'chat-4', presetId: groupedPreset.presetId }, { userId, db: session }),
 );

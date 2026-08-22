@@ -147,7 +147,7 @@ export async function buildMacroSnapshot(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
-  characterId: string | null,
+  _characterId: string | null,
   cardId: string | null = null,
 ): Promise<MacroSnapshot> {
   const [source, persona] = await Promise.all([
@@ -155,13 +155,6 @@ export async function buildMacroSnapshot(
       ? db.withUserScope(userId, (session) =>
           session.query<{ name: string; persona: string; scenario: string }>(
             'select name, persona, scenario from cards where card_id = $1 and user_id = $2', [cardId, userId]),
-        )
-      : characterId
-      ? db.withUserScope(userId, (session) =>
-          session.query<{ name: string; persona: string; scenario: string }>(
-            'select name, persona, scenario from characters where character_id = $1 and user_id = $2',
-            [characterId, userId],
-          ),
         )
       : Promise.resolve([]),
     getPersonaSettings(settings),
@@ -286,13 +279,6 @@ export async function buildNarratorStackItems(
           session.query<NarratorCharacterFieldsRow>(
             'select name, system_prompt, persona, scenario, example_dialogue from cards where card_id = $1 and user_id = $2',
             [cardId, userId],
-          ),
-        )
-      : characterId
-      ? db.withUserScope(userId, (session) =>
-          session.query<NarratorCharacterFieldsRow>(
-            'select name, system_prompt, persona, scenario, example_dialogue from characters where character_id = $1 and user_id = $2',
-            [characterId, userId],
           ),
         )
       : Promise.resolve([]),
