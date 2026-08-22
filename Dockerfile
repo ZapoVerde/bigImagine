@@ -12,6 +12,7 @@ RUN apk add --no-cache git
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY orchestrator/package.json orchestrator/package.json
 COPY plugins/canonize/package.json plugins/canonize/package.json
+COPY plugins/cards/package.json plugins/cards/package.json
 COPY plugins/characters/package.json plugins/characters/package.json
 COPY plugins/chat-memory/package.json plugins/chat-memory/package.json
 COPY plugins/context-stack-presets/package.json plugins/context-stack-presets/package.json
@@ -33,6 +34,7 @@ COPY plugins plugins
 COPY frontend frontend
 RUN npm run build --workspace=@bigbrain/orchestrator \
  && npm run build --workspace=@bigbrain/plugin-canonize \
+ && npm run build --workspace=@bigbrain/plugin-cards \
  && npm run build --workspace=@bigbrain/plugin-characters \
  && npm run build --workspace=@bigbrain/plugin-chat-memory \
  && npm run build --workspace=@bigbrain/plugin-context-stack-presets \

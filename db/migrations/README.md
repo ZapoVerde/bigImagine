@@ -587,3 +587,9 @@ Already applied by hand, not run automatically (see the file for the exact comma
    new tables. Idempotent hand-apply one-shot.
  - `0128_remove_chat_archive.sql` — drops the obsolete `chat_sessions.archived_at` lifecycle column;
    previously archived chats become ordinary chats. `scenes.archived_at` is unrelated and remains.
+- `0133_cards_runtime_characters_foundation.sql` — additive foundation for the Cards/runtime
+  Character split (`docs/plans/cards-runtime-characters/3_IMPLEMENTATION_PLAN.md` §1.1). Copies
+  legacy status-null Card rows into canonical `cards`, adds `chat_sessions.card_id`, and creates
+  `lorebook_card_links` while retaining the legacy rows/column/links for consumer cutover. Apply
+  by hand with:
+  `docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0133_cards_runtime_characters_foundation.sql`.

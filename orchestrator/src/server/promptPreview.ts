@@ -230,7 +230,7 @@ export async function buildPromptPreview(  deps: HttpServerDeps,
     const systemNeedsMacros = !session.promptStackPresetId && !!session.params.system?.includes('{{');
     const historyNeedsMacros = trimmed.some((m) => m.content.includes('{{'));
     const macroSnapshot = systemNeedsMacros || historyNeedsMacros
-      ? await buildMacroSnapshot(deps.db, deps.settings, userId, session.characterId)
+      ? await buildMacroSnapshot(deps.db, deps.settings, userId, session.characterId, session.cardId)
       : undefined;
 
     if (session.kind === 'rp' && session.promptStackPresetId) {
@@ -239,7 +239,7 @@ export async function buildPromptPreview(  deps: HttpServerDeps,
       // resolved turn saw); a chat that has never had an assistant message omits the slot.
       const lastAssistantMessageId = [...detail.messages].reverse().find((m) => m.role === 'assistant')?.messageId;
       systemStack.push(
-        ...(await buildNarratorStackItems(deps.db, deps.settings, deps.embeddings, userId, chatId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed, lastAssistantMessageId)).items,
+         ...(await buildNarratorStackItems(deps.db, deps.settings, deps.embeddings, userId, chatId, session.characterId, session.promptStackPresetId, memoryContext as RpMemoryContext, trimmed, lastAssistantMessageId, session.cardId)).items,
       );
     } else {
       let system = session.params.system;

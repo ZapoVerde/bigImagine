@@ -153,6 +153,7 @@ export interface LorebookAdminRow {
   createdAt: string;
   updatedAt: string;
   characterIds: string[];
+  cardIds: string[];
   chatOverrideCount: number;
   entries: LorebookEntryAdminRow[];
 }
@@ -170,11 +171,14 @@ export async function getLorebooksAdmin(db: PostgresClient): Promise<LorebookAdm
         updated_at: string;
         chat_override_count: number;
         character_ids: string[] | null;
+        card_ids: string[] | null;
       }>(
         `select b.lorebook_id, b.name, b.global_scope, b.created_at, b.updated_at,
                 (select count(*)::int from lorebook_chat_overrides co where co.lorebook_id = b.lorebook_id) as chat_override_count,
-                (select coalesce(array_agg(cl.character_id order by cl.joined_at), '{}'::uuid[]) from lorebook_character_links cl
-                 where cl.lorebook_id = b.lorebook_id) as character_ids
+                 (select coalesce(array_agg(cl.character_id order by cl.joined_at), '{}'::uuid[]) from lorebook_character_links cl
+                  where cl.lorebook_id = b.lorebook_id) as character_ids,
+                 (select coalesce(array_agg(lcard.card_id order by lcard.joined_at), '{}'::uuid[]) from lorebook_card_links lcard
+                  where lcard.lorebook_id = b.lorebook_id) as card_ids
          from lorebooks b
          order by b.name`,
       ),
@@ -197,6 +201,7 @@ export async function getLorebooksAdmin(db: PostgresClient): Promise<LorebookAdm
         createdAt: b.created_at,
         updatedAt: b.updated_at,
         characterIds: b.character_ids ?? [],
+        cardIds: b.card_ids ?? [],
         chatOverrideCount: b.chat_override_count,
         entries: entries.map(toLorebookEntryAdminRow),
       });
@@ -220,6 +225,7 @@ export async function createLorebookAdmin(db: PostgresClient, userId: string, na
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       characterIds: [],
+      cardIds: [],
       chatOverrideCount: 0,
       entries: [],
     };

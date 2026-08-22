@@ -200,6 +200,7 @@ export async function regenerateSwipe(
     chatId,
     session.kind,
     session.characterId,
+    session.cardId,
     session.promptStackPresetId,
     session.params,
     messagesForLlm,

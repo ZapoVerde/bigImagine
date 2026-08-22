@@ -197,10 +197,10 @@ function createFakePool() {
             return { rows: [{ preset_id: deleted.preset_id }] };
           }
 
-          if (sql.startsWith('select params, character_id from chat_sessions')) {
+          if (sql.startsWith('select params, card_id, character_id from chat_sessions')) {
             const [chatId, userId] = params;
             const chat = chatSessions.find((c) => c.chat_id === chatId && c.user_id === userId);
-            return { rows: chat ? [{ params: chat.params, character_id: chat.character_id }] : [] };
+            return { rows: chat ? [{ params: chat.params, card_id: chat.card_id ?? null, character_id: chat.character_id }] : [] };
           }
 
           if (sql.startsWith('select system_prompt, persona, scenario, example_dialogue, greetings from characters')) {

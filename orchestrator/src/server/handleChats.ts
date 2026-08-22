@@ -194,7 +194,7 @@ export async function handleChatRoutes(
       // a persona edit updates the greeting on the very next read with no re-apply. Gated like
       // every other macro pass: 'rp' chats only, and only when a message actually contains '{{'.
       if (detail.session.kind === 'rp' && detail.messages.some((m) => m.content.includes('{{'))) {
-        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.characterId);
+        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.characterId, detail.session.cardId);
         detail.messages = detail.messages.map((m) =>
           m.content.includes('{{') ? { ...m, resolvedContent: interpolateMacros(m.content, snapshot) } : m,
         );

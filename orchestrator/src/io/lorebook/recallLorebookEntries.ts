@@ -27,7 +27,7 @@
  * hiccup) logs a warning and returns [] — discovery must never break or stall a turn.
  *
  * @api-declaration
- * recallLorebookEntries(session, embeddings, userId, characterId, chatId, queryText, topK?) ->
+ * recallLorebookEntries(session, embeddings, userId, characterId, chatId, queryText, topK?, cardId?) ->
  *   Promise<LorebookEntryCandidate[]> — scoped candidates, constants first then top-K by
  *   similarity. characterId may be null (no active character — the character-link scope simply
  *   never matches). topK defaults to DEFAULT_LOREBOOK_RECALL_TOP_K and is clamped to
@@ -91,6 +91,7 @@ export async function recallLorebookEntries(
   chatId: string,
   queryText: string,
   topK = DEFAULT_LOREBOOK_RECALL_TOP_K,
+  cardId: string | null = null,
 ): Promise<LorebookEntryCandidate[]> {
   try {
     const query = cleanForEmbedding(queryText);
@@ -116,9 +117,14 @@ export async function recallLorebookEntries(
            and not e.disable
            and (
              b.global_scope
-             or exists (select 1 from lorebook_character_links lcl
-                        where lcl.lorebook_id = b.lorebook_id and lcl.character_id = $2)
-             or exists (select 1 from lorebook_chat_overrides lco
+              or exists (select 1 from lorebook_character_links lcl
+                         where lcl.lorebook_id = b.lorebook_id and lcl.character_id = $2)
+              or exists (select 1 from lorebook_character_links lcl_chat
+                         join character_chat_links ccl on ccl.character_id = lcl_chat.character_id
+                         where lcl_chat.lorebook_id = b.lorebook_id and ccl.chat_id = $3)
+              or exists (select 1 from lorebook_card_links lcard
+                         where lcard.lorebook_id = b.lorebook_id and lcard.card_id = $6)
+              or exists (select 1 from lorebook_chat_overrides lco
                         where lco.lorebook_id = b.lorebook_id and lco.chat_id = $3 and lco.enabled)
            )
            and not exists (select 1 from lorebook_chat_overrides lco
@@ -148,7 +154,7 @@ export async function recallLorebookEntries(
          from ranked r
        ) t
        order by t._sort, t.vector_embed <-> $4 nulls last, t.order_value`,
-      [userId, scopedCharacterId, chatId, toPgVectorLiteral(vector), k],
+       [userId, scopedCharacterId, chatId, toPgVectorLiteral(vector), k, cardId ?? '00000000-0000-0000-0000-000000000000'],
     );
     return rows;
   } catch (err) {

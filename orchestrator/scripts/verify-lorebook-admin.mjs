@@ -156,7 +156,8 @@ function makeDb({ users = [], books = [], entries = [], probe = [{ n: 1 }], thro
         created_at: 't',
         updated_at: 't',
         chat_override_count: 2,
-        character_ids: ['c1', 'c2'],
+         character_ids: ['c1', 'c2'],
+         card_ids: ['card-1'],
       },
     ],
     entries: [
@@ -184,7 +185,8 @@ function makeDb({ users = [], books = [], entries = [], probe = [{ n: 1 }], thro
   const rows = await getLorebooksAdmin(db);
   assert(rows.length === 1 && rows[0].lorebookId === 'b1' && rows[0].userId === 'u1', 'one book surfaced with its owner');
   assert(rows[0].globalScope === true && rows[0].chatOverrideCount === 2, 'global-scope flag + chat-override count surface');
-  assert(rows[0].characterIds.join() === 'c1,c2', 'character links surface as id list');
+   assert(rows[0].characterIds.join() === 'c1,c2', 'character links surface as id list');
+   assert(rows[0].cardIds.join() === 'card-1', 'Card links surface as id list');
   assert(rows[0].entries.length === 1 && rows[0].entries[0].content === 'castle lore' && rows[0].entries[0].constant === true, 'entries surface with gate fields');
 }
 

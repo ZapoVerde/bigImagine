@@ -53,7 +53,9 @@ const CHAT = 'ch1';
   const sql = session.calls[0].sql;
   assert(sql.includes('join lorebooks b on b.lorebook_id = e.lorebook_id'), 'candidates join their book');
   assert(sql.includes('b.global_scope'), 'global-scope books are in scope');
-  assert(sql.includes('lorebook_character_links') && sql.includes('lcl.character_id = $2'), 'character links bring a book into scope');
+   assert(sql.includes('lorebook_character_links') && sql.includes('lcl.character_id = $2'), 'character links bring a book into scope');
+   assert(sql.includes('character_chat_links') && sql.includes('ccl.chat_id = $3'), 'runtime Character links are scoped to the current chat');
+   assert(sql.includes('lorebook_card_links') && sql.includes('lcard.card_id = $6'), 'Card links bring a book into scope');
   assert(sql.includes('lorebook_chat_overrides') && sql.includes('lco.enabled'), 'enabled chat overrides bring a book into scope');
   assert(sql.includes('not lco.enabled'), 'an explicit disabled chat override beats the in-scope paths');
   assert(sql.includes('lorebook_entry_overrides') && sql.includes('not leo.enabled'), 'an entry override can remove a single entry');
@@ -64,7 +66,13 @@ const CHAT = 'ch1';
   assert(sql.includes('order by t._sort, t.vector_embed <-> $4 nulls last, t.order_value'), 'result order is constants first, then similarity, order_value tiebreak');
   const limitIdx = sql.indexOf('limit $5');
   assert(limitIdx > sql.indexOf('ranked as (') && limitIdx < sql.indexOf('select 0 as _sort'), 'the top-K limit applies to the ranked set only, never to constants');
-  assert(session.calls[0].params[3].startsWith('['), 'the embedded query is passed as a pgvector literal');
+   assert(session.calls[0].params[3].startsWith('['), 'the embedded query is passed as a pgvector literal');
+   assert(session.calls[0].params[5] === '00000000-0000-0000-0000-000000000000', 'missing Card scope binds the all-zero uuid');
+}
+{
+  const session = createFakeSession({ rows: [] });
+  await recallLorebookEntries(session, embeddings, USER, CHAR, CHAT, 'x', 8, 'card-1');
+  assert(session.calls[0].params[5] === 'card-1', 'explicit Card scope is passed to the recall query');
 }
 
 // --- 1b. topK clamping + default ---

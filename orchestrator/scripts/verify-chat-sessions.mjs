@@ -110,11 +110,11 @@ function createFakePool() {
           // Discriminated by param count, not sql.includes('parent_chat_id') — SESSION_COLUMNS
           // (used in every `returning` clause here, including createChat's) already contains that
           // substring, so a text match alone can't tell the two inserts apart.
-          if (sql.includes('insert into chat_sessions') && params.length === 12) {
+           if (sql.includes('insert into chat_sessions') && params.length === 13) {
             // forkChat's insert — column order per chatSessions.ts:
             // (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind,
-            //  character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
-            const [userId, title, folderId, paramsJson, toolNames, parentChatId, forkMessageId, kind, characterId, promptStackPresetId, cleanupPresetId, cleanupEnabledAt] =
+             //  card_id, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
+             const [userId, title, folderId, paramsJson, toolNames, parentChatId, forkMessageId, kind, cardId, characterId, promptStackPresetId, cleanupPresetId, cleanupEnabledAt] =
               params;
             const row = {
               chat_id: randomUUID(),
@@ -126,8 +126,9 @@ function createFakePool() {
               canvas_note_id: null,
               parent_chat_id: parentChatId ?? null,
               fork_message_id: forkMessageId ?? null,
-              kind: kind ?? 'chat',
-              character_id: characterId ?? null,
+               kind: kind ?? 'chat',
+               card_id: cardId ?? null,
+               character_id: characterId ?? null,
               prompt_stack_preset_id: promptStackPresetId ?? null,
               cleanup_preset_id: cleanupPresetId ?? null,
               cleanup_enabled_at: cleanupEnabledAt ?? null,
@@ -149,8 +150,9 @@ function createFakePool() {
               canvas_note_id: null,
               parent_chat_id: null,
               fork_message_id: null,
-              kind: kind ?? 'chat',
-              character_id: null,
+               kind: kind ?? 'chat',
+               card_id: null,
+               character_id: null,
               prompt_stack_preset_id: null,
               cleanup_preset_id: null,
               cleanup_enabled_at: null,

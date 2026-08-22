@@ -142,6 +142,9 @@ export interface ChatSessionRow {
    *  isolated from household assistant behavior by construction rather than by a checkbox someone
    *  has to remember to set — the empty list itself is the isolation (no tool calls at all). */
   kind: 'chat' | 'rp';
+  /** Canonical reusable Card that supplied this chat's RP source material. Runtime Character
+   *  membership remains separate in character_chat_links. */
+  cardId: string | null;
   /** Which character this chat is playing, if any — set by applyCharacterToChatTool.ts. Lets a
    *  later apply_prompt_stack_to_chat pull that character's fields without the caller re-passing
    *  characterId. Null for a chat never applied to a character. */
@@ -479,6 +482,7 @@ interface SessionDbRow {
   parent_chat_id: string | null;
   fork_message_id: string | null;
   kind: 'chat' | 'rp';
+  card_id: string | null;
   character_id: string | null;
   prompt_stack_preset_id: string | null;
   cleanup_preset_id: string | null;
@@ -499,6 +503,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     parentChatId: row.parent_chat_id,
     forkMessageId: row.fork_message_id,
     kind: row.kind,
+    cardId: row.card_id,
     characterId: row.character_id,
     promptStackPresetId: row.prompt_stack_preset_id,
     cleanupPresetId: row.cleanup_preset_id,
@@ -510,7 +515,7 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
 }
 
 const SESSION_COLUMNS =
-  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
+  'chat_id, title, folder_id, params, tool_names, canvas_note_id, parent_chat_id, fork_message_id, kind, card_id, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at, scene_id, created_at, updated_at';
 
 interface LineageDbRow {
   chat_id: string;
@@ -1167,8 +1172,8 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
 
         const newRows = await session.query<SessionDbRow>(
           `insert into chat_sessions
-             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
-           values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             (user_id, title, folder_id, params, tool_names, parent_chat_id, fork_message_id, kind, card_id, character_id, prompt_stack_preset_id, cleanup_preset_id, cleanup_enabled_at)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            returning ${SESSION_COLUMNS}`,
           [
             userId,
@@ -1178,8 +1183,9 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
             parent.toolNames,
             chatId,
             forkFromMessageId,
-            parent.kind,
-            parent.characterId,
+             parent.kind,
+             parent.cardId,
+             parent.characterId,
             parent.promptStackPresetId,
             parent.cleanupPresetId,
             parent.cleanupEnabledAt,

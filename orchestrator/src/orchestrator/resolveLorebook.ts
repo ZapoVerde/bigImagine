@@ -103,8 +103,11 @@ export async function resolveLorebook(deps: ResolveLorebookDeps): Promise<Lorebo
     const tokenBudget = Number.isFinite(parsedBudget) && parsedBudget >= 0 ? parsedBudget : Infinity;
 
     return db.withUserScope(userId, async (session) => {
-
-      const candidates = await recallLorebookEntries(session, embeddings, userId, characterId, chatId, queryText, topK);
+      const [chat] = await session.query<{ card_id: string | null }>(
+        'select card_id from chat_sessions where chat_id = $1 and user_id = $2',
+        [chatId, userId],
+      );
+      const candidates = await recallLorebookEntries(session, embeddings, userId, characterId, chatId, queryText, topK, chat?.card_id ?? null);
       if (candidates.length === 0) return undefined;
 
       const timedState = await fetchLorebookTimedEffectState(

@@ -44,7 +44,7 @@ import type { OrchestratorSettingsStore } from '@bigbrain/orchestrator/settings'
 import { assemblePromptStack, type PromptStackFields, type PromptStackSlot } from '@bigbrain/orchestrator/assemble-prompt-stack';
 import type { SlotRow } from './slotRows.js';
 
-interface CharacterFieldsRow {
+interface CardFieldsRow {
   system_prompt: string;
   persona: string;
   scenario: string;
@@ -85,8 +85,8 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
         throw new Error('apply_prompt_stack_to_chat requires chatId: string and presetId: string');
       }
 
-      const chatRows = await ctx.db.query<{ params: Record<string, unknown> | null; character_id: string | null }>(
-        'select params, character_id from chat_sessions where chat_id = $1 and user_id = $2',
+      const chatRows = await ctx.db.query<{ params: Record<string, unknown> | null; card_id: string | null; character_id: string | null }>(
+        'select params, card_id, character_id from chat_sessions where chat_id = $1 and user_id = $2',
         [args.chatId, ctx.userId],
       );
       const chat = chatRows[0];
@@ -113,13 +113,19 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
         groupName: row.group_name ?? undefined,
       }));
 
-      let character: CharacterFieldsRow | undefined;
-      if (chat.character_id) {
-        const characterRows = await ctx.db.query<CharacterFieldsRow>(
+      let card: CardFieldsRow | undefined;
+      if (chat.card_id) {
+        const cardRows = await ctx.db.query<CardFieldsRow>(
+          'select system_prompt, persona, scenario, example_dialogue, greetings from cards where card_id = $1 and user_id = $2',
+          [chat.card_id, ctx.userId],
+        );
+        card = cardRows[0];
+      } else if (chat.character_id) {
+        const characterRows = await ctx.db.query<CardFieldsRow>(
           'select system_prompt, persona, scenario, example_dialogue, greetings from characters where character_id = $1 and user_id = $2',
           [chat.character_id, ctx.userId],
         );
-        character = characterRows[0];
+        card = characterRows[0];
       }
 
       let persona: string | undefined;
@@ -134,12 +140,12 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
       }
 
       const fields: PromptStackFields = {
-        ...(character
+          ...(card
           ? {
-              system: character.system_prompt || undefined,
-              description: character.persona || undefined,
-              scenario: character.scenario || undefined,
-              mes_example: character.example_dialogue || undefined,
+              system: card.system_prompt || undefined,
+              description: card.persona || undefined,
+              scenario: card.scenario || undefined,
+              mes_example: card.example_dialogue || undefined,
             }
           : {}),
         persona,
@@ -155,7 +161,7 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
       );
 
       let greetingInserted = false;
-      if (character && character.greetings.length > 0) {
+       if (card && card.greetings.length > 0) {
         const [{ count }] = await ctx.db.query<{ count: string }>(
           'select count(*)::text as count from chat_messages where chat_id = $1',
           [args.chatId],
@@ -163,7 +169,7 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
         if (count === '0') {
           await ctx.db.query(
             'insert into chat_messages (chat_id, user_id, role, content, created_at) values ($1, $2, $3, $4, clock_timestamp())',
-            [args.chatId, ctx.userId, 'assistant', character.greetings[0]],
+             [args.chatId, ctx.userId, 'assistant', card.greetings[0]],
           );
           greetingInserted = true;
         }

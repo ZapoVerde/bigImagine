@@ -335,7 +335,7 @@ export default function CharactersView({ apiKey, onOpenRp, onChatsDeleted, refre
     setError(null);
     try {
       const chat = await createChat(apiKey, { title: detail.name, kind: 'rp' });
-      await callTool('apply_character_to_chat', { characterId: detail.characterId, chatId: chat.chatId }, apiKey);
+      await callTool('apply_card_to_chat', { cardId: detail.characterId, chatId: chat.chatId }, apiKey);
       await applyDefaultStack(chat.chatId);
       onOpenRp(chat.chatId, detail.name);
     } catch (err) {

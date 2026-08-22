@@ -63,6 +63,7 @@ export interface LorebookPanelBook {
   name: string;
   globalScope: boolean;
   characterLinked: boolean;
+  cardLinked: boolean;
   chatOverrideEnabled: boolean | null;
   entries: LorebookPanelEntry[];
 }
@@ -102,6 +103,7 @@ interface BookScopeRow {
   name: string;
   global_scope: boolean;
   character_linked: boolean;
+  card_linked: boolean;
   chat_override_enabled: boolean | null;
 }
 
@@ -139,25 +141,34 @@ export async function getLorebookPanelData(
       // A null characterId (no active character) must not short-circuit the character link into
       // an invalid uuid comparison — same all-zero literal recallLorebookEntries.ts uses.
       const scopedCharacterId = input.characterId ?? '00000000-0000-0000-0000-000000000000';
+      const [chat] = await session.query<{ card_id: string | null }>(
+        'select card_id from chat_sessions where chat_id = $1 and user_id = $2',
+        [input.chatId, input.userId],
+      );
+      const scopedCardId = chat?.card_id ?? '00000000-0000-0000-0000-000000000000';
 
       const bookRows = await session.query<BookScopeRow>(
         `select b.lorebook_id, b.name, b.global_scope,
-                exists (select 1 from lorebook_character_links lcl
-                        where lcl.lorebook_id = b.lorebook_id and lcl.character_id = $2) as character_linked,
-                lco.enabled as chat_override_enabled
+                 exists (select 1 from lorebook_character_links lcl
+                         where lcl.lorebook_id = b.lorebook_id and lcl.character_id = $2) as character_linked,
+                 exists (select 1 from lorebook_card_links lcard
+                         where lcard.lorebook_id = b.lorebook_id and lcard.card_id = $4) as card_linked,
+                 lco.enabled as chat_override_enabled
          from lorebooks b
          left join lorebook_chat_overrides lco
            on lco.lorebook_id = b.lorebook_id and lco.chat_id = $3
          where b.user_id = $1
            and (
              b.global_scope
-             or exists (select 1 from lorebook_character_links lcl2
-                        where lcl2.lorebook_id = b.lorebook_id and lcl2.character_id = $2)
-             or lco.enabled
+              or exists (select 1 from lorebook_character_links lcl2
+                         where lcl2.lorebook_id = b.lorebook_id and lcl2.character_id = $2)
+              or exists (select 1 from lorebook_card_links lcard2
+                         where lcard2.lorebook_id = b.lorebook_id and lcard2.card_id = $4)
+              or lco.enabled
            )
            and coalesce(lco.enabled, true)
          order by b.name`,
-        [input.userId, scopedCharacterId, input.chatId],
+         [input.userId, scopedCharacterId, input.chatId, scopedCardId],
       );
       if (bookRows.length === 0) {
         return { mode, modeIsDefault, books: [] };
@@ -223,6 +234,7 @@ export async function getLorebookPanelData(
           name: b.name,
           globalScope: b.global_scope,
           characterLinked: b.character_linked,
+          cardLinked: b.card_linked,
           chatOverrideEnabled: b.chat_override_enabled,
           entries: entriesByBook.get(b.lorebook_id) ?? [],
         })),

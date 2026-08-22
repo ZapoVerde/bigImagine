@@ -176,6 +176,7 @@ export async function handleChatCompletions(
   // here for docs/plans/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
   // everything else about the turn is indifferent to it.
   let sessionCharacterId: string | null = null;
+  let sessionCardId: string | null = null;
   // Which context_stack_presets row (if any) drives this turn's per-turn narrator assembly
   // (docs/plans/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
   // the async heuristic subloop (cleanupLoop.ts), opted in per chat via cleanup_enabled_at.
@@ -207,6 +208,7 @@ export async function handleChatCompletions(
     priorMessageCount = detail.messages.length;
     sessionKind = detail.session.kind;
     sessionCharacterId = detail.session.characterId;
+    sessionCardId = detail.session.cardId;
     sessionPromptStackPresetId = detail.session.promptStackPresetId;
     sessionCleanupEnabledAt = detail.session.cleanupEnabledAt;
     existingLatestUserMessageId = [...detail.messages].reverse().find((m) => m.role === 'user')?.messageId;
@@ -281,6 +283,7 @@ export async function handleChatCompletions(
       body.chat_id,
       sessionKind,
       sessionCharacterId,
+      sessionCardId,
       sessionPromptStackPresetId,
       sessionParams,
       messagesForLlm,

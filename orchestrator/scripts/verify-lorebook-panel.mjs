@@ -40,11 +40,12 @@ function settingsStore(initial = {}) {
   };
 }
 
-const BOOK_ROW = (lorebook_id, name, global_scope, character_linked, chat_override_enabled) => ({
+const BOOK_ROW = (lorebook_id, name, global_scope, character_linked, chat_override_enabled, card_linked = false) => ({
   lorebook_id,
   name,
   global_scope,
   character_linked,
+  card_linked,
   chat_override_enabled,
 });
 const ENTRY_ROW = (entry_id, lorebook_id, overrides = {}) => ({
@@ -112,20 +113,25 @@ const INPUT = { userId: 'u1', chatId: 'c1', characterId: 'char-1', latestAssista
       BOOK_ROW('b-global', 'Global', true, false, null),
       BOOK_ROW('b-char', 'Character', false, true, null),
       BOOK_ROW('b-override', 'Override-on', false, false, true),
+      BOOK_ROW('b-card', 'Card', false, false, null, true),
     ],
   });
   const data = await getLorebookPanelData(db, settingsStore({ lorebook_mode: 'on' }).store, INPUT);
-  assert(data.books.length === 3, 'global/character/override books all surface');
+   assert(data.books.length === 4, 'global/character/Card/override books all surface');
   const names = data.books.map((b) => b.name).sort();
-  assert(names.join() === 'Character,Global,Override-on', 'the three in-scope books surface');
+   assert(names.join() === 'Card,Character,Global,Override-on', 'the four in-scope books surface');
   const over = data.books.find((b) => b.lorebookId === 'b-override');
   assert(over?.chatOverrideEnabled === true && over?.globalScope === false, 'override-enabled book carries its chat-override state');
   const charBook = data.books.find((b) => b.lorebookId === 'b-char');
-  assert(charBook?.characterLinked === true, 'character-linked book surfaces characterLinked');
+   assert(charBook?.characterLinked === true, 'character-linked book surfaces characterLinked');
+   const cardBook = data.books.find((b) => b.lorebookId === 'b-card');
+   assert(cardBook?.cardLinked === true, 'Card-linked book surfaces cardLinked');
   const scopeSql = calls.find((c) => c.sql.includes('b.global_scope'))?.sql ?? '';
   assert(scopeSql.includes('coalesce(lco.enabled, true)'), 'a disabled chat override beats every in-scope path (coalesce filter in SQL)');
-  assert(scopeSql.includes('b.global_scope') && scopeSql.includes('lcl.character_id = $2') && scopeSql.includes('lco.enabled'), 'scope union: global_scope or character link or enabled chat override');
-  assert(calls.some((c) => c.sql.includes('b.global_scope') && c.params[1] === 'char-1'), 'scope query runs against the chat\'s character id');
+   assert(scopeSql.includes('b.global_scope') && scopeSql.includes('lcl.character_id = $2') && scopeSql.includes('lco.enabled'), 'scope union: global_scope or character link or enabled chat override');
+   assert(scopeSql.includes('lorebook_card_links') && scopeSql.includes('lcard2.card_id = $4'), 'scope union includes the chat Card link');
+   assert(calls.some((c) => c.sql.includes('b.global_scope') && c.params[1] === 'char-1'), 'scope query runs against the chat\'s character id');
+   assert(calls.some((c) => c.sql.includes('b.global_scope') && c.params[3] === '00000000-0000-0000-0000-000000000000'), 'scope query binds the chat Card id');
 }
 
 // --- 1c. Entries + overrides + activation badge + fail-open ---

@@ -148,9 +148,15 @@ export async function buildMacroSnapshot(
   settings: OrchestratorSettingsStore,
   userId: string,
   characterId: string | null,
+  cardId: string | null = null,
 ): Promise<MacroSnapshot> {
-  const [character, persona] = await Promise.all([
-    characterId
+  const [source, persona] = await Promise.all([
+    cardId
+      ? db.withUserScope(userId, (session) =>
+          session.query<{ name: string; persona: string; scenario: string }>(
+            'select name, persona, scenario from cards where card_id = $1 and user_id = $2', [cardId, userId]),
+        )
+      : characterId
       ? db.withUserScope(userId, (session) =>
           session.query<{ name: string; persona: string; scenario: string }>(
             'select name, persona, scenario from characters where character_id = $1 and user_id = $2',
@@ -160,7 +166,7 @@ export async function buildMacroSnapshot(
       : Promise.resolve([]),
     getPersonaSettings(settings),
   ]);
-  const characterRow = character[0];
+  const characterRow = source[0];
   return {
     charName: characterRow?.name,
     userName: persona.name || undefined,
@@ -271,10 +277,18 @@ export async function buildNarratorStackItems(
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
   lorebookSeedMessageId?: string,
+  cardId: string | null = null,
 ): Promise<{ items: PromptPreviewItem[]; lorebookActivatedEntryIds: string[] }> {
   const [slots, characterRows, persona, bridgeTemplate, plotTemplate, autoRecallTemplate, chunkTemplate, leadInTemplate, recentHistoryTemplate, syncSummariesTemplate, syncSummaryEntryTemplate, locationBlock, lorebookBlock] = await Promise.all([
     loadPromptStackSlots(db, userId, presetId),
-    characterId
+    cardId
+      ? db.withUserScope(userId, (session) =>
+          session.query<NarratorCharacterFieldsRow>(
+            'select name, system_prompt, persona, scenario, example_dialogue from cards where card_id = $1 and user_id = $2',
+            [cardId, userId],
+          ),
+        )
+      : characterId
       ? db.withUserScope(userId, (session) =>
           session.query<NarratorCharacterFieldsRow>(
             'select name, system_prompt, persona, scenario, example_dialogue from characters where character_id = $1 and user_id = $2',
@@ -447,12 +461,13 @@ async function assembleNarratorSystemText(
   userId: string,
   chatId: string,
   characterId: string | null,
+  cardId: string | null,
   presetId: string,
   memoryContext: RpMemoryContext,
   recentHistoryMessages?: LlmMessage[],
   lorebookSeedMessageId?: string,
 ): Promise<{ text: string; recentHistoryRendered: boolean; lorebookActivatedEntryIds: string[] }> {
-  const { items, lorebookActivatedEntryIds } = await buildNarratorStackItems(db, settings, embeddings, userId, chatId, characterId, presetId, memoryContext, recentHistoryMessages, lorebookSeedMessageId);
+  const { items, lorebookActivatedEntryIds } = await buildNarratorStackItems(db, settings, embeddings, userId, chatId, characterId, presetId, memoryContext, recentHistoryMessages, lorebookSeedMessageId, cardId);
   return {
     text: items.map((i) => i.content).join('\n\n'),
     recentHistoryRendered: items.some((i) => i.markerKey === 'recent_history'),
@@ -483,6 +498,7 @@ export async function assembleSessionTurnContext(
   chatId: string,
   sessionKind: 'chat' | 'rp',
   sessionCharacterId: string | null,
+  sessionCardId: string | null,
   sessionPromptStackPresetId: string | null,
   sessionParams: ChatParams,
   messagesForLlm: LlmMessage[],
@@ -508,7 +524,7 @@ export async function assembleSessionTurnContext(
   const historyNeedsMacros = sessionKind === 'rp' && trimmed.some((m) => m.content.includes('{{'));
   let macroSnapshot: MacroSnapshot | undefined;
   if (systemNeedsMacros || historyNeedsMacros) {
-    macroSnapshot = await buildMacroSnapshot(db, settings, userId, sessionCharacterId);
+    macroSnapshot = await buildMacroSnapshot(db, settings, userId, sessionCharacterId, sessionCardId);
   }
 
   if (sessionKind === 'rp' && sessionPromptStackPresetId) {
@@ -528,7 +544,7 @@ export async function assembleSessionTurnContext(
     // appended at the end"). When the slot rendered, the messages array is emptied — the stack
     // alone carries the context; the LLM adapters emit a single empty user message so providers
     // don't reject the request shape (the user's "send it as it is").
-    const narrator = await assembleNarratorSystemText(db, settings, embeddings, userId, chatId, sessionCharacterId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed, lorebookSeedMessageId);
+     const narrator = await assembleNarratorSystemText(db, settings, embeddings, userId, chatId, sessionCharacterId, sessionCardId, sessionPromptStackPresetId, memoryContext as RpMemoryContext, trimmed, lorebookSeedMessageId);
     return {
       systemPrompt: narrator.text,
       messagesForLlm: narrator.recentHistoryRendered ? [] : resolveMacrosInMessages(trimmed, historyNeedsMacros, macroSnapshot),
@@ -577,10 +593,10 @@ export async function decorateMessageForDisplay(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
-  session: Pick<ChatSessionRow, 'kind' | 'characterId'>,
+  session: Pick<ChatSessionRow, 'kind' | 'characterId' | 'cardId'>,
   message: StoredChatMessage,
 ): Promise<StoredChatMessage> {
   if (session.kind !== 'rp' || !message.content.includes('{{')) return message;
-  const snapshot = await buildMacroSnapshot(db, settings, userId, session.characterId);
+  const snapshot = await buildMacroSnapshot(db, settings, userId, session.characterId, session.cardId);
   return { ...message, resolvedContent: interpolateMacros(message.content, snapshot) };
 }

@@ -168,6 +168,8 @@ import type { ImageConnectionStore } from '../io/imageConnections.js';
 import { log } from '../io/logger.js';
 import { importCharacterCard } from './handleCharacterImport.js';
 import { handleCharacterExportRoutes } from './handleCharacterExport.js';
+import { importCard } from './handleCardImport.js';
+import { handleCardExportRoutes } from './handleCardExport.js';
 import { extractAttachmentUpload } from './handleUploadAttachment.js';
 import { handleChubCardDetail } from './handleChubCardDetail.js';
 import type { AccessIdentityResolver } from '../io/accessIdentity.js';
@@ -555,6 +557,13 @@ const routes: Route[] = [
   { method: 'POST', path: '/v1/attachments/extract', run: async (req, res, deps) => { await handleUploadAttachment(req, res, deps); } },
 
   // ---- Characters ----
+  { method: 'POST', path: '/v1/cards/import', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      const result = await importCard(req, deps, userId);
+      sendJson(res, result.status, result.body);
+    }) },
+  { method: 'GET', prefix: true, path: '/v1/cards/', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
+      await handleCardExportRoutes(req, res, deps, userId, new URL(req.url!, 'http://placeholder'));
+    }) },
   { method: 'POST', path: '/v1/characters/import', run: async (req, res, deps) => withUser(req, res, deps, async (userId) => {
       const result = await importCharacterCard(req, deps, userId);
       sendJson(res, result.status, result.body);

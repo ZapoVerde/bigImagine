@@ -1,0 +1,23 @@
+{
+  "name": "@bigbrain/plugin-cards",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "verify": "npm run build && node scripts/verify-cards.mjs && node scripts/verify-card-chat.mjs && node scripts/verify-card-codec.mjs && BIGBRAIN_CHARACTER_MEDIA_DIR=/tmp/bigbrain-verify-card-media node scripts/verify-card-import.mjs && node scripts/verify-card-http.mjs"
+  },
+  "dependencies": {
+    "@bigbrain/orchestrator": "*",
+    "crc": "^4.3.2",
+    "png-chunk-text": "^1.0.0",
+    "png-chunks-extract": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2",
+    "@types/png-chunk-text": "^1.0.3",
+    "@types/png-chunks-extract": "^1.0.2"
+  }
+}
