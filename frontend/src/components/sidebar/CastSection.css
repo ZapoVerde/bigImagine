@@ -1,7 +1,8 @@
 /* The RP sidebar's Cast section (rp-cast-infrastructure-plan.md Part C): who's known to this
    chat, with a live presence dot for whoever the current scene's Present: line says is here.
    Default expanded (the feature), still collapsible; same structural shape as the Timing
-   section (TurnDrawerSection.css) so the two stack consistently in sidebar-rp-sections. */
+   section (TurnDrawerSection.css) so the two stack consistently in sidebar-rp-sections.
+   2026-08-22: compact top row + expandable detail panel + anchored ⋯ menu. */
 
 .cast-section {
   flex-shrink: 0;
@@ -71,12 +72,50 @@
   gap: 0.25rem;
 }
 
+/* Each character's outer wrapper: contains compact row + optional detail panel + menu anchor */
+.cast-row-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+
+.cast-row-wrap.expanded {
+  border-color: var(--color-border);
+  background: var(--color-bg-elevated, var(--color-bg-surface));
+}
+
+/* Compact top row: clicking the main area expands; ⋯ button is a sibling (not nested) */
 .cast-row {
   display: flex;
   align-items: center;
+  gap: 0.4rem;
+  min-height: 2rem;
+}
+
+.cast-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
   gap: 0.5rem;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-primary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  padding: 0.2rem 0.35rem;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.cast-row-main:hover {
+  background: var(--color-hover-surface);
+}
+
+.cast-row-wrap.expanded .cast-row-main {
+  background: transparent;
 }
 
 .cast-row-avatar {
@@ -92,87 +131,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* studio-character-bridge-plan.md Part A — the per-row "Send to Studio" action (RP-born
-   characters only reach Studio from here; the Roster's own listing excludes them). Compact
-   ghost button; a transient per-row status message sits beside the name. */
-.cast-row-studio-btn {
-  flex-shrink: 0;
-  font: inherit;
-  font-size: var(--font-size-xs, 0.7rem);
-  padding: 0.15rem 0.45rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border-strong);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.cast-row-studio-btn:hover:not(:disabled) {
-  background: var(--color-hover-surface);
+  font-size: var(--font-size-sm);
   color: var(--color-text-primary);
 }
 
-.cast-row-studio-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.cast-row-studio-status {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--font-size-xs, 0.7rem);
-  color: var(--color-text-muted);
-}
-
-.cast-row-studio-status.err {
-  color: var(--color-danger);
-}
-
-/* rp-cast-delete-plan.md — the per-row remove-from-cast affordance. Mirrors the Send-to-Studio
-   ghost button (compact, subtle at rest) but with a danger hover so the higher-stakes action
-   saturates on hover instead of looking like a bare edit. A two-step confirm (✕ → Confirm?)
-   means it never fires on a single unfocused tap, so it can stay visually quiet. */
-.cast-row-remove-btn {
+.cast-row-chevron {
   flex-shrink: 0;
-  font: inherit;
-  font-size: var(--font-size-xs, 0.7rem);
-  line-height: 1;
-  padding: 0.3rem 0.4rem;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border-strong);
-  background: transparent;
-  color: var(--color-text-secondary);
-  cursor: pointer;
-}
-
-.cast-row-remove-btn:hover:not(:disabled) {
-  background: var(--color-danger);
-  border-color: var(--color-danger);
-  color: var(--color-accent-contrast);
-}
-
-.cast-row-remove-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.cast-row-remove-status {
-  flex-shrink: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--font-size-xs, 0.7rem);
+  font-size: 0.65rem;
   color: var(--color-text-muted);
-}
-
-.cast-row-remove-status.err {
-  color: var(--color-danger);
+  padding-left: 0.15rem;
 }
 
 /* The live presence indicator: a small dot, filled when the character is in the active scene's
@@ -188,6 +155,196 @@
 .cast-presence.on {
   background: var(--color-accent, #2e9e5b);
   border-color: var(--color-accent, #2e9e5b);
+}
+
+/* Discreet ⋯ button — sibling of the expandable identity area, not nested inside it */
+.cast-row-menu-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.cast-row-menu-btn {
+  width: 1.6rem;
+  height: 1.6rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.cast-row-menu-btn:hover {
+  color: var(--color-text-primary);
+  background: var(--color-hover-surface);
+  border-color: var(--color-border-strong);
+}
+
+/* Anchored menu surface */
+.cast-row-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 10rem;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: var(--color-bg-elevated, #fff);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md, 6px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 10;
+}
+
+.cast-row-menu-item {
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.6rem;
+  font: inherit;
+  font-size: var(--font-size-sm, 0.82rem);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.cast-row-menu-item:hover:not(:disabled) {
+  background: var(--color-hover-surface);
+}
+
+.cast-row-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-row-menu-item.danger {
+  color: var(--color-danger);
+}
+
+.cast-row-menu-item.danger:hover:not(:disabled) {
+  background: var(--color-danger);
+  color: var(--color-accent-contrast, #fff);
+}
+
+.cast-row-menu-item.danger.confirm {
+  font-weight: 600;
+}
+
+/* Expanded description panel */
+.cast-row-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.5rem 0.6rem 0.6rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.cast-detail-label {
+  font-size: var(--font-size-xs, 0.72rem);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--label-letter-spacing, 0.04em);
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.cast-detail-textarea {
+  width: 100%;
+  min-height: 4.5rem;
+  resize: vertical;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-primary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.45rem 0.5rem;
+}
+
+.cast-detail-textarea:focus {
+  outline: none;
+  border-color: var(--color-accent, #2e9e5b);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent, #2e9e5b) 25%, transparent);
+}
+
+.cast-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cast-detail-save-btn {
+  flex-shrink: 0;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent, #2e9e5b);
+  background: var(--color-accent, #2e9e5b);
+  color: var(--color-accent-contrast, #fff);
+  cursor: pointer;
+}
+
+.cast-detail-save-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.cast-detail-save-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cast-detail-status {
+  font-size: var(--font-size-xs, 0.7rem);
+  color: var(--color-text-muted);
+}
+
+.cast-detail-status.ok {
+  color: var(--color-accent, #2e9e5b);
+}
+
+.cast-detail-status.err {
+  color: var(--color-danger);
+}
+
+.cast-detail-loading,
+.cast-detail-error {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  padding: 0.2rem 0;
+}
+
+.cast-detail-error {
+  color: var(--color-danger);
+}
+
+.cast-detail-command-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  font-size: var(--font-size-xs, 0.7rem);
+}
+
+.cast-row-command-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding: 0.15rem 0.35rem 0.25rem;
+  font-size: var(--font-size-xs, 0.68rem);
+}
+
+.cast-row-command-text {
+  color: var(--color-text-muted);
+}
+
+.cast-row-command-text.err {
+  color: var(--color-danger);
 }
 
 /* Cast Refresh Imagery — discreet icon button in the header (required behaviour). */
