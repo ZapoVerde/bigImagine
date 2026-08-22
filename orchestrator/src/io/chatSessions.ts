@@ -63,9 +63,10 @@
  * @api-declaration
  * createChatSessionStore(db) -> ChatSessionStore
  *   .listChats(userId, {search?, folderId?, kind?}) — summaries, updated_at desc
- *   .createChat(userId, {title?, folderId?, kind?, toolNames?}) — full new session row; kind
- *     defaults to 'chat', and an 'rp' chat defaults toolNames to DEFAULT_RP_TOOLS ([]) unless
- *     overridden
+ *   .createChat(userId, {title?, folderId?, kind?, cardId?, toolNames?}) — full new session row;
+ *     kind defaults to 'chat', and an 'rp' chat defaults toolNames to DEFAULT_RP_TOOLS ([]) unless
+ *     overridden. cardId is required when kind is 'rp' (chat_sessions_rp_requires_card, migration
+ *     0135) — Card association happens atomically at creation, never as a later patch
  *   .getChat(userId, chatId) — {session, messages} or undefined; each message carries a `swipes`
  *     {index, count} whenever it's ever been regenerated (see recordSwipe/cycleSwipe below),
  *     undefined otherwise
@@ -145,10 +146,6 @@ export interface ChatSessionRow {
   /** Canonical reusable Card that supplied this chat's RP source material. Runtime Character
    *  membership remains separate in character_chat_links. */
   cardId: string | null;
-  /** Which character this chat is playing, if any — set by applyCharacterToChatTool.ts. Lets a
-   *  later apply_prompt_stack_to_chat pull that character's fields without the caller re-passing
-   *  characterId. Null for a chat never applied to a character. */
-  characterId: string | null;
   /** The last context_stack_presets row applied to this chat via apply_prompt_stack_to_chat, so
    *  the settings panel can show the current selection on reload. Null until first applied. */
   promptStackPresetId: string | null;
@@ -348,10 +345,13 @@ export const DEFAULT_RP_TOOLS: string[] = [];
 export interface ChatSessionStore {
   listChats(userId: string, opts?: { search?: string; folderId?: string; kind?: 'chat' | 'rp' }): Promise<ChatSummary[]>;
   /** kind defaults to 'chat'. When init.kind === 'rp' and toolNames isn't explicitly given, tool_names
-   *  defaults to DEFAULT_RP_TOOLS ([]) rather than null (all tools) — see this file's own preamble. */
+   *  defaults to DEFAULT_RP_TOOLS ([]) rather than null (all tools) — see this file's own preamble.
+   *  cardId must be supplied when kind === 'rp' (chat_sessions_rp_requires_card, migration 0135):
+   *  Card association happens atomically at creation, not as a later apply_card_to_chat patch, so
+   *  an 'rp' row is never briefly cardless. */
   createChat(
     userId: string,
-    init?: { title?: string; folderId?: string; kind?: 'chat' | 'rp'; toolNames?: string[] | null },
+    init?: { title?: string; folderId?: string; kind?: 'chat' | 'rp'; cardId?: string; toolNames?: string[] | null },
   ): Promise<ChatSessionRow>;
   getChat(userId: string, chatId: string): Promise<ChatDetail | undefined>;
   /** This chat's slice of the rolling sync loop's status record — same read surface as the admin
@@ -503,7 +503,6 @@ function toSessionRow(row: SessionDbRow): ChatSessionRow {
     forkMessageId: row.fork_message_id,
     kind: row.kind,
     cardId: row.card_id,
-    characterId: null,
     promptStackPresetId: row.prompt_stack_preset_id,
     cleanupPresetId: row.cleanup_preset_id,
     cleanupEnabledAt: row.cleanup_enabled_at,
@@ -577,15 +576,18 @@ export function createChatSessionStore(db: PostgresClient): ChatSessionStore {
     async createChat(userId, init = {}) {
       return db.withUserScope(userId, async (session) => {
         const kind = init.kind ?? 'chat';
+        if (kind === 'rp' && !init.cardId) {
+          throw new Error('createChat requires cardId when kind is "rp" (every RP chat belongs to one Card)');
+        }
         // RP defaults to no tools at all (DEFAULT_RP_TOOLS = []), never the recall pair and
         // never null (all tools) — enforced here so every RP-creating call site gets the
         // guarantee for free (see this file's own preamble; httpServer.ts re-enforces it per
         // turn so even a stale/widened row can't leak tools to the RP model).
         const toolNames = init.toolNames !== undefined ? init.toolNames : kind === 'rp' ? DEFAULT_RP_TOOLS : null;
         const rows = await session.query<SessionDbRow>(
-          `insert into chat_sessions (user_id, title, folder_id, kind, tool_names) values ($1, coalesce($2, 'New chat'), $3, $4, $5)
+          `insert into chat_sessions (user_id, title, folder_id, kind, card_id, tool_names) values ($1, coalesce($2, 'New chat'), $3, $4, $5, $6)
            returning ${SESSION_COLUMNS}`,
-          [userId, init.title ?? null, init.folderId ?? null, kind, toolNames],
+          [userId, init.title ?? null, init.folderId ?? null, kind, init.cardId ?? null, toolNames],
         );
         return toSessionRow(rows[0]!);
       });

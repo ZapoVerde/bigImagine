@@ -138,7 +138,7 @@ function createFakePool() {
             return { rows: [row] };
           }
            if (sql.includes('insert into chat_sessions')) {
-             const [userId, title, folderId, kind, toolNames] = params;
+             const [userId, title, folderId, kind, cardId, toolNames] = params;
              const row = {
                chat_id: randomUUID(),
                user_id: userId,
@@ -150,7 +150,7 @@ function createFakePool() {
                parent_chat_id: null,
                fork_message_id: null,
                 kind: kind ?? 'chat',
-                card_id: null,
+                card_id: cardId ?? null,
                prompt_stack_preset_id: null,
                cleanup_preset_id: null,
                cleanup_enabled_at: null,
@@ -731,12 +731,26 @@ assert(created.title === 'Groceries planning', 'createChat honors the given titl
 assert(created.toolNames === null, 'a new chat allows all tools (toolNames null)');
 
 {
-  const rpChat = await store.createChat(USER_A, { title: 'An RP', kind: 'rp' });
+  // chat_sessions_rp_requires_card (migration 0135, 4_ISSUES.md #1): every 'rp' chat must carry a
+  // card_id from the moment it's created — the actual Start RP sequence (CardsView.startRp)
+  // creates the chat and applies the Card in two separate calls, so cardId must be supplied
+  // atomically at createChat time rather than patched in afterward, or a real Postgres insert
+  // would violate the check constraint before apply_card_to_chat ever runs.
+  let threw = false;
+  try {
+    await store.createChat(USER_A, { title: 'Cardless RP', kind: 'rp' });
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'createChat rejects an rp chat with no cardId — every RP chat belongs to one Card');
+
+  const rpChat = await store.createChat(USER_A, { title: 'An RP', kind: 'rp', cardId: 'card-1' });
+  assert(rpChat.cardId === 'card-1', 'createChat stamps cardId atomically at creation for an rp chat');
   assert(
     JSON.stringify(rpChat.toolNames) === JSON.stringify(DEFAULT_RP_TOOLS),
     "an rp chat defaults to DEFAULT_RP_TOOLS ([]) — no tools at all, not the recall pair and not null/all",
   );
-  const explicitRp = await store.createChat(USER_A, { title: 'RP no tools', kind: 'rp', toolNames: [] });
+  const explicitRp = await store.createChat(USER_A, { title: 'RP no tools', kind: 'rp', cardId: 'card-1', toolNames: [] });
   assert(JSON.stringify(explicitRp.toolNames) === '[]', 'an explicit toolNames overrides the rp default');
 }
 
@@ -774,13 +788,13 @@ await store.appendMessages(USER_A, created.chatId, [
   assert(chatDetail.syncBoundary === undefined, "'chat'-lane chat never carries syncBoundary");
 
   // 'rp' with no closed sync point: absent.
-  const freshRp = await store.createChat(USER_A, { title: 'RP fresh', kind: 'rp' });
+  const freshRp = await store.createChat(USER_A, { title: 'RP fresh', kind: 'rp', cardId: 'card-1' });
   await store.appendMessages(USER_A, freshRp.chatId, [{ role: 'user', content: 'hello' }]);
   const freshDetail = await store.getChat(USER_A, freshRp.chatId);
   assert(freshDetail.syncBoundary === undefined, 'an rp chat with no closed sync point omits syncBoundary');
 
   // 'rp' with closed sync points: boundary present, newest-first, closed-only, correctly anchored.
-  const rpBoundary = await store.createChat(USER_A, { title: 'RP bound', kind: 'rp' });
+  const rpBoundary = await store.createChat(USER_A, { title: 'RP bound', kind: 'rp', cardId: 'card-1' });
   const b = await store.appendMessages(USER_A, rpBoundary.chatId, [
     { role: 'user', content: 'word a', messageId: 'b-m1' },
     { role: 'assistant', content: 'word b', messageId: 'b-m2' },

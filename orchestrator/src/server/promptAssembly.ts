@@ -147,7 +147,6 @@ export async function buildMacroSnapshot(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
-  _characterId: string | null,
   cardId: string | null = null,
 ): Promise<MacroSnapshot> {
   const [source, persona] = await Promise.all([
@@ -510,7 +509,7 @@ export async function assembleSessionTurnContext(
   const historyNeedsMacros = sessionKind === 'rp' && trimmed.some((m) => m.content.includes('{{'));
   let macroSnapshot: MacroSnapshot | undefined;
   if (systemNeedsMacros || historyNeedsMacros) {
-    macroSnapshot = await buildMacroSnapshot(db, settings, userId, sessionCharacterId, sessionCardId);
+    macroSnapshot = await buildMacroSnapshot(db, settings, userId, sessionCardId);
   }
 
   if (sessionKind === 'rp' && sessionPromptStackPresetId) {
@@ -579,10 +578,10 @@ export async function decorateMessageForDisplay(
   db: PostgresClient,
   settings: OrchestratorSettingsStore,
   userId: string,
-  session: Pick<ChatSessionRow, 'kind' | 'characterId' | 'cardId'>,
+  session: Pick<ChatSessionRow, 'kind' | 'cardId'>,
   message: StoredChatMessage,
 ): Promise<StoredChatMessage> {
   if (session.kind !== 'rp' || !message.content.includes('{{')) return message;
-  const snapshot = await buildMacroSnapshot(db, settings, userId, session.characterId, session.cardId);
+  const snapshot = await buildMacroSnapshot(db, settings, userId, session.cardId);
   return { ...message, resolvedContent: interpolateMacros(message.content, snapshot) };
 }

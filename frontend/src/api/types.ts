@@ -518,8 +518,6 @@ export interface ChatSessionRow {
   kind: 'chat' | 'rp';
   /** Canonical Card for this chat's RP source material. Null for a chat never linked to a Card. */
   cardId: string | null;
-  /** @deprecated legacy source Card via characters — always null after the Cards cutover; use cardId. */
-  characterId: string | null;
   /** The scene_id cache pointer (segway.md §2.2) — which scene this chat's story currently
    *  stands in, stamped by the post-turn scraper. Backend has always sent it (chatSessions.ts's
    *  toSessionRow); the frontend type just never surfaced it — the RP sidebar's Cast section

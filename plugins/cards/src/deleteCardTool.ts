@@ -3,10 +3,13 @@
  * @stamp 2026-08-22
  * @architectural-role IO Wrapper — deletes a Card and its dependent chats
  * @description
- * Deletes all chats carrying the Card reference first, then deletes the Card row. Chat deletion
- * cascades runtime membership removal; this tool never queries or deletes runtime Characters by
- * Card identity. Returned chat ids let the frontend reconcile open RP tabs. Local imported Card
- * media cleanup is best-effort through the existing UUID-keyed storage adapter.
+ * Deletes all chats carrying the Card reference first, then the Card's own imported lorebook
+ * (insertCardFromCard.ts is the only writer of lorebook_card_links — a lorebook reachable through
+ * it belongs exclusively to that Card, so deleting it here is not cross-Card cleanup), then the
+ * Card row itself. Chat deletion cascades runtime membership removal; this tool never queries or
+ * deletes runtime Characters by Card identity. Returned chat ids let the frontend reconcile open
+ * RP tabs. Local imported Card media cleanup is best-effort through the existing UUID-keyed
+ * storage adapter.
  *
  * @api-declaration
  * createDeleteCardTool() — returns delete_card with deletedChatIds
@@ -48,6 +51,15 @@ export function createDeleteCardTool(): RegisteredTool {
       const chats = await ctx.db.query<{ chat_id: string }>(
         'delete from chat_sessions where card_id = $1 and user_id = $2 returning chat_id',
         [args.cardId, ctx.userId],
+      );
+      // The Card's own imported lorebook (if any) is Card-owned supporting content, not an
+      // independent reusable lorebook — it must not outlive the Card that owns it. Deleting
+      // `lorebooks` cascades to lorebook_entries and lorebook_card_links.
+      await ctx.db.query(
+        `delete from lorebooks where user_id = $1 and lorebook_id in (
+           select lorebook_id from lorebook_card_links where card_id = $2 and user_id = $1
+         )`,
+        [ctx.userId, args.cardId],
       );
       const cards = await ctx.db.query<{ card_id: string }>(
         'delete from cards where card_id = $1 and user_id = $2 returning card_id',

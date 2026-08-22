@@ -199,7 +199,7 @@ export async function regenerateSwipe(
     userId,
     chatId,
     session.kind,
-    session.characterId,
+    null, // sessionCharacterId: no chat-level "active character" concept post-Cards-cutover; lorebook character-scoping (resolveLorebook.ts) simply contributes nothing
     session.cardId,
     session.promptStackPresetId,
     session.params,

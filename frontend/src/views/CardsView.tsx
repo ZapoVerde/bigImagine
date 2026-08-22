@@ -300,7 +300,7 @@ export default function CardsView({ apiKey, onOpenRp, onChatsDeleted, refreshKey
     setStartingRp(true);
     setError(null);
     try {
-      const chat = await createChat(apiKey, { title: detail.name, kind: 'rp' });
+      const chat = await createChat(apiKey, { title: detail.name, kind: 'rp', card_id: detail.cardId });
       await callTool('apply_card_to_chat', { cardId: detail.cardId, chatId: chat.chatId }, apiKey);
       await applyDefaultStack(chat.chatId);
       onOpenRp(chat.chatId, detail.name);

@@ -163,12 +163,13 @@ export async function handleChatRoutes(
       return;
     }
     if (req.method === 'POST') {
-      const body = (await readJsonBody(req)) as { title?: string; folder_id?: string; kind?: string };
+      const body = (await readJsonBody(req)) as { title?: string; folder_id?: string; kind?: string; card_id?: string };
       const kind = body.kind === 'rp' ? 'rp' : undefined;
       const session = await deps.chats.createChat(userId, {
         title: typeof body.title === 'string' ? body.title : undefined,
         folderId: typeof body.folder_id === 'string' ? body.folder_id : undefined,
         kind,
+        cardId: typeof body.card_id === 'string' ? body.card_id : undefined,
       });
       sendJson(res, 201, session);
       return;
@@ -194,7 +195,7 @@ export async function handleChatRoutes(
       // a persona edit updates the greeting on the very next read with no re-apply. Gated like
       // every other macro pass: 'rp' chats only, and only when a message actually contains '{{'.
       if (detail.session.kind === 'rp' && detail.messages.some((m) => m.content.includes('{{'))) {
-        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.characterId, detail.session.cardId);
+        const snapshot = await buildMacroSnapshot(deps.db, deps.settings, userId, detail.session.cardId);
         detail.messages = detail.messages.map((m) =>
           m.content.includes('{{') ? { ...m, resolvedContent: interpolateMacros(m.content, snapshot) } : m,
         );
@@ -344,7 +345,9 @@ export async function handleChatRoutes(
       await getLorebookPanelData(deps.db, deps.settings, {
         userId,
         chatId,
-        characterId: detail.session.characterId,
+        // No chat-level "active character" concept post-Cards-cutover; the character-link scope
+        // simply contributes nothing (recallLorebookEntries.ts already tolerates null).
+        characterId: null,
         latestAssistantMessageId,
       }),
     );

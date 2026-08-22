@@ -1964,7 +1964,7 @@ export default function ChatView({
     setRestarting(true);
     setError(null);
     try {
-      const chat = await createChat(apiKey, { title: activeChat.title, kind: 'rp' });
+      const chat = await createChat(apiKey, { title: activeChat.title, kind: 'rp', card_id: activeChat.cardId });
       await callTool('apply_card_to_chat', { cardId: activeChat.cardId, chatId: chat.chatId }, apiKey);
       await applyDefaultStack(chat.chatId);
       if (restartDeleteOld) {

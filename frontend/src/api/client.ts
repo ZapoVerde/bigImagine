@@ -441,7 +441,7 @@ export async function listChats(apiKey: string | null, search?: string, kind?: '
 
 export function createChat(
   apiKey: string | null,
-  init?: { title?: string; folder_id?: string; kind?: 'chat' | 'rp' },
+  init?: { title?: string; folder_id?: string; kind?: 'chat' | 'rp'; card_id?: string },
 ): Promise<ChatSessionRow> {
   return jsonRequest<ChatSessionRow>('/v1/chats', apiKey, { method: 'POST', body: init ?? {} });
 }

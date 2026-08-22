@@ -18,6 +18,8 @@ function createFakePool() {
   const chats = [];
   const characters = [];
   const memberships = [];
+  const lorebooks = [];
+  const lorebookCardLinks = [];
   let sequence = 0;
   return {
     async connect() {
@@ -63,6 +65,17 @@ function createFakePool() {
             if (sql.includes('greetings = $')) card.greetings = JSON.parse(rest[i++]);
             return { rows: [{ card_id: card.card_id, name: card.name }] };
           }
+          if (sql.startsWith('delete from lorebooks')) {
+            const [userId, cardId] = params;
+            const owned = lorebookCardLinks.filter((l) => l.card_id === cardId && l.user_id === userId).map((l) => l.lorebook_id);
+            for (let i = lorebooks.length - 1; i >= 0; i--) {
+              if (owned.includes(lorebooks[i].lorebook_id) && lorebooks[i].user_id === userId) lorebooks.splice(i, 1);
+            }
+            for (let i = lorebookCardLinks.length - 1; i >= 0; i--) {
+              if (lorebookCardLinks[i].card_id === cardId) lorebookCardLinks.splice(i, 1);
+            }
+            return { rows: [] };
+          }
           if (sql.startsWith('delete from chat_sessions')) {
             const [cardId, userId] = params;
             const deleted = chats.filter((c) => c.card_id === cardId && c.user_id === userId);
@@ -91,6 +104,8 @@ function createFakePool() {
     chats,
     characters,
     memberships,
+    lorebooks,
+    lorebookCardLinks,
   };
 }
 
@@ -137,12 +152,21 @@ pool.memberships.push(
   { character_id: 'character-sydney-b', chat_id: 'chat-b' },
   { character_id: 'character-other', chat_id: 'chat-other' },
 );
+// 4_ISSUES.md #2: an imported Card's embedded lorebook is Card-owned supporting content, not an
+// independent reusable lorebook — it must not outlive the Card that owns it.
+pool.lorebooks.push({ lorebook_id: 'lorebook-sydney', user_id: userId }, { lorebook_id: 'lorebook-other', user_id: userId });
+pool.lorebookCardLinks.push(
+  { lorebook_id: 'lorebook-sydney', card_id: card.cardId, user_id: userId },
+  { lorebook_id: 'lorebook-other', card_id: otherCard.cardId, user_id: userId },
+);
 const deleted = await db.withUserScope(userId, (session) => remove.handler({ cardId: card.cardId }, { userId, db: session }));
 assert(deleted.deleted && deleted.deletedChatIds.length === 3, 'delete_card deletes all dependent chats, including forks, and returns their ids');
 assert(pool.cards.length === 1 && pool.cards[0].card_id === otherCard.cardId, 'delete_card leaves another Card untouched');
 assert(pool.chats.length === 1 && pool.chats[0].chat_id === 'chat-other', 'delete_card leaves another Card\'s chat untouched');
 assert(pool.characters.length === 1 && pool.characters[0].character_id === 'character-other', 'runtime Characters are orphan-cleaned only after their final Card chat link disappears');
 assert(pool.memberships.length === 1 && pool.memberships[0].character_id === 'character-other', 'runtime membership for another Card remains intact');
+assert(pool.lorebooks.length === 1 && pool.lorebooks[0].lorebook_id === 'lorebook-other', "delete_card deletes the Card's own imported lorebook, not just its link row");
+assert(pool.lorebookCardLinks.length === 1 && pool.lorebookCardLinks[0].card_id === otherCard.cardId, "delete_card leaves another Card's lorebook association untouched");
 
 if (process.exitCode) process.exit(1);
 console.log('\nCards verification passed');

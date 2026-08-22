@@ -172,10 +172,6 @@ export async function handleChatCompletions(
   let sessionTitle: string | undefined;
   let priorMessageCount = 0;
   let sessionKind: 'chat' | 'rp' = 'chat';
-  // Which character (if any) this chat is linked to (applyCharacterToChatTool.ts) — only read
-  // here for docs/plans/prompt-macros.md's {{char}} macro (see the interpolateMacros call below);
-  // everything else about the turn is indifferent to it.
-  let sessionCharacterId: string | null = null;
   let sessionCardId: string | null = null;
   // Which context_stack_presets row (if any) drives this turn's per-turn narrator assembly
   // (docs/plans/turn-loop-plan.md §3.2). The legacy post-runTurn cleanup pass is gone — cleanup is now
@@ -207,7 +203,6 @@ export async function handleChatCompletions(
     sessionTitle = detail.session.title;
     priorMessageCount = detail.messages.length;
     sessionKind = detail.session.kind;
-    sessionCharacterId = detail.session.characterId;
     sessionCardId = detail.session.cardId;
     sessionPromptStackPresetId = detail.session.promptStackPresetId;
     sessionCleanupEnabledAt = detail.session.cleanupEnabledAt;
@@ -282,7 +277,7 @@ export async function handleChatCompletions(
       userId,
       body.chat_id,
       sessionKind,
-      sessionCharacterId,
+      null, // sessionCharacterId: no chat-level "active character" concept post-Cards-cutover
       sessionCardId,
       sessionPromptStackPresetId,
       sessionParams,
