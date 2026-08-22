@@ -242,21 +242,9 @@ Only then mark the Implementation Plan task complete and select the next ready t
 
 ## 10. Final integration gate
 
-After every task in the Implementation Plan has passed its Task Contract review, perform the plan's Final Integration Verification.
+After every task in the Implementation Plan has passed its Task Contract review, perform the plan's Final Integration Verification as defined in `FINAL_INTEGRATION_REVIEW.md`.
 
-The integration reviewer receives:
-
-1. Architectural Report;
-2. finalized Blueprint;
-3. Implementation Plan;
-4. full implementation diff;
-5. final deterministic verification results.
-
-The final integration question is:
-
-**Did the completed implementation faithfully deliver the original architectural intent across the whole change?**
-
-This gate does not replace task-level review.
+This gate does not replace task-level review. It exists because task-level review only judges one frozen contract against one diff; it does not re-verify that the seams between tasks agree with each other, or that a task's assumption about unchanged code was correct.
 
 ## 11. Harness invariants
 
