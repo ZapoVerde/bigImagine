@@ -599,3 +599,5 @@ Already applied by hand, not run automatically (see the file for the exact comma
   from `characters`, and tightens runtime status constraints. Fails fast if any Card row
   lacks a canonical counterpart. Apply by hand with:
   `docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0134_destructive_cards_cutover.sql`.
+- `0135_cards_runtime_characters_fixes.sql` — fixes for `docs/plans/cards-runtime-characters/4_ISSUES.md` review of `722f648..cafc832`. Restores `cards.card_id DEFAULT gen_random_uuid()` (Issue 1) and adds `chat_sessions_rp_requires_card` check `kind != 'rp' OR card_id IS NOT NULL` (Issue 2). Historical check on live DB (2026-08-22): 13 sessions, 8 `rp` with `card_id`, 5 `chat` with `card_id IS NULL` and zero `character_chat_links` — no historical `rp` chat was orphaned when `0134` dropped `character_id`. Apply by hand with:
+  `docker exec -i bigimagine-postgres psql -U bigimagine_admin -d bigimagine < db/migrations/0135_cards_runtime_characters_fixes.sql`.

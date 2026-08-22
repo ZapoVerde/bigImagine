@@ -1,14 +1,14 @@
 /**
  * @file plugins/context-stack-presets/src/applyPromptStackToChatTool.ts
  * @stamp 2026-08-05
- * @architectural-role IO Wrapper — assembles a preset's slots (plus the chat's linked character,
+ * @architectural-role IO Wrapper — assembles a preset's slots (plus the chat's linked Card,
  *   if any) into a chat's system prompt
  * @description
  * The RP settings panel's "Apply" action (frontend/src/views/ChatView.tsx's ChatSettings): reads
- * the target chat's linked character_id (db/migrations/0049_chat_kind.sql, stamped by
- * applyCharacterToChatTool.ts) and the requested preset's ordered slots, maps the character's card
- * fields onto assemblePromptStack.ts's PromptStackFields (system/description/scenario/mes_example —
- * the four fields a character card actually has; the rest of MarkerKey has no source yet and is
+ * the target chat's linked card_id (chat_sessions.card_id -> cards.card_id, stamped by
+ * applyCardToChatTool.ts) and the requested preset's ordered slots, maps the Card's fields
+ * onto assemblePromptStack.ts's PromptStackFields (system/description/scenario/mes_example —
+ * the four fields a Card actually has; the rest of MarkerKey has no source yet and is
  * left undefined, which the assembler already treats as "skip this slot"), then calls that pure
  * function and folds its LlmMessage[] into a single string joined with blank lines. Known v1
  * simplification: a custom slot's non-system role collapses into the system text along with
@@ -16,8 +16,8 @@
  * text is the only thing this chat shape (ChatView, not scenes) has to write into.
  *
  * Read-merge-writes chat_sessions.params.system and prompt_stack_preset_id, the same
- * read-then-`update ... set params = $n::jsonb` shape applyCharacterToChatTool.ts uses — plugins
- * own their own SQL, never orchestrator's internal IO modules. Also seeds the character's first
+ * read-then-`update ... set params = $n::jsonb` shape applyCardToChatTool.ts uses — plugins
+ * own their own SQL, never orchestrator's internal IO modules. Also seeds the Card's first
  * greeting under the identical zero-messages guard that tool uses, so calling this on a chat that
  * already has messages (re-applying a different stack later) never re-seeds.
  *
@@ -69,7 +69,7 @@ export function createApplyPromptStackToChatTool(settings: OrchestratorSettingsS
     definition: {
       name: 'apply_prompt_stack_to_chat',
       description:
-        "Apply a prompt-stack preset to a chat: assembles the preset's ordered slots (plus the chat's linked character, if any) into the chat's system prompt, and seeds the character's first greeting if the chat has no messages yet.",
+        "Apply a prompt-stack preset to a chat: assembles the preset's ordered slots (plus the chat's linked Card, if any) into the chat's system prompt, and seeds the Card's first greeting if the chat has no messages yet.",
       parameters: {
         type: 'object',
         properties: {
