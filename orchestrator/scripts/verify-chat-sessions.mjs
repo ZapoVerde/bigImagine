@@ -1153,6 +1153,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
 {
   const forkFolder = await store.createFolder(USER_A, { name: 'Fork test folder' });
   const parent = await store.createChat(USER_A, { title: 'Fork parent', folderId: forkFolder.folderId });
+  pool.sessions.get(parent.chatId).card_id = 'card-1';
   await store.updateChat(USER_A, parent.chatId, {
     params: { system: 'Stay in character.', temperature: 0.7 },
     toolNames: ['roll_dice'],
@@ -1172,6 +1173,7 @@ assert(folder.name === 'Meal planning', 'createFolder returns the folder');
   assert(forked !== undefined, 'forkChat succeeds at a valid message id');
   assert(forked.title === 'Fork of Fork parent', 'a fork with no explicit title defaults to "Fork of {parent title}"');
   assert(forked.folderId === forkFolder.folderId, "a fork inherits the parent's folder");
+  assert(forked.cardId === 'card-1', "a fork inherits the parent's canonical Card reference");
   assert(forked.params.system === 'Stay in character.', "a fork inherits the parent's params");
   assert(forked.toolNames.length === 1 && forked.toolNames[0] === 'roll_dice', "a fork inherits the parent's toolNames");
   assert(forked.parentChatId === parent.chatId, 'a fork records its parent chat id');
