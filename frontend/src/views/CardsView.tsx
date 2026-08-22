@@ -218,22 +218,43 @@ export default function CardsView({ apiKey, onOpenRp, onChatsDeleted, refreshKey
     }
   }
 
-  async function removeCard() {
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [pendingLorebookIds, setPendingLorebookIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+
+  function openDeleteModal() {
     if (!detail?.found) return;
-    if (!window.confirm(`Delete "${detail.name}"? This can't be undone.`)) return;
+    setPendingLorebookIds(new Set());
+    setShowDeleteModal(true);
+  }
+
+  function toggleLorebookDelete(id: string) {
+    setPendingLorebookIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function confirmDelete() {
+    if (!detail?.found) return;
+    setDeleting(true);
+    setError(null);
     try {
-      const result = await callTool<{ deleted: boolean; deletedChatIds?: string[] }>(
-        'delete_card',
-        { cardId: detail.cardId },
-        apiKey,
-      );
+      const args: { cardId: string; deleteLorebookIds?: string[] } = { cardId: detail.cardId };
+      if (pendingLorebookIds.size > 0) args.deleteLorebookIds = [...pendingLorebookIds];
+      const result = await callTool<{ deleted: boolean; deletedChatIds?: string[] }>('delete_card', args, apiKey);
       onChatsDeleted?.(result.deletedChatIds ?? []);
       setSelectedId(null);
       setDetail(null);
       setMobileShowEditor(false);
+      setShowDeleteModal(false);
       await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'failed to delete card');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -422,7 +443,7 @@ export default function CardsView({ apiKey, onOpenRp, onChatsDeleted, refreshKey
                 placeholder="Character name"
               />
               {!creatingNew && detail?.found && (
-                <button type="button" className="characters-delete-btn" onClick={removeCard}>
+                <button type="button" className="characters-delete-btn" onClick={openDeleteModal}>
                   Delete
                 </button>
               )}
@@ -514,6 +535,41 @@ export default function CardsView({ apiKey, onOpenRp, onChatsDeleted, refreshKey
           </>
         )}
       </div>
+      {showDeleteModal && detail?.found && (
+        <div className="characters-delete-modal-overlay" onClick={() => !deleting && setShowDeleteModal(false)}>
+          <div className="characters-delete-modal" role="dialog" aria-modal="true" aria-label={`Delete ${detail.name}?`} onClick={(e) => e.stopPropagation()}>
+            <h3 className="characters-delete-modal-title">Delete &ldquo;{detail.name}&rdquo;?</h3>
+            <p className="characters-delete-modal-body">This will also delete all roleplays started from this Card.</p>
+            {detail.linkedLorebooks && detail.linkedLorebooks.length > 0 && (
+              <div className="characters-delete-modal-lorebooks">
+                <div className="characters-delete-modal-lorebooks-label">Linked lorebooks:</div>
+                {detail.linkedLorebooks.map((lb) => (
+                  <label key={lb.lorebookId} className={`characters-delete-modal-lorebook-row${lb.shared ? ' shared' : ''}`}>
+                    {!lb.shared ? (
+                      <input
+                        type="checkbox"
+                        checked={pendingLorebookIds.has(lb.lorebookId)}
+                        onChange={() => toggleLorebookDelete(lb.lorebookId)}
+                        disabled={deleting}
+                      />
+                    ) : null}
+                    <span className="characters-delete-modal-lorebook-name">{lb.name}</span>
+                    {lb.shared && <span className="characters-delete-modal-lorebook-shared">Also linked to another Card — will be kept</span>}
+                  </label>
+                ))}
+              </div>
+            )}
+            <div className="characters-delete-modal-actions">
+              <button type="button" className="characters-delete-modal-cancel" onClick={() => setShowDeleteModal(false)} disabled={deleting}>
+                Cancel
+              </button>
+              <button type="button" className="characters-delete-modal-confirm" onClick={() => void confirmDelete()} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete Card'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

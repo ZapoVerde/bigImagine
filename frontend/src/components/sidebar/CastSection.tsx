@@ -6,9 +6,9 @@
  * @description
  * rp-cast-infrastructure-plan.md Part C — the RP sidebar's "Cast" section: who's known to this
  * chat, with a live presence indicator for whoever the current scene's `Present:` line says is
- * here right now. The roster comes from the chat-scoped get_characters tool (?chat_id=…, called
- * with castOnly: true per rp-cast-library-repair.md Part A — only this chat's linked
- * auto-registered characters, never the user's whole card library); presence comes from the
+ * here right now. The roster comes from the chat-scoped get_characters tool (?chat_id=… — only
+ * this chat's linked auto-registered characters, never the user's whole card library); presence
+ * comes from the
  * now-chat-scoped get_scenes tool, whose matching scene row's character_ids (matched against the
  * active chat's session.sceneId, up-reported by ChatView through App) are the present set.
  *
@@ -113,7 +113,7 @@ export default function CastSection({ apiKey, chatId, sceneId }: CastSectionProp
     let cancelled = false;
     setError(null);
     Promise.all([
-      callTool<CharacterSummary[]>('get_characters', { castOnly: true }, apiKey, chatId),
+      callTool<CharacterSummary[]>('get_characters', {}, apiKey, chatId),
       callTool<SceneSummary[]>('get_scenes', {}, apiKey, chatId),
     ])
       .then(([chars, scenesResult]) => {

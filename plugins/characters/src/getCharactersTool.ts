@@ -6,8 +6,7 @@
  * Runtime-only listing: every returned row is a chat-scoped auto-registered
  * character linked via character_chat_links and not inactive. The legacy Card
  * library (status IS NULL) is no longer listed here — reusable Cards are
- * served by the canonical Cards plugin (cards). The former castOnly toggle is
- * retained as a harmless pass-through for callers that still send it.
+ * served by the canonical Cards plugin (cards).
  *
  * @api-declaration
  * createGetCharactersTool() — returns the get_characters RegisteredTool
@@ -40,8 +39,7 @@ export function createGetCharactersTool(): RegisteredTool {
     },
     handler: async (_args, ctx) => {
       // Runtime-only: a character must be auto-registered (status not null, not inactive)
-      // and linked to the calling chat via character_chat_links. The former Card library
-      // (status IS NULL) and the castOnly toggle are now legacy — every call is cast-scoped.
+      // and linked to the calling chat via character_chat_links. Every call is cast-scoped.
       if (!ctx.chatId) return [];
       const rows = await ctx.db.query<CharacterRow>(
         `select character_id, name, created_at from characters

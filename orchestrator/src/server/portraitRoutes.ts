@@ -702,7 +702,7 @@ export async function handlePortraitEntities(
 /** POST /v1/portraits/entities/from-cast-character (portrait-studio-standalone-subjects-plan.md
  *  Part C) — the one-time, never-linking pull-in: resolve the caller's own character (any status —
  *  the route doesn't care whether it's a Card or a live character; in practice only CastSection
- *  calls it now, and it only ever offers live in-chat characters via its castOnly listing), read
+ *  calls it now, and it only ever offers live in-chat characters via its cast listing), read
  *  appearance || persona as the seed text exactly as the old from-character route did (409 when
  *  both are blank), and ALWAYS insert a brand-new, unlinked subject entity: character_id is never
  *  set on the row. There is no more "does a subject already exist for this character" check and no

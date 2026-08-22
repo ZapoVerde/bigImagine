@@ -1,9 +1,10 @@
 /**
  * @file plugins/cards/src/insertCardFromCard.ts
  * @stamp 2026-08-22
- * @architectural-role IO Wrapper — persists an imported Card and Card-owned supporting content
+ * @architectural-role IO Wrapper — persists an imported Card and Card-linked supporting content
  * @description The shared write path for file and Chub imports. Embedded books use the existing
  * parser/embedding behaviour but link through lorebook_card_links, never lorebook_character_links.
+ * This Lorebook is available to this Card and its RP context — not owned lifecycle content.
  * @api-declaration insertCardFromCard(db, userId, parsed, sourceJson, embeddings, media?)
  * @contract writes cards, optional Card media, lorebooks, entries, and Card links; never characters.
  */

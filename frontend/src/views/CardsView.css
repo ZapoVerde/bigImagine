@@ -383,3 +383,108 @@
   opacity: 0.5;
   cursor: default;
 }
+
+.characters-delete-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.characters-delete-modal {
+  width: 100%;
+  max-width: 28rem;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  padding: 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+}
+
+.characters-delete-modal-title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+}
+
+.characters-delete-modal-body {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.characters-delete-modal-lorebooks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.6rem;
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-canvas);
+}
+
+.characters-delete-modal-lorebooks-label {
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.characters-delete-modal-lorebook-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: var(--font-size-sm);
+}
+
+.characters-delete-modal-lorebook-row.shared {
+  opacity: 0.75;
+}
+
+.characters-delete-modal-lorebook-name {
+  font-weight: var(--font-weight-medium);
+}
+
+.characters-delete-modal-lorebook-shared {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+.characters-delete-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 0.4rem;
+}
+
+.characters-delete-modal-cancel {
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border-subtle);
+  background: var(--color-bg-surface);
+  color: var(--color-text-primary);
+  cursor: pointer;
+}
+
+.characters-delete-modal-confirm {
+  padding: 0.4rem 0.9rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-danger);
+  background: var(--color-danger);
+  color: var(--color-danger-contrast, #fff);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.characters-delete-modal-cancel:disabled,
+.characters-delete-modal-confirm:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

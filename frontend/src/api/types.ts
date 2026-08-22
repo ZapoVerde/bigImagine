@@ -1249,6 +1249,7 @@ export interface CardSummary {
 }
 
 // plugins/cards/src/getCardTool.ts — canonical Card detail shape.
+// linkedLorebooks: Card-linked lorebooks for the delete confirmation (id, name, shared).
 export type CardDetail =
   | { found: false; cardId: string }
   | {
@@ -1266,6 +1267,7 @@ export type CardDetail =
       hasSourceJson: boolean;
       createdAt: string;
       updatedAt: string;
+      linkedLorebooks: { lorebookId: string; name: string; shared: boolean }[];
     };
 
 // POST /v1/cards/import's response shape (handleCardImport.ts, relaying

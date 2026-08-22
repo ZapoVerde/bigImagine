@@ -3,8 +3,9 @@
  * @stamp 2026-08-22
  * @architectural-role IO Wrapper — reads one canonical Card
  * @description
- * Returns Card-owned authored/source fields from cards only. A runtime Character is never a
- * fallback candidate for a Card lookup.
+ * Returns Card-authored/source fields from cards only, plus linked lorebooks (id, name,
+ * shared) so the delete confirmation can render without client-side inference. A runtime
+ * Character is never a fallback candidate for a Card lookup.
  *
  * @api-declaration
  * createGetCardTool() — returns get_card
@@ -47,6 +48,15 @@ export function createGetCardTool(): RegisteredTool {
       );
       const row = rows[0];
       if (!row) return { found: false, cardId: args.cardId };
+      const linked = await ctx.db.query<{ lorebook_id: string; name: string; shared: boolean }>(
+        `select b.lorebook_id, b.name,
+                exists(select 1 from lorebook_card_links l2 where l2.lorebook_id = b.lorebook_id and l2.card_id != $1) as shared
+         from lorebooks b
+         join lorebook_card_links l on l.lorebook_id = b.lorebook_id
+         where l.card_id = $1 and l.user_id = $2
+         order by b.name`,
+        [args.cardId, ctx.userId],
+      );
       return {
         found: true,
         cardId: row.card_id,
@@ -62,6 +72,7 @@ export function createGetCardTool(): RegisteredTool {
         hasSourceJson: row.has_source_json,
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
+        linkedLorebooks: linked.map((r) => ({ lorebookId: r.lorebook_id, name: r.name, shared: Boolean(r.shared) })),
       };
     },
   };
