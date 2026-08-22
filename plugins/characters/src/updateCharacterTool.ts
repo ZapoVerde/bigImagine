@@ -117,7 +117,7 @@ export function createUpdateCharacterTool(): RegisteredTool {
         sets.push(`greetings = $${params.length}::jsonb`);
       }
       const rows = await ctx.db.query<CharacterRow>(
-        `update characters set ${sets.join(', ')} where character_id = $1 and user_id = $2 returning character_id, name`,
+        `update characters set ${sets.join(', ')} where character_id = $1 and user_id = $2 and status is not null returning character_id, name`,
         params,
       );
       const row = rows[0];

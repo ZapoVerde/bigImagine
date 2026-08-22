@@ -1,19 +1,11 @@
 /**
  * @file plugins/characters/src/getCharacterTool.ts
- * @stamp 2026-08-13
- * @architectural-role IO Wrapper — full single-character detail
+ * @stamp 2026-08-22
+ * @architectural-role IO Wrapper — full runtime Character detail
  * @description
- * The detail half of the Character Roster (docs/spec.md §6) — get_characters (getCharactersTool.ts)
- * stays summary-only for the scene/canon-fact reference use case it was built for; this is what the
- * Roster's editor pane loads once a card is picked. source_json (the exact original import, kept
- * for lossless export per bi_principles.md §7) is never returned verbatim here — it can be large
- * and the editor has no use for it — only whether one is present.
- *
- * Applies docs/plans/vistalyze_integration/segway.md §2.6's eligibility filter, same as
- * get_characters: a lookup of an ineligible row (inactive, or auto-registered but not linked to the
- * calling chat via character_chat_links, db/migrations/0096) reports not-found, so the model can't
- * pull detail on a demoted alternate timeline. The Roster only ever passes ids that the filtered
- * get_characters list returned, so its editor flow is unaffected.
+ * Runtime-only detail for the Cast and scene/canon callers. A row is visible only
+ * when it is linked to the calling chat via character_chat_links and not inactive.
+ * Reusable Cards are not served here.
  *
  * @api-declaration
  * createGetCharacterTool() — returns the get_character RegisteredTool
@@ -66,18 +58,15 @@ export function createGetCharacterTool(): RegisteredTool {
       if (!isGetCharacterArgs(args)) {
         throw new Error('get_character requires a characterId: string');
       }
+      if (!ctx.chatId) return { found: false, characterId: args.characterId };
       const rows = await ctx.db.query<CharacterDetailRow>(
         `select character_id, name, persona, appearance, scenario, system_prompt, example_dialogue, greetings,
                 spec_version, avatar_path is not null as has_avatar, source_json is not null as has_source_json,
                 created_at, updated_at
-         from characters where character_id = $1 and user_id = $2 and (
-           status is null or (
-             status <> 'inactive' and exists (
-               select 1 from character_chat_links where character_id = characters.character_id and chat_id = $3
-             )
-           )
+         from characters where character_id = $1 and user_id = $2 and status is not null and status <> 'inactive' and exists (
+           select 1 from character_chat_links where character_id = characters.character_id and chat_id = $3
          )`,
-        [args.characterId, ctx.userId, ctx.chatId ?? null],
+        [args.characterId, ctx.userId, ctx.chatId],
       );
       const row = rows[0];
       if (!row) return { found: false, characterId: args.characterId };
